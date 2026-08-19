@@ -1,0 +1,32 @@
+# Python and frontend caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+frontend/node_modules/
+frontend/.pytest_cache/
+tools/pyinstaller/
+autodrive_console/web-vue/
+
+# Local build outputs and release artifacts (reproducible from source)
+build/
+dist/
+releases/
+deployments/
+deployment/
+*.deb
+*.tar.gz
+
+# Robot/runtime state; never commit test evidence or field logs
+install/
+reports/
+logs/
+maps_cache/
+updates/
+config/console.json
+config/case_workspace.json
+config/scenario_setup.json
+config/scenario_backups/
+
+# OS/editor noise
+.DS_Store
+*.swp

@@ -1,0 +1,42 @@
+.local-viewer-workspace { --map-ratio: 76%; --image-ratio: 50%; position: relative; display: grid; min-height: clamp(650px, 82vh, 1040px); overflow: hidden; grid-template-columns: var(--map-ratio) calc(100% - var(--map-ratio)); grid-template-rows: var(--image-ratio) calc(100% - var(--image-ratio)); border: 1px solid var(--line); border-radius: 10px; background: #07131f; }
+.workspace-widget { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; border: 1px solid #28516d; background: #0a1a29; }
+.map-widget { grid-column: 1; grid-row: 1 / 3; }
+.image-widget[data-widget="cameraA"] { grid-column: 2; grid-row: 1; }
+.image-widget[data-widget="cameraB"] { grid-column: 2; grid-row: 2; }
+.workspace-widget[hidden] { display: none; }
+.local-viewer-workspace[data-image-mode="none"] { grid-template-columns: 100% 0; grid-template-rows: 100% 0; }
+.local-viewer-workspace[data-image-mode="none"] .map-widget { grid-column: 1; grid-row: 1; }
+.local-viewer-workspace[data-image-mode="single-a"] .image-widget[data-widget="cameraA"], .local-viewer-workspace[data-image-mode="single-b"] .image-widget[data-widget="cameraB"] { grid-column: 2; grid-row: 1 / 3; }
+.widget-header { display: flex; min-height: 50px; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border-bottom: 1px solid #24465f; }
+.widget-header h2 { margin: 2px 0 0; font-size: 16px; }
+.widget-header .eyebrow { margin: 0; font-size: 10px; }
+.viewer-state { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 0; }
+.viewer-state .page-muted { max-width: 360px; overflow: hidden; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-settings-button { min-height: 30px; padding: 5px 9px; white-space: nowrap; }
+.local-map-wrap { position: relative; min-height: 0; flex: 1; overflow: hidden; background: #eef2f4; overscroll-behavior: contain; }
+/* 外层 .local-map-wrap 才是唯一的视口裁切边界。world-stage 会随车体旋转，
+ * 若它也 overflow:hidden，会在旋转/缩放后把仍应可见的地图角落二次裁掉。 */
+.world-stage { position: absolute; inset: 0; overflow: visible; pointer-events: none; transform-origin:50% 50%; will-change:transform; transform:translateZ(0); }
+.map-world { position:absolute; top:0; left:0; transform-origin:0 0; will-change:transform; transform:translateZ(0); contain:layout paint style; }
+.map-world canvas { position:absolute; inset:0; display:block; image-rendering:pixelated; }
+#mapWorld { z-index:1; }.map-world #cloudCanvas { background:transparent; }
+#cloudWorld { z-index:2; }
+#vehicleLayer { position:absolute; z-index:3; pointer-events:none; box-sizing:border-box; border:2px solid #087e99; border-radius:16%; background:rgb(33 199 215 / 50%); box-shadow:0 0 0 7px rgb(18 159 180 / 14%); transform-origin:center; will-change:transform,left,top; }
+#vehicleLayer i { position:absolute; top:0; left:18%; right:18%; border-top:2px solid #fff; }
+.map-interaction-layer { position:absolute; inset:0; z-index:4; display:block; width:100%; height:100%; background:transparent; cursor:grab; touch-action:none; user-select:none; }
+.map-interaction-layer.is-panning { cursor:grabbing; }
+.local-map-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); pointer-events: none; }
+.local-map-empty[hidden] { display: none; }
+.map-legend, .map-diagnostics { position: absolute; z-index: 1; border: 1px solid rgb(98 151 180 / 55%); border-radius: 6px; background: rgb(8 21 34 / 88%); color: #d9eaf4; font-size: 12px; backdrop-filter: blur(4px); }
+.map-legend { top: 12px; left: 12px; display: flex; gap: 13px; padding: 8px 10px; }
+.map-legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.map-legend i { width: 18px; height: 3px; display: inline-block; border-radius: 2px; }
+.map-legend .legend-wall { background: #d63142; }.map-legend .legend-vehicle { width: 15px; height: 9px; border: 1px solid #0b91aa; border-radius: 2px; background: rgb(33 199 215 / 48%); }.map-legend .legend-cloud { background: #916cff; }
+.map-diagnostics { right: 12px; bottom: 12px; max-width: calc(100% - 24px); padding: 7px 10px; color: #b8d2e3; }
+.image-widget .widget-header { min-height: 42px; padding: 7px 9px; }.image-widget label { display: flex; min-width: 0; align-items: center; gap: 7px; color: #b9d8e8; font: 11px/1.2 var(--mono, monospace); }.image-widget select { width: min(250px, 19vw); min-width: 100px; border: 1px solid #2d6282; border-radius: 3px; background: #10263a; color: #d6e8f3; font: inherit; }.image-widget canvas { display: block; min-height: 0; flex: 1; width: 100%; background: #02070d; object-fit: contain; }.image-widget p { min-height: 16px; margin: 0; padding: 5px 8px; overflow: hidden; color: #8fb4ca; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-splitter { position: absolute; z-index: 4; background: transparent; }.workspace-splitter::after { position: absolute; content: ''; background: #3982a5; opacity: .7; transition: opacity .15s, background .15s; }.workspace-splitter:hover::after, .workspace-splitter.dragging::after { background: #21c7d7; opacity: 1; }
+.vertical-splitter { top: 0; bottom: 0; left: calc(var(--map-ratio) - 5px); width: 10px; cursor: col-resize; }.vertical-splitter::after { top: 0; bottom: 0; left: 4px; width: 2px; }.horizontal-splitter { top: calc(var(--image-ratio) - 5px); right: 0; width: calc(100% - var(--map-ratio)); height: 10px; cursor: row-resize; }.horizontal-splitter::after { right: 0; bottom: 4px; left: 0; height: 2px; }
+.local-viewer-workspace[data-image-mode="none"] .workspace-splitter, .local-viewer-workspace[data-image-mode^="single"] .horizontal-splitter { display: none; }
+.workspace-controls { position: absolute; z-index: 5; top: 62px; left: 12px; }.workspace-controls > div { display: grid; gap: 9px; width: 220px; padding: 12px; border: 1px solid #315b77; border-radius: 6px; background: rgb(8 21 34 / 96%); box-shadow: 0 8px 22px rgb(0 0 0 / 25%); }.workspace-controls > div[hidden] { display: none; }.workspace-controls .eyebrow { margin: 0 0 2px; }.workspace-controls label { color: #bed9e8; font-size: 12px; }.workspace-controls button { padding: 7px 8px; border: 1px solid #2e6c92; border-radius: 4px; background: #123753; color: #dcf2ff; cursor: pointer; }
+.theme-light .local-viewer-workspace { background: #dfeaf2; }.theme-light .workspace-widget { border-color: #a9c6d9; background: #f7fbfe; }.theme-light .widget-header { border-color: #c5d9e6; }.theme-light .local-map-wrap { background: #dfeaf2; }.theme-light .map-legend, .theme-light .map-diagnostics, .theme-light .workspace-controls > div { border-color: rgb(86 120 150 / 38%); background: rgb(255 255 255 / 92%); color: #27435a; }.theme-light .image-widget label, .theme-light .image-widget p, .theme-light .workspace-controls label { color: #365671; }.theme-light .image-widget select { border-color: #8bb0c9; background: #f4f9fc; color: #294962; }
+@media (max-width: 760px) { .local-viewer-workspace { min-height: 720px; --map-ratio: 100% !important; --image-ratio: 50% !important; grid-template-columns: 100% 0; }.local-viewer-workspace:not([data-image-mode="none"]) { grid-template-rows: 58% 21% 21%; }.map-widget { grid-column: 1; grid-row: 1; }.image-widget[data-widget="cameraA"] { grid-column: 1; grid-row: 2; }.image-widget[data-widget="cameraB"] { grid-column: 1; grid-row: 3; }.local-viewer-workspace[data-image-mode^="single"] .image-widget { grid-column: 1; grid-row: 2 / 4; }.workspace-splitter { display: none !important; }.viewer-state .page-muted { max-width: 170px; }.map-legend { gap: 8px; font-size: 11px; }.image-widget select { width: 140px; } }

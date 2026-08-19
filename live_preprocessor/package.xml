@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>aletheia_live_preprocessor</name>
+  <version>0.1.0</version>
+  <description>Bounded-cost PointCloud2 preprocessor for RY Aletheia live observation.</description>
+  <maintainer email="robotics@ry.local">RY Robotics</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>geometry_msgs</depend>
+  <depend>livox_ros_driver2</depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

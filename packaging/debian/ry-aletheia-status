@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# RY Aletheia 按需资源状态页。工具由普通用户直接运行，不依赖 systemd。
+set -euo pipefail
+
+INTERVAL_S=1
+
+while true; do
+  pid="$(pgrep -f '/ry_aletheia/dist/ry-aletheia([[:space:]]|$)' | head -n 1 || true)"
+
+  printf '\033[H\033[2J'
+  printf 'RY Aletheia · 实时资源状态（每 %ss 刷新，Ctrl+C 退出）\n\n' "$INTERVAL_S"
+  if [[ -z "$pid" ]]; then
+    printf '工具状态:     未运行\n\n'
+    printf '提示：双击 ~/ry_aletheia/RY Aletheia.desktop，或执行 ~/ry_aletheia/run_ry_aletheia.sh\n'
+    exit 0
+  fi
+  read -r cpu memory threads elapsed command < <(ps -p "$pid" -o %cpu=,rss=,nlwp=,etime=,args=)
+  printf '工具状态:     运行中\n'
+  printf '主进程 PID:   %s\n' "$pid"
+  printf 'CPU 占用:     %s%%  （进程平均值；100%% = 一个逻辑 CPU 核心）\n' "${cpu:-—}"
+  printf '内存占用:     %s MiB\n' "$(awk -v value="${memory:-0}" 'BEGIN { printf "%.1f", value / 1024 }')"
+  printf '线程数:       %s\n' "${threads:-—}"
+  printf '运行时长:     %s\n' "${elapsed:-—}"
+  printf '命令:         %s\n' "${command:-—}"
+  sleep "$INTERVAL_S"
+done

@@ -1,0 +1,163 @@
+{
+  "subtasks": [
+    {
+      "change_loc": false,
+      "map_url": "/opt/ry/data/maps/gk1/P1/map.yaml",
+      "pcd_url": "",
+      "subtask_name": "ele_test",
+      "waypoints": [
+        {
+          "waypoint_task_id": "1_1_elevator_in_n_x",
+          "is_task_point": true,
+          "speed_mode": "task_point",
+          "is_backward": false,
+          "is_single_point": true,
+          "pose": {
+            "position": {
+              "x": -6.226869869845534,
+              "y": 5.7002357166614805,
+              "z": 0.0
+            },
+            "orientation": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": -0.7105711465108374,
+              "w": 0.7036253589420112
+            }
+          },
+          "waypoint_id": "ele_test_0"
+        },
+        {
+          "waypoint_task_id": "1_1_elevator_out_n_x",
+          "is_task_point": true,
+          "speed_mode": "elevator_in",
+          "is_backward": false,
+          "is_single_point": true,
+          "pose": {
+            "position": {
+              "x": -6.226869869845534,
+              "y": 2.3331937590327447,
+              "z": 0.0
+            },
+            "orientation": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": -0.714603776865069,
+              "w": 0.6995294433332871
+            }
+          },
+          "waypoint_id": "ele_test_1"
+        }
+      ]
+    },
+    {
+      "change_loc": false,
+      "map_url": "/opt/ry/data/maps/gk1/P2/map.yaml",
+      "pcd_url": "",
+      "subtask_name": "ele_test_floor",
+      "waypoints": [
+        {
+          "waypoint_task_id": "1_1_close_elevdoor_x",
+          "is_task_point": true,
+          "speed_mode": "backward",
+          "is_backward": false,
+          "is_single_point": true,
+          "pose": {
+            "position": {
+              "x": -3.6096686674108938,
+              "y": -0.005426130050459221,
+              "z": 0.0
+            },
+            "orientation": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": 0.012497071494499057,
+              "w": 0.9999219085528936
+            }
+          },
+          "waypoint_id": "ele_test_floor_1"
+        }
+      ]
+    },
+    {
+      "change_loc": false,
+      "map_url": "/opt/ry/data/maps/gk1/P2/map.yaml",
+      "pcd_url": "",
+      "subtask_name": "ele_test_floor_r",
+      "waypoints": [
+        {
+          "waypoint_task_id": "1_1_elevator_in_x_n",
+          "is_task_point": true,
+          "speed_mode": "task_point",
+          "is_backward": false,
+          "is_single_point": true,
+          "pose": {
+            "position": {
+              "x": -3.6096686674108938,
+              "y": -0.005426130050459221,
+              "z": 0.0
+            },
+            "orientation": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": 0.012497071494499057,
+              "w": 0.9999219085528936
+            }
+          },
+          "waypoint_id": "ele_test_floor_1"
+        },
+        {
+          "waypoint_task_id": "1_1_eletest_out_x_n",
+          "is_task_point": true,
+          "speed_mode": "elevator_in",
+          "is_backward": false,
+          "is_single_point": true,
+          "pose": {
+            "position": {
+              "x": -0.004345181593876646,
+              "y": -0.0008132677837693336,
+              "z": 0.0
+            },
+            "orientation": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": 0.0070582780699291105,
+              "w": 0.9999750900450909
+            }
+          },
+          "waypoint_id": "ele_test_floor_0"
+        }
+      ]
+    },
+    {
+      "change_loc": false,
+      "map_url": "/opt/ry/data/maps/gk1/P2/map.yaml",
+      "pcd_url": "",
+      "subtask_name": "ele_test_r",
+      "waypoints": [
+        {
+          "waypoint_task_id": "1_1_close_elevdoor_n",
+          "is_task_point": true,
+          "speed_mode": "backward",
+          "is_backward": false,
+          "is_single_point": true,
+          "pose": {
+            "position": {
+              "x": -6.226869869845534,
+              "y": 5.7002357166614805,
+              "z": 0.0
+            },
+            "orientation": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": -0.7105711465108374,
+              "w": 0.7036253589420112
+            }
+          },
+          "waypoint_id": "ele_test_0"
+        }
+      ]
+    }
+  ],
+  "task_group_name": "高科一号电梯测试_1_1_15_0"
+}

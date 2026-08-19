@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" != "configure" ]]; then
+  exit 0
+fi
+
+detect_run_user() {
+  local candidate users
+  candidate="${RY_ALETHEIA_USER:-${SUDO_USER:-}}"
+  if [[ -n "$candidate" ]] && id "$candidate" >/dev/null 2>&1 && [[ "$candidate" != "root" ]]; then
+    printf '%s\n' "$candidate"
+    return
+  fi
+  # RY 小车的标准普通账户；优先使用，避免多账户机器选择到错误用户。
+  if id ry >/dev/null 2>&1; then
+    printf '%s\n' "ry"
+    return
+  fi
+  users="$(getent passwd | awk -F: '$3 >= 1000 && $1 != "nobody" && $7 !~ /(nologin|false)$/ { print $1 }')"
+  if [[ "$(printf '%s\n' "$users" | sed '/^$/d' | wc -l)" -eq 1 ]]; then
+    printf '%s\n' "$users"
+    return
+  fi
+  return 1
+}
+
+RUN_USER="$(detect_run_user || true)"
+if [[ -z "$RUN_USER" ]]; then
+  echo "RY Aletheia：无法自动识别唯一的普通运行账户，安装已停止。" >&2
+  echo "请使用 RY_ALETHEIA_USER=<账户> 重新安装此 .deb。" >&2
+  exit 1
+fi
+if [[ ! "$RUN_USER" =~ ^[a-z_][a-z0-9_-]*\$?$ ]]; then
+  echo "RY Aletheia：识别到的运行账户名不安全，拒绝写入服务与 sudo 配置。" >&2
+  exit 1
+fi
+RUN_GROUP="$(id -gn "$RUN_USER")"
+RUN_HOME="$(getent passwd "$RUN_USER" | awk -F: '{print $6}')"
+if [[ -z "$RUN_HOME" || ! -d "$RUN_HOME" ]]; then
+  echo "RY Aletheia：无法读取运行账户 $RUN_USER 的主目录，拒绝安装。" >&2
+  exit 1
+fi
+
+SUPERVISORCTL="$(command -v supervisorctl || true)"
+if [[ -z "$SUPERVISORCTL" ]]; then
+  echo "RY Aletheia：未找到 supervisorctl，拒绝完成安装以免控制台无法执行节点预检。" >&2
+  exit 1
+fi
+
+ROOT="$RUN_HOME/ry_aletheia"
+DEFAULTS=/usr/lib/ry-aletheia/defaults
+PRIVATE_BRIDGE=/usr/lib/ry-aletheia/foxglove_bridge_runtime
+install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0755 "$ROOT/dist" "$ROOT/tasks" "$ROOT/config" "$ROOT/reports" "$ROOT/updates" "$ROOT/maps_cache" "$ROOT/runtime/foxglove_bridge"
+install -o "$RUN_USER" -g "$RUN_GROUP" -m 0755 /usr/lib/ry-aletheia/ry-aletheia "$ROOT/dist/ry-aletheia"
+install -o "$RUN_USER" -g "$RUN_GROUP" -m 0644 /usr/lib/ry-aletheia/VERSION "$ROOT/VERSION"
+if [[ -d "$DEFAULTS/tasks" ]]; then
+  while IFS= read -r -d '' task; do
+    destination="$ROOT/tasks/$(basename -- "$task")"
+    # 任务资产仅首次缺失时补入；重新安装/升级绝不覆盖测试人员已有文件。
+    [[ -e "$destination" ]] || install -o "$RUN_USER" -g "$RUN_GROUP" -m 0644 "$task" "$destination"
+  done < <(find "$DEFAULTS/tasks" -maxdepth 1 -type f -name '*.json' -print0)
+fi
+if [[ -d "$PRIVATE_BRIDGE/share/ament_index/resource_index/packages" ]]; then
+  # 这份前缀仅由 ObservationManager 启动 Bridge 子进程时注入环境；不触碰系统 ROS。
+  cp -a "$PRIVATE_BRIDGE/." "$ROOT/runtime/foxglove_bridge/"
+fi
+chown -R "$RUN_USER:$RUN_GROUP" "$ROOT"
+
+TEMP_SUDOERS="$(mktemp)"
+trap 'rm -f "$TEMP_SUDOERS"' EXIT
+printf '%s ALL=(root) NOPASSWD: %s status, %s start *, %s restart *\n' "$RUN_USER" "$SUPERVISORCTL" "$SUPERVISORCTL" "$SUPERVISORCTL" > "$TEMP_SUDOERS"
+visudo -cf "$TEMP_SUDOERS"
+install -o root -g root -m 0440 "$TEMP_SUDOERS" /etc/sudoers.d/ry-aletheia-supervisor
+
+TASK_TARGET=/opt/ry/data/tasks/origin_tasks
+if [[ -d "$TASK_TARGET" ]] && command -v setfacl >/dev/null 2>&1; then
+  setfacl -m "u:${RUN_USER}:rwx" "$TASK_TARGET" || true
+  setfacl -d -m "u:${RUN_USER}:rwx" "$TASK_TARGET" || true
+fi
+
+rm -f "$ROOT/run_ry_aletheia.sh" "$ROOT/RY Aletheia.desktop"
+# 清理旧版 systemd 系统服务；后续完全由普通用户按需启动，不注册开机自启。
+systemctl disable --now ry-aletheia.service >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/ry-aletheia.service
+systemctl daemon-reload >/dev/null 2>&1 || true
+echo "RY Aletheia 安装完成：版本 $(cat "$ROOT/VERSION")。"
+echo "工具未自动启动、不会开机自启。请以普通账户执行：ry-aletheia"
+echo "启动后浏览器打开：http://<小车IP>:8087"

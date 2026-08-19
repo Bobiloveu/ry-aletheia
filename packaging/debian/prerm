@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 工具由普通用户按需直接运行，不由 systemd 托管。

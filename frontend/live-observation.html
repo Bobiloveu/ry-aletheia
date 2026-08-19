@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>实时运行观测 · RY Aletheia</title>
+  </head>
+  <body>
+    <div id="app">
+      <aside>
+        <div class="brand">
+          <div class="mark" title="切换主题">
+            <svg viewBox="0 0 32 32">
+              <path d="M5 24 16 4l11 20-11 4z" />
+              <path d="m11 21 5-10 5 10-5 2z" />
+            </svg>
+          </div>
+          <div>
+            <b>RY <span>Aletheia</span></b
+            ><small>AUTONOMOUS TEST SYSTEM</small
+            ><span class="brand-version" id="consoleVersion">—</span>
+          </div>
+        </div>
+        <nav>
+          <a href="/"><span>⌘</span>任务指挥台</a
+          ><a class="active" href="/live-observation.html"
+            ><span>◉</span>实时运行观测</a
+          ><a href="/case-library.html"><span>▤</span>测试用例管理</a
+          ><a href="/reports.html"><span>◫</span>报告中心</a
+          ><a href="/runtime-settings.html"><span>⚙</span>运行配置</a>
+        </nav>
+        <div class="side-status">
+          <span class="pulse"></span> LOCAL VIEWER<br /><strong id="sideState"
+            >连接检查中</strong
+          >
+        </div>
+      </aside>
+      <main class="page-main">
+        <header class="page-header">
+          <div>
+            <p class="eyebrow">LOCAL LIVE VIEW / 2D</p>
+            <h1>实时运行观测</h1>
+            <p class="sub">
+              只读展示当前 2D 地图、虚拟墙、车体定位和激光点云；不发送控制指令。
+            </p>
+          </div>
+        </header>
+        <section
+          class="local-viewer-workspace"
+          id="viewerWorkspace"
+          aria-label="可调整的实时观测工作区"
+        >
+          <article class="workspace-widget map-widget" data-widget="map">
+            <header class="widget-header">
+              <div>
+                <p class="eyebrow">MAP / VEHICLE / LIDAR</p>
+                <h2>实时二维运行视图</h2>
+              </div>
+              <div class="viewer-state">
+                <span class="badge" id="connectionState">检查中</span
+                ><span class="page-muted" id="connectionDetail"
+                  >正在读取本机观测配置。</span
+                ><button
+                  id="toggleWorkspaceControls"
+                  class="outline-button workspace-settings-button"
+                  type="button"
+                >
+                  ⚙ 设置
+                </button>
+              </div>
+            </header>
+            <div class="local-map-wrap">
+              <div id="worldStage" class="world-stage">
+                <div id="mapWorld" class="map-world">
+                  <canvas id="mapStaticCanvas"></canvas>
+                </div>
+                <div id="cloudWorld" class="map-world"><canvas id="cloudCanvas"></canvas></div>
+              </div>
+              <div id="vehicleLayer" aria-label="小车实时位置"><i></i></div>
+              <canvas
+                id="mapCanvas"
+                class="map-interaction-layer"
+                width="1920"
+                height="1080"
+              ></canvas>
+              <div class="local-map-empty" id="mapEmpty">正在获取当前地图…</div>
+              <div class="map-legend">
+                <span><i class="legend-wall"></i>虚拟墙</span
+                ><span><i class="legend-vehicle"></i>小车</span
+                ><span><i class="legend-cloud"></i>激光点云</span>
+              </div>
+              <div class="map-diagnostics" id="mapDiagnostics">
+                等待地图、定位与点云数据
+              </div>
+            </div>
+          </article>
+          <article class="workspace-widget image-widget" data-widget="cameraA">
+            <header class="widget-header">
+              <label
+                >图像窗口 1
+                <select id="cameraSelectA">
+                  <option value="">不订阅图像</option>
+                </select></label
+              >
+            </header>
+            <canvas id="cameraCanvasA" width="640" height="360"></canvas>
+            <p id="cameraStateA">等待选择图像话题</p>
+          </article>
+          <article class="workspace-widget image-widget" data-widget="cameraB">
+            <header class="widget-header">
+              <label
+                >图像窗口 2
+                <select id="cameraSelectB">
+                  <option value="">不订阅图像</option>
+                </select></label
+              >
+            </header>
+            <canvas id="cameraCanvasB" width="640" height="360"></canvas>
+            <p id="cameraStateB">等待选择图像话题</p>
+          </article>
+          <div
+            class="workspace-splitter vertical-splitter"
+            id="verticalSplitter"
+            aria-label="调整地图与图像区域宽度"
+            role="separator"
+          ></div>
+          <div
+            class="workspace-splitter horizontal-splitter"
+            id="horizontalSplitter"
+            aria-label="调整图像窗口高度"
+            role="separator"
+          ></div>
+          <div class="workspace-controls">
+            <div id="workspaceControlsBody" hidden>
+              <p class="eyebrow">WINDOW MANAGEMENT</p>
+              <label
+                ><input id="showCameraA" type="checkbox" checked /> 显示图像窗口
+                1</label
+              ><label
+                ><input id="showCameraB" type="checkbox" checked /> 显示图像窗口
+                2</label
+              ><label
+                ><input id="cameraPriority" type="checkbox" />
+                图像低延迟优先</label
+              ><button id="resetWorkspace" type="button">恢复默认布局</button>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/src/liveObservation.js"></script>
+  </body>
+</html>

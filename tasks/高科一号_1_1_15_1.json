@@ -1,0 +1,147 @@
+{
+    "subtasks": [
+        {
+            "change_loc": false,
+            "map_url": "/opt/ry/data/maps/gk1/P2/map.yaml",
+            "pcd_url": "",
+            "subtask_name": "corr_test",
+            "waypoints": [
+                {
+                    "is_backward": false,
+                    "is_single_point": true,
+                    "is_task_point": false,
+                    "pose": {
+                        "position": {
+                            "x": -3.439628817869682,
+                            "y": -0.0010394425579356437,
+                            "z": 0
+                        },
+                        "orientation": {
+                            "w": 0.6992078599082153,
+                            "x": 0,
+                            "y": 0,
+                            "z": 0.7149184349578444
+                        }
+                    },
+                    "speed_mode": "task_point",
+                    "waypoint_id": "corr_test_0",
+                    "waypoint_task_id": ""
+                },
+                {
+                    "is_backward": false,
+                    "is_single_point": true,
+                    "is_task_point": false,
+                    "pose": {
+                        "position": {
+                            "x": -3.4165174679736765,
+                            "y": 5.864513973786636,
+                            "z": 0
+                        },
+                        "orientation": {
+                            "w": 0.026288501930409523,
+                            "x": 0,
+                            "y": 0,
+                            "z": -0.9996543976126223
+                        }
+                    },
+                    "speed_mode": "task_point",
+                    "waypoint_id": "corr_test_1",
+                    "waypoint_task_id": ""
+                },
+                {
+                    "is_backward": false,
+                    "is_single_point": true,
+                    "is_task_point": false,
+                    "pose": {
+                        "position": {
+                            "x": -27.86339214507222,
+                            "y": 5.860620758576655,
+                            "z": 0
+                        },
+                        "orientation": {
+                            "w": 0.7030687083831391,
+                            "x": 0,
+                            "y": 0,
+                            "z": -0.7111219243508561
+                        }
+                    },
+                    "speed_mode": "task_point",
+                    "waypoint_id": "corr_test_2",
+                    "waypoint_task_id": ""
+                },
+                {
+                    "is_backward": false,
+                    "is_single_point": true,
+                    "is_task_point": false,
+                    "pose": {
+                        "position": {
+                            "x": -27.84325119197073,
+                            "y": -6.873906793160636,
+                            "z": 0
+                        },
+                        "orientation": {
+                            "w": 0.9994403863983832,
+                            "x": 0,
+                            "y": 0,
+                            "z": -0.033450172433795215
+                        }
+                    },
+                    "speed_mode": "task_point",
+                    "waypoint_id": "corr_test_3",
+                    "waypoint_task_id": ""
+                },
+                {
+                    "is_backward": false,
+                    "is_single_point": true,
+                    "is_task_point": false,
+                    "pose": {
+                        "position": {
+                            "x": -3.423717041608498,
+                            "y": -6.834334600265757,
+                            "z": 0
+                        },
+                        "orientation": {
+                            "w": 0.7014369524508861,
+                            "x": 0,
+                            "y": 0,
+                            "z": 0.7127315074671621
+                        }
+                    },
+                    "speed_mode": "task_point",
+                    "waypoint_id": "corr_test_4",
+                    "waypoint_task_id": ""
+                }
+            ]
+        },
+        {
+            "change_loc": false,
+            "map_url": "/opt/ry/data/maps/gk1/P2/map.yaml",
+            "pcd_url": "",
+            "subtask_name": "corr_test_r",
+            "waypoints": [
+                {
+                    "is_backward": false,
+                    "is_single_point": true,
+                    "is_task_point": true,
+                    "pose": {
+                        "position": {
+                            "x": -3.439628817869682,
+                            "y": -0.0010394425579356437,
+                            "z": 0
+                        },
+                        "orientation": {
+                            "w": -0.6992078599082153,
+                            "x": 0,
+                            "y": 0,
+                            "z": -0.7149184349578444
+                        }
+                    },
+                    "speed_mode": "task_point",
+                    "waypoint_id": "corr_test_0",
+                    "waypoint_task_id": "task_complete"
+                }
+            ]
+        }
+    ],
+    "task_group_name": "高科一号_1_1_15_1"
+}

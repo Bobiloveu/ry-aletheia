@@ -1,0 +1,4 @@
+.report-row{grid-template-columns:minmax(220px,1fr) 160px auto}
+.report-actions{display:flex;justify-content:flex-end;gap:7px;flex-wrap:wrap}
+.danger-action{border-color:#8e4050!important;color:#ff9bac!important;background:#251521!important}
+@media(max-width:850px){.report-actions{justify-content:flex-start}}

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$HOME/ry_aletheia"
+if [[ ! -x "$ROOT/dist/ry-aletheia" ]]; then
+  echo "RY Aletheia 未安装到 $ROOT，或当前账户不是安装账户。" >&2
+  exit 1
+fi
+# 在操作者的实际终端环境中加载 ROS，保留 ROS_DOMAIN_ID、DDS 和桌面会话配置。
+if [[ -f "$HOME/.bashrc" ]]; then
+  set +u
+  source "$HOME/.bashrc"
+  set -u
+fi
+if [[ -f /opt/ry/install/setup.bash ]]; then
+  set +u
+  source /opt/ry/install/setup.bash
+  set -u
+fi
+cd "$ROOT"
+exec "$ROOT/dist/ry-aletheia"
