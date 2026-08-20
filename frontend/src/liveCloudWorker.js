@@ -5,7 +5,7 @@ let frames = [];
 
 self.onmessage = ({ data }) => {
   if (data.type === 'init') {
-    canvas = new OffscreenCanvas(1, 1);
+    canvas = data.canvas || new OffscreenCanvas(1, 1);
     context = canvas.getContext('2d', { alpha: true, desynchronized: true });
     self.postMessage({ type: 'ready' });
     return;
@@ -29,6 +29,7 @@ self.onmessage = ({ data }) => {
       if (x >= 0 && x < map.width && y >= 0 && y < map.height) context.fillRect(x - .35, y - .35, .7, .7);
     }
   }
-  const bitmap = canvas.transferToImageBitmap();
-  self.postMessage({ type: 'frame', width: map.width, height: map.height, bitmap }, [bitmap]);
+  // transferControlToOffscreen 模式下 Canvas 已经是页面可见图层，直接提交，
+  // 不再创建/复制 ImageBitmap 到主线程。
+  self.postMessage({ type: 'rendered' });
 };

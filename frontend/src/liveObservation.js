@@ -85,6 +85,7 @@ let cloudWorkerReady = false;
 let cloudWorkerBusy = false;
 let pendingCloudFrame;
 let cloudWorkerFailed = false;
+let cloudWorkerOwnsCanvas = false;
 let pendingCloudPacket;
 let cloudPacketQueued = false;
 let pendingPosePacket;
@@ -464,23 +465,33 @@ function normalizeAngle(value) {
   return angle;
 }
 function initializeCloudWorker() {
-  // 可见 Canvas 始终留在主线程；Worker 只返回已完成的 ImageBitmap。
-  // 因而任意 Worker 故障均可无损回退到原 Canvas 路径。
+  // 将动态点云 Canvas 的控制权一次性交给 Worker。旧实现每帧都需要
+  // Worker -> ImageBitmap -> 主线程 drawImage，恰好会堵住位姿与交互事件。
+  // 静态地图/墙体和车体仍是独立层，Worker 不会接触它们。
   if (!window.Worker || !window.OffscreenCanvas || !window.ImageBitmap) return;
   try {
     cloudWorker = new Worker(new URL('./liveCloudWorker.js', import.meta.url), { type: 'module' });
     cloudWorker.onmessage = ({ data }) => {
       if (data?.type === 'ready') { cloudWorkerReady = true; configureCloudWorker(); return; }
       if (data?.type === 'frame-skipped') { cloudWorkerBusy = false; flushCloudWorker(); return; }
-      if (data?.type !== 'frame') return;
+      if (data?.type !== 'rendered' && data?.type !== 'frame') return;
       cloudWorkerBusy = false;
-      const canvas = $('cloudCanvas'); const context = canvas.getContext('2d');
-      if (canvas.width !== data.width || canvas.height !== data.height) { canvas.width = data.width; canvas.height = data.height; }
-      context.clearRect(0, 0, canvas.width, canvas.height); context.drawImage(data.bitmap, 0, 0); data.bitmap.close?.();
+      // 兼容不支持 transferControlToOffscreen 的旧浏览器；现代浏览器中
+      // Worker 已直接画到屏幕，不再做主线程 ImageBitmap 复制。
+      if (data?.type === 'frame' && !cloudWorkerOwnsCanvas) {
+        const canvas = $('cloudCanvas'); const context = canvas.getContext('2d');
+        if (canvas.width !== data.width || canvas.height !== data.height) { canvas.width = data.width; canvas.height = data.height; }
+        context.clearRect(0, 0, canvas.width, canvas.height); context.drawImage(data.bitmap, 0, 0); data.bitmap.close?.();
+      }
       flushCloudWorker();
     };
-    cloudWorker.onerror = () => { cloudWorkerFailed = true; cloudWorkerReady = false; cloudWorkerBusy = false; pendingCloudFrame = undefined; reportObservation('WARNING', '点云 Worker 不可用，已自动回退至兼容渲染。'); };
-    cloudWorker.postMessage({ type: 'init' });
+    cloudWorker.onerror = () => { cloudWorkerFailed = true; cloudWorkerReady = false; cloudWorkerBusy = false; pendingCloudFrame = undefined; reportObservation('WARNING', cloudWorkerOwnsCanvas ? '点云 Worker 异常，已停止动态点云以保障小车位姿和地图交互。请刷新页面重试。' : '点云 Worker 不可用，已自动回退至兼容渲染。'); };
+    const canvas = $('cloudCanvas');
+    if (canvas?.transferControlToOffscreen) {
+      const offscreen = canvas.transferControlToOffscreen();
+      cloudWorkerOwnsCanvas = true;
+      cloudWorker.postMessage({ type: 'init', canvas: offscreen }, [offscreen]);
+    } else cloudWorker.postMessage({ type: 'init' });
   } catch (_) { cloudWorkerFailed = true; cloudWorker = undefined; }
 }
 function configureCloudWorker() {
@@ -1022,6 +1033,8 @@ function scheduleCloudRasterBuild() {
   });
 }
 function rebuildCloudRaster() {
+  // Worker 直绘模式下，主线程绝不能再 getContext()；否则既无收益又会抛错。
+  if (cloudWorkerOwnsCanvas) return;
   const canvas = $('cloudCanvas');
   if (!mapInfo || !cloud?.mapPoints) { canvas.width = canvas.height = 1; return; }
   if (canvas.width !== mapInfo.width || canvas.height !== mapInfo.height) { canvas.width = mapInfo.width; canvas.height = mapInfo.height; }
