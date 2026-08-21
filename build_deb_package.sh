@@ -53,7 +53,7 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 PKG="$STAGE/ry-aletheia"
 OUT="$OUTPUT_DIR/ry-aletheia_${VERSION}_${ARCH}.deb"
-mkdir -p "$PKG/DEBIAN" "$PKG/usr/lib/ry-aletheia/defaults/tasks" "$PKG/usr/lib/ry-aletheia" "$PKG/usr/bin" "$PKG/usr/share/doc/ry-aletheia/images"
+mkdir -p "$PKG/DEBIAN" "$PKG/usr/lib/ry-aletheia/defaults/tasks" "$PKG/usr/lib/ry-aletheia" "$PKG/usr/bin" "$PKG/usr/share/doc/ry-aletheia/docs/images"
 
 if [[ -n "$BRIDGE_DEB" ]]; then
   # 只提取官方 Bridge 的 ROS 前缀，并安装到 Aletheia 私有目录。绝不写入
@@ -98,11 +98,11 @@ install -m 0755 "$ROOT/packaging/debian/postrm" "$PKG/DEBIAN/postrm"
 install -m 0755 "$ROOT/packaging/debian/ry-aletheia-launcher" "$PKG/usr/bin/ry-aletheia"
 install -m 0755 "$ROOT/packaging/debian/ry-aletheia-status" "$PKG/usr/bin/ry-aletheia-status"
 install -m 0644 "$ROOT/deployment/README.md" "$PKG/usr/lib/ry-aletheia/README.md"
-install -m 0644 "$ROOT/README.md" "$PKG/usr/share/doc/ry-aletheia/USER_GUIDE.md"
+install -m 0644 "$ROOT/USER_GUIDE.md" "$PKG/usr/share/doc/ry-aletheia/USER_GUIDE.md"
 install -m 0644 "$ROOT/PROJECT_OVERVIEW.md" "$PKG/usr/share/doc/ry-aletheia/PROJECT_OVERVIEW.md"
 if [[ -d "$ROOT/docs/images" ]]; then
   while IFS= read -r -d '' guide_image; do
-    install -m 0644 "$guide_image" "$PKG/usr/share/doc/ry-aletheia/images/$(basename -- "$guide_image")"
+    install -m 0644 "$guide_image" "$PKG/usr/share/doc/ry-aletheia/docs/images/$(basename -- "$guide_image")"
   done < <(find "$ROOT/docs/images" -maxdepth 1 -type f -name '*.png' -print0)
 fi
 printf '%s\n' "$VERSION" > "$PKG/usr/lib/ry-aletheia/VERSION"

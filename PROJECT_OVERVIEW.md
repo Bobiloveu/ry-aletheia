@@ -1,6 +1,6 @@
 # RY Aletheia 工程手册
 
-> 面向维护、开发、构建与现场排障人员。日常安装、使用和升级请优先阅读 [README.md](README.md) 与 `releases/<版本>/README.md`。
+> 面向维护、开发、构建与现场排障人员。项目入口见 [README.md](README.md)；日常安装、使用和升级请优先阅读 [USER_GUIDE.md](USER_GUIDE.md) 与 `releases/<版本>/README.md`。
 
 ## 1. 工程定位与边界
 

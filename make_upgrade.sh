@@ -76,7 +76,7 @@ if "$BUILD_DEB"; then
     DEB_ROW="| \`$(basename "$DEB_FILE")\` | 首次安装或完整重装时使用的 Debian 安装包。 |"
   fi
 fi
-install -m 0644 "$ROOT/README.md" "$RELEASE_DIR/USER_GUIDE.md"
+install -m 0644 "$ROOT/USER_GUIDE.md" "$RELEASE_DIR/USER_GUIDE.md"
 install -m 0644 "$ROOT/PROJECT_OVERVIEW.md" "$RELEASE_DIR/PROJECT_OVERVIEW.md"
 if [[ -d "$ROOT/docs/images" ]]; then
   mkdir -p "$RELEASE_DIR/docs/images"
