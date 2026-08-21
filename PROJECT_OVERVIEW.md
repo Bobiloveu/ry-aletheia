@@ -210,13 +210,75 @@ Vite 预览调用本机 `8087` API；页面导航必须保持在 `5173`，不能
 
 ## 11. 构建、发布与验证
 
-### 私有 Foxglove Bridge 的边界
+### 11.1 获取源码与开发环境
+
+其他开发者应从 GitHub 获取源码，并使用当前稳定分支开始开发：
+
+```bash
+git clone https://github.com/Bobiloveu/ry-aletheia.git
+cd ry-aletheia
+git switch v1.0-baseline
+```
+
+推荐在与目标小车一致的 Ubuntu 22.04 `amd64` + ROS 2 Humble 环境开发。完整二进制构建还依赖小车业务工作空间的 `master_interfaces` 类型支持库；仅安装通用 ROS Humble 不能替代该接口。开发机至少应具备：Python 3、Node.js 20+、npm、CMake、C++17 编译器、PyInstaller，以及 `rclcpp`、`sensor_msgs`、`geometry_msgs`、`tf2_ros`、`livox_ros_driver2` 的 ROS 2 C++ 开发包。
+
+先安装锁定的前端依赖并确认基础检查：
+
+```bash
+cd frontend && npm ci && cd ..
+python3 -m pytest -q tests
+```
+
+不要提交 `node_modules/`、`build/`、`dist/`、`releases/`、车辆日志、报告、地图缓存或本机 `console.json`。提交前先执行 `git status --short`，只允许源码、测试、文档和构建脚本进入提交。
+
+### 11.2 导入小车专有 ROS 依赖
+
+在一台已正常运行、且与目标环境匹配的参考小车上执行一次依赖导出。脚本只读取已有 ROS 安装，不修改小车系统：
+
+```bash
+./export_robot_build_deps.sh /tmp/ry-aletheia-robot-build-deps.tar.gz
+./export_robot_cpp_sdk.sh /tmp/ry-aletheia-ros2-cpp-sdk.tar.gz
+```
+
+将生成的文件和对应的 `.sha256` 一并复制到开发机。标准二进制构建至少需要第一个包；在干净开发机的源码根目录中解压，使 `install/setup.bash` 与 `build-deps-manifest.json` 出现在工程根目录：
+
+```bash
+tar -xzf /path/to/ry-aletheia-robot-build-deps_*.tar.gz -C .
+test -f install/setup.bash && test -f build-deps-manifest.json
+```
+
+`export_robot_cpp_sdk.sh` 用于归档原生 C++ 编译所需的 Humble SDK；当前标准流程优先在参考小车或已安装匹配 Humble 开发包的主机上构建。若使用导出的 SDK 进行异机构建，必须先单独验证 `cmake -S live_preprocessor -B build/live_preprocessor` 成功，再进行完整二进制构建；不要把 SDK 解压到 `/opt/ros` 或覆盖系统 ROS。
+
+### 11.3 日常开发与本地预览
+
+修改 Vue 页面时，使用下列命令启动 Vite 预览；它会代理本机 `8087` API，浏览器地址保持在 `5173`：
+
+```bash
+./run_vue_preview.sh
+# 浏览器：http://127.0.0.1:5173
+```
+
+修改 C++ 预处理节点时，先在已 source 的 ROS 环境中进行独立编译：
+
+```bash
+source install/setup.bash
+cmake -S live_preprocessor -B build/live_preprocessor -DCMAKE_BUILD_TYPE=Release
+cmake --build build/live_preprocessor --parallel 2
+```
+
+完整构建由 `build_binary.sh` 统一执行：它先构建 Vue 产物和 C++ 预处理节点，再生成 `dist/ry-aletheia`。可通过 `ROVER_QA_ROS_SETUP=/path/to/setup.bash` 指定参考小车的 ROS 工作空间；未指定时依次使用 `/opt/ry/install/setup.bash` 和工程内 `install/setup.bash`。
+
+```bash
+./build_binary.sh
+```
+
+### 11.4 私有 Foxglove Bridge 的边界
 
 所有目标车均以 ROS Humble 作为基础运行环境，因此完整离线包只内置锁定版本的 Foxglove Bridge，不复制整套 Humble。`ObservationManager` 优先直接执行 `runtime/foxglove_bridge/lib/foxglove_bridge/foxglove_bridge`，不会通过系统 `ros2 launch` 解析 Bridge 版本。私有前缀仅影响 Aletheia 创建的 Bridge 与点云/位姿预处理子进程，不能写入 `/opt/ros`、覆盖系统 Bridge 或改变其他节点环境。
 
 车端 ROS Humble 与业务 ROS 图仍是明确集成契约：`/start_execute_tasks`、TF、地图、雷达驱动、导航、`master_interfaces` 及 Supervisor 属于机器人系统，不随工具复制。完整包只要求目标车为匹配 CPU 架构的 ROS Humble 平台。
 
-### 构建
+### 11.5 发布构建
 
 ```bash
 # 生成升级 ZIP
@@ -237,7 +299,7 @@ Vite 预览调用本机 `8087` API；页面导航必须保持在 `5173`，不能
 
 版本号必须为数字点号格式。脚本会拒绝覆盖已有发布目录，并在 `releases/<版本>/` 输出 ZIP、`SHA256SUMS`、说明和可选 DEB。
 
-### 每次改动后的最小验证集
+### 11.6 每次改动后的最小验证集
 
 ```bash
 python3 -m pytest -q tests/test_offline_modules.py tests/test_trajectory_integrity.py
