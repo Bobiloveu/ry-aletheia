@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # 开发机一键生成网页离线升级 ZIP；--deb 始终生成内置私有 Bridge 的完整首次安装 DEB。
-# 用法：./make_upgrade.sh <版本号> [--deb | --full-deb <官方 bridge .deb>]
+# 用法：./make_upgrade.sh <版本号> [--deb]
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 SETUP="$ROOT/install/setup.bash"
-if [[ $# -ne 1 && $# -ne 2 && $# -ne 3 ]]; then
-  echo "用法：./make_upgrade.sh <版本号> [--deb | --full-deb <官方 bridge .deb>]" >&2
+if [[ $# -ne 1 && $# -ne 2 ]]; then
+  echo "用法：./make_upgrade.sh <版本号> [--deb]" >&2
   exit 2
 fi
 VERSION="$1"
@@ -16,14 +16,8 @@ AUTO_FULL_BRIDGE=false
 case "$#" in
   1) ;;
   2)
-    [[ "$2" == "--deb" ]] || { echo "未知参数：$2（仅支持 --deb 或 --full-deb）。" >&2; exit 2; }
+    [[ "$2" == "--deb" ]] || { echo "未知参数：$2（仅支持 --deb）。" >&2; exit 2; }
     BUILD_DEB=true; AUTO_FULL_BRIDGE=true
-    ;;
-  3)
-    [[ "$2" == "--full-deb" ]] || { echo "未知参数：$2（仅支持 --full-deb <Bridge DEB>）。" >&2; exit 2; }
-    FULL_BRIDGE_DEB="$(realpath "$3")"
-    [[ -f "$FULL_BRIDGE_DEB" ]] || { echo "未找到 Foxglove Bridge DEB：$FULL_BRIDGE_DEB" >&2; exit 1; }
-    BUILD_DEB=true
     ;;
 esac
 
