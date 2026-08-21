@@ -97,7 +97,8 @@ install -m 0755 "$ROOT/packaging/debian/prerm" "$PKG/DEBIAN/prerm"
 install -m 0755 "$ROOT/packaging/debian/postrm" "$PKG/DEBIAN/postrm"
 install -m 0755 "$ROOT/packaging/debian/ry-aletheia-launcher" "$PKG/usr/bin/ry-aletheia"
 install -m 0755 "$ROOT/packaging/debian/ry-aletheia-status" "$PKG/usr/bin/ry-aletheia-status"
-install -m 0644 "$ROOT/deployment/README.md" "$PKG/usr/lib/ry-aletheia/README.md"
+# 运行目录根部保留面向使用者的入口文档；不再依赖已废弃的手工部署说明。
+install -m 0644 "$ROOT/USER_GUIDE.md" "$PKG/usr/lib/ry-aletheia/README.md"
 install -m 0644 "$ROOT/USER_GUIDE.md" "$PKG/usr/share/doc/ry-aletheia/USER_GUIDE.md"
 install -m 0644 "$ROOT/PROJECT_OVERVIEW.md" "$PKG/usr/share/doc/ry-aletheia/PROJECT_OVERVIEW.md"
 if [[ -d "$ROOT/docs/images" ]]; then
