@@ -27,10 +27,6 @@ while [[ $# -gt 0 ]]; do
         echo "提供的文件不是 ros-humble-foxglove-bridge DEB。" >&2
         exit 1
       }
-      [[ "$(dpkg-deb -f "$BRIDGE_DEB" Architecture)" == "amd64" ]] || {
-        echo "当前完整包仅支持 amd64 Foxglove Bridge。" >&2
-        exit 1
-      }
       shift 2
       ;;
     *)
@@ -57,12 +53,16 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 PKG="$STAGE/ry-aletheia"
 OUT="$OUTPUT_DIR/ry-aletheia_${VERSION}_${ARCH}.deb"
-mkdir -p "$PKG/DEBIAN" "$PKG/usr/lib/ry-aletheia/defaults/tasks" "$PKG/usr/lib/ry-aletheia" "$PKG/usr/bin"
+mkdir -p "$PKG/DEBIAN" "$PKG/usr/lib/ry-aletheia/defaults/tasks" "$PKG/usr/lib/ry-aletheia" "$PKG/usr/bin" "$PKG/usr/share/doc/ry-aletheia/images"
 
 if [[ -n "$BRIDGE_DEB" ]]; then
   # 只提取官方 Bridge 的 ROS 前缀，并安装到 Aletheia 私有目录。绝不写入
   # /opt/ros，也不通过 Conflicts/Replaces 接管系统 ros-humble-foxglove-bridge。
   BRIDGE_STAGE="$STAGE/foxglove-bridge"
+  [[ "$(dpkg-deb -f "$BRIDGE_DEB" Architecture)" == "$ARCH" ]] || {
+    echo "Foxglove Bridge 架构必须与目标 DEB 一致：期望 $ARCH。" >&2
+    exit 1
+  }
   PRIVATE_RUNTIME="$PKG/usr/lib/ry-aletheia/foxglove_bridge_runtime"
   dpkg-deb -x "$BRIDGE_DEB" "$BRIDGE_STAGE"
   mkdir -p "$PRIVATE_RUNTIME"
@@ -74,17 +74,21 @@ else
   DESCRIPTION="Offline first-install package for the RY Aletheia robot QA console."
 fi
 
-cat > "$PKG/DEBIAN/control" <<EOF
-Package: ry-aletheia
-Version: $VERSION
-Section: utils
-Priority: optional
-Architecture: $ARCH
-Maintainer: RY Robotics
-$FOXGLOVE_CONTROL
-Description: RY Aletheia autonomous driving validation console
- $DESCRIPTION
-EOF
+{
+  printf '%s\n' \
+    'Package: ry-aletheia' \
+    "Version: $VERSION" \
+    'Section: utils' \
+    'Priority: optional' \
+    "Architecture: $ARCH" \
+    'Maintainer: RY Robotics'
+  if [[ -n "$FOXGLOVE_CONTROL" ]]; then
+    printf '%s\n' "$FOXGLOVE_CONTROL"
+  fi
+  printf '%s\n' \
+    'Description: RY Aletheia automated testing console' \
+    " $DESCRIPTION"
+} > "$PKG/DEBIAN/control"
 
 # Debian 包内先保留根账户只读的母本；安装后脚本会复制到自动识别的普通账户目录。
 install -m 0755 "$ROOT/dist/ry-aletheia" "$PKG/usr/lib/ry-aletheia/ry-aletheia"
@@ -94,6 +98,13 @@ install -m 0755 "$ROOT/packaging/debian/postrm" "$PKG/DEBIAN/postrm"
 install -m 0755 "$ROOT/packaging/debian/ry-aletheia-launcher" "$PKG/usr/bin/ry-aletheia"
 install -m 0755 "$ROOT/packaging/debian/ry-aletheia-status" "$PKG/usr/bin/ry-aletheia-status"
 install -m 0644 "$ROOT/deployment/README.md" "$PKG/usr/lib/ry-aletheia/README.md"
+install -m 0644 "$ROOT/README.md" "$PKG/usr/share/doc/ry-aletheia/USER_GUIDE.md"
+install -m 0644 "$ROOT/PROJECT_OVERVIEW.md" "$PKG/usr/share/doc/ry-aletheia/PROJECT_OVERVIEW.md"
+if [[ -d "$ROOT/docs/images" ]]; then
+  while IFS= read -r -d '' guide_image; do
+    install -m 0644 "$guide_image" "$PKG/usr/share/doc/ry-aletheia/images/$(basename -- "$guide_image")"
+  done < <(find "$ROOT/docs/images" -maxdepth 1 -type f -name '*.png' -print0)
+fi
 printf '%s\n' "$VERSION" > "$PKG/usr/lib/ry-aletheia/VERSION"
 
 while IFS= read -r -d '' task; do
@@ -104,4 +115,4 @@ mkdir -p "$(dirname -- "$OUT")"
 rm -f "$OUT"
 dpkg-deb --root-owner-group --build "$PKG" "$OUT" >/dev/null
 echo "首次离线安装包已生成：$OUT"
-echo "复制到小车后双击安装，或执行：sudo apt install ./$([[ "$OUT" == */* ]] && basename "$OUT" || echo "$OUT")"
+echo "复制到小车后双击安装，或执行：sudo dpkg -i ./$([[ "$OUT" == */* ]] && basename "$OUT" || echo "$OUT")"

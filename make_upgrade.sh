@@ -1,20 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 开发机一键生成网页离线升级 ZIP；传 --deb 时额外生成首次部署 Debian 包。
-# 用法：./make_upgrade.sh <版本号> [--deb]
+# 开发机一键生成网页离线升级 ZIP；可同时生成普通或内置私有 Bridge 的首次安装 DEB。
+# 用法：./make_upgrade.sh <版本号> [--deb | --full-deb <官方 bridge .deb>]
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 SETUP="$ROOT/install/setup.bash"
-if [[ $# -ne 1 && $# -ne 2 ]]; then
-  echo "用法：./make_upgrade.sh <版本号> [--deb]，例如：./make_upgrade.sh 0.1 --deb" >&2
+if [[ $# -ne 1 && $# -ne 2 && $# -ne 3 ]]; then
+  echo "用法：./make_upgrade.sh <版本号> [--deb | --full-deb <官方 bridge .deb>]" >&2
   exit 2
 fi
 VERSION="$1"
 BUILD_DEB=false
-if [[ $# -eq 2 ]]; then
-  [[ "$2" == "--deb" ]] || { echo "未知参数：$2（仅支持 --deb）" >&2; exit 2; }
-  BUILD_DEB=true
-fi
+FULL_BRIDGE_DEB=""
+case "$#" in
+  1) ;;
+  2)
+    [[ "$2" == "--deb" ]] || { echo "未知参数：$2（仅支持 --deb 或 --full-deb）。" >&2; exit 2; }
+    BUILD_DEB=true
+    ;;
+  3)
+    [[ "$2" == "--full-deb" ]] || { echo "未知参数：$2（仅支持 --full-deb <Bridge DEB>）。" >&2; exit 2; }
+    FULL_BRIDGE_DEB="$(realpath "$3")"
+    [[ -f "$FULL_BRIDGE_DEB" ]] || { echo "未找到 Foxglove Bridge DEB：$FULL_BRIDGE_DEB" >&2; exit 1; }
+    BUILD_DEB=true
+    ;;
+esac
 
 if [[ ! -f "$SETUP" ]]; then
   echo "未找到工程内 install/setup.bash。请先在小车执行 export_robot_build_deps.sh，并将生成的依赖包解压到本工程根目录。" >&2
@@ -45,16 +55,32 @@ mkdir -p "$RELEASE_DIR"
 ZIP_FILE="$RELEASE_DIR/ry-aletheia_${VERSION}.zip"
 if "$BUILD_DEB"; then
   echo "[3/$TOTAL_STEPS] 正在生成首次安装 DEB..."
-  "$ROOT/build_deb_package.sh" "$VERSION" --output-dir "$RELEASE_DIR"
+  if [[ -n "$FULL_BRIDGE_DEB" ]]; then
+    "$ROOT/build_deb_package.sh" "$VERSION" --output-dir "$RELEASE_DIR" --with-foxglove-bridge "$FULL_BRIDGE_DEB"
+  else
+    "$ROOT/build_deb_package.sh" "$VERSION" --output-dir "$RELEASE_DIR"
+  fi
 fi
 echo "[$TOTAL_STEPS/$TOTAL_STEPS] 正在生成发布校验与使用说明..."
 sha256sum "$ZIP_FILE" > "$RELEASE_DIR/SHA256SUMS"
 ZIP_MD5="$(md5sum "$ZIP_FILE" | awk '{print $1}')"
 DEB_ROW=""
+DEB_INSTALL_NOTE=""
 if "$BUILD_DEB"; then
   DEB_FILE="$RELEASE_DIR/ry-aletheia_${VERSION}_$(dpkg --print-architecture).deb"
   sha256sum "$DEB_FILE" >> "$RELEASE_DIR/SHA256SUMS"
-  DEB_ROW="| \`$(basename "$DEB_FILE")\` | 首次安装或完整重装时使用的 Debian 安装包。 |"
+  if [[ -n "$FULL_BRIDGE_DEB" ]]; then
+    DEB_ROW="| \`$(basename "$DEB_FILE")\` | 完整首次安装包：内置工具私有 Foxglove Bridge，不依赖系统 Bridge 版本。 |"
+    DEB_INSTALL_NOTE="完整 DEB 首次部署或需要统一私有 Bridge 时，在 DEB 所在目录执行：\`sudo dpkg -i ./$(basename "$DEB_FILE")\`。不要为本工具执行 \`apt autoremove\`。"
+  else
+    DEB_ROW="| \`$(basename "$DEB_FILE")\` | 首次安装或完整重装时使用的 Debian 安装包。 |"
+  fi
+fi
+install -m 0644 "$ROOT/README.md" "$RELEASE_DIR/USER_GUIDE.md"
+install -m 0644 "$ROOT/PROJECT_OVERVIEW.md" "$RELEASE_DIR/PROJECT_OVERVIEW.md"
+if [[ -d "$ROOT/docs/images" ]]; then
+  mkdir -p "$RELEASE_DIR/docs/images"
+  cp -a "$ROOT/docs/images/." "$RELEASE_DIR/docs/images/"
 fi
 cat > "$RELEASE_DIR/README.md" <<EOF
 # RY Aletheia $VERSION 升级包
@@ -65,7 +91,9 @@ cat > "$RELEASE_DIR/README.md" <<EOF
 | --- | --- |
 | \`ry-aletheia_${VERSION}.zip\` | 已安装 Aletheia 后，在网页“运行配置 → 工具离线升级”中上传的升级包。 |
 $DEB_ROW
-| \`SHA256SUMS\` | 升级 ZIP 的 SHA-256 校验值。 |
+| \`USER_GUIDE.md\` | 面向测试人员与部署人员的完整图文使用手册；配图位于 \`docs/images/\`。 |
+| \`PROJECT_OVERVIEW.md\` | 面向开发与维护人员的工程概览。 |
+| \`SHA256SUMS\` | 本目录 ZIP 和 DEB 的 SHA-256 校验值。 |
 
 ## 使用方法
 
@@ -75,6 +103,8 @@ $DEB_ROW
 4. 点击“校验并应用升级”，等待工具自动重启后刷新网页。
 
 升级不会覆盖任务文件、用例别名、运行配置、地图缓存或历史报告。
+
+$DEB_INSTALL_NOTE
 
 ## 校验信息
 
@@ -87,5 +117,5 @@ echo "升级包：$ZIP_FILE"
 if "$BUILD_DEB"; then
   echo "首次安装包：$DEB_FILE"
 else
-  echo "如需同时生成首次安装 DEB，请执行：./make_upgrade.sh $VERSION --deb"
+  echo "如需生成内置私有 Bridge 的完整首次安装包，请执行：./make_upgrade.sh $VERSION --full-deb <Foxglove Bridge DEB>"
 fi

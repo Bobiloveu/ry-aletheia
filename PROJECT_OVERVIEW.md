@@ -4,7 +4,7 @@
 
 ## 1. 工程定位与边界
 
-RY Aletheia 是部署在机器人小车 Ubuntu 主机上的离线自动驾驶测试平台。测试人员通过同一 Wi-Fi 下的浏览器访问 `http://<小车IP>:8087`；任务调用、ROS2 通信、Supervisor 操作、地图缓存与报告生成均在小车本机完成。
+RY Aletheia 是部署在机器人小车 Ubuntu 主机上的离线自动测试平台。测试人员通过同一 Wi-Fi 下的浏览器访问 `http://<小车IP>:8087`；任务调用、ROS2 通信、Supervisor 操作、地图缓存与报告生成均在小车本机完成。
 
 它负责测试编排、证据记录和只读观测，不替代小车原有的导航、定位、地图服务或安全控制。
 
@@ -36,14 +36,15 @@ RY Aletheia 是部署在机器人小车 Ubuntu 主机上的离线自动驾驶测
   ▼
 RY Aletheia（普通账户）
   ├─ Python 控制台：计划、任务、Supervisor、轨迹、报告、配置、升级
-  ├─ C++ 轻量预处理：/livox/points → /aletheia/live_points
+  ├─ C++ 轻量位姿进程：最新 TF map → base_* → /_aletheia/live_pose（60Hz，ROS 2 hidden）
+  ├─ C++ 轻量点云进程：/livox/points（或 /livox/lidar 回退）→ /_aletheia/live_points（到达即发布，ROS 2 hidden）
   └─ Aletheia 私有 Foxglove Bridge（按需运行）
        ├─ ROS2：/map、/odom、TF、/amcl_pose、/start_execute_tasks、/livox/points
        ├─ Supervisor：受限 sudo supervisorctl status/start/restart
        └─ 运行数据：tasks、config、reports、maps_cache、updates、logs
 ```
 
-测试执行经 HTTP API 进入 `RunManager`。实时观测则由浏览器直连 Aletheia 私有 Bridge，不再经过 `8087 → Python → Bridge` 中转，避免 Python 复制高频点云/图像造成额外延迟。
+测试执行经 HTTP API 进入 `RunManager`。实时观测则由浏览器直连 Aletheia 私有 Bridge，不再经过 `8087 → Python → Bridge` 中转，避免 Python 复制高频点云/图像造成额外延迟。浏览器再以两条 WebSocket 分离数据：位姿专线只订阅 `/_aletheia/live_pose`，主连接承载地图、点云和按需图像，避免大点云帧阻塞车体位姿。
 
 ## 4. 目录与数据所有权
 
@@ -58,6 +59,7 @@ RY Aletheia（普通账户）
 | `reports/` | HTML/CSV 报告与轨迹证据 | 否 |
 | `maps_cache/` | 地图、虚拟墙、观测底图缓存 | 否 |
 | `updates/` | 升级暂存与唯一 `.bak` 备份 | 否 |
+| `runtime/foxglove_bridge/` | 完整离线包部署的私有 Foxglove Bridge | 否 |
 | `logs/` | 控制台、Bridge、预处理与错误日志 | 否 |
 | `autodrive_console/` | Python 业务源码、正式网页输出 | 仅构建时 |
 | `frontend/` | Vue/Vite 源码 | 仅开发机 |
@@ -145,19 +147,19 @@ queued → preparing → running → completed
 
 ```text
 静态地图栅格 + 虚拟墙  ─┐
-点云 Canvas（Worker 合成） ├─ CSS 变换：缩放、拖动、航向旋转
+点云 Canvas（Worker 合成） ├─ CSS 变换：缩放、拖动（固定 map 朝向）
 车体 DOM 覆盖层           ┘
 ```
 
-地图、虚拟墙在首次取得或切图时缓存；拖动、缩放、位姿和点云更新都不应重绘静态底图。缩放以鼠标位置为中心，中键或左键拖动仅改变视图变换。
+地图、虚拟墙在首次取得或切图时缓存；拖动、缩放、位姿和点云更新都不应重绘静态底图。缩放以鼠标位置为中心，中键或左键拖动仅改变视图变换。地图必须稳定保持原始 `map` 坐标朝向，不能在进入页面时按车体初始航向旋转；只允许车体 DOM 图标旋转。
 
 ### 9.2 时效优先与背压
 
 | 数据 | 策略 | 时效边界 |
 | --- | --- | --- |
-| 点云 | C++ `keep_last(1)`，最多 10Hz、3000 点；Worker 单槽处理 | 输入超过 180ms 丢弃 |
-| 位姿 | C++ 发布最新 `map → base_*` TF，浏览器独立动画 | 超过 120ms 丢弃；30Hz 显示 |
-| 浏览器 WebSocket | 点云与位姿均为容量 1 的 latest-wins 队列 | 新包覆盖未解码旧包 |
+| 点云 | C++ `keep_last(1)`，3000 点；扫描回调到达即处理，Worker 单槽处理 | 节点内最新槽停留超过 140ms 才丢弃；浏览器包超过 100ms 丢弃；仅绘制最新一帧固定不透明点 |
+| 位姿 | 独立 C++ 进程发布最新 `map → base_*` TF，浏览器独立动画 | 超过 250ms 丢弃；60Hz 发布；独立 WebSocket 专线 |
+| 浏览器 WebSocket | 点云/地图/图像走主连接，位姿走第二条连接；均为容量 1 的 latest-wins 队列 | 新包覆盖未解码旧包，避免 TCP 队头阻塞 |
 | 地图 | 短订阅读取；仅切图时再更新 | 不持续传输大栅格 |
 | 图像 | 仅订阅用户选中的话题，优先最新压缩帧 | 不追赶旧图像 |
 
@@ -167,19 +169,37 @@ queued → preparing → running → completed
 
 `live_preprocessor/` 的 `ry_aletheia_live` 仅服务本工具，不改动原自动驾驶节点：
 
-- 输入 `/livox/points` 或 Livox 原生 `CustomMsg`。
-- 输出已投影到 `map` 的 `/aletheia/live_points` 及 `/aletheia/live_pose`。
-- 只接受标准 `float32 x/y/z`，限制距离、均匀抽样、QoS depth=1。
-- 超时输入在 TF 查找和坐标转换前丢弃；TF 不可用则跳过当前帧。
+- 数据输入和输出必须明确区分：点云优先读取小车原有的 `/livox/points`（`sensor_msgs/PointCloud2`）；该标准流连续 500ms 未到达时，才回退读取 `/livox/lidar`（`livox_ros_driver2/CustomMsg`）。两条同源扫描不能同时混合，否则网页会在两组扫描之间跳变。位姿不读取单独的定位话题，而是查询小车现有 TF 的 `map → base_footprint`，并兼容 `base_link`、`base_footprint_link`。
+- 网页专用输出为已投影到 `map` 的 `/_aletheia/live_points`（`sensor_msgs/PointCloud2`）和 `/_aletheia/live_pose`（`geometry_msgs/PoseStamped`）。两者位于 ROS 2 hidden 命名空间，默认不在 RViz 的常规话题选择器展示；私有 Foxglove Bridge 显式启用 `include_hidden`，仅供实时页按确定名称订阅。
+- 点云与位姿由两个独立进程运行，避免坐标转换或点云限采样阻塞高频位姿。
+- 只接受标准 `float32 x/y/z`，限制距离、均匀抽样。节点默认上限为 5000 点，工具运行时覆盖为 3000 点；雷达输入为 best-effort、depth=1，输出 `/_aletheia/live_points` 为 reliable、depth=1，以兼容 Foxglove Bridge 可靠订阅且不积压历史扫描。点云在回调抵达时立刻处理发布，不使用周期轮询。
+- Livox 标准点云携带逐点 `timestamp` 时，按 5ms 时间桶查询历史 `map → lidar` TF 后投影；快速原地旋转优先逐点去畸变。若某一时间桶缺少历史覆盖，则降级为扫描 header 时刻的刚体变换，必要时才使用最新 TF；实时页不能因增强去畸变失败而整帧无点云。
+- 点云在节点内最新槽停留超过 140ms 才丢弃；不能把部分 Livox 驱动固有的旧 header 时间戳误判为网络滞后。header 时间仍用于 TF/逐点去畸变，TF 不可用则跳过当前帧。车体位姿使用最新可用 `map → base_*` 变换，避免低频 `map → odom` 的合成时间戳使显示流断续。
 - 不使用 PCL、不改写原 ROS 话题、不写导航参数。
 
-现场排障优先看 `logs/live_preprocessor.log`、`logs/foxglove_bridge.log` 和工具日志，再检查 `/aletheia/live_points`、`/aletheia/live_pose` 的频率与时间戳。
+现场排障优先看 `logs/live_preprocessor_cloud.log`、`logs/live_preprocessor_pose.log`、`logs/foxglove_bridge.log` 和工具日志，再检查 `/_aletheia/live_points`、`/_aletheia/live_pose` 的频率与时间戳（使用 `ros2 topic list --include-hidden-topics`）。页面保持打开约 10 秒后，可从 `GET /api/observation` 的 `client_metrics` 读取 `cloud_source_age_ms`、`cloud_packet_rate_hz`、位姿年龄、渲染帧率和长帧计数，以区分激光源、车端预处理、网络和浏览器合成问题。实车参考：原始与预处理点云约 10Hz，前端为降低 Canvas 合成竞争主动消费约 8Hz。
 
 ## 10. 前端维护
 
 前端源位于 `frontend/src/`，构建产物输出到 `autodrive_console/web-vue/`。主要页面为任务指挥台、实时运行观测、测试用例管理、场景前置配置、报告中心、运行配置和工具日志。
 
 共享视觉样式集中在 `autodrive_console/web/*.css` 与 `frontend/src/*.css`。深/浅主题只写浏览器 Local Storage，不写机器人配置。新页面默认避免冗余说明文字，但必须保留必要的安全状态和错误反馈。
+
+### 10.1 PC 与移动端入口
+
+桌面页面仍使用既有 URL 和既有 HTML/CSS；移动端不复用、也不覆盖桌面壳层。`web_console.py` 会依据 Client Hint（优先）和 User-Agent（兼容）将已知页面自动转入 `/m/` 对应入口，例如 `/live-observation.html` 对应 `/m/live-observation.html`，根路径及 Vue 任务台对应 `/m/`。`?view=desktop` 是明确的桌面回退开关，便于调试或用户临时切换。
+
+`/m/` 页面由服务端在原页面中注入下列独立资源，调用的是相同受控 API 与页面控制器：
+
+- `autodrive_console/web/mobile_console.js`：移动端抽屉导航、页面链接改写、桌面版回退和实时观测全屏状态；
+- `autodrive_console/web/mobile_console.css`：安全区、单列布局、最小 44px 触控目标及横竖屏规则；仅通过 `/m/` 页面加载，不能被桌面页面引用；
+- `frontend/src/liveObservation.css`：实时观测画布在窄屏和横屏下的尺寸、工具条与诊断信息降级规则。
+
+移动端实时观测的“全屏地图”必须只保留观测窗口：优先使用浏览器 Fullscreen API；不支持时（尤其 iOS）使用 CSS 沉浸模式作为等价回退。横屏和竖屏均需保持地图可见、退出控件可达，退出后恢复原滚动位置和页面交互。不得以全局媒体查询修改 PC 布局，也不得为移动端复制一套 API、实时流或业务状态。
+
+### 10.2 前端修改自检
+
+涉及移动端时，至少检查桌面宽度、手机竖屏、手机横屏和实时观测全屏/退出全屏。桌面页面应不加载 `mobile_console.*`，移动端所有导航页面应保留与 PC 相同的功能入口；自动分流、`?view=desktop` 回退、浏览器刷新及屏幕旋转都不能造成状态丢失或重复订阅。
 
 ```bash
 ./run_vue_preview.sh
@@ -190,6 +210,12 @@ Vite 预览调用本机 `8087` API；页面导航必须保持在 `5173`，不能
 
 ## 11. 构建、发布与验证
 
+### 私有 Foxglove Bridge 的边界
+
+所有目标车均以 ROS Humble 作为基础运行环境，因此完整离线包只内置锁定版本的 Foxglove Bridge，不复制整套 Humble。`ObservationManager` 优先直接执行 `runtime/foxglove_bridge/lib/foxglove_bridge/foxglove_bridge`，不会通过系统 `ros2 launch` 解析 Bridge 版本。私有前缀仅影响 Aletheia 创建的 Bridge 与点云/位姿预处理子进程，不能写入 `/opt/ros`、覆盖系统 Bridge 或改变其他节点环境。
+
+车端 ROS Humble 与业务 ROS 图仍是明确集成契约：`/start_execute_tasks`、TF、地图、雷达驱动、导航、`master_interfaces` 及 Supervisor 属于机器人系统，不随工具复制。完整包只要求目标车为匹配 CPU 架构的 ROS Humble 平台。
+
 ### 构建
 
 ```bash
@@ -199,6 +225,15 @@ Vite 预览调用本机 `8087` API；页面导航必须保持在 `5173`，不能
 # 同时生成首次安装 DEB
 ./make_upgrade.sh 1.18 --deb
 ```
+
+生成完整离线首次安装包时，使用锁定版本、匹配目标架构的官方 Bridge DEB：
+
+```bash
+# 生成已内置私有 Foxglove Bridge 的完整首次安装包
+./build_offline_foxglove_bundle.sh 1.18 /path/to/ros-humble-foxglove-bridge_<版本>_amd64.deb
+```
+
+完整包会在 `releases/<版本>-offline/` 输出；其 `DEB` 控制字段不依赖系统 `ros-humble-foxglove-bridge`，且包内必须包含私有 Bridge 可执行文件。普通网页升级 ZIP 不更新 Bridge。
 
 版本号必须为数字点号格式。脚本会拒绝覆盖已有发布目录，并在 `releases/<版本>/` 输出 ZIP、`SHA256SUMS`、说明和可选 DEB。
 
@@ -220,8 +255,8 @@ cmake --build build/live_preprocessor -j2
 | --- | --- |
 | 服务可见却无法调用 | 普通账户的 ROS_DOMAIN_ID、RMW 环境、`/opt/ry/install/setup.bash`、`master_interfaces` 类型支持库。 |
 | 重启节点后立即失败 | 编排是否等待每阶段全部 `RUNNING` 和稳定时间；方案应用后是否留出稳定窗口。 |
-| 无点云或位姿 | Bridge 端口、预处理日志、TF `map → base_*`、点云 frame_id。 |
-| 观测落后实车 | 是否回退到原始点云、预处理频率、浏览器性能、Wi-Fi；不要提高队列深度。 |
+| 无点云或位姿 | 先看 `/api/observation`：Bridge 是否 online、`client_metrics.cloud_packet_rate_hz` 是否非零；再看 `/_aletheia/live_points` 的发布者/订阅者和 QoS。点云输出必须是 reliable，Bridge 必须 `include_hidden:=true`。若 `/livox/points` 与 `/livox/lidar` 都为 0 发布者、但 `DRIVERS:104-livox_lidar` 仍显示 RUNNING，先确认无活动测试、传感器 `192.168.1.21` 网络可达，再受限重启该单项。 |
+| 观测落后实车 | 先读取 `/api/observation` 的 `client_metrics`：位姿年龄低而 `cloud_source_age_ms` 高时优先检查激光源时间戳/频率；再检查预处理日志、Wi-Fi 与浏览器长帧。不要提高队列深度或恢复长点云历史。 |
 | 地图/墙体不对齐 | `/map` origin/resolution、map_server 当前 YAML、缓存 ID、实际墙体文件。 |
 | 轨迹缺段 | map/TF 可用性、切图、坐标变换拒绝原因和报告中的证据提示。 |
 | 升级后不能启动 | `updates/` 备份、`logs/ry-aletheia-error.log`、8087 端口占用、二进制权限。 |

@@ -56,10 +56,10 @@ cat > "$OUT/README.md" <<EOF
 
 \`\`\`bash
 cd "$(basename "$OUT")"
-sudo apt install ./$(basename "$ALETHEIA_DEB")
+sudo dpkg -i ./$(basename "$ALETHEIA_DEB")
 \`\`\`
 
-安装过程会将 Bridge 放入 Aletheia 私有运行目录，不会替换、删除或影响系统已有的 \`ros-humble-foxglove-bridge\`。无需额外执行 \`install.sh\` 或输入 ROS 命令。该完整包要求目标小车已具备 ROS Humble 基础运行环境；安装完成后，以普通账户执行 \`ry-aletheia\` 启动工具。
+安装过程会将 Bridge 放入 Aletheia 私有运行目录，不会替换、删除或影响系统已有的 \`ros-humble-foxglove-bridge\`。推荐使用 \`dpkg -i\`，避免系统中与本工具无关的 APT 未完成依赖阻塞安装；不要执行 \`apt autoremove\`。无需额外执行 \`install.sh\` 或输入 ROS 命令。该完整包要求目标小车已具备 ROS Humble 基础运行环境；安装完成后，以普通账户执行 \`ry-aletheia\` 启动工具。
 EOF
 sha256sum "$OUT"/*.deb > "$OUT/SHA256SUMS"
 echo "Foxglove 离线安装目录已生成：$OUT"

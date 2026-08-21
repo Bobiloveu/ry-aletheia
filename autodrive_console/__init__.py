@@ -1,1 +1,1 @@
-"""RY Aletheia 自动驾驶测试平台。"""
+"""RY Aletheia 自动测试平台。"""

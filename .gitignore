@@ -13,6 +13,7 @@ dist/
 releases/
 deployments/
 deployment/
+.cache/
 *.deb
 *.tar.gz
 
