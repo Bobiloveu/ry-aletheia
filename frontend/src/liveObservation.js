@@ -11,7 +11,9 @@ import './liveObservation.css';
 // 安全缓存后通过 HTTP 提供；浏览器直连 Aletheia 私有 Bridge 获取实时数据。
 // /map 必须进入白名单：它是 TRANSIENT_LOCAL 话题，浏览器仅在短订阅窗口内
 // 接收一次当前栅格；遗漏它会导致 Bridge 已连接但地图永远无法开始加载。
-const TOPICS = new Set(['/map', '/amcl_pose', '/aletheia/live_pose', '/livox/points', '/aletheia/live_points', '/tf', '/tf_static']);
+const LIVE_CLOUD_TOPIC = '/_aletheia/live_points';
+const LIVE_POSE_TOPIC = '/_aletheia/live_pose';
+const TOPICS = new Set(['/map', '/amcl_pose', LIVE_POSE_TOPIC, '/livox/points', LIVE_CLOUD_TOPIC, '/tf', '/tf_static']);
 // ros-humble-foxglove-bridge 3.x 采用 Foxglove SDK 的握手标识。@foxglove/ws-protocol
 // 仍负责兼容的消息帧编解码，但其旧常量 foxglove.websocket.v1 不能通过 3.x Bridge。
 const FOXGLOVE_BRIDGE_SUBPROTOCOL = 'foxglove.sdk.v1';
@@ -24,19 +26,22 @@ const PREPROCESSED_CLOUD_MIN_INTERVAL_MS = 100;
 const RAW_CLOUD_MIN_INTERVAL_MS = 250;
 // 实时观测只关心“现在”。页面短暂忙碌或网络抖动后，宁可跳过旧扫描也不能
 // 按顺序补绘导致画面落后实车。两个队列均为单槽 latest-wins。
-const CLOUD_PACKET_MAX_AGE_MS = 180;
-const POSE_PACKET_MAX_AGE_MS = 120;
+const CLOUD_PACKET_MAX_AGE_MS = 100;
+// 点云保持 latest-wins，但不必与激光每一帧等速合成。8 Hz 已足够观察环境
+// 结构，且显著降低低功耗设备上 OffscreenCanvas 提交和车体 CSS 合成的争用。
+const CLOUD_COMPOSITE_MIN_INTERVAL_MS = 125;
+// 位姿包远小于点云，但在浏览器刚完成一次地图合成时可能恰好错过 120 ms
+// 窗口。保留 250 ms 仍是当前画面，不会形成历史回放，却能避免车体偶发断流。
+const POSE_PACKET_MAX_AGE_MS = 250;
+const LIVE_POSE_FALLBACK_MS = 450;
 // 实测 /tf 可稳定高频到达。仅消费约 30 Hz 已足够让车体连续运动，同时避免把
 // 数百 Hz 的 TF 批量解析和整图重绘带入浏览器主线程。
 const TF_MIN_INTERVAL_MS = 33;
 // 地图旋转、栅格缩放与高密度点云合成是最重的浏览器操作。数据接收可更快，
 // 但画布只按可见效果需要合成，避免每一帧 TF 都触发整图重绘。
-// 整幅地图、虚拟墙与点云采用同一 Canvas。持续 60 FPS 重绘会抢占浏览器主线程
-// 并反而积压位姿；限制为 30 FPS 可保持可见连续性且为 ROS/WebSocket 留出余量。
-const MAP_RENDER_INTERVAL_MS = 33;
-// 雷达原始扫描约 10 Hz；保留极短的历史帧并淡化，能消除“整帧替换”导致的
-// 点云闪断。所有历史都已在 map 坐标系，窗口很短，不会形成明显拖影。
-const CLOUD_HISTORY_MS = 90;
+// 地图世界层只更新 CSS transform，不重新栅格化地图或点云；因此可按显示器
+// 刷新率合成，避免 30 FPS 相机跟随让车体看似一卡一顿。
+const MAP_RENDER_INTERVAL_MS = 16;
 // 地图源本身约为千级像素；限制到 CSS 像素级可避免在高 DPI 电脑上反复旋转
 // 超采样的大画布，显著降低主视图卡顿，同时不压缩或修改原始地图数据。
 // 图像是观测页中带宽和解码开销最大的内容。实时查看应优先展示最新状态，
@@ -45,34 +50,52 @@ const CLOUD_HISTORY_MS = 90;
 // 因此保守限速以免抢占地图和点云的主线程时间。两者均只绘制最新帧。
 const COMPRESSED_CAMERA_RENDER_INTERVAL_MS = 0;
 const RAW_CAMERA_RENDER_INTERVAL_MS = 200;
-// OccupancyGrid 通常为 transient-local；首次接收后立即取消订阅，定期用短订阅
-// 探测 map_server 是否已经切图。避免持续传输大栅格占用无线带宽和浏览器主线程。
-const MAP_PROBE_INTERVAL_MS = 5000;
-const MAP_PROBE_TIMEOUT_MS = 1800;
+// /map 是 transient-local 的静态资产。保持一个订阅即可收到首次地图以及
+// map_server 切图时发布的新地图，不能用定时退订/重订来“探测”切图：那会把
+// 完整 OccupancyGrid 周期性塞回主线程，造成点云和车体同时掉帧。
 // 点云和动态 TF 只在实时观测页打开且地图已就绪后订阅。此前短脉冲订阅会在
 // Bridge 创建 ROS 订阅或 TF 尚未到达时错过样本，表现为点云冻结；改为持续订阅，
 // 再在浏览器端限频解码最新帧，避免重复创建订阅和积压旧帧。
 const STATIC_TF_WINDOW_MS = 1400;
+// /map 本身始终是持久订阅。此轻量标记只读取 active_map.json 中的 ID，用来
+// 发现部分 map_server 在生命周期切换时未向既有 Bridge 订阅及时重放栅格的情况。
+// 确认切图后才重订阅一次 /map，绝不轮询大 OccupancyGrid。
+const ACTIVE_MAP_SYNC_MS = 1000;
+// 地图服务切换时，/map 栅格可能先到而 map_server 参数或同目录墙文件稍后才
+// 可读。未匹配不是最终状态：有限重试既能补画虚拟墙，又不在运行中持续扫描磁盘。
+const LIVE_WALL_RETRY_DELAYS_MS = [800, 2000, 5000];
 const DEFAULT_VIEW_METERS = 16;
 const MIN_PIXELS_PER_METER = 8;
 const MAX_PIXELS_PER_METER = 420;
 const INITIAL_OVERVIEW_MOVEMENT_M = 0.12;
 // 实际定位会有厘米级位置与航向抖动。视角采用慢跟随而非逐帧硬锁定，
 // 使驾驶观察稳定，同时保留明显转弯/位移的响应。
-const FOLLOW_CENTER_ALPHA = 0.40;
+const FOLLOW_CENTER_ALPHA = 0.24;
 const FOLLOW_CENTER_SNAP_DISTANCE_M = 1.5;
-// 地图不需要随车体的小幅摆动连续旋转。仅当累计航向变化达到 90°，才切换
-// 到新的驾驶朝向；车体仍实时移动，显著减少大幅栅格旋转造成的掉帧。
-const MAP_REORIENT_THRESHOLD_RAD = Math.PI / 2;
 // 平滑接近目标后必须停止补帧。否则静止小车持续发布的 TF 会不断延长动画窗口，
 // 使页面在没有可见变化时仍维持高频重绘。
 const FOLLOW_CENTER_SETTLE_DISTANCE_M = 0.008;
 // 静止定位仍会有毫米级浮动。显示层使用 2.5 cm 滞回，累计位移超过阈值才更新，
 // 不修改 ROS 原始位姿；缓慢真实移动会自然越过阈值而继续显示。
-const VEHICLE_POSITION_DEADBAND_M = 0.025;
+const VEHICLE_POSITION_DEADBAND_M = 0.006;
 const VEHICLE_VELOCITY_DEADBAND_MPS = 0.05;
+const VEHICLE_STILL_HOLD_DISTANCE_M = 0.025;
+const VEHICLE_STILL_RELEASE_DISTANCE_M = 0.045;
+const VEHICLE_STILL_HOLD_YAW_RAD = 0.025;
+const VEHICLE_STILL_RELEASE_YAW_RAD = 0.05;
+const VEHICLE_STILL_SETTLE_MS = 220;
+const MAX_VEHICLE_PREDICTION_MS = 300;
+const ALPHA_BETA_POSITION_GAIN = 0.72;
+const ALPHA_BETA_VELOCITY_GAIN = 0.12;
+const MAX_VEHICLE_YAW_RATE_RADPS = 2.8;
 const $ = (id) => document.getElementById(id);
 let client;
+// 位姿使用独立 TCP/WebSocket。即使点云连接正在传输大帧，也不会在浏览器
+// 或 TCP 的有序字节流中阻塞这个小而高频的控制台状态流。
+let poseClient;
+let poseReaders;
+let poseSubscriptions;
+let poseLaneChannel;
 let cloudUpdatedAt = 0;
 let tfUpdatedAt = 0;
 let livePoseUpdatedAt = 0;
@@ -84,8 +107,11 @@ let cloudWorker;
 let cloudWorkerReady = false;
 let cloudWorkerBusy = false;
 let pendingCloudFrame;
+let cloudWorkerSubmitTimer;
+let lastCloudWorkerSubmitAt = 0;
 let cloudWorkerFailed = false;
 let cloudWorkerOwnsCanvas = false;
+let mapGeneration = 0;
 let pendingCloudPacket;
 let cloudPacketQueued = false;
 let pendingPosePacket;
@@ -94,12 +120,18 @@ let pose;
 let tfVehiclePose;
 let renderedVehiclePose;
 let renderedVehicleAt = 0;
+let livePoseSourceAgeMs = 0;
+let liveCloudSourceAgeMs = 0;
+const clientPerformance = { startedAt: performance.now(), posePackets: 0, poseApplied: 0, cloudPackets: 0, vehicleFrames: 0, vehicleLongFrames: 0, vehicleFrameIntervalMs: 0, lastVehicleFrameAt: 0 };
+let vehicleStillAnchor;
+let vehicleStillCandidate;
+let vehicleStillCandidateAt = 0;
 let cloud;
-let cloudFrames = [];
 let virtualWalls = [];
 let wallStatus = '等待虚拟墙匹配';
 let loadedWallMapId;
 let loadedMapId;
+let requestedActiveMapId;
 const transforms = new Map();
 // 不同车型/定位栈对底盘坐标系的命名可能不同。/amcl_pose 暂时不可用时，
 // 直接从 TF 的 map -> base_* 链路绘制车体，不能因单一定位话题短暂缺帧而消失。
@@ -109,11 +141,11 @@ const cameraSlots = { A: {}, B: {} };
 let readers;
 let subscriptions;
 let mapChannel;
-let mapProbeTimer;
-let mapProbeTimeout;
 let mapProbeSubscriptionId;
 let mapFingerprint;
 let resolvedWallFingerprint;
+let liveWallRetryTimer;
+let liveWallRetryCount = 0;
 let tfChannel;
 let staticTfChannel;
 let livePoseChannel;
@@ -140,7 +172,6 @@ let vehicleModel = { id: 'ry-standard', name: 'RY 标准小车', length_m: 1.0, 
 const mapView = { pixelsPerMeter: undefined, followVehicle: true, followOffset: { x: 0, y: 0 }, center: undefined };
 let overviewUntilMovement = true;
 let overviewPoseAnchor;
-let lockedMapYaw;
 const LAYOUT_KEY = 'ry-aletheia-live-workspace-v2';
 const DEFAULT_LAYOUT = { mapRatio: 76, imageRatio: 50, cameraA: true, cameraB: true, cameraPriority: false };
 let workspaceLayout;
@@ -158,6 +189,22 @@ function reportObservation(level, message) {
   const body = JSON.stringify({ level, message: String(message || '').slice(0, 800) });
   // 诊断日志是辅助功能：浏览器无法写入时不能反过来影响只读观测。
   fetch('/api/observation/client-log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
+}
+function reportClientMetrics() {
+  const now = performance.now(); const elapsedSeconds = Math.max(0.001, (now - clientPerformance.startedAt) / 1000);
+  const body = JSON.stringify({
+    pose_packet_rate_hz: clientPerformance.posePackets / elapsedSeconds,
+    pose_applied_rate_hz: clientPerformance.poseApplied / elapsedSeconds,
+    pose_message_age_ms: livePoseUpdatedAt ? now - livePoseUpdatedAt : 5000,
+    pose_source_age_ms: livePoseSourceAgeMs,
+    vehicle_render_rate_hz: clientPerformance.vehicleFrames / elapsedSeconds,
+    vehicle_frame_interval_ms: clientPerformance.vehicleFrameIntervalMs,
+    vehicle_long_frames: clientPerformance.vehicleLongFrames,
+    cloud_packet_rate_hz: clientPerformance.cloudPackets / elapsedSeconds,
+    cloud_source_age_ms: liveCloudSourceAgeMs,
+  });
+  fetch('/api/observation/client-metrics', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
+  clientPerformance.startedAt = now; clientPerformance.posePackets = 0; clientPerformance.poseApplied = 0; clientPerformance.cloudPackets = 0; clientPerformance.vehicleFrames = 0; clientPerformance.vehicleLongFrames = 0;
 }
 function normalizeFrame(value) { return String(value || '').replace(/^\/+|\/+$/g, ''); }
 function yawOf(quaternion = {}) {
@@ -299,6 +346,8 @@ function setupMapInteraction() {
   new ResizeObserver(resizeCanvas).observe(canvas.parentElement);
   resizeCanvas();
   let pan;
+  const touchPoints = new Map();
+  let pinch;
   const setInteractionActive = (active) => {
     mapInteractionActive = active;
     if (mapInteractionTimer) { window.clearTimeout(mapInteractionTimer); mapInteractionTimer = undefined; }
@@ -322,6 +371,38 @@ function setupMapInteraction() {
       x: layout.center.x + (cosine * dx + sine * dy) / layout.pixelsPerMeter,
       y: layout.center.y - (-sine * dx + cosine * dy) / layout.pixelsPerMeter,
     };
+  };
+  const midpoint = () => {
+    const points = [...touchPoints.values()];
+    return { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 };
+  };
+  const distanceBetweenTouches = () => {
+    const points = [...touchPoints.values()];
+    return Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+  };
+  const beginPinch = () => {
+    if (touchPoints.size !== 2 || !mapInfo) return;
+    const layout = currentMapLayout(); const point = midpoint();
+    pinch = { distance: Math.max(1, distanceBetweenTouches()), pixelsPerMeter: layout.pixelsPerMeter, anchor: worldAtCanvasPoint(point, layout) };
+    pan = undefined; canvas.classList.remove('is-panning');
+  };
+  const applyPinch = () => {
+    if (!pinch || touchPoints.size !== 2 || !mapInfo) return;
+    const point = midpoint(); const factor = distanceBetweenTouches() / pinch.distance;
+    mapView.pixelsPerMeter = Math.max(MIN_PIXELS_PER_METER, Math.min(MAX_PIXELS_PER_METER, pinch.pixelsPerMeter * factor));
+    const before = currentMapLayout(); const dx = point.x - canvas.width / 2; const dy = point.y - canvas.height / 2;
+    const cosine = Math.cos(before.rotation); const sine = Math.sin(before.rotation);
+    const desiredCenter = {
+      x: pinch.anchor.x - (cosine * dx + sine * dy) / mapView.pixelsPerMeter,
+      y: pinch.anchor.y + (-sine * dx + cosine * dy) / mapView.pixelsPerMeter,
+    };
+    const vehicle = vehiclePoseInMap();
+    if (vehicle?.position) {
+      mapView.followVehicle = true;
+      mapView.followOffset = { x: desiredCenter.x - vehicle.position.x, y: desiredCenter.y - vehicle.position.y };
+    } else mapView.center = desiredCenter;
+    overviewUntilMovement = false;
+    scheduleMapDraw(true);
   };
   const onWheel = (event) => {
     if (!mapInfo) return;
@@ -368,10 +449,22 @@ function setupMapInteraction() {
     if ((event.button !== 0 && event.button !== 1) || !mapInfo) return;
     event.preventDefault();
     setInteractionActive(true);
+    if (event.pointerType === 'touch') {
+      touchPoints.set(event.pointerId, eventCanvasPoint(event));
+      canvas.setPointerCapture(event.pointerId);
+      if (touchPoints.size === 2) beginPinch();
+      else if (touchPoints.size > 2) pinch = undefined;
+      else { pan = { pointerId: event.pointerId, point: eventCanvasPoint(event) }; canvas.classList.add('is-panning'); }
+      return;
+    }
     pan = { pointerId: event.pointerId, point: eventCanvasPoint(event) };
     canvas.setPointerCapture(event.pointerId); canvas.classList.add('is-panning');
   });
   canvas.addEventListener('pointermove', (event) => {
+    if (event.pointerType === 'touch' && touchPoints.has(event.pointerId)) {
+      touchPoints.set(event.pointerId, eventCanvasPoint(event));
+      if (pinch) { event.preventDefault(); applyPinch(); return; }
+    }
     if (!pan || event.pointerId !== pan.pointerId || !mapInfo) return;
     const next = eventCanvasPoint(event); const dx = next.x - pan.point.x; const dy = next.y - pan.point.y;
     pan.point = next;
@@ -384,9 +477,20 @@ function setupMapInteraction() {
     mapView.followVehicle = false; overviewUntilMovement = false;
     scheduleMapDraw(true);
   });
-  canvas.addEventListener('pointerup', (event) => { finishPan(event); deferInteractionEnd(); });
-  canvas.addEventListener('pointercancel', (event) => { finishPan(event); setInteractionActive(false); });
-  canvas.addEventListener('lostpointercapture', () => { finishPan(); setInteractionActive(false); });
+  const finishTouch = (event, cancelled = false) => {
+    touchPoints.delete(event.pointerId);
+    if (touchPoints.size >= 2) beginPinch();
+    else if (touchPoints.size === 1 && !cancelled) {
+      const [pointerId, point] = touchPoints.entries().next().value;
+      pinch = undefined; pan = { pointerId, point }; canvas.classList.add('is-panning');
+    } else { pinch = undefined; finishPan(); }
+  };
+  canvas.addEventListener('pointerup', (event) => { if (event.pointerType === 'touch') finishTouch(event); else finishPan(event); deferInteractionEnd(); });
+  canvas.addEventListener('pointercancel', (event) => { if (event.pointerType === 'touch') finishTouch(event, true); else finishPan(event); if (!touchPoints.size) setInteractionActive(false); });
+  canvas.addEventListener('lostpointercapture', (event) => {
+    if (event.pointerType === 'touch') touchPoints.delete(event.pointerId);
+    if (!touchPoints.size) { pinch = undefined; finishPan(event); setInteractionActive(false); }
+  });
 }
 function drawRawImage(slot, message) {
   const width = Number(message.width); const height = Number(message.height); const encoding = String(message.encoding || '').toLowerCase(); const source = message.data;
@@ -496,67 +600,100 @@ function initializeCloudWorker() {
 }
 function configureCloudWorker() {
   if (!cloudWorkerReady || !mapInfo) return;
-  cloudWorker.postMessage({ type: 'map', width: mapInfo.width, height: mapInfo.height, resolution: mapInfo.resolution, origin: mapInfo.origin, historyMs: CLOUD_HISTORY_MS });
+  cloudWorker.postMessage({ type: 'map', width: mapInfo.width, height: mapInfo.height, resolution: mapInfo.resolution, origin: mapInfo.origin, generation: mapGeneration });
 }
 function sendCloudWorker(frame) {
   if (!cloudWorkerReady || cloudWorkerFailed || !cloudWorker) return false;
-  if (cloudWorkerBusy) { pendingCloudFrame = frame; return true; }
-  cloudWorkerBusy = true;
-  cloudWorker.postMessage({ type: 'points', points: frame.points, receivedAt: frame.receivedAt }, [frame.points.buffer]);
+  // 单槽覆盖。新的扫描永远替代尚未提交的旧扫描，不能形成视觉或网络回放。
+  pendingCloudFrame = frame;
+  flushCloudWorker();
   return true;
 }
 function flushCloudWorker() {
-  if (!pendingCloudFrame || cloudWorkerBusy) return;
-  const frame = pendingCloudFrame; pendingCloudFrame = undefined; sendCloudWorker(frame);
+  if (cloudWorkerBusy || !pendingCloudFrame || !cloudWorkerReady || cloudWorkerFailed || !cloudWorker) return;
+  const delay = CLOUD_COMPOSITE_MIN_INTERVAL_MS - (performance.now() - lastCloudWorkerSubmitAt);
+  if (delay > 0) {
+    if (!cloudWorkerSubmitTimer) cloudWorkerSubmitTimer = window.setTimeout(() => {
+      cloudWorkerSubmitTimer = undefined; flushCloudWorker();
+    }, delay);
+    return;
+  }
+  const frame = pendingCloudFrame; pendingCloudFrame = undefined;
+  cloudWorkerBusy = true;
+  lastCloudWorkerSubmitAt = performance.now();
+  cloudWorker.postMessage({ type: 'points', points: frame.points, receivedAt: frame.receivedAt, generation: frame.generation }, [frame.points.buffer]);
 }
 function packCloudPoints(points) {
   const packed = new Float32Array(points.length * 2);
   for (let index = 0; index < points.length; index += 1) { packed[index * 2] = points[index].x; packed[index * 2 + 1] = points[index].y; }
   return packed;
 }
-function mapHeadingForVehicle(yaw) {
-  if (!Number.isFinite(yaw)) return 0;
-  if (!Number.isFinite(lockedMapYaw) || Math.abs(normalizeAngle(yaw - lockedMapYaw)) >= MAP_REORIENT_THRESHOLD_RAD) lockedMapYaw = yaw;
-  return lockedMapYaw;
+function predictVehicleMotion(pose, seconds) {
+  const horizon = Math.max(0, Math.min(MAX_VEHICLE_PREDICTION_MS / 1000, seconds));
+  const rawVelocity = pose.velocity || { x: 0, y: 0 };
+  const velocity = { x: Number(rawVelocity.x) || 0, y: Number(rawVelocity.y) || 0 };
+  const yawRate = Number.isFinite(pose.yawRate) ? pose.yawRate : 0;
+  let x = pose.position.x + velocity.x * horizon;
+  let y = pose.position.y + velocity.y * horizon;
+  // CTRV：速度主要沿车体前向、且正在转弯时按圆弧外推。低速/横移时退回
+  // 笛卡尔恒速模型，避免定位噪声把静止车体画成小圆圈。
+  const forwardSpeed = velocity.x * Math.cos(pose.yaw) + velocity.y * Math.sin(pose.yaw);
+  if (Math.abs(forwardSpeed) >= VEHICLE_VELOCITY_DEADBAND_MPS && Math.abs(yawRate) >= 0.03) {
+    const nextYaw = pose.yaw + yawRate * horizon;
+    x = pose.position.x + forwardSpeed / yawRate * (Math.sin(nextYaw) - Math.sin(pose.yaw));
+    y = pose.position.y - forwardSpeed / yawRate * (Math.cos(nextYaw) - Math.cos(pose.yaw));
+  }
+  return { position: { x, y }, yaw: normalizeAngle(pose.yaw + yawRate * horizon), velocity, yawRate, source: pose.source };
 }
 function renderedVehiclePoseInMap() {
   const target = vehiclePoseInMap();
   if (!target?.position) return undefined;
   const now = performance.now();
-  // 仅在 C++ 轻量位姿流提供了可信速度时，向前预测最多 90 ms。这样可抵消
-  // WebSocket、浏览器事件循环与画布帧合成造成的固定展示延迟；预测严格限时，
-  // 断流或急停时不会持续漂移。
-  const predictionSeconds = Math.min(0.09, Math.max(0, now - Number(target.receivedAt || now)) / 1000);
-  const velocity = target.velocity || { x: 0, y: 0 };
-  const desiredPosition = {
-    x: target.position.x + (Number.isFinite(velocity.x) ? velocity.x * predictionSeconds : 0),
-    y: target.position.y + (Number.isFinite(velocity.y) ? velocity.y * predictionSeconds : 0),
-  };
+  // 预测窗口包含 ROS 源时间到浏览器的已测年龄及本显示帧等待时间。它不缓存
+  // 历史样本，始终朝“现在”外推，因而不会用流畅换取额外显示延迟。
+  const predictionSeconds = Math.min(MAX_VEHICLE_PREDICTION_MS / 1000, Math.max(0, now - Number(target.receivedAt || now)) / 1000 + (target.sourceAgeMs || 0) / 1000);
+  const desired = predictVehicleMotion(target, predictionSeconds);
   if (!renderedVehiclePose || now - renderedVehicleAt > 1200
-    || Math.hypot(desiredPosition.x - renderedVehiclePose.position.x, desiredPosition.y - renderedVehiclePose.position.y) > 2.5) {
-    renderedVehiclePose = { position: desiredPosition, yaw: target.yaw, source: target.source };
+    || Math.hypot(desired.position.x - renderedVehiclePose.position.x, desired.position.y - renderedVehiclePose.position.y) > 2.5) {
+    renderedVehiclePose = desired;
     renderedVehicleAt = now;
     return renderedVehiclePose;
   }
-  // 位姿由 C++ 节点以约 45 Hz 输出。较短时间常数只填补两个样本之间的间隔，
-  // 不再给操作者造成“车已走、画面数秒后才动”的视觉滞后。
-  const displacement = Math.hypot(desiredPosition.x - renderedVehiclePose.position.x, desiredPosition.y - renderedVehiclePose.position.y);
-  const speed = Math.hypot(velocity.x || 0, velocity.y || 0);
-  const alpha = 1 - Math.exp(-Math.min(80, Math.max(1, now - renderedVehicleAt)) / 20);
-  if (displacement >= VEHICLE_POSITION_DEADBAND_M || speed >= VEHICLE_VELOCITY_DEADBAND_MPS) {
-    renderedVehiclePose.position.x += (desiredPosition.x - renderedVehiclePose.position.x) * alpha;
-    renderedVehiclePose.position.y += (desiredPosition.y - renderedVehiclePose.position.y) * alpha;
-  }
-  renderedVehiclePose.yaw = normalizeAngle(renderedVehiclePose.yaw + normalizeAngle(target.yaw - renderedVehiclePose.yaw) * alpha);
-  renderedVehiclePose.source = target.source;
+  // α-β 预测—校正：每个显示帧先按自身速度前推，再用最新真实观测的残差校正。
+  // 比单纯低通更贴近实车，同时对定位的厘米级高频抖动保持稳定。
+  const deltaSeconds = Math.min(0.08, Math.max(0.001, (now - renderedVehicleAt) / 1000));
+  const predicted = predictVehicleMotion(renderedVehiclePose, deltaSeconds);
+  const errorX = desired.position.x - predicted.position.x;
+  const errorY = desired.position.y - predicted.position.y;
+  const displacement = Math.hypot(errorX, errorY);
+  const gain = displacement < VEHICLE_POSITION_DEADBAND_M ? 0.32 : ALPHA_BETA_POSITION_GAIN;
+  renderedVehiclePose.position.x = predicted.position.x + errorX * gain;
+  renderedVehiclePose.position.y = predicted.position.y + errorY * gain;
+  const correctedVelocity = {
+    x: predicted.velocity.x + errorX * ALPHA_BETA_VELOCITY_GAIN / deltaSeconds,
+    y: predicted.velocity.y + errorY * ALPHA_BETA_VELOCITY_GAIN / deltaSeconds,
+  };
+  renderedVehiclePose.velocity = {
+    x: correctedVelocity.x * 0.28 + (desired.velocity.x || 0) * 0.72,
+    y: correctedVelocity.y * 0.28 + (desired.velocity.y || 0) * 0.72,
+  };
+  renderedVehiclePose.yaw = normalizeAngle(predicted.yaw + normalizeAngle(desired.yaw - predicted.yaw) * gain);
+  renderedVehiclePose.yawRate = desired.yawRate || 0;
+  renderedVehiclePose.source = desired.source;
   renderedVehicleAt = now;
   return renderedVehiclePose;
 }
 function requestVehicleAnimation() {
   if (vehicleAnimationFrame || document.hidden || !vehiclePoseInMap()?.position) return;
-  const render = () => {
+  const render = (frameAt) => {
     vehicleAnimationFrame = undefined;
     if (document.hidden || !lastMapLayout) return;
+    if (clientPerformance.lastVehicleFrameAt) {
+      const interval = frameAt - clientPerformance.lastVehicleFrameAt;
+      clientPerformance.vehicleFrameIntervalMs = clientPerformance.vehicleFrameIntervalMs ? clientPerformance.vehicleFrameIntervalMs * 0.85 + interval * 0.15 : interval;
+      if (interval > 34) clientPerformance.vehicleLongFrames += 1;
+    }
+    clientPerformance.lastVehicleFrameAt = frameAt; clientPerformance.vehicleFrames += 1;
     const vehicle = renderedVehiclePoseInMap();
     if (vehicle?.position) syncVehicleLayer(vehicle, lastMapLayout);
     // 仅更新独立 DOM 车体层；不重新绘制地图、虚拟墙或点云。
@@ -584,12 +721,11 @@ function hasPendingFollowAdjustment() {
   const desiredX = vehicle.position.x + (mapView.followOffset?.x || 0);
   const desiredY = vehicle.position.y + (mapView.followOffset?.y || 0);
   const centerPending = !mapView.center || Math.hypot(desiredX - mapView.center.x, desiredY - mapView.center.y) > FOLLOW_CENTER_SETTLE_DISTANCE_M;
-  return centerPending || !Number.isFinite(lockedMapYaw)
-    || Math.abs(normalizeAngle(vehicle.yaw - lockedMapYaw)) >= MAP_REORIENT_THRESHOLD_RAD;
+  return centerPending;
 }
 function requestFollowAnimation() {
-  // 每次轻量位姿到达只申请一次合成。禁止运动时额外启动 60 FPS 全图循环，
-  // 否则地图旋转、栅格与点云会压住后续位姿消息，形成“车已动、网页数秒后才动”。
+  // 每次轻量位姿到达只申请一次合成。世界层只做 CSS transform，允许 60 FPS
+  // 跟随；不重绘栅格或点云，因而不会抢占后续位姿消息。
   if (!mapInfo || document.hidden || !hasPendingFollowAdjustment()) return;
   scheduleMapDraw();
 }
@@ -619,15 +755,16 @@ function currentMapLayout() {
   const width = mapInfo.width * ratio; const height = mapInfo.height * ratio;
   return {
     ratio, width, height, pixelsPerMeter: mapView.pixelsPerMeter, center: mapView.center, vehicle,
-    // Canvas 的 Y 轴向下。将世界画面旋转到“车头向上”，而车体轮廓保持固定，
-    // 使操作者获得稳定的驾驶视角；尚未收到定位时仍以北向显示地图。
-    rotation: vehicle ? mapHeadingForVehicle(vehicle.yaw) - Math.PI / 2 : 0,
+    canvasWidth: canvas.width, canvasHeight: canvas.height,
+    // 地图必须稳定保持其原始 map 坐标朝向。定位航向的零点不一定与地图北向
+    // 完全一致，若在进入页面时旋转地图，会让静止小车也看到整张地图倾斜。
+    rotation: 0,
     left: canvas.width / 2 + (mapInfo.origin.x - mapView.center.x) * mapView.pixelsPerMeter,
     top: canvas.height / 2 - (mapInfo.origin.y + mapInfo.height * mapInfo.resolution - mapView.center.y) * mapView.pixelsPerMeter,
   };
 }
 function scheduleMapDraw(interactive = false) {
-  // 拖拽/缩放只改变 CSS 矩阵，必须在下一合成帧执行，不能被实时数据的 30 FPS
+  // 拖拽/缩放只改变 CSS 矩阵，必须在下一合成帧执行，不能被实时数据的 60 FPS
   // 节流排队。普通 ROS 更新仍保留限频，避免位姿消息挤占页面主线程。
   if (interactive && drawDeferredTimer) {
     window.clearTimeout(drawDeferredTimer);
@@ -703,24 +840,90 @@ function syncVehicleLayer(vehicle, layout) {
   const nativeY = mapInfo.height - (vehicle.position.y - mapInfo.origin.y) / mapInfo.resolution;
   const baseX = layout.left + nativeX * layout.ratio;
   const baseY = layout.top + nativeY * layout.ratio;
-  const centerX = $('mapCanvas').width / 2; const centerY = $('mapCanvas').height / 2;
+  const centerX = layout.canvasWidth / 2; const centerY = layout.canvasHeight / 2;
   const cosine = Math.cos(layout.rotation); const sine = Math.sin(layout.rotation);
   const x = centerX + cosine * (baseX - centerX) - sine * (baseY - centerY);
   const y = centerY + sine * (baseX - centerX) + cosine * (baseY - centerY);
   const length = Math.max(0.2, Number(vehicleModel.length_m) || 1.0) * layout.pixelsPerMeter;
   const width = Math.max(0.15, Number(vehicleModel.width_m) || 0.68) * layout.pixelsPerMeter;
-  element.hidden = false; element.style.left = `${x}px`; element.style.top = `${y}px`;
-  element.style.width = `${width}px`; element.style.height = `${length}px`;
-  // 小车在独立屏幕层中绘制；地图已按锁定航向旋转，故只显示相对航向。
-  const localYaw = (Number.isFinite(lockedMapYaw) ? lockedMapYaw : vehicle.yaw) - vehicle.yaw;
-  element.style.transform = `translate(-50%, -50%) rotate(${localYaw}rad)`;
+  element.hidden = false;
+  if (element.style.width !== `${width}px`) element.style.width = `${width}px`;
+  if (element.style.height !== `${length}px`) element.style.height = `${length}px`;
+  // 车体每帧只写 transform，进入独立合成层。禁止写 left/top，否则浏览器可能
+  // 重新计算绝对定位布局，形成“数据很新但视觉一卡一卡”的假延迟。
+  // ROS yaw 以 +X 为零、逆时针增加；屏幕 Y 轴向下而车体图标默认朝上，故须
+  // 转换为 pi/2 - yaw。只旋转车体，底图、点云和虚拟墙始终保持 map 朝向。
+  const localYaw = Math.PI / 2 - vehicle.yaw;
+  const transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%) rotate(${localYaw}rad)`;
+  if (element.style.transform !== transform) element.style.transform = transform;
 }
 function vehiclePoseInMap() {
   // map->odom->base_* 通常比 /amcl_pose 频率高得多。优先使用最近 TF，才能让
   // 车体连续跟随实际运动；TF 短暂缺失时自动回退至定位话题，不改变安全边界。
-  if (tfVehiclePose && performance.now() - tfVehiclePose.receivedAt < 1500) return tfVehiclePose;
+  if (tfVehiclePose) {
+    const maximumAge = tfVehiclePose.source === 'live' ? LIVE_POSE_FALLBACK_MS : 1500;
+    if (performance.now() - tfVehiclePose.receivedAt < maximumAge) return tfVehiclePose;
+  }
   if (pose?.position) return { ...pose, yaw: yawOf(pose.orientation), source: 'pose' };
   return undefined;
+}
+function armTfFallback() {
+  // 位姿流可达 60 Hz。不能每帧 clear/setTimeout，否则会不断制造定时器任务，
+  // 在 GC 或浏览器调度时表现为周期性的轻微闪顿。始终只保留一个到期检查。
+  if (tfFallbackTimer) return;
+  const check = () => {
+    tfFallbackTimer = undefined;
+    const age = livePoseUpdatedAt ? Math.max(0, performance.now() - livePoseUpdatedAt) : Infinity;
+    if (age < LIVE_POSE_FALLBACK_MS) {
+      tfFallbackTimer = window.setTimeout(check, Math.max(1, LIVE_POSE_FALLBACK_MS - age));
+      return;
+    }
+    requestStaticTransforms(); subscribeVisualizationStream('tf', tfChannel);
+  };
+  const age = livePoseUpdatedAt ? Math.max(0, performance.now() - livePoseUpdatedAt) : 0;
+  tfFallbackTimer = window.setTimeout(check, Math.max(1, LIVE_POSE_FALLBACK_MS - age));
+}
+function leaveOverviewAfterMovement(position) {
+  if (!overviewUntilMovement || !position) return;
+  if (!overviewPoseAnchor) { overviewPoseAnchor = { x: position.x, y: position.y }; return; }
+  if (Math.hypot(position.x - overviewPoseAnchor.x, position.y - overviewPoseAnchor.y) < INITIAL_OVERVIEW_MOVEMENT_M) return;
+  overviewUntilMovement = false;
+  mapView.pixelsPerMeter = undefined;
+  mapView.followOffset = { x: 0, y: 0 };
+}
+function sourcePoseAge(message) {
+  const stamp = message?.header?.stamp;
+  const seconds = Number(stamp?.sec); const nanoseconds = Number(stamp?.nanosec);
+  if (!Number.isFinite(seconds) || !Number.isFinite(nanoseconds) || seconds <= 0) return 0;
+  const age = Date.now() - (seconds * 1000 + nanoseconds / 1e6);
+  // ROS 时间可能使用仿真时钟或与浏览器主机不同步；仅接纳可信的正向年龄。
+  return age >= 0 && age <= 2000 ? age : 0;
+}
+function stabilizeStationaryVehicle(position, yaw, now) {
+  const raw = { position: { x: Number(position.x), y: Number(position.y) }, yaw };
+  if (vehicleStillAnchor) {
+    const distance = Math.hypot(raw.position.x - vehicleStillAnchor.position.x, raw.position.y - vehicleStillAnchor.position.y);
+    const yawDelta = Math.abs(normalizeAngle(raw.yaw - vehicleStillAnchor.yaw));
+    if (distance < VEHICLE_STILL_RELEASE_DISTANCE_M && yawDelta < VEHICLE_STILL_RELEASE_YAW_RAD) return { ...vehicleStillAnchor, stationary: true };
+    vehicleStillAnchor = undefined;
+    vehicleStillCandidate = raw;
+    vehicleStillCandidateAt = now;
+    return { ...raw, stationary: false };
+  }
+  if (!vehicleStillCandidate) {
+    vehicleStillCandidate = raw;
+    vehicleStillCandidateAt = now;
+    return { ...raw, stationary: false };
+  }
+  const distance = Math.hypot(raw.position.x - vehicleStillCandidate.position.x, raw.position.y - vehicleStillCandidate.position.y);
+  const yawDelta = Math.abs(normalizeAngle(raw.yaw - vehicleStillCandidate.yaw));
+  if (distance >= VEHICLE_STILL_HOLD_DISTANCE_M || yawDelta >= VEHICLE_STILL_HOLD_YAW_RAD) {
+    vehicleStillCandidate = raw;
+    vehicleStillCandidateAt = now;
+    return { ...raw, stationary: false };
+  }
+  if (now - vehicleStillCandidateAt >= VEHICLE_STILL_SETTLE_MS) vehicleStillAnchor = vehicleStillCandidate;
+  return vehicleStillAnchor ? { ...vehicleStillAnchor, stationary: true } : { ...raw, stationary: false };
 }
 function updateLivePose(message) {
   const position = message?.pose?.position;
@@ -728,23 +931,36 @@ function updateLivePose(message) {
   if (!position || !orientation || !Number.isFinite(Number(position.x)) || !Number.isFinite(Number(position.y))) return;
   // C++ 已完成 map->base 的查找；浏览器只处理一个极小 PoseStamped，避免解析完整 /tf。
   livePoseUpdatedAt = performance.now();
+  clientPerformance.poseApplied += 1;
   vehicleUpdatedAt = livePoseUpdatedAt;
-  if (tfFallbackTimer) { window.clearTimeout(tfFallbackTimer); tfFallbackTimer = undefined; }
   // 轻量流恢复后立即卸载兼容 TF，避免浏览器继续接收大批量变换消息。
   if (visualizationStreams.tf.subscriptionId !== undefined) stopStreamProbe('tf');
   const previous = tfVehiclePose?.source === 'live' ? tfVehiclePose : undefined;
   const elapsedSeconds = previous ? (livePoseUpdatedAt - previous.receivedAt) / 1000 : 0;
+  const stabilized = stabilizeStationaryVehicle(position, yawOf(orientation), livePoseUpdatedAt);
+  const stablePosition = stabilized.position;
+  const yaw = stabilized.yaw;
   let velocity = { x: 0, y: 0 };
-  if (elapsedSeconds >= 0.01 && elapsedSeconds <= 0.3) {
-    const vx = (Number(position.x) - previous.position.x) / elapsedSeconds;
-    const vy = (Number(position.y) - previous.position.y) / elapsedSeconds;
+  let yawRate = 0;
+  if (!stabilized.stationary && elapsedSeconds >= 0.01 && elapsedSeconds <= 0.3) {
+    const vx = (stablePosition.x - previous.position.x) / elapsedSeconds;
+    const vy = (stablePosition.y - previous.position.y) / elapsedSeconds;
     // 室内小车的显示预测绝不接受异常跳点或不现实的高速值。
     if (Math.hypot(vx, vy) <= 3.0) velocity = { x: vx, y: vy };
+    const candidateYawRate = normalizeAngle(yaw - previous.yaw) / elapsedSeconds;
+    if (Math.abs(candidateYawRate) <= MAX_VEHICLE_YAW_RATE_RADPS) yawRate = candidateYawRate;
   }
-  tfVehiclePose = { position, orientation, yaw: yawOf(orientation), source: 'live', receivedAt: livePoseUpdatedAt, velocity };
+  const measuredAge = sourcePoseAge(message);
+  livePoseSourceAgeMs = measuredAge > 0 ? livePoseSourceAgeMs * 0.82 + measuredAge * 0.18 : livePoseSourceAgeMs * 0.82;
+  tfVehiclePose = { position: stablePosition, orientation, yaw, source: 'live', receivedAt: livePoseUpdatedAt, velocity, yawRate, sourceAgeMs: livePoseSourceAgeMs };
+  // 轻量位姿是当前性能路径；它也必须能驱动概览 -> 随车视图，不能依赖
+  // /amcl_pose 恰好同时到达，否则小车会一直缩在大地图中，看似“消失”。
+  leaveOverviewAfterMovement(stablePosition);
+  armTfFallback();
   updateDiagnostics(); scheduleMapDraw(); requestFollowAnimation(); requestVehicleAnimation();
 }
 function scheduleLatestCloudPacket(reader, data) {
+  clientPerformance.cloudPackets += 1;
   pendingCloudPacket = { reader, data, receivedAt: performance.now() };
   if (cloudPacketQueued) return;
   cloudPacketQueued = true;
@@ -762,6 +978,7 @@ function flushLatestCloudPacket() {
   }
 }
 function scheduleLatestPosePacket(reader, data) {
+  clientPerformance.posePackets += 1;
   pendingPosePacket = { reader, data, receivedAt: performance.now() };
   if (posePacketQueued) return;
   posePacketQueued = true;
@@ -790,7 +1007,7 @@ function updateDiagnostics(force = false) {
   const source = vehicle?.source === 'live' ? '实时位姿' : (vehicle?.source === 'tf' ? 'TF' : '定位');
   const poseText = vehicle ? (inMap ? `${source} x ${vehicle.position.x.toFixed(2)} · y ${vehicle.position.y.toFixed(2)} · 小车已绘制` : `${source}不在当前地图范围`) : '等待定位/TF';
   const cloudAge = cloud ? Math.max(0, (performance.now() - cloudUpdatedAt) / 1000) : 0;
-  const cloudCount = cloud?.mapPoints?.length || 0;
+  const cloudCount = cloud?.mapPointCount ?? cloud?.mapPoints?.length ?? 0;
   const cloudText = pauseCloudForCamera()
     ? (cloud ? `图像低延迟优先，点云暂停 · 最近 ${cloudCount} 点` : '图像低延迟优先，点云暂停')
     : (cloud ? `${cloudCount} 个地图点 · ${cloudAge.toFixed(1)} 秒前` : '等待点云');
@@ -805,7 +1022,6 @@ function mapSignature(info, data) {
   return [info.width, info.height, info.resolution, info.origin?.position?.x, info.origin?.position?.y, stamp.sec, stamp.nanosec, sample].join('|');
 }
 function stopMapProbeSubscription() {
-  if (mapProbeTimeout) { window.clearTimeout(mapProbeTimeout); mapProbeTimeout = undefined; }
   if (mapProbeSubscriptionId !== undefined) {
     client?.unsubscribe(mapProbeSubscriptionId); subscriptions?.delete(mapProbeSubscriptionId); mapProbeSubscriptionId = undefined;
   }
@@ -828,17 +1044,33 @@ function requestStaticTransforms() {
 function stopStreamProbe(kind) {
   const state = visualizationStreams[kind]; if (!state) return;
   if (state.subscriptionId !== undefined) {
-    client?.unsubscribe(state.subscriptionId); subscriptions?.delete(state.subscriptionId); state.subscriptionId = undefined;
+    state.client?.unsubscribe(state.subscriptionId); state.subscriptions?.delete(state.subscriptionId); state.subscriptionId = undefined;
   }
+  state.client = undefined; state.subscriptions = undefined;
 }
-function subscribeVisualizationStream(kind, channel) {
-  const state = visualizationStreams[kind]; if (!state || !channel || !client || !readers?.has(channel.id)) return;
-  if (state.channel?.id === channel.id && state.subscriptionId !== undefined) return;
+function subscribeVisualizationStream(kind, channel, streamClient = client, streamReaders = readers, streamSubscriptions = subscriptions) {
+  const state = visualizationStreams[kind]; if (!state || !channel || !streamClient || !streamReaders?.has(channel.id)) return;
+  if (state.channel?.id === channel.id && state.client === streamClient && state.subscriptionId !== undefined) return;
   stopStreamProbe(kind); state.channel = channel;
   try {
-    state.subscriptionId = client.subscribe(channel.id);
-    subscriptions.set(state.subscriptionId, { topic: channel.topic, channelId: channel.id, visualizationKind: kind });
-  } catch (_) { state.subscriptionId = undefined; }
+    state.subscriptionId = streamClient.subscribe(channel.id);
+    state.client = streamClient; state.subscriptions = streamSubscriptions;
+    streamSubscriptions.set(state.subscriptionId, { topic: channel.topic, channelId: channel.id, visualizationKind: kind });
+  } catch (error) {
+    state.subscriptionId = undefined;
+    // 不能让单个频道的订阅失败静默地表现为“等待点云”。诊断记录只包含
+    // 话题和简短错误，不上传任何实时数据。
+    reportObservation('WARNING', `实时流订阅失败：${channel.topic}；${error?.message || '未知错误'}`);
+  }
+}
+function subscribeLivePoseStream() {
+  // 专线短暂不可用时自动回退主连接，保留既有 TF watchdog 的兼容性；专线一旦
+  // 广播到位姿通道，会立即替换主连接订阅，不会让两个连接重复解码同一位姿。
+  if (poseClient && poseLaneChannel && poseReaders?.has(poseLaneChannel.id)) {
+    subscribeVisualizationStream('livePose', poseLaneChannel, poseClient, poseReaders, poseSubscriptions);
+  } else {
+    subscribeVisualizationStream('livePose', livePoseChannel);
+  }
 }
 function hasActiveCameraSubscription() {
   return ['A', 'B'].some((slot) => workspaceLayout?.[`camera${slot}`] && cameraSlots[slot].channelId);
@@ -847,19 +1079,15 @@ function pauseCloudForCamera() {
   return Boolean(workspaceLayout?.cameraPriority && hasActiveCameraSubscription());
 }
 function activateVisualizationStreams() {
-  const usePreprocessedStream = cloudTopic === '/aletheia/live_points' && livePoseChannel;
-  subscribeVisualizationStream('livePose', livePoseChannel);
+  const usePreprocessedStream = cloudTopic === LIVE_CLOUD_TOPIC && livePoseChannel;
+  subscribeLivePoseStream();
   // 预处理流已经把点云投影至 map，且轻量位姿已由 C++ 计算，不再把完整 /tf
   // 送到浏览器。原始点云或轻量位姿暂不可用时，保留历史兼容回退链路。
   if (usePreprocessedStream) {
     stopStreamProbe('tf'); stopStaticTfSubscription();
-    if (tfFallbackTimer) window.clearTimeout(tfFallbackTimer);
-    // advertise 并不代表轻量位姿已有数据；异常时再启用兼容 TF 链路。
-    tfFallbackTimer = window.setTimeout(() => {
-      if (!livePoseUpdatedAt || performance.now() - livePoseUpdatedAt > 1500) {
-        requestStaticTransforms(); subscribeVisualizationStream('tf', tfChannel);
-      }
-    }, 1600);
+    // advertise 并不代表轻量位姿已有数据；每次新位姿都会重置 watchdog，
+    // 因而运行中的偶发断流也能迅速回退到兼容 TF 链路。
+    armTfFallback();
   } else {
     if (tfFallbackTimer) { window.clearTimeout(tfFallbackTimer); tfFallbackTimer = undefined; }
     requestStaticTransforms(); subscribeVisualizationStream('tf', tfChannel);
@@ -877,30 +1105,54 @@ function stopVisualizationStreams() {
     state.channel = undefined;
   }
 }
-function scheduleMapProbe() {
-  if (mapProbeTimer) window.clearTimeout(mapProbeTimer);
-  mapProbeTimer = window.setTimeout(beginMapProbe, MAP_PROBE_INTERVAL_MS);
-}
 function beginMapProbe() {
-  mapProbeTimer = undefined; stopMapProbeSubscription();
+  // 正常行驶期间只创建一次 ROS /map 订阅。确认 map_server 已切图时，
+  // reassertMapProbe() 才会进行一次定向重订阅以取得新 publisher 的瞬态栅格。
+  if (mapProbeSubscriptionId !== undefined) return;
   if (!client || !mapChannel || !readers?.has(mapChannel.id)) return;
   try {
     mapProbeSubscriptionId = client.subscribe(mapChannel.id);
     subscriptions.set(mapProbeSubscriptionId, { topic: '/map', channelId: mapChannel.id, mapProbe: true });
-    mapProbeTimeout = window.setTimeout(() => { stopMapProbeSubscription(); scheduleMapProbe(); }, MAP_PROBE_TIMEOUT_MS);
-  } catch (_) { scheduleMapProbe(); }
+  } catch (_) { /* Bridge 短暂不可用时由频道重新广播或页面重连恢复。 */ }
+}
+function reassertMapProbe() {
+  // 不把重订阅放到定时器里：仅 active_map_id 确认变化才执行一次，避免静态
+  // OccupancyGrid 在运行中反复进入浏览器主线程。
+  stopMapProbeSubscription(); beginMapProbe();
+}
+function invalidateMapScopedCloud() {
+  // map 坐标系在切图时会重置。丢弃旧图的待解码/待绘制扫描，并给 Worker 加
+  // generation 栅栏，杜绝上一张图的异步点云在新图就绪后闪现一帧。
+  mapGeneration += 1;
+  cloud = undefined; pendingCloudPacket = undefined; pendingCloudFrame = undefined;
+  if (cloudWorkerSubmitTimer) { window.clearTimeout(cloudWorkerSubmitTimer); cloudWorkerSubmitTimer = undefined; }
+}
+function resetLiveWallRetry() {
+  if (liveWallRetryTimer) { window.clearTimeout(liveWallRetryTimer); liveWallRetryTimer = undefined; }
+  liveWallRetryCount = 0;
+}
+function scheduleLiveWallRetry(info, fingerprint) {
+  if (liveWallRetryTimer || liveWallRetryCount >= LIVE_WALL_RETRY_DELAYS_MS.length) return;
+  const delay = LIVE_WALL_RETRY_DELAYS_MS[liveWallRetryCount++];
+  liveWallRetryTimer = window.setTimeout(() => {
+    liveWallRetryTimer = undefined;
+    // 地图已切换时不能把上一张图的异步补偿结果画到新图上。
+    if (mapFingerprint !== fingerprint || !mapInfo) return;
+    resolveLiveWalls(mapInfo, fingerprint, true);
+  }, delay);
 }
 function updateMap(message) {
   const info = message.info; if (!info?.width || !info?.height || !message.data || !(info.resolution > 0)) return;
   const signature = mapSignature(info, message.data);
   const changed = signature !== mapFingerprint;
   mapFingerprint = signature;
-  if (!changed && mapRaster) { $('mapEmpty').hidden = true; stopMapProbeSubscription(); scheduleMapProbe(); return; }
-  lockedMapYaw = undefined;
-  cloudFrames = [];
+  if (!changed && mapRaster) { $('mapEmpty').hidden = true; return; }
+  // 切图时旧图坐标系的扫描绝不能投影到新图上；等待下一帧最新点云即可。
+  invalidateMapScopedCloud();
   mapInfo = { width: info.width, height: info.height, resolution: info.resolution, origin: info.origin.position, frameId: normalizeFrame(message.header?.frame_id) || 'map' };
   // 地图本身由浏览器直连 Bridge 接收；只把必要元数据交给控制台解析同目录虚拟墙。
   // 地图切换才会调用一次，不上传栅格，不增加 ROS /map 订阅，也不持续扫描磁盘。
+  resetLiveWallRetry();
   virtualWalls = []; wallStatus = '正在匹配当前地图的虚拟墙';
   resolveLiveWalls(mapInfo, signature);
   mapRaster = document.createElement('canvas'); mapRaster.width = info.width; mapRaster.height = info.height;
@@ -910,12 +1162,12 @@ function updateMap(message) {
     const color = occupancy < 0 ? 174 : occupancy >= 65 ? 36 : 245;
     const index = (row * info.width + col) * 4; pixels.data[index] = color; pixels.data[index + 1] = color; pixels.data[index + 2] = color; pixels.data[index + 3] = 255;
   }
-  imageContext.putImageData(pixels, 0, 0); $('mapEmpty').hidden = true; stopMapProbeSubscription(); scheduleMapProbe(); renderStaticWorld(); configureCloudWorker(); projectCloud(); updateDiagnostics(); scheduleMapDraw();
+  imageContext.putImageData(pixels, 0, 0); $('mapEmpty').hidden = true; renderStaticWorld(); configureCloudWorker(); scheduleCloudRasterBuild(); updateDiagnostics(); scheduleMapDraw();
   activateVisualizationStreams();
 }
 
-async function resolveLiveWalls(info, fingerprint) {
-  if (resolvedWallFingerprint === fingerprint) return;
+async function resolveLiveWalls(info, fingerprint, retry = false) {
+  if (resolvedWallFingerprint === fingerprint && !retry) return;
   resolvedWallFingerprint = fingerprint;
   try {
     const layers = await request('/api/observation/live-layers', {
@@ -926,8 +1178,13 @@ async function resolveLiveWalls(info, fingerprint) {
     virtualWalls = Array.isArray(layers.virtual_walls) ? layers.virtual_walls : [];
     wallStatus = layers.matched ? '当前地图未配置虚拟墙' : '当前地图未匹配虚拟墙';
     loadedWallMapId = layers.map_id;
+    if (layers.map_id) loadedMapId = layers.map_id;
+    if (layers.matched) resetLiveWallRetry();
+    else scheduleLiveWallRetry(info, fingerprint);
   } catch (_) {
-    if (resolvedWallFingerprint === fingerprint) { virtualWalls = []; wallStatus = '虚拟墙读取失败'; }
+    if (resolvedWallFingerprint === fingerprint) {
+      virtualWalls = []; wallStatus = '虚拟墙读取失败'; scheduleLiveWallRetry(info, fingerprint);
+    }
   }
   renderStaticWorld(); updateDiagnostics(); scheduleMapDraw();
 }
@@ -936,13 +1193,7 @@ function updatePose(message) {
   const x = Number(source.position?.x); const y = Number(source.position?.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) { pose = undefined; updateDiagnostics(); return; }
   pose = { position: { x, y }, orientation: source.orientation || { x: 0, y: 0, z: 0, w: 1 } };
-  if (overviewUntilMovement) {
-    if (!overviewPoseAnchor) overviewPoseAnchor = { x: pose.position.x, y: pose.position.y };
-    const movement = Math.hypot(pose.position.x - overviewPoseAnchor.x, pose.position.y - overviewPoseAnchor.y);
-    if (movement >= INITIAL_OVERVIEW_MOVEMENT_M) {
-      overviewUntilMovement = false; mapView.pixelsPerMeter = undefined; mapView.followOffset = { x: 0, y: 0 };
-    }
-  }
+  leaveOverviewAfterMovement(pose.position);
   updateDiagnostics(); scheduleMapDraw(); requestFollowAnimation();
 }
 function updateTransforms(message) {
@@ -990,35 +1241,46 @@ function fieldOffset(fields, name) { return fields.find((field) => field.name ==
 function updateCloud(message) {
   const data = message.data; const step = message.point_step; const xOffset = fieldOffset(message.fields || [], 'x'); const yOffset = fieldOffset(message.fields || [], 'y'); const zOffset = fieldOffset(message.fields || [], 'z');
   if (!data || !step || xOffset === undefined || yOffset === undefined || zOffset === undefined) return;
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength); const count = Math.floor(view.byteLength / step); const stride = Math.max(1, Math.ceil(count / POINT_LIMIT)); const points = [];
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength); const count = Math.floor(view.byteLength / step); const stride = Math.max(1, Math.ceil(count / POINT_LIMIT));
+  const frameId = normalizeFrame(message.header?.frame_id);
+  const isMapFrame = frameId && frameId === normalizeFrame(mapInfo?.frameId);
+  // 预处理器的常规输出已在 map 坐标系。直接填充可转移的连续缓冲区，避免
+  // 每帧创建数千个 {x,y,z} 对象、再复制为 Float32Array 所导致的周期性 GC。
+  const packedMapPoints = isMapFrame ? new Float32Array(Math.ceil(count / stride) * 2) : undefined;
+  const points = isMapFrame ? undefined : [];
+  let pointOffset = 0;
   for (let index = 0; index < count; index += stride) {
     const offset = index * step; const x = view.getFloat32(offset + xOffset, !message.is_bigendian); const y = view.getFloat32(offset + yOffset, !message.is_bigendian); const z = view.getFloat32(offset + zOffset, !message.is_bigendian);
-    if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) && Math.abs(x) < 50 && Math.abs(y) < 50 && Math.abs(z) < 5) points.push({ x, y, z });
+    if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) && Math.abs(x) < 50 && Math.abs(y) < 50 && Math.abs(z) < 5) {
+      if (packedMapPoints) { packedMapPoints[pointOffset] = x; packedMapPoints[pointOffset + 1] = y; pointOffset += 2; }
+      else points.push({ x, y, z });
+    }
   }
   cloudUpdatedAt = performance.now();
-  const frameId = normalizeFrame(message.header?.frame_id);
-  // Aletheia 的预处理器已经把点云转换到 map。直接复用数组，避免每帧再创建
-  // 数千个坐标对象；这一分支是实时视图的常态路径。
-  cloud = { frameId, points, mapPoints: frameId === normalizeFrame(mapInfo?.frameId) ? points : [] };
-  if (cloud.mapPoints.length) recordCloudFrame(); else projectCloud(true);
+  const measuredAge = sourcePoseAge(message);
+  liveCloudSourceAgeMs = measuredAge > 0 ? liveCloudSourceAgeMs * 0.7 + measuredAge * 0.3 : liveCloudSourceAgeMs * 0.7;
+  cloud = isMapFrame
+    ? { frameId, packedMapPoints: packedMapPoints.subarray(0, pointOffset), mapPointCount: pointOffset / 2 }
+    : { frameId, points, mapPoints: [], mapPointCount: 0 };
+  if (isMapFrame) recordCloudFrame(); else projectCloud(true);
   // 点云只更新独立 cloudCanvas；不能反向触发地图相机/车体同步，
   // 否则 10~12 Hz 点云会拖慢 30 Hz 位姿视图。
   updateDiagnostics();
 }
 function recordCloudFrame() {
   const now = performance.now();
-  cloudFrames.push({ receivedAt: now, points: cloud.mapPoints });
-  cloudFrames = cloudFrames.filter((frame) => now - frame.receivedAt <= CLOUD_HISTORY_MS);
-  // 单槽最新帧队列：Worker 忙时覆盖尚未处理的帧，禁止实时数据形成延迟积压。
-  if (sendCloudWorker({ receivedAt: now, points: packCloudPoints(cloud.mapPoints) })) return;
+  // 仅保留最新扫描。Worker 忙时覆盖尚未处理的帧，禁止形成延迟积压或透明拖影。
+  const packedPoints = cloud.packedMapPoints || packCloudPoints(cloud.mapPoints || []);
+  if (sendCloudWorker({ receivedAt: now, points: packedPoints, generation: mapGeneration })) return;
   scheduleCloudRasterBuild();
 }
 function projectCloud(recordFrame = false) {
   if (!cloud || !mapInfo) return;
   const transform = transformToMap(cloud.frameId, mapInfo.frameId);
-  if (!transform) { cloud.mapPoints = []; scheduleCloudRasterBuild(); return; }
+  if (!transform) { cloud.mapPoints = []; cloud.mapPointCount = 0; scheduleCloudRasterBuild(); return; }
   const cosine = Math.cos(transform.yaw); const sine = Math.sin(transform.yaw);
-  cloud.mapPoints = cloud.points.map((point) => ({ x: cosine * point.x - sine * point.y + transform.x, y: sine * point.x + cosine * point.y + transform.y }));
+  cloud.mapPoints = (cloud.points || []).map((point) => ({ x: cosine * point.x - sine * point.y + transform.x, y: sine * point.x + cosine * point.y + transform.y }));
+  cloud.mapPointCount = cloud.mapPoints.length;
   if (recordFrame) recordCloudFrame(); else scheduleCloudRasterBuild();
 }
 function scheduleCloudRasterBuild() {
@@ -1036,33 +1298,44 @@ function rebuildCloudRaster() {
   // Worker 直绘模式下，主线程绝不能再 getContext()；否则既无收益又会抛错。
   if (cloudWorkerOwnsCanvas) return;
   const canvas = $('cloudCanvas');
-  if (!mapInfo || !cloud?.mapPoints) { canvas.width = canvas.height = 1; return; }
+  const packedPoints = cloud?.packedMapPoints;
+  const mapPoints = cloud?.mapPoints;
+  if (!mapInfo || (!packedPoints && !mapPoints)) { canvas.width = canvas.height = 1; return; }
   if (canvas.width !== mapInfo.width || canvas.height !== mapInfo.height) { canvas.width = mapInfo.width; canvas.height = mapInfo.height; }
   const context = canvas.getContext('2d');
   context.clearRect(0, 0, canvas.width, canvas.height);
-  const now = performance.now();
-  const frames = cloudFrames.length ? cloudFrames : [{ receivedAt: now, points: cloud.mapPoints }];
-  for (const frame of frames) {
-    const ageRatio = Math.max(0, 1 - (now - frame.receivedAt) / CLOUD_HISTORY_MS);
-    context.fillStyle = `rgba(128, 88, 255, ${0.16 + ageRatio * 0.64})`;
-    for (const point of frame.points) {
-      const x = (point.x - mapInfo.origin.x) / mapInfo.resolution;
-      const y = mapInfo.height - (point.y - mapInfo.origin.y) / mapInfo.resolution;
+  context.fillStyle = 'rgb(128, 88, 255)';
+  if (packedPoints) {
+    for (let index = 0; index < packedPoints.length; index += 2) {
+      const x = (packedPoints[index] - mapInfo.origin.x) / mapInfo.resolution;
+      const y = mapInfo.height - (packedPoints[index + 1] - mapInfo.origin.y) / mapInfo.resolution;
       if (x >= 0 && x < mapInfo.width && y >= 0 && y < mapInfo.height) context.fillRect(x - 0.35, y - 0.35, 0.7, 0.7);
     }
+  } else for (const point of mapPoints) {
+    const x = (point.x - mapInfo.origin.x) / mapInfo.resolution;
+    const y = mapInfo.height - (point.y - mapInfo.origin.y) / mapInfo.resolution;
+    if (x >= 0 && x < mapInfo.width && y >= 0 && y < mapInfo.height) context.fillRect(x - 0.35, y - 0.35, 0.7, 0.7);
   }
 }
-async function refreshWalls(observation) {
-  // 实时 /map 已经可用时，墙体由 resolveLiveWalls() 基于同一份地图元数据加载，
-  // 不能再以旧轨迹缓存替换正在显示的实际地图。
-  if (mapInfo) return;
+async function refreshActiveMap(observation) {
+  // active_map.json 由轨迹记录器在确认真实 /map 后写入；它是切图的轻量可靠
+  // 信号。直接 /map 更新仍优先显示原始栅格，这里仅在其缺席时立即回退缓存图。
   const mapId = observation.active_map_id;
-  if (!mapId || (mapId === loadedWallMapId && mapId === loadedMapId)) return;
+  if (!mapId || mapId === loadedMapId || mapId === requestedActiveMapId) return;
+  requestedActiveMapId = mapId;
   try {
     const layers = await request(`/api/observation/maps/${encodeURIComponent(mapId)}/layers`);
     virtualWalls = Array.isArray(layers.virtual_walls) ? layers.virtual_walls : []; loadedWallMapId = mapId;
+    // 新的 active_map_id 已由运行时确认；对 /map 定向重订阅一次即可请求新
+    // publisher 的 TRANSIENT_LOCAL 栅格，后续仍保持单一订阅。
+    reassertMapProbe();
     loadCachedMap(mapId, layers.map);
-  } catch (_) { virtualWalls = []; loadedWallMapId = mapId; }
+  } catch (_) {
+    // 网络短暂失败不能把这次切图永久标为“已处理”；下一次轻量标记检查会
+    // 重试，但不会在请求仍进行时重复触发 /map 重订阅。
+    requestedActiveMapId = undefined;
+    virtualWalls = []; loadedWallMapId = mapId;
+  }
   updateDiagnostics(); scheduleMapDraw();
 }
 function loadCachedMap(mapId, metadata) {
@@ -1072,24 +1345,62 @@ function loadCachedMap(mapId, metadata) {
   image.decoding = 'async';
   image.onload = () => {
     if (loadedMapId !== mapId) return;
+    invalidateMapScopedCloud();
     mapInfo = {
       width: Number(metadata.width), height: Number(metadata.height), resolution: Number(metadata.resolution),
       origin: { x: Number(metadata.origin[0]) || 0, y: Number(metadata.origin[1]) || 0 }, frameId: normalizeFrame(metadata.frame_id) || 'map',
     };
     mapFingerprint = `cache:${mapId}`; mapRaster = image; $('mapEmpty').hidden = true;
-    lockedMapYaw = undefined;
-    cloudFrames = [];
     // 进入观测页且车辆尚未提供定位时，优先展示完整地图；运行中切图则延续随车视角。
-    if (!pose?.position) {
+    if (!vehiclePoseInMap()?.position) {
       overviewUntilMovement = true; overviewPoseAnchor = undefined; mapView.pixelsPerMeter = undefined;
       mapView.center = undefined; mapView.followOffset = { x: 0, y: 0 };
     }
-    renderStaticWorld(); configureCloudWorker(); projectCloud(); updateDiagnostics(); scheduleMapDraw();
+    renderStaticWorld(); configureCloudWorker(); scheduleCloudRasterBuild(); updateDiagnostics(); scheduleMapDraw();
   };
   image.onerror = () => {
     if (loadedMapId === mapId) { loadedMapId = undefined; setText('mapDiagnostics', '当前地图缓存读取失败；请在测试任务中重新开启轨迹记录。'); }
   };
   image.src = `/api/observation/maps/${encodeURIComponent(mapId)}/preview.png`;
+}
+
+function connectPoseLane(url) {
+  const ws = new WebSocket(url, [FOXGLOVE_BRIDGE_SUBPROTOCOL]); ws.binaryType = 'arraybuffer';
+  poseClient = new FoxgloveClient({ ws }); poseReaders = new Map(); poseSubscriptions = new Map();
+  poseClient.on('open', () => {
+    reportObservation('INFO', `位姿专线已连接：${url}`);
+    if (mapInfo) activateVisualizationStreams();
+  });
+  poseClient.on('error', (error) => {
+    // 主连接仍可消费位姿/TF；专线故障不应中断实时观测页面。
+    reportObservation('WARNING', `位姿专线连接异常：${error.message || url}；将使用兼容链路`);
+  });
+  poseClient.on('close', (event) => {
+    const wasActive = visualizationStreams.livePose.client === poseClient;
+    poseLaneChannel = undefined; poseReaders = undefined; poseSubscriptions = undefined; poseClient = undefined;
+    reportObservation('WARNING', `位姿专线已关闭（代码 ${event.code || '未知'}）；将使用兼容链路`);
+    if (wasActive && mapInfo) activateVisualizationStreams();
+  });
+  poseClient.on('advertise', (channels) => channels.forEach((channel) => {
+    if (channel.topic !== LIVE_POSE_TOPIC) return;
+    try {
+      poseReaders.set(channel.id, new MessageReader(parse(channel.schema, { ros2: true })));
+      poseLaneChannel = channel;
+      // 不依赖地图先到达。部分 Bridge 会先广播轻量频道、后发送 /map；若在
+      // 此处等待 mapInfo，后续地图重放缺失时页面将永远没有位姿订阅。
+      subscribeLivePoseStream();
+      if (mapInfo) activateVisualizationStreams();
+    } catch (error) { reportObservation('WARNING', `位姿专线频道解析失败：${error?.message || '未知错误'}`); }
+  }));
+  poseClient.on('unadvertise', (channelIds) => {
+    if (!channelIds.includes(poseLaneChannel?.id)) return;
+    poseLaneChannel = undefined;
+    if (mapInfo) activateVisualizationStreams();
+  });
+  poseClient.on('message', ({ subscriptionId, data }) => {
+    const subscription = poseSubscriptions?.get(subscriptionId); const reader = poseReaders?.get(subscription?.channelId);
+    if (subscription?.topic === LIVE_POSE_TOPIC && reader) scheduleLatestPosePacket(reader, data);
+  });
 }
 
 function connect(payload) {
@@ -1120,11 +1431,23 @@ function connect(payload) {
       if (isCameraCandidate(channel)) { cameraChannels.set(channel.id, channel); refreshCameraOptions(); }
       else if (channel.topic === '/map') { mapChannel = channel; beginMapProbe(); }
       else if (channel.topic === '/amcl_pose') subscriptions.set(client.subscribe(channel.id), { topic: channel.topic, channelId: channel.id });
-      else if (channel.topic === '/aletheia/live_pose') { livePoseChannel = channel; if (mapInfo) activateVisualizationStreams(); }
+      else if (channel.topic === LIVE_POSE_TOPIC) {
+        livePoseChannel = channel;
+        // 实时流不能以地图作为订阅前置条件。这样即使 /map 因切图、瞬态重放
+        // 或网络时序晚到，车体和点云频道仍立即建立、只保留最新帧。
+        subscribeLivePoseStream();
+        if (mapInfo) activateVisualizationStreams();
+      }
       else if (channel.topic === '/tf') { tfChannel = channel; if (mapInfo) activateVisualizationStreams(); }
       else if (channel.topic === '/tf_static') { staticTfChannel = channel; if (mapInfo) activateVisualizationStreams(); }
-      else if (channel.topic === cloudTopic) { cloudChannel = channel; if (mapInfo) activateVisualizationStreams(); }
-    } catch (_) { /* 单一话题类型不兼容时，其余图层继续工作。 */ }
+      else if (channel.topic === cloudTopic) {
+        cloudChannel = channel;
+        if (!pauseCloudForCamera()) subscribeVisualizationStream('cloud', cloudChannel);
+        if (mapInfo) activateVisualizationStreams();
+      }
+    } catch (error) {
+      reportObservation('WARNING', `Bridge 频道解析失败：${channel.topic}；${error?.message || '未知错误'}`);
+    }
   }));
   client.on('unadvertise', (channelIds) => {
     channelIds.forEach((channelId) => cameraChannels.delete(channelId));
@@ -1145,7 +1468,7 @@ function connect(payload) {
     // 先只保留最新二进制帧，延迟到下一个显示帧再反序列化。不能在 WebSocket
     // 回调逐包解码，否则页面一旦落后就会持续处理已经没有价值的旧点云。
     if (topic === cloudTopic) { scheduleLatestCloudPacket(reader, data); return; }
-    if (topic === '/aletheia/live_pose') { scheduleLatestPosePacket(reader, data); return; }
+    if (topic === LIVE_POSE_TOPIC) { scheduleLatestPosePacket(reader, data); return; }
     const now = performance.now();
     if (topic === '/tf' && now - tfUpdatedAt < TF_MIN_INTERVAL_MS) return;
     try {
@@ -1153,6 +1476,9 @@ function connect(payload) {
       if (topic === '/map') updateMap(message); else if (topic === '/amcl_pose') updatePose(message); else { if (topic === '/tf') tfUpdatedAt = now; updateTransforms(message); }
     } catch (_) { /* 单帧损坏或字段变化不能中断观测。 */ }
   });
+  // 连接在服务器端仍共享同一 ROS 图，但浏览器到 Bridge 使用第二条 TCP 流。
+  // 因而点云或相机的瞬时大帧不会产生位姿的 TCP 队头阻塞。
+  connectPoseLane(url);
 }
 async function main() {
   initializeTheme(); setupCameraSelectors(); setupWorkspace(); setupMapInteraction(); initializeCloudWorker();
@@ -1169,12 +1495,13 @@ async function main() {
       await new Promise((resolve) => window.setTimeout(resolve, 500)); ready = await request('/api/observation');
     }
     if (!ready.bridge?.online) { setText('connectionState', 'Bridge 未就绪'); setText('connectionDetail', '请在诊断日志中检查 foxglove_bridge 启动记录。'); return; }
-    cloudTopic = ready.bridge?.cloud_topic === '/aletheia/live_points' ? '/aletheia/live_points' : '/livox/points';
-    await refreshWalls(ready); connect(ready);
-    window.setInterval(() => request('/api/observation/heartbeat', { method: 'POST' }).then(refreshWalls).catch(() => {}), 5000);
+    cloudTopic = ready.bridge?.cloud_topic === LIVE_CLOUD_TOPIC ? LIVE_CLOUD_TOPIC : '/livox/points';
+    await refreshActiveMap(ready); connect(ready);
+    window.setInterval(() => { reportClientMetrics(); request('/api/observation/heartbeat', { method: 'POST' }).then(refreshActiveMap).catch(() => {}); }, 5000);
+    window.setInterval(() => { request('/api/observation/active-map').then(refreshActiveMap).catch(() => {}); }, ACTIVE_MAP_SYNC_MS);
   } catch (error) { setText('connectionState', '不可用'); setText('connectionDetail', error.message); reportObservation('ERROR', `实时观测初始化失败：${error.message}`); }
 }
-window.addEventListener('beforeunload', () => { stopRenderScheduling(); stopMapProbeSubscription(); stopVisualizationStreams(); client?.close(); });
+window.addEventListener('beforeunload', () => { stopRenderScheduling(); stopMapProbeSubscription(); stopVisualizationStreams(); poseClient?.close(); client?.close(); });
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) stopRenderScheduling();
   else if (mapInfo) scheduleMapDraw();

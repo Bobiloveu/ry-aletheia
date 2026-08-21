@@ -30,6 +30,32 @@ class _SupervisorClient(SupervisorClient):
 
 
 class OfflineModuleTests(unittest.TestCase):
+    def test_expected_client_disconnect_does_not_escape_http_request_thread(self):
+        handler = object.__new__(web_console.ConsoleHandler)
+        handler.client_address = ("192.168.1.140", 40166)
+        with patch("http.server.BaseHTTPRequestHandler.handle", side_effect=ConnectionResetError(104, "Connection reset by peer")):
+            # 移动端切换/刷新时的正常断连不能交回 socketserver 输出 Traceback。
+            self.assertIsNone(handler.handle())
+
+    def test_mobile_console_uses_separate_known_routes_without_changing_desktop_routes(self):
+        self.assertTrue(web_console.is_mobile_console_client({"Sec-CH-UA-Mobile": "?1"}))
+        self.assertTrue(web_console.is_mobile_console_client({"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)"}))
+        self.assertFalse(web_console.is_mobile_console_client({"Sec-CH-UA-Mobile": "?0", "User-Agent": "Android"}))
+        self.assertEqual(web_console.mobile_url_for("/"), "/m/")
+        self.assertEqual(web_console.mobile_url_for("/vue/dashboard.html"), "/m/")
+        self.assertEqual(web_console.mobile_url_for("/live-observation.html"), "/m/live-observation.html")
+        self.assertEqual(web_console.mobile_page_name("/m/runtime-settings.html"), "runtime-settings.html")
+        self.assertIsNone(web_console.mobile_page_name("/m/../../web_console.py"))
+        self.assertIsNone(web_console.mobile_url_for("/api/runs/latest"))
+        mobile_shell = (web_console.WEB_ROOT / "mobile_console.js").read_text(encoding="utf-8")
+        self.assertIn("requestFullscreen", mobile_shell)
+        self.assertIn("mobile-viewer-fullscreen-active", mobile_shell)
+        mobile_style = (web_console.WEB_ROOT / "mobile_console.css").read_text(encoding="utf-8")
+        self.assertIn("orientation: landscape", mobile_style)
+        self.assertIn("width: 100dvw", mobile_style)
+        self.assertIn(".mobile-fullscreen-exit", mobile_style)
+        self.assertIn(".map-widget { position: fixed", mobile_style)
+
     def test_scenario_setup_applies_only_registered_targets_and_refuses_unsafe_restore(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -258,7 +284,9 @@ class OfflineModuleTests(unittest.TestCase):
             )
             manager = ObservationManager(root / "cache", root / "logs")
             with patch.object(MapAssetCache, "ALLOWED_ROOTS", (root / "maps",)):
-                result = manager.live_layers({"width": 2, "height": 2, "resolution": 0.25, "origin": [-3.0, 1.5], "frame_id": "map"})
+                # ROS OccupancyGrid 的 resolution 为 float32；浏览器经 CDR
+                # 解码后会带出尾差，不能因此遗漏同目录虚拟墙。
+                result = manager.live_layers({"width": 2, "height": 2, "resolution": 0.2500000037252903, "origin": [-3.0, 1.5], "frame_id": "map"})
                 cached_result = manager.live_layers({"width": 2, "height": 2, "resolution": 0.25, "origin": [-3.0, 1.5], "frame_id": "map"})
             self.assertTrue(result["matched"])
             self.assertEqual(result["virtual_walls"][0]["points"], [{"x": -2.0, "y": 2.0}, {"x": -1.0, "y": 2.0}])
@@ -286,15 +314,22 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("isCameraCandidate(channel)", source)
         self.assertIn("原始图像（高带宽，可能增加延迟）", source)
         self.assertIn("/api/observation/live-layers", source)
-        self.assertIn("if (mapInfo) return;", source)
+        self.assertIn("/api/observation/active-map", source)
+        self.assertIn("const ACTIVE_MAP_SYNC_MS = 1000;", source)
+        self.assertIn("function reassertMapProbe()", source)
+        self.assertIn("function invalidateMapScopedCloud()", source)
+        self.assertIn("generation: mapGeneration", source)
+        self.assertIn("async function refreshActiveMap(observation)", source)
+        self.assertIn("if (!mapId || mapId === loadedMapId || mapId === requestedActiveMapId) return;", source)
         self.assertIn("const POINT_LIMIT = 3000;", source)
         self.assertIn("const PREPROCESSED_CLOUD_MIN_INTERVAL_MS = 100;", source)
+        self.assertIn("const CLOUD_COMPOSITE_MIN_INTERVAL_MS = 125;", source)
         self.assertIn("const RAW_CLOUD_MIN_INTERVAL_MS = 250;", source)
-        # 全图合成上限为 30 FPS，避免移动时强制 60 FPS 重绘造成位姿积压。
-        self.assertIn("const MAP_RENDER_INTERVAL_MS = 33;", source)
+        # 世界层仅做 CSS transform，可按显示帧合成而不重绘栅格。
+        self.assertIn("const MAP_RENDER_INTERVAL_MS = 16;", source)
         self.assertIn("const TF_MIN_INTERVAL_MS = 33;", source)
         # 点云历史只保留极短窗口，避免与地图交互争用浏览器主线程。
-        self.assertIn("const CLOUD_HISTORY_MS = 90;", source)
+        self.assertIn("context.fillStyle = 'rgb(128, 88, 255)';", source)
         self.assertIn("new ResizeObserver(resizeCanvas).observe(canvas.parentElement);", source)
         self.assertIn("lastMapDrawAt = performance.now(); drawMap();", source)
         self.assertIn("function rebuildCloudRaster()", source)
@@ -302,26 +337,35 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("function renderStaticWorld()", source)
         self.assertIn("mapStaticCanvas", source)
         self.assertIn("回退到原始点云时仍保持保守限速", source)
-        self.assertIn("function mapHeadingForVehicle(yaw)", source)
-        self.assertIn("const MAP_REORIENT_THRESHOLD_RAD = Math.PI / 2;", source)
         self.assertIn("function followVehicleCenter(vehicle)", source)
         self.assertIn("function hasPendingFollowAdjustment()", source)
         self.assertIn("const FOLLOW_CENTER_SETTLE_DISTANCE_M = 0.008;", source)
-        self.assertIn("Math.abs(normalizeAngle(vehicle.yaw - lockedMapYaw)) >= MAP_REORIENT_THRESHOLD_RAD", source)
+        self.assertIn("rotation: 0,", source)
+        self.assertIn("const localYaw = Math.PI / 2 - vehicle.yaw;", source)
         self.assertIn("function requestFollowAnimation()", source)
         self.assertIn("!hasPendingFollowAdjustment()", source)
-        self.assertIn("禁止运动时额外启动 60 FPS 全图循环", source)
+        self.assertIn("世界层只做 CSS transform，允许 60 FPS", source)
         self.assertIn("function stopRenderScheduling()", source)
         self.assertIn("document.addEventListener('visibilitychange'", source)
         self.assertIn("const VEHICLE_BASE_FRAMES = ['base_footprint', 'base_link', 'base_footprint_link'];", source)
         self.assertIn("function vehiclePoseInMap()", source)
-        self.assertIn("function subscribeVisualizationStream(kind, channel)", source)
+        self.assertIn("function subscribeVisualizationStream(kind, channel, streamClient = client", source)
+        self.assertIn("function connectPoseLane(url)", source)
+        self.assertIn("connectPoseLane(url);", source)
+        self.assertIn("位姿使用独立 TCP/WebSocket", source)
         self.assertNotIn("const STREAM_PROBE_INTERVAL_MS", source)
         self.assertIn("function activateVisualizationStreams()", source)
         self.assertIn("else if (channel.topic === '/amcl_pose') subscriptions.set(client.subscribe(channel.id)", source)
         self.assertIn("else if (channel.topic === '/tf') { tfChannel = channel;", source)
-        self.assertIn("'/aletheia/live_points'", source)
-        self.assertIn("else if (channel.topic === cloudTopic) { cloudChannel = channel;", source)
+        self.assertIn("const LIVE_CLOUD_TOPIC = '/_aletheia/live_points';", source)
+        self.assertIn("else if (channel.topic === cloudTopic) {", source)
+        self.assertIn("if (!pauseCloudForCamera()) subscribeVisualizationStream('cloud', cloudChannel);", source)
+        self.assertIn("subscribeLivePoseStream();", source)
+        self.assertIn("实时流不能以地图作为订阅前置条件", source)
+        self.assertIn("function flushCloudWorker()", source)
+        self.assertIn("pendingCloudFrame = frame;", source)
+        server_source = Path("web_console.py").read_text(encoding="utf-8")
+        self.assertIn('path == "/api/observation/active-map"', server_source)
 
     def test_private_bridge_runtime_only_changes_bridge_child_environment(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -337,6 +381,37 @@ class OfflineModuleTests(unittest.TestCase):
             self.assertTrue(environment["AMENT_PREFIX_PATH"].split(":")[0] == str(prefix))
             self.assertTrue(environment["CMAKE_PREFIX_PATH"].split(":")[0] == str(prefix))
             self.assertTrue(environment["LD_LIBRARY_PATH"].split(":")[0] == str(prefix / "lib"))
+
+    def test_private_bridge_starts_directly_without_system_ros2_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prefix = root / "runtime" / "foxglove_bridge"
+            marker = prefix / "share" / "ament_index" / "resource_index" / "packages" / "foxglove_bridge"
+            executable = prefix / "lib" / "foxglove_bridge" / "foxglove_bridge"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("", encoding="utf-8")
+            executable.parent.mkdir(parents=True)
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o755)
+            manager = ObservationManager(root / "maps_cache", root / "logs")
+            settings = RobotSettings(live_observation={"enabled": True, "bridge_port": 8767})
+
+            class Process:
+                pid = 4242
+
+                @staticmethod
+                def poll():
+                    return None
+
+            with patch.object(manager, "_port_open", side_effect=[False, True]), \
+                 patch("autodrive_console.observation.subprocess.Popen", return_value=Process()) as popen, \
+                 patch("autodrive_console.observation.threading.Timer"):
+                manager.start(settings)
+            command = popen.call_args.args[0]
+            self.assertEqual(command[:3], [str(executable), "--ros-args", "-p"])
+            self.assertIn("include_hidden:=true", command)
+            self.assertNotIn("launch", command)
+            manager._process = None
 
     def test_observation_private_bridge_listens_on_lan_and_is_checked_locally(self):
         """性能模式直连浏览器，Bridge 必须监听全部网卡但仅用回环检查健康。"""
@@ -578,6 +653,35 @@ class OfflineModuleTests(unittest.TestCase):
             run = RunRecord("681174175ef5", case, 1, 0, started_at="2026-08-14T11:15:30+08:00")
             manager = RunManager(root / "reports", object(), settings)
             self.assertEqual(manager._report_stem(run), "报告_20260814_111530_电梯_往返_验证_681174175ef5")
+
+    def test_live_progress_snapshot_keeps_confirmed_percent_during_map_tf_gap(self):
+        case = TestCase("case", "case.json", "测试", TaskParameters("园区", 1, 1, 1, 1), "unused.json")
+        run = RunRecord("run", case, 2, 0, status="running")
+        run.active_attempt = 1
+        RunManager._update_live_progress(run, 1, {"progress_available": True, "percent": 46.8, "route_name": "去程"})
+        # 用户返回页面时可能正好遇到地图切换；临时状态仍应携带上一有效百分比。
+        RunManager._update_live_progress(run, 1, {"progress_available": False, "state": "等待切换至当前子任务地图"})
+        self.assertEqual(run.live_progress["percent"], 46.8)
+        self.assertTrue(run.live_progress["progress_available"])
+        self.assertTrue(run.live_progress["retained_progress"])
+
+        # 新的一轮必须从自身进度开始，不能继承上一轮。
+        run.active_attempt = 2
+        run.live_progress = {"visible": True, "attempt": 2, "attempt_total": 2, "progress_available": False, "percent": 0}
+        RunManager._update_live_progress(run, 2, {"progress_available": True, "percent": 0})
+        self.assertEqual(run.live_progress["percent"], 0)
+
+    def test_live_progress_rejects_late_attempt_callbacks_and_unknown_zero_percent(self):
+        case = TestCase("case", "case.json", "测试", TaskParameters("园区", 1, 1, 1, 1), "unused.json")
+        run = RunRecord("run", case, 2, 0, status="running")
+        run.active_attempt = 2
+        run.live_progress = {"visible": True, "attempt": 2, "attempt_total": 2, "progress_available": False, "percent": 0}
+        # 上一轮的延迟回调不能覆盖当前轮。
+        RunManager._update_live_progress(run, 1, {"progress_available": True, "percent": 88})
+        self.assertEqual(run.live_progress["attempt"], 2)
+        # 当前轮未知状态必须保持不可用，而不是伪装为真实 0%。
+        RunManager._update_live_progress(run, 2, {"state": "等待 /map", "percent": 0})
+        self.assertFalse(run.live_progress["progress_available"])
 
 
 if __name__ == "__main__":

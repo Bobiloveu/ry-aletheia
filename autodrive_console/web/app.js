@@ -6,7 +6,21 @@ const acknowledgedStallAlerts = new Set();
 const trajectoryView = { scale: 1, x: 0, y: 0, drag: null };
 // 轮询恰好落在 TF/map 短暂切换窗口时，状态包可能没有路线百分比；同一轮
 // 必须保留上一次有效值，不能把实际已运行的进度视觉上归零。
-const displayedRouteProgress = { attempt: null, percent: 0 };
+const displayedRouteProgress = { runId: null, attempt: null, percent: 0 };
+
+function routeProgressStorageKey(runId, attempt) { return `ry-aletheia-route-progress:${runId}:${attempt}`; }
+function restoredRouteProgress(runId, attempt) {
+  try {
+    const value = Number(sessionStorage.getItem(routeProgressStorageKey(runId, attempt)));
+    return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
+  } catch (_) { return 0; }
+}
+function rememberRouteProgress(runId, attempt, percent) {
+  try {
+    const current = restoredRouteProgress(runId, attempt);
+    sessionStorage.setItem(routeProgressStorageKey(runId, attempt), String(Math.max(current, percent)));
+  } catch (_) { /* 隐私模式或存储不可用时仍由服务端快照恢复。 */ }
+}
 
 function tickClock() { $('clock').textContent = new Date().toLocaleString('zh-CN', { hour12: false }); }
 function escapeHtml(value) { const el = document.createElement('span'); el.textContent = value ?? ''; return el.innerHTML; }
@@ -55,14 +69,19 @@ function renderLiveProgress(run) {
   const visible = run?.status === 'running' && Boolean(progress?.visible);
   $('routeProgress').hidden = !visible;
   if (!visible) return;
-  if (displayedRouteProgress.attempt !== progress.attempt) {
+  const runId = String(run.id || ''); const attempt = progress.attempt;
+  if (displayedRouteProgress.runId !== runId || displayedRouteProgress.attempt !== attempt) {
+    displayedRouteProgress.runId = runId;
     displayedRouteProgress.attempt = progress.attempt;
-    displayedRouteProgress.percent = 0;
+    displayedRouteProgress.percent = restoredRouteProgress(runId, attempt);
   }
-  const progressAvailable = progress.progress_available !== false;
+  // 仅轨迹采集器明确确认的投影才可显示为真实百分比；缺字段的旧快照或
+  // 新一轮初始化都属于未知，不能把数值占位 0 误导为“路线卡在起点”。
+  const progressAvailable = progress.progress_available === true;
   const receivedPercent = Number(progress.percent);
   if (progressAvailable && Number.isFinite(receivedPercent)) displayedRouteProgress.percent = Math.max(displayedRouteProgress.percent, Math.max(0, Math.min(100, receivedPercent)));
   const percent = displayedRouteProgress.percent;
+  if (progressAvailable) rememberRouteProgress(runId, attempt, percent);
   $('routeProgressPercent').textContent = progressAvailable ? `${percent.toFixed(1)}%` : '—';
   $('routeProgressFill').style.width = `${progressAvailable ? percent : 0}%`;
   $('routeProgressAttempt').textContent = `本轮 T-${String(progress.attempt).padStart(3, '0')} / ${progress.attempt_total} · 已采集 ${progress.points || 0} 点`;

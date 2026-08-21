@@ -72,6 +72,43 @@ LOGGER = LOGS.configure()
 _LIVE_PREPROCESSOR = ROOT / "aletheia_live_cloud" if getattr(sys, "frozen", False) else ROOT / "build" / "live_preprocessor" / "aletheia_live_cloud"
 OBSERVATION = ObservationManager(WORKSPACE / "maps_cache", WORKSPACE / "logs", _LIVE_PREPROCESSOR)
 
+# 移动端使用独立入口（/m/），但继续调用完全相同的受控 API 与页面控制器。
+# 不依据单一 UA 字段：优先采用浏览器 Client Hint，再兼容常见移动浏览器标识。
+MOBILE_PAGE_NAMES = frozenset({
+    "index.html", "case-library.html", "reports.html", "scenario-setup.html",
+    "tool-logs.html", "runtime-settings.html", "live-observation.html",
+})
+MOBILE_VUE_PAGES = frozenset({"runtime-settings.html", "live-observation.html"})
+_MOBILE_USER_AGENT = re.compile(r"android|iphone|ipod|iemobile|opera mini|mobile", re.IGNORECASE)
+
+
+def is_mobile_console_client(headers) -> bool:
+    """Return whether the initial console page should use the mobile shell."""
+    client_hint = str(headers.get("Sec-CH-UA-Mobile", "")).strip().lower()
+    if client_hint in {"?1", "1", "true"}:
+        return True
+    if client_hint in {"?0", "0", "false"}:
+        return False
+    return bool(_MOBILE_USER_AGENT.search(str(headers.get("User-Agent", ""))))
+
+
+def mobile_page_name(path: str) -> str | None:
+    """Map an explicit /m/ URL to a known console page, never to arbitrary files."""
+    if path in {"/m", "/m/"}:
+        return "index.html"
+    if not path.startswith("/m/"):
+        return None
+    candidate = path.removeprefix("/m/")
+    return candidate if candidate in MOBILE_PAGE_NAMES else None
+
+
+def mobile_url_for(path: str) -> str | None:
+    """Return the mobile equivalent of a first-class console route."""
+    if path in {"/", "/vue/dashboard.html"}:
+        return "/m/"
+    candidate = path.lstrip("/")
+    return f"/m/{candidate}" if candidate in MOBILE_PAGE_NAMES else None
+
 
 def _log_unhandled_exception(exc_type, exc_value, traceback) -> None:
     if issubclass(exc_type, KeyboardInterrupt):
@@ -95,8 +132,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         try:
             super().handle()
         except (BrokenPipeError, ConnectionResetError):
-            # 浏览器刷新、切页导致的连接关闭不属于工具错误，避免污染错误日志。
-            raise
+            # 浏览器刷新、切页、移动网络切换导致的连接关闭不属于工具错误。
+            # 必须在这里吞掉；重新抛出会被 socketserver 打印为整段 Traceback，
+            # 淹没真正需要处理的服务端异常。
+            return
         except Exception:
             LOGGER.exception("HTTP 请求处理发生未处理异常：client=%s", self.client_address[0] if self.client_address else "unknown")
             raise
@@ -104,7 +143,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         request = urlparse(self.path)
         path = request.path
-        if path == "/runtime-settings.html":
+        explicit_mobile_page = mobile_page_name(path)
+        preferred_view = parse_qs(request.query).get("view", [""])[0].lower()
+        if explicit_mobile_page:
+            self._mobile_page(explicit_mobile_page)
+        elif preferred_view != "desktop" and is_mobile_console_client(self.headers) and (target := mobile_url_for(path)):
+            # 每个顶级页面都可直接从手机收藏夹打开；不是只有根路径才会分流。
+            # API、报告下载等非页面路由不参与重定向，保持接口语义不变。
+            self._redirect(target)
+        elif path == "/runtime-settings.html":
             self._static_from(VUE_WEB_ROOT, "index.html")
         elif path == "/live-observation.html":
             self._static_from(VUE_WEB_ROOT, "live-observation.html")
@@ -147,6 +194,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._json({"reports": self._reports()})
         elif path == "/api/system/upgrade":
             self._json(UPGRADES.status())
+        elif path == "/api/observation/active-map":
+            # 地图切换标记只有一个短 ID，供实时页快速发现 map_server 生命周期
+            # 切换；绝不通过此接口传输或轮询 OccupancyGrid 栅格数据。
+            self._json({"active_map_id": OBSERVATION.active_map_id()})
         elif path == "/api/observation":
             self._json(OBSERVATION.status(SETTINGS.load()))
         elif path.startswith("/api/observation/maps/") and path.endswith("/preview.svg"):
@@ -333,6 +384,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 if level not in {"INFO", "WARNING", "ERROR"} or not message:
                     raise ValueError("观测日志内容无效")
                 OBSERVATION.record_client_event(level, message)
+                self._json({"recorded": True}, HTTPStatus.ACCEPTED)
+                return
+            elif path == "/api/observation/client-metrics":
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                if not isinstance(data, dict):
+                    raise ValueError("观测性能指标格式无效")
+                OBSERVATION.record_client_metrics(data)
                 self._json({"recorded": True}, HTTPStatus.ACCEPTED)
                 return
             else:
@@ -598,6 +656,39 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _mobile_page(self, requested: str) -> None:
+        """Serve the dedicated mobile shell without changing desktop HTML/CSS."""
+        root = VUE_WEB_ROOT if requested in MOBILE_VUE_PAGES else WEB_ROOT
+        target = (root / requested).resolve()
+        if root not in target.parents or not target.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        body = target.read_bytes()
+        if target.suffix != ".html":
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        shell_head = b'<link rel="stylesheet" href="/mobile_console.css">'
+        shell_body = b'<script src="/brand_version.js"></script><script defer src="/mobile_console.js"></script>'
+        # 构建产物和传统页面均有标准 head/body。若未来模板异常，宁可保留页面
+        # 功能也不注入不完整的移动壳层。
+        if b"</head>" in body and b"</body>" in body:
+            body = body.replace(b"</head>", shell_head + b"</head>", 1)
+            body = body.replace(b"</body>", shell_body + b"</body>", 1)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store, max-age=0")
+        self.send_header("Vary", "User-Agent, Sec-CH-UA-Mobile")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(HTTPStatus.FOUND)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store, max-age=0")
+        self.send_header("Vary", "User-Agent, Sec-CH-UA-Mobile")
+        self.end_headers()
+
     def _trajectory_svg(self, path: str) -> None:
         parts = path.split("/")
         if len(parts) != 8 or parts[4] != "attempts" or parts[6] != "trajectory":
@@ -654,7 +745,7 @@ if __name__ == "__main__":
     server.restart_command = None
     # 长连接代理不应拖住安全退出或离线升级后的新版本启动。
     server.daemon_threads = True
-    print("RY Aletheia 自动驾驶测试平台：http://0.0.0.0:8087")
+    print("RY Aletheia 自动测试平台：http://0.0.0.0:8087")
     print("局域网访问：http://<小车IP>:8087")
     print("按 Ctrl+C 停止服务")
     try:

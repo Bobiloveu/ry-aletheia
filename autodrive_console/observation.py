@@ -21,6 +21,11 @@ from .trajectory_render import TrajectoryRenderError, _png_gray, _read_pgm
 
 LOGGER = logging.getLogger("ry_aletheia.observation")
 
+# ROS 2 将任一路径段以下划线开头的话题视为内部（hidden）话题。实时观测页
+# 仍会按明确名称订阅它们，但 RViz 的默认“按话题”列表不会把实现细节展示给操作者。
+INTERNAL_LIVE_CLOUD_TOPIC = "/_aletheia/live_points"
+INTERNAL_LIVE_POSE_TOPIC = "/_aletheia/live_pose"
+
 
 class ObservationError(RuntimeError):
     """实时观测的配置或受控进程状态不满足启动条件。"""
@@ -42,7 +47,7 @@ class ObservationManager:
         self.log_dir = log_dir
         self._lock = threading.RLock()
         self._process: subprocess.Popen | None = None
-        self._preprocessor_process: subprocess.Popen | None = None
+        self._preprocessor_processes: dict[str, subprocess.Popen] = {}
         self._preprocessor_path = preprocessor_path
         self._started_by_console = False
         self._last_heartbeat = 0.0
@@ -53,6 +58,8 @@ class ObservationManager:
         self._live_map_matches: dict[str, dict[str, Any]] = {}
         self._map_server_yaml_checked_at = 0.0
         self._map_server_yaml: Path | None = None
+        self._client_metrics: dict[str, Any] = {}
+        self._client_metrics_at = 0.0
 
     def status(self, settings: RobotSettings) -> dict[str, Any]:
         self._stop_if_idle(settings)
@@ -61,7 +68,8 @@ class ObservationManager:
         package_available, package_detail = self._bridge_package()
         bridge_online = self._port_open("127.0.0.1", observation["bridge_port"])
         process_running = self._process is not None and self._process.poll() is None
-        preprocessor_running = self._preprocessor_process is not None and self._preprocessor_process.poll() is None
+        cloud_preprocessor_running = self._preprocessor_running("cloud")
+        pose_preprocessor_running = self._preprocessor_running("pose")
         return {
             "enabled": observation["enabled"],
             "map_source": observation["map_source"],
@@ -71,14 +79,15 @@ class ObservationManager:
                 "bind_address": "0.0.0.0", "port": observation["bridge_port"],
                 "access_mode": "direct",
                 "online": bridge_online, "managed": process_running and self._started_by_console,
-                "cloud_topic": "/aletheia/live_points" if preprocessor_running else "/livox/points",
-                "pose_topic": "/aletheia/live_pose" if preprocessor_running else "",
+                "cloud_topic": INTERNAL_LIVE_CLOUD_TOPIC if cloud_preprocessor_running else "/livox/points",
+                "pose_topic": INTERNAL_LIVE_POSE_TOPIC if pose_preprocessor_running else "",
                 "package_available": package_available, "detail": package_detail,
             },
             "maps": self.maps(),
             "active_map_id": self.active_map_id(),
             "idle_stop_seconds": observation["idle_stop_seconds"],
-            "preprocessor": {"available": bool(self._preprocessor_path and self._preprocessor_path.is_file()), "managed": preprocessor_running},
+            "preprocessor": {"available": bool(self._preprocessor_path and self._preprocessor_path.is_file()), "managed": cloud_preprocessor_running or pose_preprocessor_running, "cloud_managed": cloud_preprocessor_running, "pose_managed": pose_preprocessor_running},
+            "client_metrics": {**self._client_metrics, "age_seconds": round(max(0.0, time.monotonic() - self._client_metrics_at), 2)} if self._client_metrics_at else None,
         }
 
     def start(self, settings: RobotSettings) -> dict[str, Any]:
@@ -102,21 +111,30 @@ class ObservationManager:
             message = f"未检测到 foxglove_bridge：{detail}"
             LOGGER.error("实时观测启动失败：%s", message)
             raise ObservationError(message)
-        ros2 = shutil.which("ros2")
-        if not ros2:
+        private_bridge = self._private_bridge_executable()
+        ros2 = shutil.which("ros2") if private_bridge is None else None
+        if private_bridge is None and not ros2:
             message = "未检测到 ros2 命令；请使用机器人 ROS2 环境启动控制台"
             LOGGER.error("实时观测启动失败：%s", message)
             raise ObservationError(message)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._start_preprocessor()
         log_file = self.log_dir / "foxglove_bridge.log"
-        command = [
-            ros2, "launch", "foxglove_bridge", "foxglove_bridge_launch.xml",
+        parameters = [
             f"port:={options['bridge_port']}", "address:=0.0.0.0", "tls:=false",
             # 图像与点云只用于实时观测，积压旧数据没有价值。Bridge 3.2.x 支持
             # 限制 ROS 订阅 QoS 队列深度；固定为 1，优先把最新帧交给浏览器。
             "max_qos_depth:=1",
+            # 预处理流使用 /_aletheia/* 避免成为 RViz 的业务话题；Bridge 默认
+            # 不公告 hidden 话题，必须显式开启，否则网页永远收不到点云/位姿频道。
+            "include_hidden:=true",
         ]
+        if private_bridge is not None:
+            # 完整离线包的 Bridge 直接执行，既不依赖系统是否安装该包，也不让
+            # 系统 ros2 CLI 按环境顺序挑中错误版本。参数与官方 launch 文件等价。
+            command = [str(private_bridge), "--ros-args", *[part for item in parameters for part in ("-p", item)]]
+        else:
+            command = [ros2, "launch", "foxglove_bridge", "foxglove_bridge_launch.xml", *parameters]
         output = None
         try:
             output = log_file.open("ab", buffering=0)
@@ -159,12 +177,35 @@ class ObservationManager:
             return
         getattr(LOGGER, "warning" if level == "WARNING" else "info")("实时观测浏览器：%s", message)
 
+    def record_client_metrics(self, metrics: dict[str, Any]) -> None:
+        """保存浏览器端的低频性能摘要，供现场远程区分数据与合成瓶颈。"""
+        allowed = {
+            "pose_packet_rate_hz": (0.0, 240.0), "pose_applied_rate_hz": (0.0, 240.0),
+            "pose_message_age_ms": (0.0, 5000.0), "pose_source_age_ms": (0.0, 5000.0),
+            "vehicle_render_rate_hz": (0.0, 240.0), "vehicle_frame_interval_ms": (0.0, 1000.0),
+            "vehicle_long_frames": (0.0, 10000.0), "cloud_packet_rate_hz": (0.0, 120.0),
+            "cloud_source_age_ms": (0.0, 5000.0),
+        }
+        clean: dict[str, float] = {}
+        for key, (minimum, maximum) in allowed.items():
+            try:
+                value = float(metrics.get(key))
+            except (TypeError, ValueError):
+                continue
+            if minimum <= value <= maximum:
+                clean[key] = round(value, 2)
+        if not clean:
+            raise ValueError("观测性能指标无效")
+        with self._lock:
+            self._client_metrics = clean
+            self._client_metrics_at = time.monotonic()
+
     def stop(self) -> None:
         with self._lock:
             process = self._process
-            preprocessor = self._preprocessor_process
+            preprocessors = list(self._preprocessor_processes.values())
             self._process = None
-            self._preprocessor_process = None
+            self._preprocessor_processes = {}
             managed = self._started_by_console
             self._started_by_console = False
             if self._idle_timer:
@@ -181,7 +222,9 @@ class ObservationManager:
                     LOGGER.warning("Foxglove Bridge 未在宽限期内退出，已强制停止：pid=%s", process.pid)
                 except OSError:
                     pass
-        if preprocessor and preprocessor.poll() is None:
+        for preprocessor in preprocessors:
+            if preprocessor.poll() is not None:
+                continue
             try:
                 os.killpg(preprocessor.pid, signal.SIGTERM)
                 preprocessor.wait(timeout=2)
@@ -191,30 +234,31 @@ class ObservationManager:
                 except OSError:
                     pass
 
+    def _preprocessor_running(self, kind: str) -> bool:
+        process = self._preprocessor_processes.get(kind)
+        return process is not None and process.poll() is None
+
     def _start_preprocessor(self) -> None:
-        """按需启动轻量点云节点；失败时安全回退到原始点云观测。"""
-        if self._preprocessor_process and self._preprocessor_process.poll() is None:
-            return
+        """以独立进程启动点云与位姿流，避免点云转换阻塞车体位姿。"""
         target = self._preprocessor_path
         if target is None or not target.is_file():
-            LOGGER.warning("实时点云预处理节点不可用，回退订阅 /livox/points：%s", target or "未配置")
+            LOGGER.warning("实时预处理节点不可用，回退订阅 /livox/points 和 TF：%s", target or "未配置")
             return
-        try:
-            log = (self.log_dir / "live_preprocessor.log").open("ab", buffering=0)
-            self._preprocessor_process = subprocess.Popen(
-                # 位姿保持 30 Hz；点云限制到 10 Hz、3000 点且 QoS depth=1。
-                # 这足以维持扫描连续性，同时将浏览器对象分配、WebSocket 带宽和
-                # 小车端坐标变换开销从原来的 15×5000 明显压低。
-                # 时效阈值是实时安全边界：超时扫描/TF 不做坐标变换，也不发送给网页。
-                [str(target), "--ros-args", "-p", "rate_hz:=10.0", "-p", "max_points:=3000", "-p", "pose_rate_hz:=30.0", "-p", "max_input_age_ms:=180", "-p", "max_pose_age_ms:=120"],
-                cwd=self.maps_dir.parent, stdout=log, stderr=subprocess.STDOUT,
-                start_new_session=True, close_fds=True, env=self._bridge_environment(),
-            )
-            log.close()
-            LOGGER.info("已启动 Aletheia 轻量点云预处理：pid=%s", self._preprocessor_process.pid)
-        except OSError as exc:
-            self._preprocessor_process = None
-            LOGGER.warning("实时点云预处理启动失败，回退原始点云：%s", exc)
+        definitions = {
+            "cloud": ["-r", "__node:=ry_aletheia_live_cloud", "-p", "enable_cloud:=true", "-p", "enable_pose:=false", "-p", f"output_topic:={INTERNAL_LIVE_CLOUD_TOPIC}", "-p", "max_points:=3000", "-p", "max_input_age_ms:=140"],
+            "pose": ["-r", "__node:=ry_aletheia_live_pose", "-p", "enable_cloud:=false", "-p", "enable_pose:=true", "-p", f"pose_topic:={INTERNAL_LIVE_POSE_TOPIC}", "-p", "pose_rate_hz:=60.0", "-p", "max_pose_age_ms:=250"],
+        }
+        for kind, arguments in definitions.items():
+            if self._preprocessor_running(kind):
+                continue
+            try:
+                log = (self.log_dir / f"live_preprocessor_{kind}.log").open("ab", buffering=0)
+                process = subprocess.Popen([str(target), "--ros-args", *arguments], cwd=self.maps_dir.parent, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, close_fds=True, env=self._bridge_environment())
+                log.close()
+                self._preprocessor_processes[kind] = process
+                LOGGER.info("已启动 Aletheia 轻量%s流：pid=%s", "点云" if kind == "cloud" else "位姿", process.pid)
+            except OSError as exc:
+                LOGGER.warning("实时%s流启动失败：%s", "点云" if kind == "cloud" else "位姿", exc)
 
     def maps(self) -> list[dict[str, Any]]:
         """读取已经缓存的地图元数据，不读取 PGM 像素，不触发 ROS2 通信。"""
@@ -344,7 +388,10 @@ class ObservationManager:
             frame_id = str(metadata.get("frame_id") or "map").strip() or "map"
         except (KeyError, TypeError, ValueError) as exc:
             raise ObservationError("实时地图元数据无效") from exc
-        signature = f"{width}|{height}|{resolution:.12g}|{origin[0]:.12g}|{origin[1]:.12g}|{frame_id}"
+        # OccupancyGrid.resolution 是 float32；0.05 会在浏览器端还原为
+        # 0.050000000745...。用与地图匹配容差相容的稳定键，避免同一张地图
+        # 因二进制浮点尾差分别得到“已匹配”和“未匹配”的缓存状态。
+        signature = f"{width}|{height}|{round(resolution, 8):.8f}|{origin[0]:.12g}|{origin[1]:.12g}|{frame_id}"
         with self._lock:
             cached = self._live_map_matches.get(signature)
         if cached is not None:
@@ -372,10 +419,16 @@ class ObservationManager:
                 "virtual_walls": MapAssetCache.virtual_walls(asset),
             }
         with self._lock:
-            self._live_map_matches[signature] = result
-            # 只需记住最近少量地图，P1/P2/P3 切换不会反复扫描，也防止长期运行增长。
-            if len(self._live_map_matches) > 12:
-                self._live_map_matches.pop(next(iter(self._live_map_matches)))
+            # 成功匹配的静态地图可以长期复用；反之，map_server 启动、切图和
+            # 缓存落盘的短暂窗口都可能造成一次性未命中。绝不能把该阴性结果
+            # 永久缓存，否则页面即使随后具备地图与墙文件也不会再补画虚拟墙。
+            if result["matched"]:
+                self._live_map_matches[signature] = result
+                # 只需记住最近少量地图，P1/P2/P3 切换不会反复扫描，也防止长期运行增长。
+                if len(self._live_map_matches) > 12:
+                    self._live_map_matches.pop(next(iter(self._live_map_matches)))
+            else:
+                self._live_map_matches.pop(signature, None)
         return result
 
     def _map_server_asset(
@@ -457,10 +510,15 @@ class ObservationManager:
         with self._lock:
             if time.monotonic() - self._package_checked_at < self._PACKAGE_CACHE_SECONDS and self._package_available is not None:
                 return self._package_available, self._package_detail
-            ros2 = shutil.which("ros2")
-            if not ros2:
-                self._package_available, self._package_detail = False, "未找到 ros2 命令"
+            private_bridge = self._private_bridge_executable()
+            if private_bridge is not None:
+                self._package_available = True
+                self._package_detail = f"已检测到 Aletheia 私有 Foxglove Bridge（{private_bridge}）"
             else:
+                ros2 = shutil.which("ros2")
+            if private_bridge is None and not ros2:
+                self._package_available, self._package_detail = False, "未找到 ros2 命令"
+            elif private_bridge is None:
                 try:
                     result = subprocess.run(
                         [ros2, "pkg", "prefix", "foxglove_bridge"],
@@ -484,6 +542,13 @@ class ObservationManager:
         marker = prefix / "share" / "ament_index" / "resource_index" / "packages" / "foxglove_bridge"
         return prefix if marker.is_file() else None
 
+    def _private_bridge_executable(self) -> Path | None:
+        prefix = self._private_bridge_prefix()
+        if prefix is None:
+            return None
+        executable = prefix / "lib" / "foxglove_bridge" / "foxglove_bridge"
+        return executable if executable.is_file() and os.access(executable, os.X_OK) else None
+
     def _bridge_environment(self) -> dict[str, str]:
         """只为 Bridge 子进程注入私有前缀，控制台和机器人 ROS 图保持原环境。"""
         env = os.environ.copy()
@@ -498,12 +563,17 @@ class ObservationManager:
         prefix_text = str(prefix)
         prepend("AMENT_PREFIX_PATH", prefix_text)
         prepend("CMAKE_PREFIX_PATH", prefix_text)
+        bin_dir = prefix / "bin"
+        if bin_dir.is_dir():
+            prepend("PATH", str(bin_dir))
         lib_dir = prefix / "lib"
         if lib_dir.is_dir():
             prepend("LD_LIBRARY_PATH", str(lib_dir))
         python_dir = prefix / "lib" / "python3.10" / "site-packages"
         if python_dir.is_dir():
             prepend("PYTHONPATH", str(python_dir))
+        env.setdefault("ROS_VERSION", "2")
+        env.setdefault("ROS_DISTRO", "humble")
         return env
 
     @staticmethod
@@ -522,9 +592,11 @@ class ObservationManager:
                     "Aletheia 私有 Foxglove Bridge 已异常退出：pid=%s exit_code=%s；末尾日志：%s",
                     pid, exit_code, self._bridge_log_tail(),
                 )
-            if self._preprocessor_process and self._preprocessor_process.poll() is not None:
-                LOGGER.warning("Aletheia 点云预处理节点已退出：pid=%s code=%s；将回退原始点云", self._preprocessor_process.pid, self._preprocessor_process.returncode)
-                self._preprocessor_process = None
+            for kind, process in list(self._preprocessor_processes.items()):
+                if process.poll() is None:
+                    continue
+                LOGGER.warning("Aletheia 轻量%s流已退出：pid=%s code=%s；将启用对应回退", "点云" if kind == "cloud" else "位姿", process.pid, process.returncode)
+                del self._preprocessor_processes[kind]
 
     def _log_startup_diagnostic(self) -> None:
         """受控 Bridge 启动后仅记录一次结果，不参与周期性状态查询。"""

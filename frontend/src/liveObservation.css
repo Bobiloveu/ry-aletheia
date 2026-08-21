@@ -21,7 +21,7 @@
 .map-world canvas { position:absolute; inset:0; display:block; image-rendering:pixelated; }
 #mapWorld { z-index:1; }.map-world #cloudCanvas { background:transparent; }
 #cloudWorld { z-index:2; }
-#vehicleLayer { position:absolute; z-index:3; pointer-events:none; box-sizing:border-box; border:2px solid #087e99; border-radius:16%; background:rgb(33 199 215 / 50%); box-shadow:0 0 0 7px rgb(18 159 180 / 14%); transform-origin:center; will-change:transform,left,top; }
+#vehicleLayer { position:absolute; top:0; left:0; z-index:3; pointer-events:none; box-sizing:border-box; border:2px solid #087e99; border-radius:16%; background:rgb(33 199 215 / 50%); box-shadow:0 0 0 7px rgb(18 159 180 / 14%); transform-origin:center; will-change:transform; contain:layout paint; backface-visibility:hidden; }
 #vehicleLayer i { position:absolute; top:0; left:18%; right:18%; border-top:2px solid #fff; }
 .map-interaction-layer { position:absolute; inset:0; z-index:4; display:block; width:100%; height:100%; background:transparent; cursor:grab; touch-action:none; user-select:none; }
 .map-interaction-layer.is-panning { cursor:grabbing; }
@@ -39,4 +39,63 @@
 .local-viewer-workspace[data-image-mode="none"] .workspace-splitter, .local-viewer-workspace[data-image-mode^="single"] .horizontal-splitter { display: none; }
 .workspace-controls { position: absolute; z-index: 5; top: 62px; left: 12px; }.workspace-controls > div { display: grid; gap: 9px; width: 220px; padding: 12px; border: 1px solid #315b77; border-radius: 6px; background: rgb(8 21 34 / 96%); box-shadow: 0 8px 22px rgb(0 0 0 / 25%); }.workspace-controls > div[hidden] { display: none; }.workspace-controls .eyebrow { margin: 0 0 2px; }.workspace-controls label { color: #bed9e8; font-size: 12px; }.workspace-controls button { padding: 7px 8px; border: 1px solid #2e6c92; border-radius: 4px; background: #123753; color: #dcf2ff; cursor: pointer; }
 .theme-light .local-viewer-workspace { background: #dfeaf2; }.theme-light .workspace-widget { border-color: #a9c6d9; background: #f7fbfe; }.theme-light .widget-header { border-color: #c5d9e6; }.theme-light .local-map-wrap { background: #dfeaf2; }.theme-light .map-legend, .theme-light .map-diagnostics, .theme-light .workspace-controls > div { border-color: rgb(86 120 150 / 38%); background: rgb(255 255 255 / 92%); color: #27435a; }.theme-light .image-widget label, .theme-light .image-widget p, .theme-light .workspace-controls label { color: #365671; }.theme-light .image-widget select { border-color: #8bb0c9; background: #f4f9fc; color: #294962; }
-@media (max-width: 760px) { .local-viewer-workspace { min-height: 720px; --map-ratio: 100% !important; --image-ratio: 50% !important; grid-template-columns: 100% 0; }.local-viewer-workspace:not([data-image-mode="none"]) { grid-template-rows: 58% 21% 21%; }.map-widget { grid-column: 1; grid-row: 1; }.image-widget[data-widget="cameraA"] { grid-column: 1; grid-row: 2; }.image-widget[data-widget="cameraB"] { grid-column: 1; grid-row: 3; }.local-viewer-workspace[data-image-mode^="single"] .image-widget { grid-column: 1; grid-row: 2 / 4; }.workspace-splitter { display: none !important; }.viewer-state .page-muted { max-width: 170px; }.map-legend { gap: 8px; font-size: 11px; }.image-widget select { width: 140px; } }
+/* 窄屏仅切换为纵向工作区；桌面栅格和用户保存的桌面分栏比例均不受影响。 */
+@media (max-width: 760px) {
+  .local-viewer-workspace { min-height: max(700px, calc(100svh - 120px)); --map-ratio: 100% !important; --image-ratio: 50% !important; grid-template-columns: 100% 0; border-radius: 8px; }
+  .local-viewer-workspace:not([data-image-mode="none"]) { grid-template-rows: 62% 19% 19%; }
+  .local-viewer-workspace[data-image-mode="none"] { min-height: max(460px, calc(100svh - 120px)); }
+  .map-widget { grid-column: 1; grid-row: 1; }
+  .image-widget[data-widget="cameraA"] { grid-column: 1; grid-row: 2; }
+  .image-widget[data-widget="cameraB"] { grid-column: 1; grid-row: 3; }
+  .local-viewer-workspace[data-image-mode^="single"] .image-widget { grid-column: 1; grid-row: 2 / 4; }
+  .workspace-splitter { display: none !important; }
+  .map-widget .widget-header { min-height: 0; align-items: flex-start; flex-wrap: wrap; gap: 7px; padding: 9px 10px; }
+  .map-widget .widget-header h2 { font-size: 15px; }
+  .viewer-state { width: 100%; justify-content: space-between; gap: 7px; }
+  .viewer-state .page-muted { flex: 1; max-width: none; min-width: 0; font-size: 11px; }
+  .workspace-settings-button { min-height: 38px; padding: 7px 10px; }
+  .map-legend { top: 9px; left: 9px; gap: 7px; padding: 7px 8px; font-size: 11px; }
+  .map-legend i { width: 14px; }
+  .map-diagnostics { right: 8px; bottom: 8px; max-width: calc(100% - 16px); padding: 6px 8px; font-size: 10px; }
+  .workspace-controls { top: 104px; left: 9px; right: 9px; }
+  .workspace-controls > div { width: min(320px, calc(100vw - 38px)); padding: 11px; }
+  .workspace-controls .eyebrow { font-size: 10px; }
+  .workspace-controls button, .image-widget select { min-height: 38px; }
+  .image-widget .widget-header { min-height: 46px; padding: 7px 10px; }
+  .image-widget select { width: min(220px, 58vw); }
+  .image-widget p { padding: 6px 9px; }
+}
+@media (max-width: 420px) {
+  .local-viewer-workspace { min-height: 680px; }
+  .map-legend { gap: 5px; font-size: 10px; }
+  .map-legend span { gap: 4px; }
+  .viewer-state .page-muted { max-width: 150px; }
+}
+/* 手机竖屏：让首屏优先呈现可操作的地图，而不是重复的导航状态和留白。
+ * 这里的 aside/page-main 都只随本页的 liveObservation.css 加载，桌面及其余页面不变。 */
+@media (max-width: 480px) {
+  .page-main { padding: 18px max(12px, env(safe-area-inset-right)) calc(30px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
+  .page-header { margin-bottom: 16px; }
+  .page-header .eyebrow { margin-bottom: 6px; font-size: 9px; }
+  .page-header h1 { font-size: 24px; }
+  .page-header .sub { margin-top: 6px; font-size: 12px; line-height: 1.45; }
+  .local-viewer-workspace { min-height: max(640px, calc(100svh - 110px)); border-right: 0; border-left: 0; border-radius: 6px; }
+  .local-viewer-workspace:not([data-image-mode="none"]) { grid-template-rows: 70% 15% 15%; }
+  .local-viewer-workspace[data-image-mode="none"] { min-height: max(440px, calc(100svh - 110px)); }
+  .map-widget .widget-header { gap: 6px; padding: 8px 9px; }
+  .viewer-state { gap: 6px; }
+  .viewer-state .badge { padding: 6px; font-size: 9px; }
+  .viewer-state .page-muted { font-size: 10px; }
+  .workspace-settings-button { min-height: 40px; padding: 7px 9px; }
+  .workspace-controls { top: 98px; }
+  .workspace-controls > div { width: 100%; max-width: none; }
+  .map-diagnostics { display: none; }
+  .image-widget .widget-header { min-height: 42px; }
+  .image-widget p { display: none; }
+}
+/* 横屏手机可见高度有限，保留地图为主、缩小不常用的图像预览条。 */
+@media (max-width: 760px) and (max-height: 540px) and (orientation: landscape) {
+  .local-viewer-workspace { min-height: 520px; }
+  .local-viewer-workspace:not([data-image-mode="none"]) { grid-template-rows: 72% 14% 14%; }
+  .map-widget .widget-header { padding-top: 6px; padding-bottom: 6px; }
+}

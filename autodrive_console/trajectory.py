@@ -260,6 +260,7 @@ class TrajectorySession:
                 progress = {
                     **self._last_progress,
                     "state": "等待 /map" if active is None else "等待 map←odom 坐标变换",
+                    "progress_available": self._last_progress.get("progress_available") is True,
                     "percent": round(self._reported_percent, 1),
                     "points": sum(len(item["points"]) for item in self._segments.values()),
                     "tf_errors": self._tf_errors,
@@ -347,6 +348,7 @@ class TrajectorySession:
             progress = {
                 **self._last_progress,
                 "state": "定位数据中断",
+                "progress_available": self._last_progress.get("progress_available") is True,
                 "percent": round(self._reported_percent, 1),
                 "points": sum(len(item["points"]) for item in self._segments.values()),
                 "stalled": True,
@@ -388,7 +390,7 @@ class TrajectorySession:
 
     def _estimate_progress(self, active: ActiveMap | None, x: float, y: float, point_count: int) -> dict[str, Any] | None:
         if not self.route_plan:
-            return {"state": "任务未提供可计算的理想路径", "points": point_count, "position": {"x": x, "y": y}}
+            return {"state": "任务未提供可计算的理想路径", "progress_available": False, "points": point_count, "position": {"x": x, "y": y}}
         if self._route_index >= len(self.route_plan):
             return {"state": "全部线路已完成", "percent": 100.0, "points": point_count, "position": {"x": x, "y": y}}
         route = self.route_plan[self._route_index]
@@ -415,9 +417,9 @@ class TrajectorySession:
         # /map 短暂缺失时只回退匹配当前子任务，绝不按空间距离跳到后续线路。
         distance_to_route, distance, total = _project_route(route["points"], x, y)
         if not active and distance_to_route > 3.0:
-            return {"state": "定位与当前理想路线距离较远，等待路线匹配", "points": point_count, "position": {"x": x, "y": y}, "map_label": route["map_label"]}
+            return {"state": "定位与当前理想路线距离较远，等待路线匹配", "progress_available": False, "points": point_count, "position": {"x": x, "y": y}, "map_label": route["map_label"]}
         if total <= 0:
-            return None
+            return {"state": "当前理想路线长度无效", "progress_available": False, "points": point_count, "position": {"x": x, "y": y}}
         self._route_progress[self._route_index] = max(self._route_progress.get(self._route_index, 0.0), distance)
         at_route_end = (
             hypot(x - float(route["points"][-1]["x"]), y - float(route["points"][-1]["y"])) <= self.ROUTE_END_DISTANCE_M

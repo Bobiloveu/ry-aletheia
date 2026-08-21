@@ -11,6 +11,7 @@ import uuid
 import shutil
 import subprocess
 from datetime import datetime
+from math import isfinite
 from pathlib import Path
 
 from .models import AttemptResult, RunRecord, TestCase, now_iso
@@ -27,6 +28,15 @@ LOGGER = logging.getLogger("ry_aletheia.run")
 # 方案写入启动脚本后，不应立刻触发 Supervisor 重启。给文件系统、挂载层和
 # 读取脚本的守护进程一个确定且足够短的稳定窗口，避免 lightning 读取到旧配置。
 SCENARIO_APPLY_SETTLE_SECONDS = 3.0
+
+
+def _usable_progress_percent(value: object) -> float | None:
+    """Return a bounded display percentage, rejecting missing/NaN snapshots."""
+    try:
+        percent = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(100.0, percent)) if isfinite(percent) else None
 
 
 def _format_report_time(value: object) -> str:
@@ -225,7 +235,9 @@ class RunManager:
                     run.active_attempt = index
                     run.forced_attempt_failure = None
                     attempt_interrupt_event.clear()
-                    run.live_progress = {"visible": True, "attempt": index, "attempt_total": run.requested_count, "state": "正在等待 /map 与 /odom", "percent": 0, "points": 0}
+                    # 0% 与“尚未收到可验证路线投影”不是一回事。后者必须明确
+                    # 标记为不可用，避免多轮切换时网页把未知状态误画成卡住的 0%。
+                    run.live_progress = {"visible": True, "attempt": index, "attempt_total": run.requested_count, "state": "正在等待 /map 与 /odom", "progress_available": False, "percent": 0, "points": 0}
                     trajectory_start_error = ""
                     if run.prepare_trajectory_maps:
                         try:
@@ -238,7 +250,7 @@ class RunManager:
                             trajectory_session = None
                             trajectory_start_error = f"轨迹采集未启动：{exc}"
                             LOGGER.exception("轨迹采集启动失败：run=%s attempt=%s", run.id, index)
-                            run.live_progress = {"visible": True, "attempt": index, "attempt_total": run.requested_count, "state": "轨迹采集不可用，任务仍将执行", "percent": 0, "points": 0, "integrity_warning": trajectory_start_error}
+                            run.live_progress = {"visible": True, "attempt": index, "attempt_total": run.requested_count, "state": "轨迹采集不可用，任务仍将执行", "progress_available": False, "percent": 0, "points": 0, "integrity_warning": trajectory_start_error}
                     # 服务端会在整条任务完成后才返回；该阈值与“服务发现 300 秒”
                     # 完全独立，避免长路径或等电梯任务已完成却被本地误判超时。
                     execution_timeout = getattr(self.settings.load(), "task_execution_timeout_s", 900)
@@ -398,7 +410,32 @@ class RunManager:
     @staticmethod
     def _update_live_progress(run: RunRecord, attempt: int, progress: dict) -> None:
         # 由轨迹采集线程低频更新，仅用于网页展示，不参与任何执行判定。
-        run.live_progress = {"visible": True, "attempt": attempt, "attempt_total": run.requested_count, **progress}
+        # 页面切换会重新加载浏览器内存；因此服务端快照本身也必须保留同一轮
+        # 已确认的最大进度。/map 或 TF 短暂切换期间的“不可计算”不能把
+        # 操作者返回页面后看到的线路进度重置为 0%。
+        # ROS executor 在收尾时可能仍派发最后一个回调。它属于旧轮次，绝不能
+        # 覆盖已经开始的下一轮，否则网页会偶发看到整轮进度一直为 0%。
+        if run.active_attempt != attempt or run.status != "running":
+            return
+        previous = run.live_progress or {}
+        previous_available = previous.get("attempt") == attempt and previous.get("progress_available") is True
+        previous_percent = _usable_progress_percent(previous.get("percent")) if previous_available else None
+        progress_available = progress.get("progress_available") is True
+        incoming_percent = _usable_progress_percent(progress.get("percent")) if progress_available else None
+        merged = {"visible": True, "attempt": attempt, "attempt_total": run.requested_count, **progress}
+        if previous_percent is not None and (incoming_percent is None or incoming_percent < previous_percent):
+            merged["percent"] = round(previous_percent, 1)
+            # 仍保留“等待切图/TF”的文字，但继续展示已确认的总进度而非空条。
+            if not progress_available:
+                merged["progress_available"] = True
+                merged["retained_progress"] = True
+        elif progress_available:
+            merged["progress_available"] = True
+        else:
+            # 轨迹尚未得到 /map→/odom 的可信投影时，保留内部 0 作为数值占位，
+            # 但明确告诉前端不要将它渲染为真实的 0% 路线进度。
+            merged["progress_available"] = False
+        run.live_progress = merged
 
     @staticmethod
     def _update_preflight_nodes(run: RunRecord, states: list[dict]) -> None:
@@ -551,7 +588,7 @@ class RunManager:
         p = run.case.parameters
         target.write_text(f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>运行验证报告 {esc(run.id)}</title>
 <style>body{{margin:0;background:#edf2f7;color:#142235;font:14px Arial,"Microsoft YaHei",sans-serif}}main{{max-width:1280px;margin:auto;padding:34px}}header{{padding:28px 32px;background:#10263f;color:#f5f9ff;border-radius:12px}}header p{{margin:8px 0 0;color:#adc6dc}}h1{{margin:0;font-size:27px}}h2{{margin:30px 0 12px;font-size:19px}}.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:16px}}.metric{{padding:16px;background:#fff;border:1px solid #d8e1ea;border-radius:8px}}.metric small{{display:block;color:#697c90}}.metric b{{display:block;margin-top:7px;font-size:21px}}.ratio{{display:flex;align-items:center;gap:14px;margin-top:16px;padding:14px;background:#fff;border:1px solid #d8e1ea}}.pie{{display:grid;place-items:center;width:88px;height:88px;border-radius:50%;background:conic-gradient(#13795b 0deg {success_percent * 3.6:.2f}deg,#b42338 {success_percent * 3.6:.2f}deg 360deg);position:relative}}.pie:after{{content:'';position:absolute;inset:17px;border-radius:50%;background:#fff}}.pie b{{z-index:1;font-size:14px}}.ratio small{{display:block;margin-top:5px;color:#697c90}}table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid #d8e1ea}}th,td{{padding:11px;border-bottom:1px solid #e2e8ef;text-align:left;vertical-align:top}}th{{background:#edf3f8;color:#4a647c;font-size:12px}}td.passed{{color:#13795b;font-weight:bold}}td.failed{{color:#b42338;font-weight:bold}}td.cancelled{{color:#8a6b2c;font-weight:bold}}.attempt{{margin-top:20px;padding:20px;background:#fff;border:1px solid #d8e1ea;border-radius:8px}}.attempt h3{{margin:0 0 15px}}.attempt h3 span{{margin-left:8px;font-size:11px;color:#4a647c}}figure{{margin:14px 0;padding:12px;border:1px solid #dce5ed;background:#f8fafc}}figcaption{{margin-bottom:10px;color:#47627c;font-weight:bold}}figure svg{{display:block;max-width:100%;height:auto;border:1px solid #aab9c7}}.notice{{padding:12px;background:#fff7e7;color:#885a16}}footer{{margin-top:32px;color:#667b90;font-size:12px}}</style>
-<main><header><div>RY ALETHEIA / AUTONOMOUS TEST REPORT</div><h1>自动驾驶测试运行报告</h1><p>运行 ID：{esc(run.id)} · 用例：{esc(case_display_name)} · 状态：{esc(status_text)}</p></header>
+<main><header><div>RY ALETHEIA / AUTOMATED TEST REPORT</div><h1>自动测试运行报告</h1><p>运行 ID：{esc(run.id)} · 用例：{esc(case_display_name)} · 状态：{esc(status_text)}</p></header>
 <section class="grid"><div class="metric"><small>计划轮次</small><b>{run.requested_count}</b></div><div class="metric"><small>已执行轮次</small><b>{summary['completed']}</b></div><div class="metric"><small>通过 / 失败</small><b>{summary['passed']} / {summary['failed']}</b></div><div class="metric"><small>通过率</small><b>{summary['passRate']}%</b></div></section>
 <section class="ratio"><div class="pie"><b>{summary['passRate']}%</b></div><div><b>已执行轮次成功率构成</b><small>绿色：通过 {summary['passed']} 轮；红色：失败 {summary['failed']} 轮；已取消 {summary['cancelled']} 轮不计入成功率。未执行轮次不计入成功率。</small></div></section>
 <h2>运行信息</h2><p>用例：{esc(case_display_name)} · 任务文件：{esc(run.case.filename)}<br>场景：{esc(run.case.name)} · 社区：{esc(p.community)} · 楼栋：{p.building} · 单元：{p.unit} · 楼层：{p.floor} · 门牌：{p.door}<br>开始：{esc(_format_report_time(run.started_at))} · 结束：{esc(_format_report_time(run.finished_at))} · CSV 伴随文件：{esc(csv_name)}</p>

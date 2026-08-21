@@ -1,0 +1,98 @@
+/* 独立移动端壳层：仅由 /m/ 页面加载，绝不参与桌面页面的样式计算。 */
+@media (max-width: 900px), (pointer: coarse) {
+  html { min-width: 320px; background: #08111f; }
+  body.mobile-console { min-height: 100svh; overflow-x: hidden; background: radial-gradient(ellipse at 50% -20%, #183b62 0, #08111f 48%); }
+  .mobile-console aside {
+    position: fixed !important; z-index: 90; top: 0; bottom: 0; left: 0; display: flex !important;
+    width: min(84vw, 326px) !important; height: 100svh; padding: calc(22px + env(safe-area-inset-top)) 16px calc(18px + env(safe-area-inset-bottom));
+    overflow-y: auto; transform: translateX(-105%); transition: transform .22s ease; box-shadow: 18px 0 44px #000a;
+  }
+  .mobile-console.mobile-nav-open aside { transform: translateX(0); }
+  .mobile-console aside nav { display: grid !important; margin-top: 34px; gap: 4px; }
+  .mobile-console aside nav a { min-height: 48px; margin: 0; padding: 14px; font-size: 14px; }
+  .mobile-console aside .side-status { margin-top: auto; padding-top: 16px; }
+  .mobile-console .mobile-nav-toggle {
+    position: fixed; z-index: 80; top: max(12px, env(safe-area-inset-top)); left: 12px; display: grid; width: 44px; height: 44px;
+    padding: 11px; gap: 5px; border: 1px solid #38617c; border-radius: 9px; background: #0c2235eF; box-shadow: 0 8px 20px #0007;
+  }
+  .mobile-console .mobile-nav-toggle span { display: block; height: 2px; border-radius: 2px; background: #d7edf9; }
+  .mobile-console .mobile-nav-scrim { position: fixed; z-index: 70; inset: 0; display: none; margin: 0; border: 0; border-radius: 0; background: #02081299; box-shadow: none; }
+  .mobile-console.mobile-nav-open .mobile-nav-scrim { display: block; }
+  .mobile-console .mobile-desktop-link { display: block; width: max-content; margin-top: 12px; color: #95bfd9; font: 10px ui-monospace, monospace; text-decoration: none; }
+
+  .mobile-console main, .mobile-console .page-main {
+    width: 100%; max-width: none; min-height: 100svh; margin: 0 !important;
+    padding: calc(70px + env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) calc(28px + env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left)) !important;
+  }
+  .mobile-console header, .mobile-console .page-header { display: block; margin-bottom: 20px; }
+  .mobile-console header h1, .mobile-console .page-header h1 { font-size: clamp(24px, 7vw, 30px); line-height: 1.18; }
+  .mobile-console .sub { font-size: 13px; line-height: 1.6; }
+  .mobile-console .header-meta, .mobile-console .asset-header-actions, .mobile-console .scenario-actions, .mobile-console .observation-actions, .mobile-console .log-header-actions { display: flex; align-items: stretch; flex-wrap: wrap; gap: 9px; margin-top: 16px; text-align: left; }
+  .mobile-console .header-meta > *, .mobile-console .asset-header-actions > *, .mobile-console .scenario-actions > *, .mobile-console .observation-actions > *, .mobile-console .log-header-actions > * { flex: 1 1 145px; }
+
+  .mobile-console .metrics, .mobile-console .grid, .mobile-console .page-grid, .mobile-console .node-grid, .mobile-console .settings-form { grid-template-columns: minmax(0, 1fr) !important; }
+  .mobile-console .metrics { gap: 10px; }.mobile-console .metrics article { padding: 16px; }
+  .mobile-console .grid, .mobile-console .page-grid { gap: 12px; }
+  .mobile-console .page-grid > .panel, .mobile-console .page-grid > .span-5, .mobile-console .page-grid > .span-7 { grid-column: 1 / -1; }
+  .mobile-console .panel { padding: 16px; border-radius: 8px; }
+  .mobile-console .panel-title { align-items: flex-start; flex-wrap: wrap; gap: 11px; margin-bottom: 16px; }
+  .mobile-console .panel-title > :last-child { max-width: 100%; }
+  .mobile-console .page-stat { font-size: 25px; }
+  .mobile-console .fields, .mobile-console .settings-form { gap: 10px; }
+  .mobile-console .fields { grid-template-columns: minmax(0, 1fr); }
+  .mobile-console label { font-size: 11px; }
+  .mobile-console input, .mobile-console select, .mobile-console textarea { min-height: 44px; padding: 10px; font-size: 14px; }
+  .mobile-console button, .mobile-console .compact-action, .mobile-console .page-top-action, .mobile-console .outline-button { min-height: 44px; padding: 10px 12px; font-size: 12px; }
+  .mobile-console .text-button, .mobile-console .compact-action { width: auto; }
+  .mobile-console .route-progress { padding: 13px; }.mobile-console .route-progress-head { align-items: flex-start; }.mobile-console .route-progress-head strong { font-size: 22px; }
+  .mobile-console .route-progress-meta { align-items: flex-start; flex-direction: column; }.mobile-console .route-progress-meta span:last-child { white-space: normal; text-align: left; }
+  .mobile-console .chart { height: 108px; }.mobile-console .table-wrap { margin-right: -3px; }.mobile-console table { min-width: 680px; }
+
+  .mobile-console .asset-row, .mobile-console .report-row, .mobile-console .scenario-profile, .mobile-console .vehicle-model-row { grid-template-columns: minmax(0, 1fr) !important; gap: 10px; }
+  .mobile-console .asset-row, .mobile-console .report-row { padding: 13px; }.mobile-console .case-controls { grid-column: 1 / -1; grid-template-columns: minmax(0, 1fr); }.mobile-console .case-controls button { width: 100%; }
+  .mobile-console .upgrade-actions { align-items: stretch; flex-direction: column; }.mobile-console .upgrade-actions button { width: 100%; }
+  .mobile-console .asset-dropzone, .mobile-console .upgrade-dropzone { min-height: 112px; padding: 14px; }
+  .mobile-console .file-preview { max-height: 320px; font-size: 11px; }.mobile-console .scenario-browser-dialog, .mobile-console .dependency-dialog, .mobile-console .trajectory-dialog { width: calc(100vw - 20px); max-height: calc(100svh - 20px); padding: 16px; }
+  .mobile-console .dialog { width: calc(100vw - 28px); padding: 18px; }.mobile-console .dialog-actions { flex-direction: column-reverse; }.mobile-console .dialog-actions button { width: 100%; }
+
+  .mobile-console .local-viewer-workspace { min-height: max(640px, calc(100svh - 110px)); }
+  .mobile-console .workspace-controls > div { width: min(320px, calc(100vw - 44px)); }
+  .mobile-console .mobile-viewer-fullscreen { min-height: 38px; padding: 7px 9px; white-space: nowrap; }
+  .mobile-console.mobile-viewer-fullscreen-active { overflow: hidden; }
+  .mobile-console.mobile-viewer-fullscreen-active .mobile-nav-toggle,
+  .mobile-console.mobile-viewer-fullscreen-active > aside,
+  .mobile-console.mobile-viewer-fullscreen-active > main > :not(.local-viewer-workspace),
+  .mobile-console.mobile-viewer-fullscreen-active > .page-main > :not(.local-viewer-workspace),
+  .mobile-console.mobile-viewer-fullscreen-active #app > aside,
+  .mobile-console.mobile-viewer-fullscreen-active #app > main > :not(.local-viewer-workspace) { display: none !important; }
+  /* 不是把工作区压缩进全屏，而是让地图 widget 自身成为唯一的全视口图层。 */
+  .mobile-console.mobile-viewer-fullscreen-active .local-viewer-workspace {
+    position: fixed; z-index: 120; inset: 0 !important; display: block; box-sizing: border-box; width: 100dvw; max-width: none; height: 100dvh; min-height: 100dvh;
+    overflow: visible; border: 0; border-radius: 0; background: transparent;
+  }
+  .mobile-console.mobile-viewer-fullscreen-active .local-viewer-workspace .map-widget { position: fixed !important; z-index: 130; inset: 0 !important; display: flex; width: 100dvw !important; max-width: none; height: 100dvh !important; min-height: 100dvh; grid-column: auto; grid-row: auto; border: 0; border-radius: 0; }
+  .mobile-console.mobile-viewer-fullscreen-active .local-viewer-workspace .image-widget,
+  .mobile-console.mobile-viewer-fullscreen-active .local-viewer-workspace .workspace-splitter { display: none !important; }
+  .mobile-console.mobile-viewer-fullscreen-active .map-widget .widget-header,
+  .mobile-console.mobile-viewer-fullscreen-active .workspace-controls { display: none !important; }
+  .mobile-console.mobile-viewer-fullscreen-active .local-map-wrap { min-height: 0; }
+  .mobile-console.mobile-viewer-fullscreen-active .map-legend { top: 8px; left: 8px; }
+  .mobile-console.mobile-viewer-fullscreen-active .map-diagnostics { right: 8px; bottom: 8px; }
+  .mobile-console .mobile-fullscreen-exit { display: none; }
+  .mobile-console.mobile-viewer-fullscreen-active .mobile-fullscreen-exit { position: absolute; z-index: 12; top: max(10px, env(safe-area-inset-top)); right: max(10px, env(safe-area-inset-right)); display: block; width: auto; min-height: 38px; margin: 0; padding: 8px 11px; border: 1px solid #6a9fbd; border-radius: 7px; background: rgb(7 28 43 / 90%); color: #edf9ff; box-shadow: 0 5px 18px rgb(0 0 0 / 32%); }
+}
+
+@media (max-width: 420px) {
+  .mobile-console main, .mobile-console .page-main { padding-right: 11px !important; padding-left: 11px !important; }
+  .mobile-console .panel { padding: 13px; }.mobile-console .eyebrow { font-size: 9px; }
+  .mobile-console .mobile-nav-toggle { left: 10px; }
+}
+
+/* 横屏手机的高度最宝贵：控制条固定为单行，地图占满剩余的动态视口。 */
+@media (max-width: 900px) and (pointer: coarse) and (orientation: landscape) and (max-height: 600px) {
+  .mobile-console.mobile-viewer-fullscreen-active .local-viewer-workspace,
+  .mobile-console.mobile-viewer-fullscreen-active .local-viewer-workspace .map-widget { width: 100dvw !important; height: 100dvh !important; min-height: 100dvh; }
+  .mobile-console.mobile-viewer-fullscreen-active .map-legend { padding: 5px 7px; font-size: 10px; }
+  .mobile-console.mobile-viewer-fullscreen-active .map-diagnostics { display: none; }
+  .mobile-console.mobile-viewer-fullscreen-active .mobile-fullscreen-exit { top: max(7px, env(safe-area-inset-top)); right: max(7px, env(safe-area-inset-right)); min-height: 32px; padding: 6px 8px; font-size: 11px; }
+}
