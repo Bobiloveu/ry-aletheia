@@ -13,7 +13,8 @@ import './liveObservation.css';
 // 接收一次当前栅格；遗漏它会导致 Bridge 已连接但地图永远无法开始加载。
 const LIVE_CLOUD_TOPIC = '/_aletheia/live_points';
 const LIVE_POSE_TOPIC = '/_aletheia/live_pose';
-const TOPICS = new Set(['/map', '/amcl_pose', LIVE_POSE_TOPIC, '/livox/points', LIVE_CLOUD_TOPIC, '/tf', '/tf_static']);
+const DEFAULT_LIVE_CLOUD_SOURCE_TOPIC = '/collision_voxel_layer/points';
+const TOPICS = new Set(['/map', '/amcl_pose', LIVE_POSE_TOPIC, DEFAULT_LIVE_CLOUD_SOURCE_TOPIC, LIVE_CLOUD_TOPIC, '/tf', '/tf_static']);
 // ros-humble-foxglove-bridge 3.x 采用 Foxglove SDK 的握手标识。@foxglove/ws-protocol
 // 仍负责兼容的消息帧编解码，但其旧常量 foxglove.websocket.v1 不能通过 3.x Bridge。
 const FOXGLOVE_BRIDGE_SUBPROTOCOL = 'foxglove.sdk.v1';
@@ -150,7 +151,7 @@ let tfChannel;
 let staticTfChannel;
 let livePoseChannel;
 let cloudChannel;
-let cloudTopic = '/livox/points';
+let cloudTopic = DEFAULT_LIVE_CLOUD_SOURCE_TOPIC;
 let staticTfSubscriptionId;
 let staticTfStopTimer;
 let tfFallbackTimer;
@@ -1495,7 +1496,7 @@ async function main() {
       await new Promise((resolve) => window.setTimeout(resolve, 500)); ready = await request('/api/observation');
     }
     if (!ready.bridge?.online) { setText('connectionState', 'Bridge 未就绪'); setText('connectionDetail', '请在诊断日志中检查 foxglove_bridge 启动记录。'); return; }
-    cloudTopic = ready.bridge?.cloud_topic === LIVE_CLOUD_TOPIC ? LIVE_CLOUD_TOPIC : '/livox/points';
+    cloudTopic = ready.bridge?.cloud_topic === LIVE_CLOUD_TOPIC ? LIVE_CLOUD_TOPIC : DEFAULT_LIVE_CLOUD_SOURCE_TOPIC;
     await refreshActiveMap(ready); connect(ready);
     window.setInterval(() => { reportClientMetrics(); request('/api/observation/heartbeat', { method: 'POST' }).then(refreshActiveMap).catch(() => {}); }, 5000);
     window.setInterval(() => { request('/api/observation/active-map').then(refreshActiveMap).catch(() => {}); }, ACTIVE_MAP_SYNC_MS);

@@ -95,10 +95,11 @@ def test_pose_stream_is_reliable_and_does_not_drop_latest_composed_transform():
 
 def test_cloud_stream_is_event_driven_and_tightly_freshness_bounded():
     source = (ROOT / "live_preprocessor" / "src" / "live_cloud_preprocessor.cpp").read_text(encoding="utf-8")
+    assert 'declare_parameter<std::string>("input_topic", "/collision_voxel_layer/points")' in source
     assert 'declare_parameter<int>("max_input_age_ms", 140)' in source
     assert "publish_latest();" in source
     assert "rate_hz_), [this] { publish_latest(); });" not in source
-    assert "last_standard_input_at_" in source
+    assert "last_primary_input_at_" in source
     assert "latest_input_received_at_" in source
     assert "std::chrono::now()" not in source
     assert "std::chrono::milliseconds(500)" in source

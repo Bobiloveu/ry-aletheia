@@ -25,6 +25,7 @@ LOGGER = logging.getLogger("ry_aletheia.observation")
 # 仍会按明确名称订阅它们，但 RViz 的默认“按话题”列表不会把实现细节展示给操作者。
 INTERNAL_LIVE_CLOUD_TOPIC = "/_aletheia/live_points"
 INTERNAL_LIVE_POSE_TOPIC = "/_aletheia/live_pose"
+DEFAULT_LIVE_CLOUD_SOURCE_TOPIC = "/collision_voxel_layer/points"
 
 
 class ObservationError(RuntimeError):
@@ -79,7 +80,7 @@ class ObservationManager:
                 "bind_address": "0.0.0.0", "port": observation["bridge_port"],
                 "access_mode": "direct",
                 "online": bridge_online, "managed": process_running and self._started_by_console,
-                "cloud_topic": INTERNAL_LIVE_CLOUD_TOPIC if cloud_preprocessor_running else "/livox/points",
+                "cloud_topic": INTERNAL_LIVE_CLOUD_TOPIC if cloud_preprocessor_running else DEFAULT_LIVE_CLOUD_SOURCE_TOPIC,
                 "pose_topic": INTERNAL_LIVE_POSE_TOPIC if pose_preprocessor_running else "",
                 "package_available": package_available, "detail": package_detail,
             },
@@ -242,7 +243,7 @@ class ObservationManager:
         """以独立进程启动点云与位姿流，避免点云转换阻塞车体位姿。"""
         target = self._preprocessor_path
         if target is None or not target.is_file():
-            LOGGER.warning("实时预处理节点不可用，回退订阅 /livox/points 和 TF：%s", target or "未配置")
+            LOGGER.warning("实时预处理节点不可用，回退订阅 %s 和 TF：%s", DEFAULT_LIVE_CLOUD_SOURCE_TOPIC, target or "未配置")
             return
         definitions = {
             "cloud": ["-r", "__node:=ry_aletheia_live_cloud", "-p", "enable_cloud:=true", "-p", "enable_pose:=false", "-p", f"output_topic:={INTERNAL_LIVE_CLOUD_TOPIC}", "-p", "max_points:=3000", "-p", "max_input_age_ms:=140"],

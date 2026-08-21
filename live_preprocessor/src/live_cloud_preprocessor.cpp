@@ -30,7 +30,8 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
       // 不能与控制台主进程共用完全相同的 ROS 节点名，否则 ROS2 会把两个
       // 独立进程视为同名节点并造成参数/服务发现不确定。名称仍明确归属工具。
       : Node("ry_aletheia_live"),
-        input_topic_(declare_parameter<std::string>("input_topic", "/livox/points")),
+        // 默认复用导航正在消费的标准障碍物点云；可通过 input_topic 参数替换。
+        input_topic_(declare_parameter<std::string>("input_topic", "/collision_voxel_layer/points")),
         livox_input_topic_(declare_parameter<std::string>("livox_input_topic", "/livox/lidar")),
         // 下划线命名空间是 ROS 2 的 hidden 约定：这两条仅供 Aletheia 实时
         // 观测使用，不应在 RViz 的常规话题选择器中被当作业务传感器话题展示。
@@ -43,8 +44,8 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
         max_points_(static_cast<int>(std::clamp<int64_t>(declare_parameter<int>("max_points", 5000), 500, 12000))),
         rate_hz_(std::clamp(declare_parameter<double>("rate_hz", 10.0), 1.0, 20.0)),
         pose_rate_hz_(std::clamp(declare_parameter<double>("pose_rate_hz", 60.0), 10.0, 60.0)),
-        // 这是“节点内最新槽”的最大停留时间，不用传感器 header 判断。部分 Livox
-        // 驱动会在当前时刻发布带有数百毫秒旧 stamp 的扫描，header 仍要留给 TF。
+        // 这是“节点内最新槽”的最大停留时间，不用传感器 header 判断。部分传感器
+        // 会在当前时刻发布带有较旧 stamp 的扫描，header 仍要留给 TF。
         max_input_age_ms_(std::clamp(static_cast<int>(declare_parameter<int>("max_input_age_ms", 140)), 50, 5000)),
         // map->odom 的低频边在部分定位栈中会短暂超过一个 120 ms 周期。
         // 250 ms 仍只接受当前位姿，却避免轻量位姿流因一次 TF 抖动断续。
@@ -55,7 +56,7 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
     for (const std::string& frame : {base_frame_, std::string("base_link"), std::string("base_footprint_link")}) {
       if (!frame.empty() && base_frame_set_.insert(frame).second) base_frames_.push_back(frame);
     }
-    // 雷达驱动通常是 best-effort；输入只保留最新一帧，不能在节点内积压。
+    // 传感器点云通常是 best-effort；输入只保留最新一帧，不能在节点内积压。
     auto sensor_input_qos = rclcpp::SensorDataQoS().keep_last(1);
     // Foxglove Bridge 对显式订阅的 PointCloud2 默认请求 reliable。输出也使用
     // reliable + depth=1，既保证 DDS 能匹配，又绝不缓存历史扫描造成显示滞后。
@@ -70,23 +71,22 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
               std::lock_guard<std::mutex> guard(input_mutex_);
               latest_input_ = std::move(message);
               ++input_sequence_;
-              last_standard_input_at_ = std::chrono::steady_clock::now();
-              latest_input_received_at_ = last_standard_input_at_;
+              last_primary_input_at_ = std::chrono::steady_clock::now();
+              latest_input_received_at_ = last_primary_input_at_;
             }
             // 独立点云进程在扫描抵达时立刻处理，避免定时轮询额外等待一帧。
             publish_latest();
           });
-    // 部分小车没有启用 livox_to_pointcloud2，只有原生 CustomMsg 在发布。
+    // 主点云短暂不可用时，部分小车仍可从原生 Livox CustomMsg 回退。
     // 在此处一次性限点转换，避免再增加一个面向自动驾驶的转换节点。
       livox_subscription_ = create_subscription<livox_ros_driver2::msg::CustomMsg>(
         livox_input_topic_, sensor_input_qos, [this](livox_ros_driver2::msg::CustomMsg::ConstSharedPtr message) {
-          // 部分车同时发布 PointCloud2 与同一雷达的原生 CustomMsg。若两者都
-          // 处理，网页会在两组近乎同时的扫描之间跳变；标准流存在时只使用它，
-          // 原生流仅作为转换节点未运行时的自动回退。
+          // 主 PointCloud2 与原生 CustomMsg 不能同时处理，否则网页会在两组
+          // 近乎同时的扫描之间跳变；原生流仅作为主输入缺失时的自动回退。
           {
             std::lock_guard<std::mutex> guard(input_mutex_);
-            if (last_standard_input_at_ != std::chrono::steady_clock::time_point{} &&
-                std::chrono::steady_clock::now() - last_standard_input_at_ < std::chrono::milliseconds(500)) return;
+            if (last_primary_input_at_ != std::chrono::steady_clock::time_point{} &&
+                std::chrono::steady_clock::now() - last_primary_input_at_ < std::chrono::milliseconds(500)) return;
           }
           auto cloud = std::make_shared<sensor_msgs::msg::PointCloud2>();
           cloud->header = message->header;
@@ -107,8 +107,8 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
           cloud->width = cloud->data.size() / cloud->point_step; cloud->row_step = cloud->width * cloud->point_step;
           {
             std::lock_guard<std::mutex> guard(input_mutex_);
-            if (last_standard_input_at_ != std::chrono::steady_clock::time_point{} &&
-                std::chrono::steady_clock::now() - last_standard_input_at_ < std::chrono::milliseconds(500)) return;
+            if (last_primary_input_at_ != std::chrono::steady_clock::time_point{} &&
+                std::chrono::steady_clock::now() - last_primary_input_at_ < std::chrono::milliseconds(500)) return;
             latest_input_ = std::move(cloud);
             ++input_sequence_;
             latest_input_received_at_ = std::chrono::steady_clock::now();
@@ -136,8 +136,8 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
     std::optional<uint32_t> x, y, z, timestamp;
     for (const auto& field : cloud.fields) {
       if (field.count != 1) continue;
-      // Livox PointCloud2 的 timestamp 是每点绝对纳秒时间（float64）。它是
-      // 快速转向时去畸变所需的时间基；不存在时保留整帧兼容投影。
+      // 标准 PointCloud2 若携带每点绝对纳秒 timestamp（float64），可作为快速
+      // 转向时去畸变的时间基；不存在时保留整帧兼容投影。
       if (field.name == "timestamp" && field.datatype == sensor_msgs::msg::PointField::FLOAT64) timestamp = field.offset;
       // 本节点刻意仅接受标准 float32 x/y/z，避免推测自定义字段的编码。
       else if (field.datatype == sensor_msgs::msg::PointField::FLOAT32 && field.name == "x") x = field.offset;
@@ -340,7 +340,7 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
   std::unordered_set<std::string> base_frame_set_;
   std::mutex input_mutex_;
   sensor_msgs::msg::PointCloud2::ConstSharedPtr latest_input_;
-  std::chrono::steady_clock::time_point last_standard_input_at_;
+  std::chrono::steady_clock::time_point last_primary_input_at_;
   std::chrono::steady_clock::time_point latest_input_received_at_;
   uint64_t input_sequence_{0}, published_sequence_{0};
 };

@@ -37,9 +37,9 @@ RY Aletheia 是部署在机器人小车 Ubuntu 主机上的离线自动测试平
 RY Aletheia（普通账户）
   ├─ Python 控制台：计划、任务、Supervisor、轨迹、报告、配置、升级
   ├─ C++ 轻量位姿进程：最新 TF map → base_* → /_aletheia/live_pose（60Hz，ROS 2 hidden）
-  ├─ C++ 轻量点云进程：/livox/points（或 /livox/lidar 回退）→ /_aletheia/live_points（到达即发布，ROS 2 hidden）
+  ├─ C++ 轻量点云进程：/collision_voxel_layer/points（或 /livox/lidar 回退）→ /_aletheia/live_points（到达即发布，ROS 2 hidden）
   └─ Aletheia 私有 Foxglove Bridge（按需运行）
-       ├─ ROS2：/map、/odom、TF、/amcl_pose、/start_execute_tasks、/livox/points
+       ├─ ROS2：/map、/odom、TF、/amcl_pose、/start_execute_tasks、/collision_voxel_layer/points
        ├─ Supervisor：受限 sudo supervisorctl status/start/restart
        └─ 运行数据：tasks、config、reports、maps_cache、updates、logs
 ```
@@ -169,12 +169,12 @@ queued → preparing → running → completed
 
 `live_preprocessor/` 的 `ry_aletheia_live` 仅服务本工具，不改动原自动驾驶节点：
 
-- 数据输入和输出必须明确区分：点云优先读取小车原有的 `/livox/points`（`sensor_msgs/PointCloud2`）；该标准流连续 500ms 未到达时，才回退读取 `/livox/lidar`（`livox_ros_driver2/CustomMsg`）。两条同源扫描不能同时混合，否则网页会在两组扫描之间跳变。位姿不读取单独的定位话题，而是查询小车现有 TF 的 `map → base_footprint`，并兼容 `base_link`、`base_footprint_link`。
+- 数据输入和输出必须明确区分：点云优先读取导航实际使用的 `/collision_voxel_layer/points`（`sensor_msgs/PointCloud2`）；该主流连续 500ms 未到达时，才回退读取 `/livox/lidar`（`livox_ros_driver2/CustomMsg`）。两路不能同时混合，否则网页会在两组近乎同时的扫描之间跳变。位姿不读取单独的定位话题，而是查询小车现有 TF 的 `map → base_footprint`，并兼容 `base_link`、`base_footprint_link`。
 - 网页专用输出为已投影到 `map` 的 `/_aletheia/live_points`（`sensor_msgs/PointCloud2`）和 `/_aletheia/live_pose`（`geometry_msgs/PoseStamped`）。两者位于 ROS 2 hidden 命名空间，默认不在 RViz 的常规话题选择器展示；私有 Foxglove Bridge 显式启用 `include_hidden`，仅供实时页按确定名称订阅。
 - 点云与位姿由两个独立进程运行，避免坐标转换或点云限采样阻塞高频位姿。
-- 只接受标准 `float32 x/y/z`，限制距离、均匀抽样。节点默认上限为 5000 点，工具运行时覆盖为 3000 点；雷达输入为 best-effort、depth=1，输出 `/_aletheia/live_points` 为 reliable、depth=1，以兼容 Foxglove Bridge 可靠订阅且不积压历史扫描。点云在回调抵达时立刻处理发布，不使用周期轮询。
-- Livox 标准点云携带逐点 `timestamp` 时，按 5ms 时间桶查询历史 `map → lidar` TF 后投影；快速原地旋转优先逐点去畸变。若某一时间桶缺少历史覆盖，则降级为扫描 header 时刻的刚体变换，必要时才使用最新 TF；实时页不能因增强去畸变失败而整帧无点云。
-- 点云在节点内最新槽停留超过 140ms 才丢弃；不能把部分 Livox 驱动固有的旧 header 时间戳误判为网络滞后。header 时间仍用于 TF/逐点去畸变，TF 不可用则跳过当前帧。车体位姿使用最新可用 `map → base_*` 变换，避免低频 `map → odom` 的合成时间戳使显示流断续。
+- 只接受标准 `float32 x/y/z`，限制距离、均匀抽样。节点默认上限为 5000 点，工具运行时覆盖为 3000 点；点云输入为 best-effort、depth=1，输出 `/_aletheia/live_points` 为 reliable、depth=1，以兼容 Foxglove Bridge 可靠订阅且不积压历史扫描。点云在回调抵达时立刻处理发布，不使用周期轮询。
+- 标准点云携带逐点 `timestamp` 时，按 5ms 时间桶查询历史 `map → 输入 frame` TF 后投影；快速原地旋转优先逐点去畸变。若某一时间桶缺少历史覆盖，则降级为扫描 header 时刻的刚体变换，必要时才使用最新 TF；实时页不能因增强去畸变失败而整帧无点云。
+- 点云在节点内最新槽停留超过 140ms 才丢弃；不能把传感器或导航管线固有的旧 header 时间戳误判为网络滞后。header 时间仍用于 TF/逐点去畸变，TF 不可用则跳过当前帧。车体位姿使用最新可用 `map → base_*` 变换，避免低频 `map → odom` 的合成时间戳使显示流断续。
 - 不使用 PCL、不改写原 ROS 话题、不写导航参数。
 
 现场排障优先看 `logs/live_preprocessor_cloud.log`、`logs/live_preprocessor_pose.log`、`logs/foxglove_bridge.log` 和工具日志，再检查 `/_aletheia/live_points`、`/_aletheia/live_pose` 的频率与时间戳（使用 `ros2 topic list --include-hidden-topics`）。页面保持打开约 10 秒后，可从 `GET /api/observation` 的 `client_metrics` 读取 `cloud_source_age_ms`、`cloud_packet_rate_hz`、位姿年龄、渲染帧率和长帧计数，以区分激光源、车端预处理、网络和浏览器合成问题。实车参考：原始与预处理点云约 10Hz，前端为降低 Canvas 合成竞争主动消费约 8Hz。
@@ -317,7 +317,7 @@ cmake --build build/live_preprocessor -j2
 | --- | --- |
 | 服务可见却无法调用 | 普通账户的 ROS_DOMAIN_ID、RMW 环境、`/opt/ry/install/setup.bash`、`master_interfaces` 类型支持库。 |
 | 重启节点后立即失败 | 编排是否等待每阶段全部 `RUNNING` 和稳定时间；方案应用后是否留出稳定窗口。 |
-| 无点云或位姿 | 先看 `/api/observation`：Bridge 是否 online、`client_metrics.cloud_packet_rate_hz` 是否非零；再看 `/_aletheia/live_points` 的发布者/订阅者和 QoS。点云输出必须是 reliable，Bridge 必须 `include_hidden:=true`。若 `/livox/points` 与 `/livox/lidar` 都为 0 发布者、但 `DRIVERS:104-livox_lidar` 仍显示 RUNNING，先确认无活动测试、传感器 `192.168.1.21` 网络可达，再受限重启该单项。 |
+| 无点云或位姿 | 先看 `/api/observation`：Bridge 是否 online、`client_metrics.cloud_packet_rate_hz` 是否非零；再看 `/_aletheia/live_points` 的发布者/订阅者和 QoS。点云输出必须是 reliable，Bridge 必须 `include_hidden:=true`。先确认 `/collision_voxel_layer/points` 是否有发布者和非零频率；主流缺失 500ms 后才会尝试 `/livox/lidar` 回退。 |
 | 观测落后实车 | 先读取 `/api/observation` 的 `client_metrics`：位姿年龄低而 `cloud_source_age_ms` 高时优先检查激光源时间戳/频率；再检查预处理日志、Wi-Fi 与浏览器长帧。不要提高队列深度或恢复长点云历史。 |
 | 地图/墙体不对齐 | `/map` origin/resolution、map_server 当前 YAML、缓存 ID、实际墙体文件。 |
 | 轨迹缺段 | map/TF 可用性、切图、坐标变换拒绝原因和报告中的证据提示。 |

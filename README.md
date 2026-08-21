@@ -50,7 +50,7 @@ http://<小车IP>:8087
              │
 RY Aletheia（小车普通账户）
   ├─ Python 控制台与测试编排
-  ├─ C++ 实时预处理：/livox/points 或 /livox/lidar → 网页专用点云/位姿流
+  ├─ C++ 实时预处理：/collision_voxel_layer/points（Livox 原始流回退）→ 网页专用点云/位姿流
   └─ 工具私有 Foxglove Bridge（按需启动）
              │
 小车已有 ROS 2 Humble、定位、地图、导航与传感器节点
