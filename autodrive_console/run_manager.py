@@ -272,6 +272,11 @@ class RunManager:
                             trajectory = trajectory_session.stop()
                             # ROS2 /map 可能发现任务 JSON 未能引用到的真实地图；后续渲染必须使用该实际资产。
                             trajectory_assets = trajectory_session.maps
+                            # route_plan 在本轮会将离线/空地图 ID 绑定为 ROS 实际
+                            # 地图的运行时 asset_id。多轮执行若只带入 maps 而遗漏该
+                            # 绑定，下一轮会拿旧 ID 与新 active map 比较，持续停在
+                            # “等待切图”，进度因而始终无法从 0% 开始投影。
+                            route_plan = [dict(item) for item in trajectory_session.route_plan]
                         except Exception as exc:
                             trajectory_start_error = f"轨迹采集停止失败：{exc}"
                             LOGGER.exception("轨迹采集停止失败：run=%s attempt=%s", run.id, index)

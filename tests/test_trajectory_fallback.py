@@ -239,6 +239,73 @@ class TrajectoryFallbackTests(unittest.TestCase):
         self.assertIn("轨迹采集未启动", run.attempts[0].message)
         self.assertIn("轨迹证据不完整", saved[0]["integrity_warning"])
 
+    def test_runtime_route_map_binding_is_carried_into_the_next_attempt(self):
+        """多轮时，上一轮从 ROS /map 识别出的 asset ID 必须供下一轮继续使用。"""
+        initial_plans = []
+
+        class Asset:
+            def __init__(self, asset_id):
+                self.id = asset_id
+
+            def to_dict(self):
+                return {"id": self.id}
+
+        class Maps:
+            def __init__(self, *_args):
+                pass
+
+            @staticmethod
+            def prepare(_source):
+                return [Asset("offline-map")]
+
+            @staticmethod
+            def route_plan(_source, _assets):
+                return [{"map_id": "offline-map", "map_label": "P1", "name": "去程", "points": [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}]}]
+
+        class RuntimeMapTrajectory:
+            instances = 0
+
+            def __init__(self, assets, route_plan, *_args, **_kwargs):
+                type(self).instances += 1
+                self.number = type(self).instances
+                self.maps = list(assets)
+                self.route_plan = [dict(item) for item in route_plan]
+                initial_plans.append([dict(item) for item in route_plan])
+
+            @staticmethod
+            def start():
+                pass
+
+            def stop(self):
+                if self.number == 1:
+                    self.maps = [Asset("runtime-map")]
+                    self.route_plan[0]["map_id"] = "runtime-map"
+                return {"points": 0, "segments": [], "diagnostics": {}}
+
+        class Settings:
+            @staticmethod
+            def load():
+                return type("Options", (), {"elevator_wait_timeout_s": 180, "task_execution_timeout_s": 900})()
+
+        case = TestCase("case", "case.json", "测试用例", TaskParameters("社区", 1, 1, 1, 1), "unused.json")
+        with tempfile.TemporaryDirectory() as directory:
+            manager = RunManager(Path(directory), _Executor(), Settings())
+            run = RunRecord("run", case, 2, 0, prepare_trajectory_maps=True)
+            manager._runs[run.id] = run
+            manager._cancel_events[run.id] = threading.Event()
+            manager._resume_events[run.id] = threading.Event()
+            manager._attempt_interrupt_events[run.id] = threading.Event()
+            with patch("autodrive_console.run_manager.RobotGateway", _Gateway), \
+                 patch("autodrive_console.run_manager.MapAssetCache", Maps), \
+                 patch("autodrive_console.run_manager.TrajectorySession", RuntimeMapTrajectory), \
+                 patch.object(manager, "_write_trajectory"), \
+                 patch.object(manager, "_write_report"):
+                manager._run(run)
+
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(initial_plans[0][0]["map_id"], "offline-map")
+        self.assertEqual(initial_plans[1][0]["map_id"], "runtime-map")
+
 
 if __name__ == "__main__":
     unittest.main()
