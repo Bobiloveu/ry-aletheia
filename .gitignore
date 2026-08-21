@@ -11,8 +11,6 @@ autodrive_console/web-vue/
 build/
 dist/
 releases/
-deployments/
-deployment/
 .cache/
 *.deb
 *.tar.gz
