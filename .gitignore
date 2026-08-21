@@ -10,8 +10,7 @@ autodrive_console/web-vue/
 # Local build outputs and release artifacts (reproducible from source)
 build/
 dist/
-releases/*
-!releases/README.md
+releases/
 deployments/
 deployment/
 .cache/

@@ -60,7 +60,7 @@ cmake -S "$BUILD_ROOT/live_preprocessor" -B "$BUILD_ROOT/build/live_preprocessor
 cmake --build "$BUILD_ROOT/build/live_preprocessor" --parallel 2
 LIVE_PREPROCESSOR="$BUILD_ROOT/build/live_preprocessor/aletheia_live_cloud"
 [[ -x "$LIVE_PREPROCESSOR" ]] || { echo "实时点云预处理节点构建失败。" >&2; exit 1; }
-ROSIDL_LIBRARY_ARGS=()
+ROSIDL_LIBRARIES=()
 # Python 的 --collect-all 不会稳定收集 ROS2 运行时动态选择的类型支持库。
 # 任务服务和 TF 监听均需要它们；从所有已 source 的 prefix 收集，兼容接口包位于
 # 工作空间 install 或系统 /opt/ros 下的两种部署。
@@ -77,7 +77,7 @@ for package in master_interfaces tf2_msgs; do
     for library_dir in "$prefix/$package/lib" "$prefix/lib"; do
       for library in "$library_dir"/lib"$package"__rosidl_*.so; do
         if [[ -f "$library" ]]; then
-          ROSIDL_LIBRARY_ARGS+=(--add-binary "$library:.")
+          ROSIDL_LIBRARIES+=("$library")
           found=true
         fi
       done
@@ -87,6 +87,13 @@ for package in master_interfaces tf2_msgs; do
     echo "未找到 $package 的 ROS 类型支持库；请确认已加载完整的小车 ROS2 环境。" >&2
     exit 1
   fi
+done
+# 同一类型支持库可能同时出现在工作空间与 AMENT_PREFIX_PATH 中。先去重、排序，
+# 保证生成的 PyInstaller spec 与打包二进制不因 source 顺序不同而产生无意义变更。
+mapfile -t ROSIDL_LIBRARIES < <(printf '%s\n' "${ROSIDL_LIBRARIES[@]}" | LC_ALL=C sort -u)
+ROSIDL_LIBRARY_ARGS=()
+for library in "${ROSIDL_LIBRARIES[@]}"; do
+  ROSIDL_LIBRARY_ARGS+=(--add-binary "$library:.")
 done
 python3 -m PyInstaller \
   --noconfirm \

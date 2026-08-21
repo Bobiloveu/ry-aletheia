@@ -23,6 +23,15 @@ http://<小车IP>:8087
 
 完整安装、移动端使用、页面操作、人工恢复、升级和常见问题请阅读 [USER_GUIDE.md](USER_GUIDE.md)。
 
+## 版本与发布
+
+当前正式版本为 `v1.0.0`。发布包仅通过 [GitHub Releases](https://github.com/Bobiloveu/ry-aletheia/releases) 交付：
+
+- `ry-aletheia_1.0.0.zip`：已安装工具的小车在网页中离线升级使用。
+- `ry-aletheia_1.0.0_amd64.deb`：新小车首次部署或需要完整重装时使用。
+
+仓库中的 `releases/` 是本地构建输出目录，默认不纳入版本控制；不要将 ZIP、DEB、日志、报告或车辆配置提交到源码仓库。
+
 ## 主要能力
 
 - 测试用例导入、校验、别名管理及跨车用例包交付。
@@ -56,7 +65,7 @@ RY Aletheia（小车普通账户）
 | [USER_GUIDE.md](USER_GUIDE.md) | 测试人员、部署人员 | 安装、启动、页面操作、手机端、执行测试、升级、卸载与常见问题。 |
 | [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) | 开发、维护人员 | 架构、数据边界、实时链路、构建、测试与现场排障。 |
 | [live_preprocessor/README.md](live_preprocessor/README.md) | C++ 模块维护人员 | 实时点云/位姿预处理节点的构建与运行参数。 |
-| [releases/README.md](releases/README.md) | 发布与部署人员 | 升级 ZIP、DEB 与完整离线包的交付说明。 |
+| [GitHub Releases](https://github.com/Bobiloveu/ry-aletheia/releases) | 发布与部署人员 | 下载正式 ZIP 与 DEB 发布包。 |
 
 ## 仓库结构
 

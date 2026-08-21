@@ -1,6 +1,6 @@
 # RY Aletheia 工程手册
 
-> 面向维护、开发、构建与现场排障人员。项目入口见 [README.md](README.md)；日常安装、使用和升级请优先阅读 [USER_GUIDE.md](USER_GUIDE.md) 与 `releases/<版本>/README.md`。
+> 面向维护、开发、构建与现场排障人员。项目入口见 [README.md](README.md)；日常安装、使用和升级请优先阅读 [USER_GUIDE.md](USER_GUIDE.md) 与 [GitHub Releases](https://github.com/Bobiloveu/ry-aletheia/releases)。
 
 ## 1. 工程定位与边界
 
@@ -65,7 +65,7 @@ RY Aletheia（普通账户）
 | `frontend/` | Vue/Vite 源码 | 仅开发机 |
 | `live_preprocessor/` | C++ 点云预处理节点源码 | 仅构建时 |
 | `install/`、`cpp_sdk/` | 目标小车导出的离线构建依赖 | 仅开发机 |
-| `releases/` | ZIP、校验文件和可选 DEB 交付物 | 开发机输出 |
+| `releases/` | ZIP、校验文件和可选 DEB 的本地构建输出；正式交付通过 GitHub Releases | 开发机输出，忽略 |
 
 升级必须只替换程序产物，不能覆盖任务、报告、缓存或用户配置。
 
@@ -220,10 +220,10 @@ Vite 预览调用本机 `8087` API；页面导航必须保持在 `5173`，不能
 
 ```bash
 # 生成升级 ZIP
-./make_upgrade.sh 1.18
+./make_upgrade.sh 1.0.0
 
 # 同时生成首次安装 DEB
-./make_upgrade.sh 1.18 --deb
+./make_upgrade.sh 1.0.0 --deb
 ```
 
 生成完整离线首次安装包时，使用锁定版本、匹配目标架构的官方 Bridge DEB：
