@@ -61,57 +61,18 @@ if "$BUILD_DEB"; then
     "$ROOT/build_deb_package.sh" "$VERSION" --output-dir "$RELEASE_DIR"
   fi
 fi
-echo "[$TOTAL_STEPS/$TOTAL_STEPS] 正在生成发布校验与使用说明..."
-sha256sum "$ZIP_FILE" > "$RELEASE_DIR/SHA256SUMS"
-ZIP_MD5="$(md5sum "$ZIP_FILE" | awk '{print $1}')"
-DEB_ROW=""
-DEB_INSTALL_NOTE=""
+echo "[$TOTAL_STEPS/$TOTAL_STEPS] 正在生成发布校验..."
+(
+  cd "$RELEASE_DIR"
+  sha256sum "$(basename "$ZIP_FILE")" > SHA256SUMS
+)
 if "$BUILD_DEB"; then
   DEB_FILE="$RELEASE_DIR/ry-aletheia_${VERSION}_$(dpkg --print-architecture).deb"
-  sha256sum "$DEB_FILE" >> "$RELEASE_DIR/SHA256SUMS"
-  if [[ -n "$FULL_BRIDGE_DEB" ]]; then
-    DEB_ROW="| \`$(basename "$DEB_FILE")\` | 完整首次安装包：内置工具私有 Foxglove Bridge，不依赖系统 Bridge 版本。 |"
-    DEB_INSTALL_NOTE="完整 DEB 首次部署或需要统一私有 Bridge 时，在 DEB 所在目录执行：\`sudo dpkg -i ./$(basename "$DEB_FILE")\`。不要为本工具执行 \`apt autoremove\`。"
-  else
-    DEB_ROW="| \`$(basename "$DEB_FILE")\` | 首次安装或完整重装时使用的 Debian 安装包。 |"
-  fi
+  (
+    cd "$RELEASE_DIR"
+    sha256sum "$(basename "$DEB_FILE")" >> SHA256SUMS
+  )
 fi
-install -m 0644 "$ROOT/USER_GUIDE.md" "$RELEASE_DIR/USER_GUIDE.md"
-install -m 0644 "$ROOT/PROJECT_OVERVIEW.md" "$RELEASE_DIR/PROJECT_OVERVIEW.md"
-if [[ -d "$ROOT/docs/images" ]]; then
-  mkdir -p "$RELEASE_DIR/docs/images"
-  cp -a "$ROOT/docs/images/." "$RELEASE_DIR/docs/images/"
-fi
-cat > "$RELEASE_DIR/README.md" <<EOF
-# RY Aletheia $VERSION 升级包
-
-本目录为本次网页离线升级交付物。
-
-| 文件 | 用途 |
-| --- | --- |
-| \`ry-aletheia_${VERSION}.zip\` | 已安装 Aletheia 后，在网页“运行配置 → 工具离线升级”中上传的升级包。 |
-$DEB_ROW
-| \`USER_GUIDE.md\` | 面向测试人员与部署人员的完整图文使用手册；配图位于 \`docs/images/\`。 |
-| \`PROJECT_OVERVIEW.md\` | 面向开发与维护人员的工程概览。 |
-| \`SHA256SUMS\` | 本目录 ZIP 和 DEB 的 SHA-256 校验值。 |
-
-## 使用方法
-
-1. 电脑连接小车 Wi-Fi，打开 \`http://<小车IP>:8087\`。
-2. 进入“运行配置”。
-3. 在“工具离线升级”拖入 \`ry-aletheia_${VERSION}.zip\`。
-4. 点击“校验并应用升级”，等待工具自动重启后刷新网页。
-
-升级不会覆盖任务文件、用例别名、运行配置、地图缓存或历史报告。
-
-$DEB_INSTALL_NOTE
-
-## 校验信息
-
-- 版本：\`$VERSION\`
-- ZIP 文件 MD5：\`$ZIP_MD5\`
-- SHA-256：见 \`SHA256SUMS\`
-EOF
 echo "完成：$RELEASE_DIR"
 echo "升级包：$ZIP_FILE"
 if "$BUILD_DEB"; then
