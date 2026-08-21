@@ -284,18 +284,18 @@ cmake --build build/live_preprocessor --parallel 2
 # 生成升级 ZIP
 ./make_upgrade.sh 1.0.0
 
-# 同时生成首次安装 DEB
+# 同时生成完整首次安装 DEB：自动使用已校验的缓存 Bridge；缓存缺失时下载锁定版本。
 ./make_upgrade.sh 1.0.0 --deb
 ```
 
-生成完整离线首次安装包时，使用锁定版本、匹配目标架构的官方 Bridge DEB：
+如需指定已下载的、匹配目标架构的官方 Bridge DEB，可显式传入：
 
 ```bash
-# 生成已内置私有 Foxglove Bridge 的完整首次安装包
-./build_offline_foxglove_bundle.sh 1.18 /path/to/ros-humble-foxglove-bridge_<版本>_amd64.deb
+# 仍会生成 ZIP + 内置私有 Bridge 的完整 DEB
+./make_upgrade.sh 1.0.0 --full-deb /path/to/ros-humble-foxglove-bridge_<版本>_amd64.deb
 ```
 
-完整包会在 `releases/<版本>-offline/` 输出，目录仅含完整 `DEB` 与 `SHA256SUMS`；其 `DEB` 控制字段不依赖系统 `ros-humble-foxglove-bridge`，且包内必须包含私有 Bridge 可执行文件。普通网页升级 ZIP 不更新 Bridge。
+`--deb` 与 `--full-deb` 的完整包均输出到 `releases/<版本>/`，其 `DEB` 控制字段不依赖系统 `ros-humble-foxglove-bridge`，且包内必须包含私有 Bridge 可执行文件。`build_offline_foxglove_bundle.sh` 仍保留给只需单独生成完整 DEB 的维护场景，输出到 `releases/<版本>-offline/`。普通网页升级 ZIP 不更新 Bridge。
 
 版本号必须为数字点号格式。脚本会拒绝覆盖已有发布目录，并在 `releases/<版本>/` 输出 ZIP、`SHA256SUMS`、说明和可选 DEB。
 
