@@ -295,7 +295,7 @@ cmake --build build/live_preprocessor --parallel 2
 ./build_offline_foxglove_bundle.sh 1.18 /path/to/ros-humble-foxglove-bridge_<版本>_amd64.deb
 ```
 
-完整包会在 `releases/<版本>-offline/` 输出；其 `DEB` 控制字段不依赖系统 `ros-humble-foxglove-bridge`，且包内必须包含私有 Bridge 可执行文件。普通网页升级 ZIP 不更新 Bridge。
+完整包会在 `releases/<版本>-offline/` 输出，目录仅含完整 `DEB` 与 `SHA256SUMS`；其 `DEB` 控制字段不依赖系统 `ros-humble-foxglove-bridge`，且包内必须包含私有 Bridge 可执行文件。普通网页升级 ZIP 不更新 Bridge。
 
 版本号必须为数字点号格式。脚本会拒绝覆盖已有发布目录，并在 `releases/<版本>/` 输出 ZIP、`SHA256SUMS`、说明和可选 DEB。
 

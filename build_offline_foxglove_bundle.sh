@@ -37,18 +37,16 @@ PACKAGE_ARCH="$(dpkg-deb -f "$BRIDGE_SOURCE" Architecture)"
   exit 1
 }
 
-"$ROOT/build_deb_package.sh" "$VERSION" --with-foxglove-bridge "$BRIDGE_SOURCE"
 ARCH="${RY_ALETHEIA_DEB_ARCH:-$(dpkg --print-architecture)}"
-ALETHEIA_DEB="$ROOT/releases/ry-aletheia_${VERSION}_${ARCH}.deb"
-[[ -f "$ALETHEIA_DEB" ]] || { echo "未生成 Aletheia DEB。" >&2; exit 1; }
-
 OUT="$ROOT/releases/$VERSION-offline"
 if [[ -e "$OUT" ]]; then
   echo "离线安装目录已存在，拒绝覆盖：$OUT" >&2
   exit 1
 fi
 mkdir -p "$OUT"
-install -m 0644 "$ALETHEIA_DEB" "$OUT/$(basename "$ALETHEIA_DEB")"
+"$ROOT/build_deb_package.sh" "$VERSION" --output-dir "$OUT" --with-foxglove-bridge "$BRIDGE_SOURCE"
+ALETHEIA_DEB="$OUT/ry-aletheia_${VERSION}_${ARCH}.deb"
+[[ -f "$ALETHEIA_DEB" ]] || { echo "未生成 Aletheia DEB。" >&2; exit 1; }
 (
   cd "$OUT"
   sha256sum ./*.deb > SHA256SUMS
