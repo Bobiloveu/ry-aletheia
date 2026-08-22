@@ -35,7 +35,9 @@ def _simulate_latest_wins(rate_hz: int, max_age_ms: int, blocked_windows: list[t
 def test_realtime_source_declares_single_slot_freshness_boundaries():
     source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
     assert "const CLOUD_PACKET_MAX_AGE_MS = 100;" in source
-    assert "import { Application, Container, Graphics, Sprite, Texture } from 'pixi.js';" in source
+    assert "import { Application, BufferImageSource, Container, Graphics, Sprite, Texture } from 'pixi.js';" in source
+    assert "async function initializeCameraRenderer(slot)" in source
+    assert "getContext('2d')" not in source
     assert "function renderCloudPoints(packedPoints)" in source
     assert "points.fill(0x8058ff);" in source
     assert "const POSE_PACKET_MAX_AGE_MS = 250;" in source

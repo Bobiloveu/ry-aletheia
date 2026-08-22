@@ -1,7 +1,7 @@
 import { FoxgloveClient } from '@foxglove/ws-protocol';
 import { parse } from '@foxglove/rosmsg';
 import { MessageReader } from '@foxglove/rosmsg2-serialization';
-import { Application, Container, Graphics, Sprite, Texture } from 'pixi.js';
+import { Application, BufferImageSource, Container, Graphics, Sprite, Texture } from 'pixi.js';
 import '../../autodrive_console/web/styles.css';
 import '../../autodrive_console/web/refinement.css';
 import '../../autodrive_console/web/page_views.css';
@@ -40,12 +40,12 @@ const LIVE_POSE_FALLBACK_MS = 450;
 // 数百 Hz 的 TF 批量解析和整图重绘带入浏览器主线程。
 const TF_MIN_INTERVAL_MS = 33;
 // 地图旋转、栅格缩放与高密度点云合成是最重的浏览器操作。数据接收可更快，
-// 但画布只按可见效果需要合成，避免每一帧 TF 都触发整图重绘。
-// 地图世界层只更新 CSS transform，不重新栅格化地图或点云；因此可按显示器
+// 但 PixiJS 只按可见效果提交，避免每一帧 TF 都触发整图重绘。
+// 地图世界层只更新 PixiJS 变换，不重新上传地图纹理或点云几何；因此可按显示器
 // 刷新率合成，避免 30 FPS 相机跟随让车体看似一卡一顿。
 const MAP_RENDER_INTERVAL_MS = 16;
 // 地图源本身约为千级像素；限制到 CSS 像素级可避免在高 DPI 电脑上反复旋转
-// 超采样的大画布，显著降低主视图卡顿，同时不压缩或修改原始地图数据。
+// 超采样的渲染目标，显著降低主视图卡顿，同时不压缩或修改原始地图数据。
 // 图像是观测页中带宽和解码开销最大的内容。实时查看应优先展示最新状态，
 // 而不是让浏览器逐帧补完历史画面；否则延迟会持续累积并明显落后于 RViz2。
 // 压缩图像由浏览器异步解码，直接调度最新帧；原始图像需要逐像素转换，
@@ -103,7 +103,7 @@ let tfUpdatedAt = 0;
 let livePoseUpdatedAt = 0;
 let vehicleUpdatedAt = 0;
 let mapInfo;
-let mapRaster;
+let mapTexture;
 let cloudRasterQueued = false;
 let pendingCloudFrame;
 let cloudRenderTimer;
@@ -247,9 +247,49 @@ function isDepthTransport(channel) { return /\/compressedDepth$/i.test(String(ch
 function isCompressedCamera(channel) { return channel.schemaName === 'sensor_msgs/msg/CompressedImage' && !isDepthTransport(channel); }
 function isCameraCandidate(channel) { return isImageChannel(channel) && !isDepthTransport(channel); }
 function setCameraState(slot, value) { setText(`cameraState${slot}`, value); }
+function createRgbaTexture(pixels, width, height) {
+  return new Texture({ source: new BufferImageSource({ resource: pixels, width, height, format: 'rgba8unorm' }) });
+}
+function layoutCameraSprite(state) {
+  if (!state.sprite || !state.viewport || !state.frameWidth || !state.frameHeight) return;
+  const scale = Math.min(state.viewport.width / state.frameWidth, state.viewport.height / state.frameHeight);
+  state.sprite.width = state.frameWidth * scale; state.sprite.height = state.frameHeight * scale;
+  state.sprite.position.set((state.viewport.width - state.sprite.width) / 2, (state.viewport.height - state.sprite.height) / 2);
+}
+function clearCameraTexture(state) {
+  state.sprite?.destroy(); state.sprite = undefined;
+  state.texture?.destroy(true); state.texture = undefined;
+  state.imageBitmap?.close(); state.imageBitmap = undefined;
+  state.frameWidth = undefined; state.frameHeight = undefined;
+}
+function presentCameraTexture(slot, texture, width, height, imageBitmap) {
+  const state = cameraSlots[slot];
+  if (!state.app) { texture.destroy(true); imageBitmap?.close(); return; }
+  clearCameraTexture(state);
+  state.texture = texture; state.imageBitmap = imageBitmap; state.frameWidth = width; state.frameHeight = height;
+  state.sprite = new Sprite(texture); state.app.stage.addChild(state.sprite);
+  layoutCameraSprite(state); state.app.render();
+}
+async function initializeCameraRenderer(slot) {
+  const state = cameraSlots[slot]; const host = $(`cameraView${slot}`);
+  if (!host || state.initialization) return state.initialization;
+  state.initialization = (async () => {
+    const rect = host.getBoundingClientRect(); const width = Math.max(1, Math.round(rect.width) || 640); const height = Math.max(1, Math.round(rect.height) || 360);
+    const app = new Application();
+    await app.init({ width, height, background: 0x02070d, antialias: false, autoDensity: true, resolution: window.devicePixelRatio || 1 });
+    app.ticker.stop(); app.canvas.classList.add('pixi-camera-canvas'); app.canvas.setAttribute('aria-hidden', 'true');
+    host.replaceChildren(app.canvas); state.app = app; state.viewport = { width, height };
+    const resize = () => {
+      const next = host.getBoundingClientRect(); const nextWidth = Math.max(1, Math.round(next.width)); const nextHeight = Math.max(1, Math.round(next.height));
+      if (state.viewport.width === nextWidth && state.viewport.height === nextHeight) return;
+      state.viewport = { width: nextWidth, height: nextHeight }; app.renderer.resize(nextWidth, nextHeight); layoutCameraSprite(state); app.render();
+    };
+    state.resizeObserver = new ResizeObserver(resize); state.resizeObserver.observe(host); resize();
+  })();
+  return state.initialization;
+}
 function clearCamera(slot) {
-  const canvas = $(`cameraCanvas${slot}`); const context = canvas.getContext('2d');
-  context.fillStyle = '#02070d'; context.fillRect(0, 0, canvas.width, canvas.height);
+  const state = cameraSlots[slot]; clearCameraTexture(state); state.app?.render();
 }
 function refreshCameraOptions() {
   const candidates = [...cameraChannels.values()].sort((left, right) => {
@@ -338,7 +378,7 @@ function setupWorkspace() {
 function setupMapInteraction() {
   const interaction = $('mapInteraction');
   const wrap = interaction.parentElement;
-  const resizeCanvas = () => {
+  const resizeMapViewport = () => {
     const wrap = interaction.parentElement; const rect = wrap?.getBoundingClientRect();
     if (!rect?.width || !rect?.height) return;
     // 交互层和 Pixi 世界层均严格使用 CSS 像素；渲染器自行处理高 DPI，不能
@@ -351,8 +391,8 @@ function setupMapInteraction() {
     mapView.pixelsPerMeter = undefined;
     scheduleMapDraw();
   };
-  new ResizeObserver(resizeCanvas).observe(interaction.parentElement);
-  resizeCanvas();
+  new ResizeObserver(resizeMapViewport).observe(interaction.parentElement);
+  resizeMapViewport();
   let pan;
   const touchPoints = new Map();
   let pinch;
@@ -368,11 +408,11 @@ function setupMapInteraction() {
     if (mapInteractionTimer) window.clearTimeout(mapInteractionTimer);
     mapInteractionTimer = window.setTimeout(() => setInteractionActive(false), 140);
   };
-  const eventCanvasPoint = (event) => {
+  const eventViewportPoint = (event) => {
     const rect = interaction.getBoundingClientRect();
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   };
-  const worldAtCanvasPoint = (target, layout) => {
+  const worldAtViewportPoint = (target, layout) => {
     const dx = target.x - mapViewport.width / 2; const dy = target.y - mapViewport.height / 2;
     const cosine = Math.cos(layout.rotation); const sine = Math.sin(layout.rotation);
     return {
@@ -391,7 +431,7 @@ function setupMapInteraction() {
   const beginPinch = () => {
     if (touchPoints.size !== 2 || !mapInfo) return;
     const layout = currentMapLayout(); const point = midpoint();
-    pinch = { distance: Math.max(1, distanceBetweenTouches()), pixelsPerMeter: layout.pixelsPerMeter, anchor: worldAtCanvasPoint(point, layout) };
+    pinch = { distance: Math.max(1, distanceBetweenTouches()), pixelsPerMeter: layout.pixelsPerMeter, anchor: worldAtViewportPoint(point, layout) };
     pan = undefined; interaction.classList.remove('is-panning');
   };
   const applyPinch = () => {
@@ -419,7 +459,7 @@ function setupMapInteraction() {
     setInteractionActive(true);
     deferInteractionEnd();
     overviewUntilMovement = false;
-    const before = currentMapLayout(); const cursor = eventCanvasPoint(event); const anchor = worldAtCanvasPoint(cursor, before);
+    const before = currentMapLayout(); const cursor = eventViewportPoint(event); const anchor = worldAtViewportPoint(cursor, before);
     // 对鼠标滚轮和触控板使用相同的连续比例，而不是每一条事件只跳一个固定档位。
     // 这使放大/缩小响应立即且不会被浏览器的滚动节流吞掉。
     const factor = Math.exp(Math.max(-0.32, Math.min(0.32, -event.deltaY * 0.0022)));
@@ -458,23 +498,23 @@ function setupMapInteraction() {
     event.preventDefault();
     setInteractionActive(true);
     if (event.pointerType === 'touch') {
-      touchPoints.set(event.pointerId, eventCanvasPoint(event));
+      touchPoints.set(event.pointerId, eventViewportPoint(event));
       interaction.setPointerCapture(event.pointerId);
       if (touchPoints.size === 2) beginPinch();
       else if (touchPoints.size > 2) pinch = undefined;
-      else { pan = { pointerId: event.pointerId, point: eventCanvasPoint(event) }; interaction.classList.add('is-panning'); }
+      else { pan = { pointerId: event.pointerId, point: eventViewportPoint(event) }; interaction.classList.add('is-panning'); }
       return;
     }
-    pan = { pointerId: event.pointerId, point: eventCanvasPoint(event) };
+    pan = { pointerId: event.pointerId, point: eventViewportPoint(event) };
     interaction.setPointerCapture(event.pointerId); interaction.classList.add('is-panning');
   });
   interaction.addEventListener('pointermove', (event) => {
     if (event.pointerType === 'touch' && touchPoints.has(event.pointerId)) {
-      touchPoints.set(event.pointerId, eventCanvasPoint(event));
+      touchPoints.set(event.pointerId, eventViewportPoint(event));
       if (pinch) { event.preventDefault(); applyPinch(); return; }
     }
     if (!pan || event.pointerId !== pan.pointerId || !mapInfo) return;
-    const next = eventCanvasPoint(event); const dx = next.x - pan.point.x; const dy = next.y - pan.point.y;
+    const next = eventViewportPoint(event); const dx = next.x - pan.point.x; const dy = next.y - pan.point.y;
     pan.point = next;
     if (!dx && !dy) return;
     const layout = currentMapLayout(); const cosine = Math.cos(layout.rotation); const sine = Math.sin(layout.rotation);
@@ -505,22 +545,15 @@ function drawRawImage(slot, message) {
   if (!width || !height || !source || !['rgb8', 'bgr8', 'rgba8', 'bgra8', 'mono8'].includes(encoding)) { setCameraState(slot, `暂不支持编码：${encoding || '未知'}`); return; }
   const channels = encoding === 'mono8' ? 1 : (encoding === 'rgb8' || encoding === 'bgr8' ? 3 : 4); const step = Number(message.step) || width * channels;
   if (source.byteLength < step * height) { setCameraState(slot, '图像数据不完整'); return; }
-  const canvas = $(`cameraCanvas${slot}`); const context = canvas.getContext('2d'); const state = cameraSlots[slot];
-  if (!state.scratch || state.scratch.width !== width || state.scratch.height !== height) {
-    state.scratch = document.createElement('canvas'); state.scratch.width = width; state.scratch.height = height;
-    state.imageData = state.scratch.getContext('2d').createImageData(width, height);
-  }
-  const image = state.imageData;
+  const pixels = new Uint8Array(width * height * 4);
   for (let row = 0; row < height; row += 1) for (let column = 0; column < width; column += 1) {
     const from = row * step + column * channels; const to = (row * width + column) * 4;
-    if (encoding === 'mono8') image.data[to] = image.data[to + 1] = image.data[to + 2] = source[from];
-    else if (encoding === 'bgr8' || encoding === 'bgra8') { image.data[to] = source[from + 2]; image.data[to + 1] = source[from + 1]; image.data[to + 2] = source[from]; }
-    else { image.data[to] = source[from]; image.data[to + 1] = source[from + 1]; image.data[to + 2] = source[from + 2]; }
-    image.data[to + 3] = channels === 4 ? source[from + 3] : 255;
+    if (encoding === 'mono8') pixels[to] = pixels[to + 1] = pixels[to + 2] = source[from];
+    else if (encoding === 'bgr8' || encoding === 'bgra8') { pixels[to] = source[from + 2]; pixels[to + 1] = source[from + 1]; pixels[to + 2] = source[from]; }
+    else { pixels[to] = source[from]; pixels[to + 1] = source[from + 1]; pixels[to + 2] = source[from]; }
+    pixels[to + 3] = channels === 4 ? source[from + 3] : 255;
   }
-  const scale = Math.min(canvas.width / width, canvas.height / height); const drawWidth = width * scale; const drawHeight = height * scale;
-  state.scratch.getContext('2d').putImageData(image, 0, 0);
-  context.fillStyle = '#02070d'; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(state.scratch, (canvas.width - drawWidth) / 2, (canvas.height - drawHeight) / 2, drawWidth, drawHeight);
+  presentCameraTexture(slot, createRgbaTexture(pixels, width, height), width, height);
   setCameraState(slot, `${width} × ${height} · ${encoding}`);
 }
 async function drawCompressedImage(slot, message, sequence) {
@@ -531,9 +564,8 @@ async function drawCompressedImage(slot, message, sequence) {
     // 解码期间如果已有更新帧到达，旧帧直接丢弃。此前旧帧仍会绘制，造成
     // 画面看起来稳定落后于 RViz2；这里确保浏览器只展示最新可解码画面。
     if (state.latestSequence !== sequence) { bitmap.close(); return; }
-    const canvas = $(`cameraCanvas${slot}`); const context = canvas.getContext('2d'); const width = bitmap.width; const height = bitmap.height;
-    const scale = Math.min(canvas.width / width, canvas.height / height); const drawWidth = width * scale; const drawHeight = height * scale;
-    context.fillStyle = '#02070d'; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(bitmap, (canvas.width - drawWidth) / 2, (canvas.height - drawHeight) / 2, drawWidth, drawHeight); bitmap.close();
+    const width = bitmap.width; const height = bitmap.height;
+    presentCameraTexture(slot, Texture.from(bitmap), width, height, bitmap);
     setCameraState(slot, `${message.format || 'compressed'} · ${width} × ${height}`);
   } catch (_) { setCameraState(slot, '压缩图像解码失败'); }
 }
@@ -764,7 +796,7 @@ function currentMapLayout() {
   const width = mapInfo.width * ratio; const height = mapInfo.height * ratio;
   return {
     ratio, width, height, pixelsPerMeter: mapView.pixelsPerMeter, center: mapView.center, vehicle,
-    canvasWidth: mapViewport.width, canvasHeight: mapViewport.height,
+    viewportWidth: mapViewport.width, viewportHeight: mapViewport.height,
     // 地图必须稳定保持其原始 map 坐标朝向。定位航向的零点不一定与地图北向
     // 完全一致，若在进入页面时旋转地图，会让静止小车也看到整张地图倾斜。
     rotation: 0,
@@ -800,7 +832,7 @@ function stopRenderScheduling() {
   vehicleAnimationFrame = undefined;
 }
 function drawMap() {
-  if (!mapInfo || !mapRaster || !pixiReady) return;
+  if (!mapInfo || !mapTexture || !pixiReady) return;
   // 地图纹理、虚拟墙和点云均由 PixiJS 的同一世界容器渲染。此处只更新
   // GPU 相机矩阵，不重新上传静态地图纹理或重建点云几何。
   const layout = currentMapLayout();
@@ -813,15 +845,14 @@ function drawMap() {
 }
 
 function renderStaticWorld() {
-  if (!mapInfo || !mapRaster || !pixiReady) return;
+  if (!mapInfo || !mapTexture || !pixiReady) return;
   pixiMapSprite?.destroy();
-  pixiMapTexture?.destroy(false);
-  pixiMapTexture = Texture.from(mapRaster);
+  pixiMapLayer.removeChildren();
+  pixiMapTexture = mapTexture;
   pixiMapTexture.source.scaleMode = 'nearest';
   pixiMapSprite = new Sprite(pixiMapTexture);
   pixiMapSprite.width = mapInfo.width;
   pixiMapSprite.height = mapInfo.height;
-  pixiMapLayer.removeChildren();
   pixiMapLayer.addChild(pixiMapSprite);
   pixiWallLayer.removeChildren().forEach((child) => child.destroy());
   const walls = new Graphics();
@@ -863,7 +894,7 @@ function syncVehicleLayer(vehicle, layout) {
   const nativeY = mapInfo.height - (vehicle.position.y - mapInfo.origin.y) / mapInfo.resolution;
   const baseX = layout.left + nativeX * layout.ratio;
   const baseY = layout.top + nativeY * layout.ratio;
-  const centerX = layout.canvasWidth / 2; const centerY = layout.canvasHeight / 2;
+  const centerX = layout.viewportWidth / 2; const centerY = layout.viewportHeight / 2;
   const cosine = Math.cos(layout.rotation); const sine = Math.sin(layout.rotation);
   const x = centerX + cosine * (baseX - centerX) - sine * (baseY - centerY);
   const y = centerY + sine * (baseX - centerX) + cosine * (baseY - centerY);
@@ -1020,7 +1051,7 @@ function flushLatestPosePacket() {
 }
 function updateDiagnostics(force = false) {
   const now = performance.now();
-  // 诊断文字不需要随 TF 的十几 Hz 刷新；频繁修改 DOM 会与 Canvas 绘制争用
+  // 诊断文字不需要随 TF 的十几 Hz 刷新；频繁修改 DOM 会与 PixiJS 渲染争用
   // 主线程，反而造成地图“跟不上”。重要状态可传 force 立即展示。
   if (!force && now - lastDiagnosticsAt < 500) return;
   lastDiagnosticsAt = now;
@@ -1170,7 +1201,7 @@ function updateMap(message) {
   const signature = mapSignature(info, message.data);
   const changed = signature !== mapFingerprint;
   mapFingerprint = signature;
-  if (!changed && mapRaster) { $('mapEmpty').hidden = true; return; }
+  if (!changed && mapTexture) { $('mapEmpty').hidden = true; return; }
   // 切图时旧图坐标系的扫描绝不能投影到新图上；等待下一帧最新点云即可。
   invalidateMapScopedCloud();
   mapInfo = { width: info.width, height: info.height, resolution: info.resolution, origin: info.origin.position, frameId: normalizeFrame(message.header?.frame_id) || 'map' };
@@ -1179,14 +1210,13 @@ function updateMap(message) {
   resetLiveWallRetry();
   virtualWalls = []; wallStatus = '正在匹配当前地图的虚拟墙';
   resolveLiveWalls(mapInfo, signature);
-  mapRaster = document.createElement('canvas'); mapRaster.width = info.width; mapRaster.height = info.height;
-  const imageContext = mapRaster.getContext('2d'); const pixels = imageContext.createImageData(info.width, info.height);
+  const pixels = new Uint8Array(info.width * info.height * 4);
   for (let row = 0; row < info.height; row += 1) for (let col = 0; col < info.width; col += 1) {
     const occupancy = message.data[(info.height - 1 - row) * info.width + col];
     const color = occupancy < 0 ? 174 : occupancy >= 65 ? 36 : 245;
-    const index = (row * info.width + col) * 4; pixels.data[index] = color; pixels.data[index + 1] = color; pixels.data[index + 2] = color; pixels.data[index + 3] = 255;
+    const index = (row * info.width + col) * 4; pixels[index] = color; pixels[index + 1] = color; pixels[index + 2] = color; pixels[index + 3] = 255;
   }
-  imageContext.putImageData(pixels, 0, 0); $('mapEmpty').hidden = true; renderStaticWorld(); scheduleCloudRasterBuild(); updateDiagnostics(); scheduleMapDraw();
+  mapTexture?.destroy(true); mapTexture = createRgbaTexture(pixels, info.width, info.height); $('mapEmpty').hidden = true; renderStaticWorld(); scheduleCloudRasterBuild(); updateDiagnostics(); scheduleMapDraw();
   activateVisualizationStreams();
 }
 
@@ -1357,7 +1387,7 @@ function loadCachedMap(mapId, metadata) {
       width: Number(metadata.width), height: Number(metadata.height), resolution: Number(metadata.resolution),
       origin: { x: Number(metadata.origin[0]) || 0, y: Number(metadata.origin[1]) || 0 }, frameId: normalizeFrame(metadata.frame_id) || 'map',
     };
-    mapFingerprint = `cache:${mapId}`; mapRaster = image; $('mapEmpty').hidden = true;
+    mapTexture?.destroy(true); mapTexture = Texture.from(image); mapFingerprint = `cache:${mapId}`; $('mapEmpty').hidden = true;
     // 进入观测页且车辆尚未提供定位时，优先展示完整地图；运行中切图则延续随车视角。
     if (!vehiclePoseInMap()?.position) {
       overviewUntilMovement = true; overviewPoseAnchor = undefined; mapView.pixelsPerMeter = undefined;
@@ -1488,7 +1518,7 @@ function connect(payload) {
   connectPoseLane(url);
 }
 async function main() {
-  initializeTheme(); setupCameraSelectors(); setupWorkspace(); setupMapInteraction(); await initializePixiRenderer();
+  initializeTheme(); setupCameraSelectors(); setupWorkspace(); setupMapInteraction(); await initializePixiRenderer(); await Promise.all(['A', 'B'].map(initializeCameraRenderer));
   try {
     const [settings, upgrade] = await Promise.all([request('/api/settings'), request('/api/system/upgrade')]);
     setText('consoleVersion', upgrade.current_version ? `v${upgrade.current_version}` : '开发版');

@@ -41,17 +41,18 @@ http://<小车IP>:8087
 | 实时二维地图 | Canvas 静态地图、点云 Canvas/Worker 合成 | PixiJS 场景树：地图纹理、虚拟墙与最新点云独立图层 |
 | 地图交互与车体 | CSS 视图变换、DOM 车体层 | PixiJS 世界容器变换、保留 DOM 车体层 |
 | 点云时效策略 | 单槽 latest-wins、限频合成 | 保持相同单槽 latest-wins、限频与过期帧丢弃策略 |
-| 相机预览、ROS/Bridge/API | 既有实现 | 保持不变；相机预览仍使用独立 Canvas |
+| 相机预览 | 原生 Canvas 2D 绘制 | PixiJS 纹理与精灵渲染；保留原始/压缩图像解码及最新帧优先策略 |
+| ROS/Bridge/API | 既有实现 | 保持不变 |
 | 开发工具链 | 手工管理 Python、Node 与构建工具 | 根目录 `pixi.toml`/`pixi.lock` 锁定 Python 3.10、Node 20、CMake、编译器、PyInstaller 与 pytest |
 
-`v2.0` 仅重构浏览器侧实时地图渲染引擎，不改变任务下发、Supervisor 编排、ROS2 话题、Foxglove Bridge、后端 API 或机器人控制边界。详细设计和环境边界见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)。
+`v2.0` 仅重构浏览器侧实时可视化渲染引擎：地图、点云和相机预览均改用 PixiJS；不改变任务下发、Supervisor 编排、ROS2 话题、Foxglove Bridge、后端 API 或机器人控制边界。详细设计和环境边界见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)。
 
 ## 主要能力
 
 - 测试用例导入、校验、别名管理及跨车用例包交付。
 - 多轮串行测试、场景前置参数受控替换、Supervisor 依赖编排与人工恢复。
 - 多地图轨迹、理想路径与虚拟墙证据，以及 HTML/CSV 离线报告。
-- 低延迟实时二维观测：PixiJS 渲染地图、虚拟墙与点云，DOM 覆盖车体，并按需展示图像。
+- 低延迟实时观测：PixiJS 渲染地图、虚拟墙、点云与相机图像，DOM 覆盖车体，并按需订阅图像。
 - PC 桌面布局与独立移动端界面；手机实时观测支持横竖屏全屏地图。
 - 完整离线 DEB 可内置工具私有 Foxglove Bridge，不改写系统已有 Bridge 或 ROS 环境。
 
