@@ -35,9 +35,7 @@ def _simulate_latest_wins(rate_hz: int, max_age_ms: int, blocked_windows: list[t
 def test_realtime_source_declares_single_slot_freshness_boundaries():
     source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
     assert "const CLOUD_PACKET_MAX_AGE_MS = 100;" in source
-    assert "import { Application, Container, Graphics, Sprite, Texture } from 'pixi.js';" in source
-    assert "function renderCloudPoints(packedPoints)" in source
-    assert "points.fill(0x8058ff);" in source
+    assert "context.fillStyle = 'rgb(128, 88, 255)';" in source
     assert "const POSE_PACKET_MAX_AGE_MS = 250;" in source
     assert "const LIVE_POSE_FALLBACK_MS = 450;" in source
     assert "function armTfFallback()" in source
@@ -138,10 +136,11 @@ def test_virtual_wall_match_retries_only_after_a_transient_miss():
 
 def test_map_transition_invalidates_async_cloud_frames():
     source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
+    worker = (ROOT / "frontend" / "src" / "liveCloudWorker.js").read_text(encoding="utf-8")
     assert "function invalidateMapScopedCloud()" in source
     assert "pendingCloudPacket = undefined; pendingCloudFrame = undefined;" in source
     assert "generation: mapGeneration" in source
-    assert "if (frame.generation === mapGeneration) renderCloudPoints(frame.points);" in source
+    assert "data.generation !== map.generation" in worker
 
 
 def test_preprocessed_map_cloud_avoids_per_point_object_churn():
@@ -156,7 +155,7 @@ def test_cloud_composition_is_latest_wins_and_paced_below_vehicle_rendering():
     assert "const CLOUD_COMPOSITE_MIN_INTERVAL_MS = 125;" in source
     assert "pendingCloudFrame = frame;" in source
     assert "const delay = CLOUD_COMPOSITE_MIN_INTERVAL_MS" in source
-    assert "lastCloudRenderAt = performance.now();" in source
+    assert "lastCloudWorkerSubmitAt = performance.now();" in source
 
 
 def test_pause_does_not_create_historical_cloud_backlog():

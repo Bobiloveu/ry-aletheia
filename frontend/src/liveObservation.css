@@ -17,8 +17,10 @@
 /* 外层 .local-map-wrap 才是唯一的视口裁切边界。world-stage 会随车体旋转，
  * 若它也 overflow:hidden，会在旋转/缩放后把仍应可见的地图角落二次裁掉。 */
 .world-stage { position: absolute; inset: 0; overflow: visible; pointer-events: none; transform-origin:50% 50%; will-change:transform; transform:translateZ(0); }
-.map-world { position:absolute; inset:0; z-index:1; contain:layout paint style; }
-.map-world .pixi-map-canvas { display:block; width:100%; height:100%; image-rendering:pixelated; }
+.map-world { position:absolute; top:0; left:0; transform-origin:0 0; will-change:transform; transform:translateZ(0); contain:layout paint style; }
+.map-world canvas { position:absolute; inset:0; display:block; image-rendering:pixelated; }
+#mapWorld { z-index:1; }.map-world #cloudCanvas { background:transparent; }
+#cloudWorld { z-index:2; }
 #vehicleLayer { position:absolute; top:0; left:0; z-index:3; pointer-events:none; box-sizing:border-box; border:2px solid #087e99; border-radius:16%; background:rgb(33 199 215 / 50%); box-shadow:0 0 0 7px rgb(18 159 180 / 14%); transform-origin:center; will-change:transform; contain:layout paint; backface-visibility:hidden; }
 #vehicleLayer i { position:absolute; top:0; left:18%; right:18%; border-top:2px solid #fff; }
 .map-interaction-layer { position:absolute; inset:0; z-index:4; display:block; width:100%; height:100%; background:transparent; cursor:grab; touch-action:none; user-select:none; }

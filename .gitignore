@@ -2,7 +2,6 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-.pixi/
 frontend/node_modules/
 frontend/.pytest_cache/
 tools/pyinstaller/
