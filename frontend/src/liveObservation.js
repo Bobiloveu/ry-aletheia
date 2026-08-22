@@ -1,6 +1,7 @@
 import { FoxgloveClient } from '@foxglove/ws-protocol';
 import { parse } from '@foxglove/rosmsg';
 import { MessageReader } from '@foxglove/rosmsg2-serialization';
+import { Application, Container, Graphics, Sprite, Texture } from 'pixi.js';
 import '../../autodrive_console/web/styles.css';
 import '../../autodrive_console/web/refinement.css';
 import '../../autodrive_console/web/page_views.css';
@@ -29,7 +30,7 @@ const RAW_CLOUD_MIN_INTERVAL_MS = 250;
 // 按顺序补绘导致画面落后实车。两个队列均为单槽 latest-wins。
 const CLOUD_PACKET_MAX_AGE_MS = 100;
 // 点云保持 latest-wins，但不必与激光每一帧等速合成。8 Hz 已足够观察环境
-// 结构，且显著降低低功耗设备上 OffscreenCanvas 提交和车体 CSS 合成的争用。
+// 结构，并避免频繁更新点云几何抢占车体 CSS 合成。
 const CLOUD_COMPOSITE_MIN_INTERVAL_MS = 125;
 // 位姿包远小于点云，但在浏览器刚完成一次地图合成时可能恰好错过 120 ms
 // 窗口。保留 250 ms 仍是当前画面，不会形成历史回放，却能避免车体偶发断流。
@@ -104,15 +105,20 @@ let vehicleUpdatedAt = 0;
 let mapInfo;
 let mapRaster;
 let cloudRasterQueued = false;
-let cloudWorker;
-let cloudWorkerReady = false;
-let cloudWorkerBusy = false;
 let pendingCloudFrame;
-let cloudWorkerSubmitTimer;
-let lastCloudWorkerSubmitAt = 0;
-let cloudWorkerFailed = false;
-let cloudWorkerOwnsCanvas = false;
+let cloudRenderTimer;
+let lastCloudRenderAt = 0;
 let mapGeneration = 0;
+let pixiApp;
+let pixiWorld;
+let pixiMapLayer;
+let pixiWallLayer;
+let pixiCloudLayer;
+let pixiMapSprite;
+let pixiMapTexture;
+let pixiReady = false;
+let pixiInitialization;
+const mapViewport = { width: 1, height: 1 };
 let pendingCloudPacket;
 let cloudPacketQueued = false;
 let pendingPosePacket;
@@ -330,21 +336,22 @@ function setupWorkspace() {
   $('resetWorkspace').addEventListener('click', () => { workspaceLayout = structuredClone(DEFAULT_LAYOUT); applyWorkspaceLayout(); for (const slot of ['A', 'B']) subscribeCamera(slot); activateVisualizationStreams(); saveWorkspaceLayout(); });
 }
 function setupMapInteraction() {
-  const canvas = $('mapCanvas');
-  const wrap = canvas.parentElement;
+  const interaction = $('mapInteraction');
+  const wrap = interaction.parentElement;
   const resizeCanvas = () => {
-    const wrap = canvas.parentElement; const rect = wrap?.getBoundingClientRect();
+    const wrap = interaction.parentElement; const rect = wrap?.getBoundingClientRect();
     if (!rect?.width || !rect?.height) return;
-    // 交互 Canvas 不承担绘制，必须严格使用 CSS 像素；世界层也是 CSS 坐标。
-    // 若这里混入 devicePixelRatio，滚轮锚点会与地图/车体层落在不同坐标系。
+    // 交互层和 Pixi 世界层均严格使用 CSS 像素；渲染器自行处理高 DPI，不能
+    // 把 devicePixelRatio 混入视图坐标，否则滚轮锚点会与车体层错位。
     const width = Math.max(1, Math.round(rect.width)); const height = Math.max(1, Math.round(rect.height));
-    if (canvas.width === width && canvas.height === height) return;
-    canvas.width = width; canvas.height = height;
-    // 像素坐标系变化后让布局根据当前容器重算，避免窗口大小变化造成模糊或跳变。
+    if (mapViewport.width === width && mapViewport.height === height) return;
+    mapViewport.width = width; mapViewport.height = height;
+    pixiApp?.renderer.resize(width, height);
+    // 坐标系变化后让布局根据当前容器重算，避免窗口大小变化造成模糊或跳变。
     mapView.pixelsPerMeter = undefined;
     scheduleMapDraw();
   };
-  new ResizeObserver(resizeCanvas).observe(canvas.parentElement);
+  new ResizeObserver(resizeCanvas).observe(interaction.parentElement);
   resizeCanvas();
   let pan;
   const touchPoints = new Map();
@@ -362,11 +369,11 @@ function setupMapInteraction() {
     mapInteractionTimer = window.setTimeout(() => setInteractionActive(false), 140);
   };
   const eventCanvasPoint = (event) => {
-    const rect = canvas.getBoundingClientRect();
-    return { x: (event.clientX - rect.left) * canvas.width / rect.width, y: (event.clientY - rect.top) * canvas.height / rect.height };
+    const rect = interaction.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   };
   const worldAtCanvasPoint = (target, layout) => {
-    const dx = target.x - canvas.width / 2; const dy = target.y - canvas.height / 2;
+    const dx = target.x - mapViewport.width / 2; const dy = target.y - mapViewport.height / 2;
     const cosine = Math.cos(layout.rotation); const sine = Math.sin(layout.rotation);
     return {
       x: layout.center.x + (cosine * dx + sine * dy) / layout.pixelsPerMeter,
@@ -385,13 +392,13 @@ function setupMapInteraction() {
     if (touchPoints.size !== 2 || !mapInfo) return;
     const layout = currentMapLayout(); const point = midpoint();
     pinch = { distance: Math.max(1, distanceBetweenTouches()), pixelsPerMeter: layout.pixelsPerMeter, anchor: worldAtCanvasPoint(point, layout) };
-    pan = undefined; canvas.classList.remove('is-panning');
+    pan = undefined; interaction.classList.remove('is-panning');
   };
   const applyPinch = () => {
     if (!pinch || touchPoints.size !== 2 || !mapInfo) return;
     const point = midpoint(); const factor = distanceBetweenTouches() / pinch.distance;
     mapView.pixelsPerMeter = Math.max(MIN_PIXELS_PER_METER, Math.min(MAX_PIXELS_PER_METER, pinch.pixelsPerMeter * factor));
-    const before = currentMapLayout(); const dx = point.x - canvas.width / 2; const dy = point.y - canvas.height / 2;
+    const before = currentMapLayout(); const dx = point.x - mapViewport.width / 2; const dy = point.y - mapViewport.height / 2;
     const cosine = Math.cos(before.rotation); const sine = Math.sin(before.rotation);
     const desiredCenter = {
       x: pinch.anchor.x - (cosine * dx + sine * dy) / mapView.pixelsPerMeter,
@@ -416,9 +423,9 @@ function setupMapInteraction() {
     // 对鼠标滚轮和触控板使用相同的连续比例，而不是每一条事件只跳一个固定档位。
     // 这使放大/缩小响应立即且不会被浏览器的滚动节流吞掉。
     const factor = Math.exp(Math.max(-0.32, Math.min(0.32, -event.deltaY * 0.0022)));
-    mapView.pixelsPerMeter = Math.max(MIN_PIXELS_PER_METER, Math.min(MAX_PIXELS_PER_METER, (mapView.pixelsPerMeter || canvas.width / DEFAULT_VIEW_METERS) * factor));
+    mapView.pixelsPerMeter = Math.max(MIN_PIXELS_PER_METER, Math.min(MAX_PIXELS_PER_METER, (mapView.pixelsPerMeter || mapViewport.width / DEFAULT_VIEW_METERS) * factor));
     // 光标下的世界坐标在缩放前后不变；保存相对车辆偏移后，车辆仍保持连续跟随。
-    const dx = cursor.x - canvas.width / 2; const dy = cursor.y - canvas.height / 2;
+    const dx = cursor.x - mapViewport.width / 2; const dy = cursor.y - mapViewport.height / 2;
     const cosine = Math.cos(before.rotation); const sine = Math.sin(before.rotation);
     const desiredCenter = {
       x: anchor.x - (cosine * dx + sine * dy) / mapView.pixelsPerMeter,
@@ -433,7 +440,7 @@ function setupMapInteraction() {
   };
   // 监听整个地图容器，避免覆盖图层或图例改变后吞掉滚轮事件。
   wrap.addEventListener('wheel', onWheel, { passive: false });
-  canvas.addEventListener('dblclick', () => {
+  interaction.addEventListener('dblclick', () => {
     overviewUntilMovement = false;
     mapView.followVehicle = true; mapView.followOffset = { x: 0, y: 0 };
     const vehicle = vehiclePoseInMap();
@@ -442,26 +449,26 @@ function setupMapInteraction() {
   });
   const finishPan = (event) => {
     if (!pan || (event && event.pointerId !== pan.pointerId)) return;
-    if (canvas.hasPointerCapture(pan.pointerId)) canvas.releasePointerCapture(pan.pointerId);
-    pan = undefined; canvas.classList.remove('is-panning');
+    if (interaction.hasPointerCapture(pan.pointerId)) interaction.releasePointerCapture(pan.pointerId);
+    pan = undefined; interaction.classList.remove('is-panning');
   };
-  canvas.addEventListener('pointerdown', (event) => {
+  interaction.addEventListener('pointerdown', (event) => {
     // 同时支持左键和中键拖拽；中键仍保留，左键避免操作者误以为地图不能拖动。
     if ((event.button !== 0 && event.button !== 1) || !mapInfo) return;
     event.preventDefault();
     setInteractionActive(true);
     if (event.pointerType === 'touch') {
       touchPoints.set(event.pointerId, eventCanvasPoint(event));
-      canvas.setPointerCapture(event.pointerId);
+      interaction.setPointerCapture(event.pointerId);
       if (touchPoints.size === 2) beginPinch();
       else if (touchPoints.size > 2) pinch = undefined;
-      else { pan = { pointerId: event.pointerId, point: eventCanvasPoint(event) }; canvas.classList.add('is-panning'); }
+      else { pan = { pointerId: event.pointerId, point: eventCanvasPoint(event) }; interaction.classList.add('is-panning'); }
       return;
     }
     pan = { pointerId: event.pointerId, point: eventCanvasPoint(event) };
-    canvas.setPointerCapture(event.pointerId); canvas.classList.add('is-panning');
+    interaction.setPointerCapture(event.pointerId); interaction.classList.add('is-panning');
   });
-  canvas.addEventListener('pointermove', (event) => {
+  interaction.addEventListener('pointermove', (event) => {
     if (event.pointerType === 'touch' && touchPoints.has(event.pointerId)) {
       touchPoints.set(event.pointerId, eventCanvasPoint(event));
       if (pinch) { event.preventDefault(); applyPinch(); return; }
@@ -483,12 +490,12 @@ function setupMapInteraction() {
     if (touchPoints.size >= 2) beginPinch();
     else if (touchPoints.size === 1 && !cancelled) {
       const [pointerId, point] = touchPoints.entries().next().value;
-      pinch = undefined; pan = { pointerId, point }; canvas.classList.add('is-panning');
+      pinch = undefined; pan = { pointerId, point }; interaction.classList.add('is-panning');
     } else { pinch = undefined; finishPan(); }
   };
-  canvas.addEventListener('pointerup', (event) => { if (event.pointerType === 'touch') finishTouch(event); else finishPan(event); deferInteractionEnd(); });
-  canvas.addEventListener('pointercancel', (event) => { if (event.pointerType === 'touch') finishTouch(event, true); else finishPan(event); if (!touchPoints.size) setInteractionActive(false); });
-  canvas.addEventListener('lostpointercapture', (event) => {
+  interaction.addEventListener('pointerup', (event) => { if (event.pointerType === 'touch') finishTouch(event); else finishPan(event); deferInteractionEnd(); });
+  interaction.addEventListener('pointercancel', (event) => { if (event.pointerType === 'touch') finishTouch(event, true); else finishPan(event); if (!touchPoints.size) setInteractionActive(false); });
+  interaction.addEventListener('lostpointercapture', (event) => {
     if (event.pointerType === 'touch') touchPoints.delete(event.pointerId);
     if (!touchPoints.size) { pinch = undefined; finishPan(event); setInteractionActive(false); }
   });
@@ -569,60 +576,62 @@ function normalizeAngle(value) {
   while (angle <= -Math.PI) angle += Math.PI * 2;
   return angle;
 }
-function initializeCloudWorker() {
-  // 将动态点云 Canvas 的控制权一次性交给 Worker。旧实现每帧都需要
-  // Worker -> ImageBitmap -> 主线程 drawImage，恰好会堵住位姿与交互事件。
-  // 静态地图/墙体和车体仍是独立层，Worker 不会接触它们。
-  if (!window.Worker || !window.OffscreenCanvas || !window.ImageBitmap) return;
-  try {
-    cloudWorker = new Worker(new URL('./liveCloudWorker.js', import.meta.url), { type: 'module' });
-    cloudWorker.onmessage = ({ data }) => {
-      if (data?.type === 'ready') { cloudWorkerReady = true; configureCloudWorker(); return; }
-      if (data?.type === 'frame-skipped') { cloudWorkerBusy = false; flushCloudWorker(); return; }
-      if (data?.type !== 'rendered' && data?.type !== 'frame') return;
-      cloudWorkerBusy = false;
-      // 兼容不支持 transferControlToOffscreen 的旧浏览器；现代浏览器中
-      // Worker 已直接画到屏幕，不再做主线程 ImageBitmap 复制。
-      if (data?.type === 'frame' && !cloudWorkerOwnsCanvas) {
-        const canvas = $('cloudCanvas'); const context = canvas.getContext('2d');
-        if (canvas.width !== data.width || canvas.height !== data.height) { canvas.width = data.width; canvas.height = data.height; }
-        context.clearRect(0, 0, canvas.width, canvas.height); context.drawImage(data.bitmap, 0, 0); data.bitmap.close?.();
-      }
-      flushCloudWorker();
-    };
-    cloudWorker.onerror = () => { cloudWorkerFailed = true; cloudWorkerReady = false; cloudWorkerBusy = false; pendingCloudFrame = undefined; reportObservation('WARNING', cloudWorkerOwnsCanvas ? '点云 Worker 异常，已停止动态点云以保障小车位姿和地图交互。请刷新页面重试。' : '点云 Worker 不可用，已自动回退至兼容渲染。'); };
-    const canvas = $('cloudCanvas');
-    if (canvas?.transferControlToOffscreen) {
-      const offscreen = canvas.transferControlToOffscreen();
-      cloudWorkerOwnsCanvas = true;
-      cloudWorker.postMessage({ type: 'init', canvas: offscreen }, [offscreen]);
-    } else cloudWorker.postMessage({ type: 'init' });
-  } catch (_) { cloudWorkerFailed = true; cloudWorker = undefined; }
+async function initializePixiRenderer() {
+  const host = $('mapWorld');
+  if (!host || pixiInitialization) return pixiInitialization;
+  pixiInitialization = (async () => {
+    const app = new Application();
+    await app.init({
+      width: mapViewport.width,
+      height: mapViewport.height,
+      backgroundAlpha: 0,
+      antialias: false,
+      autoDensity: true,
+      resolution: window.devicePixelRatio || 1,
+    });
+    // 原页面只在状态变化时合成。停掉 PixiJS 默认 ticker 后仍沿用既有的
+    // rAF/节流边界，不能因引擎替换而空转重绘。
+    app.ticker.stop();
+    app.canvas.classList.add('pixi-map-canvas');
+    app.canvas.setAttribute('aria-hidden', 'true');
+    host.replaceChildren(app.canvas);
+    pixiApp = app;
+    pixiWorld = new Container();
+    pixiMapLayer = new Container();
+    pixiWallLayer = new Container();
+    pixiCloudLayer = new Container();
+    pixiWorld.addChild(pixiMapLayer, pixiWallLayer, pixiCloudLayer);
+    app.stage.addChild(pixiWorld);
+    pixiReady = true;
+    renderStaticWorld();
+    rebuildCloudRaster();
+    scheduleMapDraw();
+  })().catch((error) => {
+    reportObservation('ERROR', `PixiJS 渲染器初始化失败：${error?.message || '未知错误'}`);
+    throw error;
+  });
+  return pixiInitialization;
 }
-function configureCloudWorker() {
-  if (!cloudWorkerReady || !mapInfo) return;
-  cloudWorker.postMessage({ type: 'map', width: mapInfo.width, height: mapInfo.height, resolution: mapInfo.resolution, origin: mapInfo.origin, generation: mapGeneration });
-}
-function sendCloudWorker(frame) {
-  if (!cloudWorkerReady || cloudWorkerFailed || !cloudWorker) return false;
+function queueCloudRender(frame) {
+  if (!pixiReady) return false;
   // 单槽覆盖。新的扫描永远替代尚未提交的旧扫描，不能形成视觉或网络回放。
   pendingCloudFrame = frame;
-  flushCloudWorker();
+  flushCloudRenderer();
   return true;
 }
-function flushCloudWorker() {
-  if (cloudWorkerBusy || !pendingCloudFrame || !cloudWorkerReady || cloudWorkerFailed || !cloudWorker) return;
-  const delay = CLOUD_COMPOSITE_MIN_INTERVAL_MS - (performance.now() - lastCloudWorkerSubmitAt);
+function flushCloudRenderer() {
+  if (!pendingCloudFrame || !pixiReady) return;
+  const delay = CLOUD_COMPOSITE_MIN_INTERVAL_MS - (performance.now() - lastCloudRenderAt);
   if (delay > 0) {
-    if (!cloudWorkerSubmitTimer) cloudWorkerSubmitTimer = window.setTimeout(() => {
-      cloudWorkerSubmitTimer = undefined; flushCloudWorker();
+    if (!cloudRenderTimer) cloudRenderTimer = window.setTimeout(() => {
+      cloudRenderTimer = undefined; flushCloudRenderer();
     }, delay);
     return;
   }
   const frame = pendingCloudFrame; pendingCloudFrame = undefined;
-  cloudWorkerBusy = true;
-  lastCloudWorkerSubmitAt = performance.now();
-  cloudWorker.postMessage({ type: 'points', points: frame.points, receivedAt: frame.receivedAt, generation: frame.generation }, [frame.points.buffer]);
+  lastCloudRenderAt = performance.now();
+  if (frame.generation === mapGeneration) renderCloudPoints(frame.points);
+  if (pendingCloudFrame) flushCloudRenderer();
 }
 function packCloudPoints(points) {
   const packed = new Float32Array(points.length * 2);
@@ -725,15 +734,14 @@ function hasPendingFollowAdjustment() {
   return centerPending;
 }
 function requestFollowAnimation() {
-  // 每次轻量位姿到达只申请一次合成。世界层只做 CSS transform，允许 60 FPS
-  // 跟随；不重绘栅格或点云，因而不会抢占后续位姿消息。
+  // 每次轻量位姿到达只申请一次相机变换。PixiJS 仅更新世界容器矩阵，
+  // 不重绘地图纹理或点云几何，因而不会抢占后续位姿消息。
   if (!mapInfo || document.hidden || !hasPendingFollowAdjustment()) return;
   scheduleMapDraw();
 }
 
 function currentMapLayout() {
   if (!mapInfo) return undefined;
-  const canvas = $('mapCanvas');
   const fallbackCenter = {
     x: mapInfo.origin.x + mapInfo.width * mapInfo.resolution / 2,
     y: mapInfo.origin.y + mapInfo.height * mapInfo.resolution / 2,
@@ -745,23 +753,23 @@ function currentMapLayout() {
   }
   if (!mapView.center) mapView.center = fallbackCenter;
   if (!mapView.pixelsPerMeter) {
-    const fullMapScale = Math.min(canvas.width / (mapInfo.width * mapInfo.resolution), canvas.height / (mapInfo.height * mapInfo.resolution)) * 0.92;
+    const fullMapScale = Math.min(mapViewport.width / (mapInfo.width * mapInfo.resolution), mapViewport.height / (mapInfo.height * mapInfo.resolution)) * 0.92;
     mapView.pixelsPerMeter = overviewUntilMovement
       // 初始概览必须完整容纳地图；不能套用近景视图的最小缩放限制，
       // 否则在大地图上仍会出现边缘被裁切的“概览”。
       ? Math.max(1, fullMapScale)
-      : Math.max(MIN_PIXELS_PER_METER, Math.min(MAX_PIXELS_PER_METER, canvas.width / DEFAULT_VIEW_METERS));
+      : Math.max(MIN_PIXELS_PER_METER, Math.min(MAX_PIXELS_PER_METER, mapViewport.width / DEFAULT_VIEW_METERS));
   }
   const ratio = mapInfo.resolution * mapView.pixelsPerMeter;
   const width = mapInfo.width * ratio; const height = mapInfo.height * ratio;
   return {
     ratio, width, height, pixelsPerMeter: mapView.pixelsPerMeter, center: mapView.center, vehicle,
-    canvasWidth: canvas.width, canvasHeight: canvas.height,
+    canvasWidth: mapViewport.width, canvasHeight: mapViewport.height,
     // 地图必须稳定保持其原始 map 坐标朝向。定位航向的零点不一定与地图北向
     // 完全一致，若在进入页面时旋转地图，会让静止小车也看到整张地图倾斜。
     rotation: 0,
-    left: canvas.width / 2 + (mapInfo.origin.x - mapView.center.x) * mapView.pixelsPerMeter,
-    top: canvas.height / 2 - (mapInfo.origin.y + mapInfo.height * mapInfo.resolution - mapView.center.y) * mapView.pixelsPerMeter,
+    left: mapViewport.width / 2 + (mapInfo.origin.x - mapView.center.x) * mapView.pixelsPerMeter,
+    top: mapViewport.height / 2 - (mapInfo.origin.y + mapInfo.height * mapInfo.resolution - mapView.center.y) * mapView.pixelsPerMeter,
   };
 }
 function scheduleMapDraw(interactive = false) {
@@ -792,47 +800,61 @@ function stopRenderScheduling() {
   vehicleAnimationFrame = undefined;
 }
 function drawMap() {
-  if (!mapInfo || !mapRaster) return;
-  // 静态地图和虚拟墙均已预绘制到 mapStaticCanvas。此处仅改变世界层的
-  // CSS 变换；浏览器合成器可在 GPU 侧完成平移/旋转，不能重新绘制整张地图。
+  if (!mapInfo || !mapRaster || !pixiReady) return;
+  // 地图纹理、虚拟墙和点云均由 PixiJS 的同一世界容器渲染。此处只更新
+  // GPU 相机矩阵，不重新上传静态地图纹理或重建点云几何。
   const layout = currentMapLayout();
   lastMapLayout = layout;
-  const stage = $('worldStage'); const world = $('mapWorld'); const cloudWorld = $('cloudWorld');
-  const stageTransform = `rotate(${layout.rotation}rad)`;
-  if (stage.style.transform !== stageTransform) stage.style.transform = stageTransform;
-  // 单一合成变换：不会触发布局或重新栅格化静态地图，只更新 GPU 图层的位置与比例。
-  const worldTransform = `translate3d(${layout.left}px, ${layout.top}px, 0) scale(${layout.ratio})`;
-  if (world.style.width !== `${mapInfo.width}px`) world.style.width = `${mapInfo.width}px`;
-  if (world.style.height !== `${mapInfo.height}px`) world.style.height = `${mapInfo.height}px`;
-  if (world.style.transform !== worldTransform) world.style.transform = worldTransform;
-  // 动态点云与静态地图是两个独立合成层。更新 cloudCanvas 时不应使地图纹理失效。
-  if (cloudWorld.style.width !== `${mapInfo.width}px`) cloudWorld.style.width = `${mapInfo.width}px`;
-  if (cloudWorld.style.height !== `${mapInfo.height}px`) cloudWorld.style.height = `${mapInfo.height}px`;
-  if (cloudWorld.style.transform !== worldTransform) cloudWorld.style.transform = worldTransform;
+  pixiWorld.position.set(layout.left, layout.top);
+  pixiWorld.scale.set(layout.ratio, layout.ratio);
+  pixiWorld.rotation = layout.rotation;
   syncVehicleLayer(layout.vehicle, layout);
+  pixiApp.render();
 }
 
 function renderStaticWorld() {
-  if (!mapInfo || !mapRaster) return;
-  const canvas = $('mapStaticCanvas');
-  if (canvas.width !== mapInfo.width || canvas.height !== mapInfo.height) { canvas.width = mapInfo.width; canvas.height = mapInfo.height; }
-  const context = canvas.getContext('2d'); context.clearRect(0, 0, canvas.width, canvas.height); context.imageSmoothingEnabled = false;
-  context.drawImage(mapRaster, 0, 0, mapInfo.width, mapInfo.height);
-  context.strokeStyle = '#d63142'; context.lineWidth = Math.max(1, 0.06 / mapInfo.resolution); context.lineCap = 'round'; context.lineJoin = 'round';
+  if (!mapInfo || !mapRaster || !pixiReady) return;
+  pixiMapSprite?.destroy();
+  pixiMapTexture?.destroy(false);
+  pixiMapTexture = Texture.from(mapRaster);
+  pixiMapTexture.source.scaleMode = 'nearest';
+  pixiMapSprite = new Sprite(pixiMapTexture);
+  pixiMapSprite.width = mapInfo.width;
+  pixiMapSprite.height = mapInfo.height;
+  pixiMapLayer.removeChildren();
+  pixiMapLayer.addChild(pixiMapSprite);
+  pixiWallLayer.removeChildren().forEach((child) => child.destroy());
+  const walls = new Graphics();
+  const lineWidth = Math.max(1, 0.06 / mapInfo.resolution);
   for (const wall of virtualWalls) {
     const points = Array.isArray(wall.points) ? wall.points : [];
     if (points.length < 2) continue;
-    context.beginPath();
     points.forEach((point, index) => {
       const world = wall.coordinate_mode === 'image_relative'
         ? { x: mapInfo.origin.x + Number(point.x), y: mapInfo.origin.y + Number(point.y) }
         : { x: Number(point.x), y: Number(point.y) };
       const targetX = (world.x - mapInfo.origin.x) / mapInfo.resolution;
       const targetY = mapInfo.height - (world.y - mapInfo.origin.y) / mapInfo.resolution;
-      if (index === 0) context.moveTo(targetX, targetY); else context.lineTo(targetX, targetY);
+      if (index === 0) walls.moveTo(targetX, targetY); else walls.lineTo(targetX, targetY);
     });
-    context.stroke();
   }
+  walls.stroke({ color: 0xd63142, width: lineWidth, cap: 'round', join: 'round' });
+  pixiWallLayer.addChild(walls);
+  pixiApp.render();
+}
+function renderCloudPoints(packedPoints) {
+  if (!pixiReady || !mapInfo) return;
+  pixiCloudLayer.removeChildren().forEach((child) => child.destroy());
+  if (!packedPoints?.length) { pixiApp.render(); return; }
+  const points = new Graphics();
+  for (let index = 0; index < packedPoints.length; index += 2) {
+    const x = (packedPoints[index] - mapInfo.origin.x) / mapInfo.resolution;
+    const y = mapInfo.height - (packedPoints[index + 1] - mapInfo.origin.y) / mapInfo.resolution;
+    if (x >= 0 && x < mapInfo.width && y >= 0 && y < mapInfo.height) points.rect(x - 0.35, y - 0.35, 0.7, 0.7);
+  }
+  points.fill(0x8058ff);
+  pixiCloudLayer.addChild(points);
+  pixiApp.render();
 }
 function syncVehicleLayer(vehicle, layout) {
   const element = $('vehicleLayer');
@@ -1122,11 +1144,12 @@ function reassertMapProbe() {
   stopMapProbeSubscription(); beginMapProbe();
 }
 function invalidateMapScopedCloud() {
-  // map 坐标系在切图时会重置。丢弃旧图的待解码/待绘制扫描，并给 Worker 加
+  // map 坐标系在切图时会重置。丢弃旧图的待解码/待绘制扫描，并给渲染器加
   // generation 栅栏，杜绝上一张图的异步点云在新图就绪后闪现一帧。
   mapGeneration += 1;
   cloud = undefined; pendingCloudPacket = undefined; pendingCloudFrame = undefined;
-  if (cloudWorkerSubmitTimer) { window.clearTimeout(cloudWorkerSubmitTimer); cloudWorkerSubmitTimer = undefined; }
+  if (cloudRenderTimer) { window.clearTimeout(cloudRenderTimer); cloudRenderTimer = undefined; }
+  renderCloudPoints();
 }
 function resetLiveWallRetry() {
   if (liveWallRetryTimer) { window.clearTimeout(liveWallRetryTimer); liveWallRetryTimer = undefined; }
@@ -1163,7 +1186,7 @@ function updateMap(message) {
     const color = occupancy < 0 ? 174 : occupancy >= 65 ? 36 : 245;
     const index = (row * info.width + col) * 4; pixels.data[index] = color; pixels.data[index + 1] = color; pixels.data[index + 2] = color; pixels.data[index + 3] = 255;
   }
-  imageContext.putImageData(pixels, 0, 0); $('mapEmpty').hidden = true; renderStaticWorld(); configureCloudWorker(); scheduleCloudRasterBuild(); updateDiagnostics(); scheduleMapDraw();
+  imageContext.putImageData(pixels, 0, 0); $('mapEmpty').hidden = true; renderStaticWorld(); scheduleCloudRasterBuild(); updateDiagnostics(); scheduleMapDraw();
   activateVisualizationStreams();
 }
 
@@ -1264,15 +1287,15 @@ function updateCloud(message) {
     ? { frameId, packedMapPoints: packedMapPoints.subarray(0, pointOffset), mapPointCount: pointOffset / 2 }
     : { frameId, points, mapPoints: [], mapPointCount: 0 };
   if (isMapFrame) recordCloudFrame(); else projectCloud(true);
-  // 点云只更新独立 cloudCanvas；不能反向触发地图相机/车体同步，
+  // 点云只更新独立 PixiJS 点云层；不能反向触发地图相机/车体同步，
   // 否则 10~12 Hz 点云会拖慢 30 Hz 位姿视图。
   updateDiagnostics();
 }
 function recordCloudFrame() {
   const now = performance.now();
-  // 仅保留最新扫描。Worker 忙时覆盖尚未处理的帧，禁止形成延迟积压或透明拖影。
+  // 仅保留最新扫描。渲染间隔内覆盖尚未处理的帧，禁止形成延迟积压或透明拖影。
   const packedPoints = cloud.packedMapPoints || packCloudPoints(cloud.mapPoints || []);
-  if (sendCloudWorker({ receivedAt: now, points: packedPoints, generation: mapGeneration })) return;
+  if (queueCloudRender({ receivedAt: now, points: packedPoints, generation: mapGeneration })) return;
   scheduleCloudRasterBuild();
 }
 function projectCloud(recordFrame = false) {
@@ -1286,7 +1309,7 @@ function projectCloud(recordFrame = false) {
 }
 function scheduleCloudRasterBuild() {
   // 拖拽和缩放时点云并不需要重新投影；保留最新数据，交互结束后再一次性刷新。
-  // 这样大点云的 Canvas fillRect 循环不会抢走鼠标事件和 CSS 合成帧。
+  // 这样大点云的 PixiJS 图形更新不会抢走鼠标事件和 CSS 合成帧。
   if (mapInteractionActive) { cloudRasterPending = true; return; }
   if (cloudRasterQueued) return;
   cloudRasterQueued = true;
@@ -1296,27 +1319,10 @@ function scheduleCloudRasterBuild() {
   });
 }
 function rebuildCloudRaster() {
-  // Worker 直绘模式下，主线程绝不能再 getContext()；否则既无收益又会抛错。
-  if (cloudWorkerOwnsCanvas) return;
-  const canvas = $('cloudCanvas');
   const packedPoints = cloud?.packedMapPoints;
   const mapPoints = cloud?.mapPoints;
-  if (!mapInfo || (!packedPoints && !mapPoints)) { canvas.width = canvas.height = 1; return; }
-  if (canvas.width !== mapInfo.width || canvas.height !== mapInfo.height) { canvas.width = mapInfo.width; canvas.height = mapInfo.height; }
-  const context = canvas.getContext('2d');
-  context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = 'rgb(128, 88, 255)';
-  if (packedPoints) {
-    for (let index = 0; index < packedPoints.length; index += 2) {
-      const x = (packedPoints[index] - mapInfo.origin.x) / mapInfo.resolution;
-      const y = mapInfo.height - (packedPoints[index + 1] - mapInfo.origin.y) / mapInfo.resolution;
-      if (x >= 0 && x < mapInfo.width && y >= 0 && y < mapInfo.height) context.fillRect(x - 0.35, y - 0.35, 0.7, 0.7);
-    }
-  } else for (const point of mapPoints) {
-    const x = (point.x - mapInfo.origin.x) / mapInfo.resolution;
-    const y = mapInfo.height - (point.y - mapInfo.origin.y) / mapInfo.resolution;
-    if (x >= 0 && x < mapInfo.width && y >= 0 && y < mapInfo.height) context.fillRect(x - 0.35, y - 0.35, 0.7, 0.7);
-  }
+  if (!mapInfo) { renderCloudPoints(); return; }
+  renderCloudPoints(packedPoints || packCloudPoints(mapPoints || []));
 }
 async function refreshActiveMap(observation) {
   // active_map.json 由轨迹记录器在确认真实 /map 后写入；它是切图的轻量可靠
@@ -1357,7 +1363,7 @@ function loadCachedMap(mapId, metadata) {
       overviewUntilMovement = true; overviewPoseAnchor = undefined; mapView.pixelsPerMeter = undefined;
       mapView.center = undefined; mapView.followOffset = { x: 0, y: 0 };
     }
-    renderStaticWorld(); configureCloudWorker(); scheduleCloudRasterBuild(); updateDiagnostics(); scheduleMapDraw();
+    renderStaticWorld(); scheduleCloudRasterBuild(); updateDiagnostics(); scheduleMapDraw();
   };
   image.onerror = () => {
     if (loadedMapId === mapId) { loadedMapId = undefined; setText('mapDiagnostics', '当前地图缓存读取失败；请在测试任务中重新开启轨迹记录。'); }
@@ -1482,7 +1488,7 @@ function connect(payload) {
   connectPoseLane(url);
 }
 async function main() {
-  initializeTheme(); setupCameraSelectors(); setupWorkspace(); setupMapInteraction(); initializeCloudWorker();
+  initializeTheme(); setupCameraSelectors(); setupWorkspace(); setupMapInteraction(); await initializePixiRenderer();
   try {
     const [settings, upgrade] = await Promise.all([request('/api/settings'), request('/api/system/upgrade')]);
     setText('consoleVersion', upgrade.current_version ? `v${upgrade.current_version}` : '开发版');

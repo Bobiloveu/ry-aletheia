@@ -37,7 +37,7 @@ http://<小车IP>:8087
 - 测试用例导入、校验、别名管理及跨车用例包交付。
 - 多轮串行测试、场景前置参数受控替换、Supervisor 依赖编排与人工恢复。
 - 多地图轨迹、理想路径与虚拟墙证据，以及 HTML/CSV 离线报告。
-- 低延迟实时二维观测：地图、车体、点云、虚拟墙和按需图像。
+- 低延迟实时二维观测：PixiJS 渲染地图、虚拟墙与点云，DOM 覆盖车体，并按需展示图像。
 - PC 桌面布局与独立移动端界面；手机实时观测支持横竖屏全屏地图。
 - 完整离线 DEB 可内置工具私有 Foxglove Bridge，不改写系统已有 Bridge 或 ROS 环境。
 
@@ -47,6 +47,7 @@ http://<小车IP>:8087
 浏览器（PC / 手机）
   ├─ HTTP :8087：控制台、任务、报告与配置
   └─ WebSocket :8767：实时观测直连
+       └─ PixiJS：地图栅格、虚拟墙、最新点云
              │
 RY Aletheia（小车普通账户）
   ├─ Python 控制台与测试编排
@@ -56,7 +57,7 @@ RY Aletheia（小车普通账户）
 小车已有 ROS 2 Humble、定位、地图、导航与传感器节点
 ```
 
-实时位姿和点云分别使用网页专用流，浏览器侧采用独立连接与“只保留最新帧”策略，避免大点云帧拖慢车体显示。
+实时位姿和点云分别使用网页专用流，浏览器侧采用独立连接与“只保留最新帧”策略。PixiJS 只更新地图世界容器或最新点云几何，车体仍由独立 DOM 层显示，避免大点云帧拖慢车体显示。
 
 ## 文档
 
@@ -71,7 +72,7 @@ RY Aletheia（小车普通账户）
 
 ```text
 autodrive_console/  Python 业务模块、正式网页资源与移动端壳层
-frontend/            Vue/Vite 前端源码
+frontend/            Vue/Vite 前端源码与 PixiJS 实时地图渲染
 live_preprocessor/   ROS 2 C++ 实时点云与位姿预处理节点
 tests/               自动化回归测试
 docs/images/         用户操作指南配图
@@ -82,11 +83,12 @@ make_upgrade.sh      生成网页升级 ZIP 与完整离线 DEB 的发布入口
 
 ## 开发与验证
 
-开发和构建依赖小车导出的 ROS 2 Humble 离线环境。完整前置条件、命令和发布检查表见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)。代码修改后的基础验证：
+`v2.0` 使用 Pixi 管理 Python、Node.js、CMake、编译器、PyInstaller 与 pytest；ROS 2 Humble 及小车专有接口仍需从参考车导入。完整前置条件、命令和发布检查表见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)。首次初始化及基础验证：
 
 ```bash
-python3 -m pytest -q tests
-cd frontend && npm run check
+pixi install
+pixi run frontend-install
+pixi run verify
 ```
 
 ## 支持与反馈
