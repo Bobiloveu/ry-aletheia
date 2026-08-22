@@ -146,18 +146,18 @@ queued → preparing → running → completed
 ### 9.1 分层渲染
 
 ```text
-静态地图栅格 + 虚拟墙  ─┐
-点云 Canvas（Worker 合成） ├─ CSS 变换：缩放、拖动（固定 map 朝向）
+PixiJS 地图纹理 + 虚拟墙 ─┐
+PixiJS 最新点云几何       ├─ Pixi 世界容器：缩放、拖动（固定 map 朝向）
 车体 DOM 覆盖层           ┘
 ```
 
-地图、虚拟墙在首次取得或切图时缓存；拖动、缩放、位姿和点云更新都不应重绘静态底图。缩放以鼠标位置为中心，中键或左键拖动仅改变视图变换。地图必须稳定保持原始 `map` 坐标朝向，不能在进入页面时按车体初始航向旋转；只允许车体 DOM 图标旋转。
+实时二维地图由 PixiJS 管理：地图栅格为纹理，虚拟墙和点云为独立图层；首次取得或切图时才更新静态地图纹理。拖动、缩放与位姿跟随只更新 Pixi 世界容器变换，点云只替换最新一帧几何，均不重绘静态底图。缩放以鼠标位置为中心，中键或左键拖动仅改变视图变换。地图必须稳定保持原始 `map` 坐标朝向，不能在进入页面时按车体初始航向旋转；只允许车体 DOM 图标旋转。相机预览仍使用独立 Canvas，未纳入地图渲染引擎。
 
 ### 9.2 时效优先与背压
 
 | 数据 | 策略 | 时效边界 |
 | --- | --- | --- |
-| 点云 | C++ `keep_last(1)`，3000 点；扫描回调到达即处理，Worker 单槽处理 | 节点内最新槽停留超过 140ms 才丢弃；浏览器包超过 100ms 丢弃；仅绘制最新一帧固定不透明点 |
+| 点云 | C++ `keep_last(1)`，3000 点；扫描回调到达即处理，PixiJS 单槽最新帧渲染 | 节点内最新槽停留超过 140ms 才丢弃；浏览器包超过 100ms 丢弃；仅绘制最新一帧固定不透明点 |
 | 位姿 | 独立 C++ 进程发布最新 `map → base_*` TF，浏览器独立动画 | 超过 250ms 丢弃；60Hz 发布；独立 WebSocket 专线 |
 | 浏览器 WebSocket | 点云/地图/图像走主连接，位姿走第二条连接；均为容量 1 的 latest-wins 队列 | 新包覆盖未解码旧包，避免 TCP 队头阻塞 |
 | 地图 | 短订阅读取；仅切图时再更新 | 不持续传输大栅格 |
@@ -177,11 +177,11 @@ queued → preparing → running → completed
 - 点云在节点内最新槽停留超过 140ms 才丢弃；不能把传感器或导航管线固有的旧 header 时间戳误判为网络滞后。header 时间仍用于 TF/逐点去畸变，TF 不可用则跳过当前帧。车体位姿使用最新可用 `map → base_*` 变换，避免低频 `map → odom` 的合成时间戳使显示流断续。
 - 不使用 PCL、不改写原 ROS 话题、不写导航参数。
 
-现场排障优先看 `logs/live_preprocessor_cloud.log`、`logs/live_preprocessor_pose.log`、`logs/foxglove_bridge.log` 和工具日志，再检查 `/_aletheia/live_points`、`/_aletheia/live_pose` 的频率与时间戳（使用 `ros2 topic list --include-hidden-topics`）。页面保持打开约 10 秒后，可从 `GET /api/observation` 的 `client_metrics` 读取 `cloud_source_age_ms`、`cloud_packet_rate_hz`、位姿年龄、渲染帧率和长帧计数，以区分激光源、车端预处理、网络和浏览器合成问题。实车参考：原始与预处理点云约 10Hz，前端为降低 Canvas 合成竞争主动消费约 8Hz。
+现场排障优先看 `logs/live_preprocessor_cloud.log`、`logs/live_preprocessor_pose.log`、`logs/foxglove_bridge.log` 和工具日志，再检查 `/_aletheia/live_points`、`/_aletheia/live_pose` 的频率与时间戳（使用 `ros2 topic list --include-hidden-topics`）。页面保持打开约 10 秒后，可从 `GET /api/observation` 的 `client_metrics` 读取 `cloud_source_age_ms`、`cloud_packet_rate_hz`、位姿年龄、渲染帧率和长帧计数，以区分激光源、车端预处理、网络和 PixiJS 图层更新问题。实车参考：原始与预处理点云约 10Hz，前端为降低点云几何更新竞争主动消费约 8Hz。
 
 ## 10. 前端维护
 
-前端源位于 `frontend/src/`，构建产物输出到 `autodrive_console/web-vue/`。主要页面为任务指挥台、实时运行观测、测试用例管理、场景前置配置、报告中心、运行配置和工具日志。
+前端源位于 `frontend/src/`，构建产物输出到 `autodrive_console/web-vue/`。主要页面为任务指挥台、实时运行观测、测试用例管理、场景前置配置、报告中心、运行配置和工具日志。实时观测页依赖 `pixi.js`：`liveObservation.js` 负责 Pixi 应用、地图纹理、虚拟墙和点云图层；保留 DOM 车体层、DOM 交互层及独立 Canvas 相机预览。
 
 共享视觉样式集中在 `autodrive_console/web/*.css` 与 `frontend/src/*.css`。深/浅主题只写浏览器 Local Storage，不写机器人配置。新页面默认避免冗余说明文字，但必须保留必要的安全状态和错误反馈。
 
@@ -193,7 +193,7 @@ queued → preparing → running → completed
 
 - `autodrive_console/web/mobile_console.js`：移动端抽屉导航、页面链接改写、桌面版回退和实时观测全屏状态；
 - `autodrive_console/web/mobile_console.css`：安全区、单列布局、最小 44px 触控目标及横竖屏规则；仅通过 `/m/` 页面加载，不能被桌面页面引用；
-- `frontend/src/liveObservation.css`：实时观测画布在窄屏和横屏下的尺寸、工具条与诊断信息降级规则。
+- `frontend/src/liveObservation.css`：PixiJS 地图视图在窄屏和横屏下的尺寸、工具条与诊断信息降级规则。
 
 移动端实时观测的“全屏地图”必须只保留观测窗口：优先使用浏览器 Fullscreen API；不支持时（尤其 iOS）使用 CSS 沉浸模式作为等价回退。横屏和竖屏均需保持地图可见、退出控件可达，退出后恢复原滚动位置和页面交互。不得以全局媒体查询修改 PC 布局，也不得为移动端复制一套 API、实时流或业务状态。
 
@@ -212,17 +212,27 @@ Vite 预览调用本机 `8087` API；页面导航必须保持在 `5173`，不能
 
 ### 11.1 获取源码与开发环境
 
-其他开发者应从 GitHub 获取源码，并使用当前稳定分支开始开发：
+其他开发者应从 GitHub 获取源码，并使用当前 `v2.0` 分支开始开发：
 
 ```bash
 git clone https://github.com/Bobiloveu/ry-aletheia.git
 cd ry-aletheia
-git switch v1.0-baseline
+git switch v2.0
 ```
 
 推荐在与目标小车一致的 Ubuntu 22.04 `amd64` + ROS 2 Humble 环境开发。完整二进制构建还依赖小车业务工作空间的 `master_interfaces` 类型支持库；仅安装通用 ROS Humble 不能替代该接口。开发机至少应具备：Python 3、Node.js 20+、npm、CMake、C++17 编译器、PyInstaller，以及 `rclcpp`、`sensor_msgs`、`geometry_msgs`、`tf2_ros`、`livox_ros_driver2` 的 ROS 2 C++ 开发包。
 
-先安装锁定的前端依赖并确认基础检查：
+`v2.0` 使用仓库根目录的 `pixi.toml` 管理可复现的开发工具链：Python 3.10、Node.js 20、CMake、C++ 编译器、PyInstaller 和 pytest。首次进入仓库执行：
+
+```bash
+pixi install
+pixi run frontend-install
+pixi run verify
+```
+
+常用任务为 `pixi run test`、`pixi run frontend-check` 和 `pixi run vue-preview`。Pixi 不管理 ROS 2 Humble、`master_interfaces` 或小车导出的 `install/`：它们仍是目标小车/参考车提供的外部构建前置条件，完整二进制构建前必须按下一节导入并 source 相匹配的 ROS 环境。
+
+不使用 Pixi 时，仍可手工安装锁定的前端依赖并确认基础检查：
 
 ```bash
 cd frontend && npm ci && cd ..
