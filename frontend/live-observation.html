@@ -71,18 +71,10 @@
             </header>
             <div class="local-map-wrap">
               <div id="worldStage" class="world-stage">
-                <div id="mapWorld" class="map-world">
-                  <canvas id="mapStaticCanvas"></canvas>
-                </div>
-                <div id="cloudWorld" class="map-world"><canvas id="cloudCanvas"></canvas></div>
+                <div id="mapWorld" class="map-world" aria-label="PixiJS 实时地图"></div>
               </div>
               <div id="vehicleLayer" aria-label="小车实时位置"><i></i></div>
-              <canvas
-                id="mapCanvas"
-                class="map-interaction-layer"
-                width="1920"
-                height="1080"
-              ></canvas>
+              <div id="mapInteraction" class="map-interaction-layer" aria-label="地图缩放与拖动交互"></div>
               <div class="local-map-empty" id="mapEmpty">正在获取当前地图…</div>
               <div class="map-legend">
                 <span><i class="legend-wall"></i>虚拟墙</span
