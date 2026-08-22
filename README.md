@@ -32,6 +32,20 @@ http://<小车IP>:8087
 
 仓库中的 `releases/` 是本地构建输出目录，默认不纳入版本控制；不要将 ZIP、DEB、日志、报告或车辆配置提交到源码仓库。
 
+## v2.0 分支说明
+
+`v2.0` 是独立开发分支，`v1.0-baseline` 保持 v1.0 基线内容；当前 v2.0 改动不会自动进入 1.0，除非后续明确合并。
+
+| 范围 | `v1.0-baseline` | `v2.0` |
+| --- | --- | --- |
+| 实时二维地图 | Canvas 静态地图、点云 Canvas/Worker 合成 | PixiJS 场景树：地图纹理、虚拟墙与最新点云独立图层 |
+| 地图交互与车体 | CSS 视图变换、DOM 车体层 | PixiJS 世界容器变换、保留 DOM 车体层 |
+| 点云时效策略 | 单槽 latest-wins、限频合成 | 保持相同单槽 latest-wins、限频与过期帧丢弃策略 |
+| 相机预览、ROS/Bridge/API | 既有实现 | 保持不变；相机预览仍使用独立 Canvas |
+| 开发工具链 | 手工管理 Python、Node 与构建工具 | 根目录 `pixi.toml`/`pixi.lock` 锁定 Python 3.10、Node 20、CMake、编译器、PyInstaller 与 pytest |
+
+`v2.0` 仅重构浏览器侧实时地图渲染引擎，不改变任务下发、Supervisor 编排、ROS2 话题、Foxglove Bridge、后端 API 或机器人控制边界。详细设计和环境边界见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)。
+
 ## 主要能力
 
 - 测试用例导入、校验、别名管理及跨车用例包交付。
