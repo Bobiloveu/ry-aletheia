@@ -222,7 +222,7 @@ git switch v2.0
 
 推荐在与目标小车一致的 Ubuntu 22.04 `amd64` + ROS 2 Humble 环境开发。完整二进制构建还依赖小车业务工作空间的 `master_interfaces` 类型支持库；仅安装通用 ROS Humble 不能替代该接口。开发机至少应具备：Python 3、Node.js 20+、npm、CMake、C++17 编译器、PyInstaller，以及 `rclcpp`、`sensor_msgs`、`geometry_msgs`、`tf2_ros`、`livox_ros_driver2` 的 ROS 2 C++ 开发包。
 
-`v2.0` 使用仓库根目录的 `pixi.toml` 管理可复现的开发工具链：Python 3.10、Node.js 20、CMake、C++ 编译器、PyInstaller 和 pytest。首次进入仓库执行：
+`v2.0` 使用仓库根目录的 `pixi.toml` 管理可复现的开发工具链：Python 3.10、Node.js 20、CMake、C++ 编译器、PyInstaller 和 pytest。其基础开发环境支持 macOS（Apple Silicon/Intel）、Linux x86_64 与 Windows x86_64。首次进入仓库执行：
 
 ```bash
 pixi install
@@ -230,7 +230,7 @@ pixi run frontend-install
 pixi run verify
 ```
 
-常用任务为 `pixi run test`、`pixi run frontend-check` 和 `pixi run vue-preview`。Pixi 不管理 ROS 2 Humble、`master_interfaces` 或小车导出的 `install/`：它们仍是目标小车/参考车提供的外部构建前置条件，完整二进制构建前必须按下一节导入并 source 相匹配的 ROS 环境。
+常用任务为 `pixi run test`、`pixi run frontend-check` 和 `pixi run vue-preview`。在 Windows 上，`pixi run vue-preview` 只启动 Vite；需要另开一个终端执行 `pixi run backend` 启动本地 API。Pixi 不管理 ROS 2 Humble、`master_interfaces` 或小车导出的 `install/`：它们仍是目标小车/参考车提供的外部构建前置条件，完整二进制构建及面向小车的升级 ZIP/DEB 只能在匹配的 Linux x86_64 ROS 环境执行。
 
 不使用 Pixi 时，仍可手工安装锁定的前端依赖并确认基础检查：
 

@@ -98,7 +98,7 @@ make_upgrade.sh      生成网页升级 ZIP 与完整离线 DEB 的发布入口
 
 ## 开发与验证
 
-`v2.0` 使用 Pixi 管理 Python、Node.js、CMake、编译器、PyInstaller 与 pytest；ROS 2 Humble 及小车专有接口仍需从参考车导入。完整前置条件、命令和发布检查表见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)。首次初始化及基础验证：
+`v2.0` 使用 Pixi 管理 Python、Node.js、CMake、编译器、PyInstaller 与 pytest，支持 macOS（Apple Silicon/Intel）、Linux x86_64 和 Windows x86_64 的前端开发与基础验证；ROS 2 Humble 及小车专有接口仍需从参考车导入。完整前置条件、命令和发布检查表见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)。首次初始化及基础验证：
 
 ```bash
 pixi install
