@@ -175,7 +175,7 @@ class OfflineModuleTests(unittest.TestCase):
             store.save({"startup_script": str(script), "profiles": [], "case_bindings": {}})
             launch = store.browse(str(launch_dir), "fcrp")
             self.assertEqual([item["name"] for item in launch["files"]], ["demo.launch.py"])
-            self.assertEqual(store.browse(str(launch_dir), "lightning")["files"], [{"name": "ignored.yaml", "path": str((launch_dir / "ignored.yaml").resolve()), "size": 5}])
+            self.assertEqual(store.browse(str(launch_dir), "lightning")["files"], [{"name": "ignored.yaml", "path": str((launch_dir / "ignored.yaml").resolve()), "size": (launch_dir / "ignored.yaml").stat().st_size}])
             with self.assertRaisesRegex(ScenarioSetupError, "浏览类型"):
                 store.browse(str(launch_dir), "all")
 

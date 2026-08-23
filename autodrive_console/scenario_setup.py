@@ -13,7 +13,7 @@ import re
 import tempfile
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 DEFAULT_DOCUMENT = {
@@ -251,7 +251,11 @@ class ScenarioSetupStore:
         # 开发与测试环境可运行在 Windows；绝对路径的判定必须交给 pathlib，不能
         # 把 Linux 的“以 / 开头”误当成通用规则。小车侧的配置文件和 ROS 路径仍由
         # _validate_profile_values 严格限制在 /opt/ry。
-        if not script_path.is_absolute() or ".." in script_path.parts or "\x00" in script:
+        # Windows 开发机不会把小车的 POSIX 路径识别为绝对路径；它仍是受控的
+        # 目标路径表示，必须与本机绝对路径同样接受。两种语法都检查父目录跳转。
+        is_robot_path = script.startswith("/opt/ry/")
+        path_parts = (*script_path.parts, *PurePosixPath(script).parts)
+        if not (script_path.is_absolute() or is_robot_path) or ".." in path_parts or "\x00" in script:
             raise ScenarioSetupError("启动脚本必须是安全的绝对路径")
         profiles = document.get("profiles", [])
         if not isinstance(profiles, list) or len(profiles) > 80:
