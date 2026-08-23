@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -386,9 +387,9 @@ class OfflineModuleTests(unittest.TestCase):
             manager = ObservationManager(root / "maps_cache", root / "logs")
             environment = manager._bridge_environment()
             self.assertEqual(manager._private_bridge_prefix(), prefix)
-            self.assertTrue(environment["AMENT_PREFIX_PATH"].split(":")[0] == str(prefix))
-            self.assertTrue(environment["CMAKE_PREFIX_PATH"].split(":")[0] == str(prefix))
-            self.assertTrue(environment["LD_LIBRARY_PATH"].split(":")[0] == str(prefix / "lib"))
+            self.assertEqual(environment["AMENT_PREFIX_PATH"].split(os.pathsep)[0], str(prefix))
+            self.assertEqual(environment["CMAKE_PREFIX_PATH"].split(os.pathsep)[0], str(prefix))
+            self.assertEqual(environment["LD_LIBRARY_PATH"].split(os.pathsep)[0], str(prefix / "lib"))
 
     def test_private_bridge_starts_directly_without_system_ros2_launch(self):
         with tempfile.TemporaryDirectory() as directory:

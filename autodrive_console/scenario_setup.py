@@ -247,7 +247,11 @@ class ScenarioSetupStore:
         if not isinstance(document, dict):
             raise ScenarioSetupError("场景前置配置格式错误")
         script = str(document.get("startup_script", "")).strip()
-        if not script.startswith("/") or ".." in Path(script).parts or "\x00" in script:
+        script_path = Path(script)
+        # 开发与测试环境可运行在 Windows；绝对路径的判定必须交给 pathlib，不能
+        # 把 Linux 的“以 / 开头”误当成通用规则。小车侧的配置文件和 ROS 路径仍由
+        # _validate_profile_values 严格限制在 /opt/ry。
+        if not script_path.is_absolute() or ".." in script_path.parts or "\x00" in script:
             raise ScenarioSetupError("启动脚本必须是安全的绝对路径")
         profiles = document.get("profiles", [])
         if not isinstance(profiles, list) or len(profiles) > 80:
@@ -268,7 +272,7 @@ class ScenarioSetupStore:
         case_bindings = document.get("case_bindings", {})
         if not isinstance(case_bindings, dict) or any(not isinstance(case, str) or value not in ids for case, value in case_bindings.items()):
             raise ScenarioSetupError("用例与前置方案绑定无效")
-        directories = self._validate_search_directories(document.get("search_directories", []), Path(script))
+        directories = self._validate_search_directories(document.get("search_directories", []), script_path)
         command_bindings = self._validate_bindings(document.get("bindings", {}))
         return {"startup_script": script, "search_directories": directories, "bindings": command_bindings, "profiles": prepared, "case_bindings": case_bindings}
 
