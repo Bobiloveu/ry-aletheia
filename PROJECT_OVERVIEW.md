@@ -64,7 +64,7 @@ RY Aletheia（普通账户）
 | `autodrive_console/` | Python 业务源码、正式网页输出 | 仅构建时 |
 | `frontend/` | Vue/Vite 源码 | 仅开发机 |
 | `live_preprocessor/` | C++ 点云预处理节点源码 | 仅构建时 |
-| `install/`、`cpp_sdk/` | 目标小车导出的离线构建依赖 | 仅开发机 |
+| `install/` | 目标小车导出的最小 ROS 构建覆盖层（`master_interfaces`、`livox_ros_driver2`） | 仅开发机 |
 | `releases/` | ZIP、校验文件和可选 DEB 的本地构建输出；正式交付通过 GitHub Releases | 开发机输出，忽略 |
 
 升级必须只替换程序产物，不能覆盖任务、报告、缓存或用户配置。
@@ -243,21 +243,22 @@ python3 -m pytest -q tests
 
 ### 11.2 导入小车专有 ROS 依赖
 
-在一台已正常运行、且与目标环境匹配的参考小车上执行一次依赖导出。脚本只读取已有 ROS 安装，不修改小车系统：
+在一台已正常运行、且与目标环境匹配的参考小车上执行一次最小依赖导出。脚本只读取已有 ROS 安装，不修改小车系统：
 
 ```bash
-./export_robot_build_deps.sh /tmp/ry-aletheia-robot-build-deps.tar.gz
-./export_robot_cpp_sdk.sh /tmp/ry-aletheia-ros2-cpp-sdk.tar.gz
+mkdir -p third_party/robot_build_deps
+./export_robot_build_deps.sh \
+  third_party/robot_build_deps/ry-aletheia-robot-build-deps-humble-amd64.tar.gz
 ```
 
-将生成的文件和对应的 `.sha256` 一并复制到开发机。标准二进制构建至少需要第一个包；在干净开发机的源码根目录中解压，使 `install/setup.bash` 与 `build-deps-manifest.json` 出现在工程根目录：
+压缩包只包含 `master_interfaces`、`livox_ros_driver2` 与加载它们所需的根启动脚本，不包含整车导航、感知、地图、任务或运行数据。仓库中的 `third_party/robot_build_deps/` 受版本控制，便于已获授权的开发者开箱构建；其中含小车专有接口，推送到远程前必须确认仓库成员具有访问权限。将压缩包和对应的 `.sha256` 一并复制到开发机；在干净开发机的源码根目录中解压，使 `install/setup.bash` 与 `build-deps-manifest.json` 出现在工程根目录：
 
 ```bash
 tar -xzf /path/to/ry-aletheia-robot-build-deps_*.tar.gz -C .
 test -f install/setup.bash && test -f build-deps-manifest.json
 ```
 
-`export_robot_cpp_sdk.sh` 用于归档原生 C++ 编译所需的 Humble SDK；当前标准流程优先在参考小车或已安装匹配 Humble 开发包的主机上构建。若使用导出的 SDK 进行异机构建，必须先单独验证 `cmake -S live_preprocessor -B build/live_preprocessor` 成功，再进行完整二进制构建；不要把 SDK 解压到 `/opt/ros` 或覆盖系统 ROS。
+接收方仍必须自行安装匹配的 Ubuntu 22.04 `amd64` + ROS 2 Humble；最小包不是 ROS 发行版替代品。`cpp_sdk/` 不是仓库目录，也不被 `build_binary.sh` 读取。`export_robot_cpp_sdk.sh` 仅保留给需要在无 ROS 开发包的异机构建机上进行原生 C++ 兼容性验证时使用；不要把 SDK 解压到工程根目录、`/opt/ros`，也不要覆盖系统 ROS。
 
 ### 11.3 日常开发与本地预览
 
