@@ -12,6 +12,7 @@ build/
 dist/
 releases/
 .cache/
+ry-aletheia.spec
 *.deb
 *.tar.gz
 
