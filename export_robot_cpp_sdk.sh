@@ -141,4 +141,4 @@ tar --create --gzip --file "$OUTPUT" --numeric-owner --directory / \
 (cd "$OUTPUT_DIR" && sha256sum "$(basename -- "$OUTPUT")" > "$(basename -- "$OUTPUT").sha256")
 echo "SDK 已生成：$OUTPUT"
 echo "校验文件：$OUTPUT.sha256"
-echo "请将两个文件放入开发机工程根目录的 cpp_sdk/ 目录。"
+echo "该 SDK 仅用于异机构建兼容性验证，不是标准构建依赖；请解压到独立临时目录，勿覆盖工程根目录或 /opt/ros。"
