@@ -16,6 +16,12 @@ ry-aletheia.spec
 *.deb
 *.tar.gz
 
+# Versioned minimum robot build overlay; contains only the approved interface packages.
+!third_party/
+!third_party/robot_build_deps/
+!third_party/robot_build_deps/*.tar.gz
+!third_party/robot_build_deps/*.tar.gz.sha256
+
 # Robot/runtime state; never commit test evidence or field logs
 install/
 reports/
