@@ -19,8 +19,10 @@
   sha256sum -c ry-aletheia-robot-build-deps-humble-amd64.tar.gz.sha256)
 tar -xzf third_party/robot_build_deps/ry-aletheia-robot-build-deps-humble-amd64.tar.gz -C .
 cd frontend && npm ci && cd ..
-./build_binary.sh
+./make_upgrade.sh 1.0.0 --deb
 ```
+
+该命令会构建核心二进制、离线升级 ZIP、内置私有 Foxglove Bridge 的完整首次安装 DEB，以及 `SHA256SUMS`。如只验证二进制构建，可执行 `./build_binary.sh`。
 
 ## 更新依赖包
 
