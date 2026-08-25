@@ -29,8 +29,10 @@ class StatusCommandTests(unittest.TestCase):
                 "ps",
                 '''if [[ "$*" == *"-p 222 -o args="* ]]; then
   printf "/home/ry/ry_aletheia/dist/ry-aletheia\\n"
+elif [[ "$*" == *"-p 222 -o rss="* ]]; then
+  printf "20480 4 00:02:00 /home/ry/ry_aletheia/dist/ry-aletheia\\n"
 elif [[ "$*" == *"-p 222 -o %cpu="* ]]; then
-  printf "3.0 20480 4 00:02:00 /home/ry/ry_aletheia/dist/ry-aletheia\\n"
+  printf "3.0\\n"
 else
   exit 0
 fi''',
@@ -52,6 +54,7 @@ fi''',
             )
 
         self.assertIn("工具状态:     运行中（8087 已监听）", result.stdout)
+        self.assertIn("工具总 CPU:   3.0%  （/proc 不可用，ps 平均值）", result.stdout)
         self.assertIn("服务 PID:     222", result.stdout)
         self.assertIn("内存占用:     20.0 MiB", result.stdout)
         self.assertIn("left_camera", result.stdout)

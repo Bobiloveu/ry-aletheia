@@ -3,7 +3,8 @@
 #
 # PyInstaller onefile 会留下一个很轻的引导父进程，再由子进程提供 Web 服务。
 # 因此不能再用 pgrep 的第一个命中项作为主进程；这里以实际占用 8087 的服务
-# 进程为准，并单独汇总隔离的 video-runner 进程组。
+# 进程为准。CPU 则按安装前缀内全部自有进程的 /proc CPU 时间做区间采样，覆盖
+# 控制台、Bridge、预处理、MediaMTX 和视频编码器，而非 ps 的生命周期平均值。
 set -euo pipefail
 
 INTERVAL_S=1
@@ -58,11 +59,61 @@ format_mib() {
   awk -v value="${1:-0}" 'BEGIN { printf "%.1f", value / 1024 }'
 }
 
+installation_root() {
+  local pid="$1" command
+  command="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+  # 真实服务子进程始终由 <安装目录>/dist/ry-aletheia 启动。安装目录允许
+  # 位于任意普通账户路径，不能把 /home/ry 写死在状态工具中。
+  sed -nE 's#^(.+)/dist/ry-aletheia([[:space:]].*)?$#\1#p' <<< "$command" | head -n 1
+}
+
+tool_tick_snapshot() {
+  local root="$1" pid ticks
+  # 只枚举本工具安装前缀中的进程；不把原机器人 ROS 节点、相机驱动或导航
+  # 进程计入 Aletheia CPU。对同一 pid 的两次快照求差，避免新建进程的历史
+  # jiffies 误计入本次采样。
+  while IFS= read -r pid; do
+    [[ -r "/proc/$pid/stat" ]] || continue
+    ticks="$(awk '{print $14 + $15}' "/proc/$pid/stat" 2>/dev/null || true)"
+    [[ "$ticks" =~ ^[0-9]+$ ]] && printf '%s %s\n' "$pid" "$ticks"
+  done < <(ps -eo pid=,args= 2>/dev/null | awk -v prefix="$root/" 'index($0, prefix) { print $1 }')
+}
+
+tool_cpu_percent() {
+  local root="$1" started ended before after pid ticks elapsed delta=0
+  local -A before_ticks=()
+  while read -r pid ticks; do
+    before_ticks["$pid"]="$ticks"
+  done < <(tool_tick_snapshot "$root")
+  [[ ${#before_ticks[@]} -gt 0 ]] || return 1
+  started="$(awk '{print $1}' /proc/uptime 2>/dev/null || true)"
+  sleep "$INTERVAL_S"
+  ended="$(awk '{print $1}' /proc/uptime 2>/dev/null || true)"
+  while read -r pid ticks; do
+    [[ -n "${before_ticks[$pid]:-}" ]] || continue
+    (( delta += ticks - before_ticks[$pid] ))
+  done < <(tool_tick_snapshot "$root")
+  elapsed="$(awk -v end="$ended" -v start="$started" 'BEGIN { value = end - start; if (value > 0) printf "%.6f", value }')"
+  [[ -n "$elapsed" ]] || return 1
+  awk -v ticks="$delta" -v seconds="$elapsed" -v hz="$(getconf CLK_TCK 2>/dev/null || echo 100)" 'BEGIN { printf "%.1f", ticks / hz / seconds * 100 }'
+}
+
+print_tool_cpu() {
+  local root="$1" sampled fallback
+  sampled="$(tool_cpu_percent "$root" 2>/dev/null || true)"
+  if [[ -n "$sampled" ]]; then
+    printf '工具总 CPU:   %s%%  （近 %ss；100%% = 一个逻辑 CPU 核心）\n' "$sampled" "$INTERVAL_S"
+    return
+  fi
+  # /proc 被容器策略隐藏时仍保留可用的降级值，并明确标识其不是瞬时采样。
+  fallback="$(ps -p "$2" -o %cpu= 2>/dev/null | tr -d ' ' || true)"
+  printf '工具总 CPU:   %s%%  （/proc 不可用，ps 平均值）\n' "${fallback:-—}"
+}
+
 print_process_metrics() {
-  local pid="$1" cpu rss threads elapsed command
-  read -r cpu rss threads elapsed command < <(ps -p "$pid" -o %cpu=,rss=,nlwp=,etime=,args= 2>/dev/null || true)
+  local pid="$1" rss threads elapsed command
+  read -r rss threads elapsed command < <(ps -p "$pid" -o rss=,nlwp=,etime=,args= 2>/dev/null || true)
   printf '服务 PID:     %s\n' "$pid"
-  printf 'CPU 占用:     %s%%  （进程平均值；100%% = 一个逻辑 CPU 核心）\n' "${cpu:-—}"
   printf '内存占用:     %s MiB\n' "$(format_mib "${rss:-0}")"
   printf '线程数:       %s\n' "${threads:-—}"
   printf '运行时长:     %s\n' "${elapsed:-—}"
@@ -131,7 +182,7 @@ for stream in document.get("streams", []):
 }
 
 render_status() {
-  local pid
+  local pid root
   pid="$(console_pid)"
 
   if [[ "$ONCE" == false ]]; then
@@ -148,6 +199,13 @@ render_status() {
   fi
 
   printf '工具状态:     运行中（8087 已监听）\n'
+  root="$(installation_root "$pid")"
+  if [[ -n "$root" ]]; then
+    print_tool_cpu "$root" "$pid"
+  else
+    # 理论上 console_pid 已校验过命令路径；此分支仅留给进程刚退出的竞态。
+    printf '工具总 CPU:   —  （服务进程正在切换，未能确定安装目录）\n'
+  fi
   print_process_metrics "$pid"
   printf '\n'
   print_video_metrics
@@ -155,7 +213,8 @@ render_status() {
 }
 
 while true; do
-  render_status
+  if ! render_status; then
+    sleep "$INTERVAL_S"
+  fi
   [[ "$ONCE" == true ]] && exit 0
-  sleep "$INTERVAL_S"
 done
