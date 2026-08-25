@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO
 
+from .upgrade_signature import UpgradeSignatureError, verify_manifest_signature
+
 
 class UpgradeError(ValueError):
     """离线升级包不完整、被篡改或不适用于当前运行实例。"""
@@ -135,15 +137,19 @@ class UpgradeManager:
             if binary_entry.file_size != binary_info["size"]:
                 raise UpgradeError("升级包二进制大小与清单不一致。")
             binary = temp_root / "ry-aletheia"
-            # 写入临时二进制时同步计算 MD5，避免升级完成后再完整读取一次大文件。
-            # 校验仍发生在 os.replace 前，安全边界不变。
-            digest = hashlib.md5()
+            # 兼容上一版本读取的 MD5 字段，同时使用 SHA-256 与 Ed25519 发布
+            # 签名保证内容完整性和发布者真实性。所有校验均发生在 os.replace 前。
+            md5_digest = hashlib.md5()
+            sha256_digest = hashlib.sha256()
             with bundle.open(binary_entry) as source, binary.open("wb") as output:
                 while chunk := source.read(1024 * 1024):
                     output.write(chunk)
-                    digest.update(chunk)
-        if digest.hexdigest() != manifest["binary"]["md5"]:
+                    md5_digest.update(chunk)
+                    sha256_digest.update(chunk)
+        if md5_digest.hexdigest() != manifest["binary"]["md5"]:
             raise UpgradeError("MD5 校验失败，升级包可能已损坏。")
+        if sha256_digest.hexdigest() != manifest["binary"]["sha256"]:
+            raise UpgradeError("SHA-256 校验失败，升级包可能已损坏。")
         return manifest, binary
 
     def _read_manifest(self, bundle: zipfile.ZipFile) -> dict:
@@ -164,6 +170,12 @@ class UpgradeManager:
             or binary["size"] < 1
             or not isinstance(binary.get("md5"), str)
             or not __import__("re").fullmatch(r"[0-9a-f]{32}", binary["md5"])
+            or not isinstance(binary.get("sha256"), str)
+            or not __import__("re").fullmatch(r"[0-9a-f]{64}", binary["sha256"])
         ):
             raise UpgradeError("升级清单字段不符合 RY Aletheia 离线升级协议。")
+        try:
+            verify_manifest_signature(manifest)
+        except UpgradeSignatureError as exc:
+            raise UpgradeError(str(exc)) from exc
         return manifest

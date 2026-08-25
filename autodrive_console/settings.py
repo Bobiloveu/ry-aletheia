@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -13,6 +14,8 @@ DEFAULT_NODES = [
     {"id": "task", "label": "任务服务节点", "supervisor": "MODULES:212-task_execute_server", "required": True},
     {"id": "bringup", "label": "导航节点", "supervisor": "MODULES:214-fcrp_bringup", "required": True},
 ]
+
+SUPERVISOR_PROCESS_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(?::[A-Za-z0-9][A-Za-z0-9_.-]{0,127})?\Z")
 
 
 DEFAULT_VEHICLE_MODELS = [
@@ -169,7 +172,7 @@ class SettingsStore:
             raise ValueError("请选择一个有效的当前车型")
         if not isinstance(settings.nodes, list) or not settings.nodes:
             raise ValueError("至少需要配置一个 Supervisor 节点")
-        if not isinstance(settings.monitor_nodes, list) or not all(isinstance(name, str) and name for name in settings.monitor_nodes):
+        if not isinstance(settings.monitor_nodes, list) or not all(isinstance(name, str) and SUPERVISOR_PROCESS_NAME.fullmatch(name) for name in settings.monitor_nodes):
             raise ValueError("默认监控节点配置格式错误")
         if len(set(settings.monitor_nodes)) != len(settings.monitor_nodes):
             raise ValueError("默认监控节点不能重复")
@@ -189,7 +192,7 @@ class SettingsStore:
         for step in plan["steps"]:
             if not isinstance(step, dict) or not isinstance(step.get("nodes"), list) or not step["nodes"]:
                 raise ValueError("每个依赖步骤必须至少选择一个 Supervisor 节点")
-            if not all(isinstance(name, str) and name for name in step["nodes"]):
+            if not all(isinstance(name, str) and SUPERVISOR_PROCESS_NAME.fullmatch(name) for name in step["nodes"]):
                 raise ValueError("依赖步骤中的 Supervisor 节点格式错误")
             if len(set(step["nodes"])) != len(step["nodes"]):
                 raise ValueError("同一依赖步骤不能重复选择节点")
@@ -200,5 +203,5 @@ class SettingsStore:
             if not 0 <= int(step.get("wait_seconds", 0)) <= 300:
                 raise ValueError("步骤等待时间必须介于 0 和 300 秒")
         for node in settings.nodes:
-            if not node.get("label") or not node.get("supervisor"):
+            if not node.get("label") or not isinstance(node.get("supervisor"), str) or not SUPERVISOR_PROCESS_NAME.fullmatch(node["supervisor"]):
                 raise ValueError("每个节点都必须包含 label 和 supervisor")

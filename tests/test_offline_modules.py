@@ -1,7 +1,9 @@
+import base64
 import hashlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -22,6 +24,52 @@ from autodrive_console.settings import RobotSettings, SettingsStore
 from autodrive_console.supervisor import SupervisorClient
 from autodrive_console.tool_logging import ToolLogStore
 from autodrive_console.upgrade_manager import UpgradeError, UpgradeManager
+from autodrive_console import upgrade_signature
+
+
+def _signed_upgrade_manifest(binary: bytes) -> tuple[dict, str]:
+    """Create a throwaway Ed25519 release for upgrade boundary tests."""
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        private_key = root / "test-release.pem"
+        payload_path = root / "manifest.payload"
+        signature_path = root / "manifest.signature"
+        subprocess.run(
+            ["openssl", "genpkey", "-algorithm", "Ed25519", "-out", str(private_key)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        manifest = {
+            "schema": UpgradeManager.SCHEMA,
+            "version": "0.2",
+            "created_at": "2026-08-13T00:00:00+08:00",
+            "binary": {
+                "path": "ry-aletheia",
+                "size": len(binary),
+                "md5": hashlib.md5(binary).hexdigest(),
+                "sha256": hashlib.sha256(binary).hexdigest(),
+            },
+        }
+        payload_path.write_bytes(upgrade_signature.canonical_manifest_payload(manifest))
+        subprocess.run(
+            ["openssl", "pkeyutl", "-sign", "-inkey", str(private_key), "-rawin", "-in", str(payload_path), "-out", str(signature_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        public_der = subprocess.run(
+            ["openssl", "pkey", "-in", str(private_key), "-pubout", "-outform", "DER"],
+            check=True,
+            capture_output=True,
+        ).stdout
+        manifest["signature"] = {
+            "algorithm": upgrade_signature.SIGNATURE_ALGORITHM,
+            "key_id": upgrade_signature.RELEASE_KEY_ID,
+            "value": base64.b64encode(signature_path.read_bytes()).decode("ascii"),
+        }
+        return manifest, base64.b64encode(public_der[-32:]).decode("ascii")
 
 
 class _SupervisorClient(SupervisorClient):
@@ -42,6 +90,9 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertTrue(web_console.is_mobile_console_client({"Sec-CH-UA-Mobile": "?1"}))
         self.assertTrue(web_console.is_mobile_console_client({"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)"}))
         self.assertFalse(web_console.is_mobile_console_client({"Sec-CH-UA-Mobile": "?0", "User-Agent": "Android"}))
+        console_source = Path("web_console.py").read_text(encoding="utf-8")
+        self.assertIn('forced_mobile = query.get("mobile", [""])[0] == "1"', console_source)
+        self.assertIn("forced_mobile or is_mobile_console_client", console_source)
         self.assertEqual(web_console.mobile_url_for("/"), "/m/")
         self.assertEqual(web_console.mobile_url_for("/vue/dashboard.html"), "/m/")
         self.assertEqual(web_console.mobile_url_for("/live-observation.html"), "/m/live-observation.html")
@@ -49,13 +100,22 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIsNone(web_console.mobile_page_name("/m/../../web_console.py"))
         self.assertIsNone(web_console.mobile_url_for("/api/runs/latest"))
         mobile_shell = (web_console.WEB_ROOT / "mobile_console.js").read_text(encoding="utf-8")
-        self.assertIn("requestFullscreen", mobile_shell)
-        self.assertIn("mobile-viewer-fullscreen-active", mobile_shell)
+        self.assertIn("NAV_ITEMS", mobile_shell)
+        self.assertIn("mobile-shell-generic", mobile_shell)
+        self.assertIn("mobile-shell-nav", mobile_shell)
+        self.assertIn("dedicatedLiveConsole", mobile_shell)
+        self.assertIn("document.querySelector('.mobile-console-bar') && document.querySelector('.mobile-bottom-nav')", mobile_shell)
+        self.assertNotIn("mobileRotateGuard", mobile_shell)
+        self.assertIn(".mobile-bottom-nav a", mobile_shell)
+        self.assertNotIn("mobile-viewer-fullscreen-active", mobile_shell)
+        self.assertNotIn("mobile-nav-toggle", mobile_shell)
         mobile_style = (web_console.WEB_ROOT / "mobile_console.css").read_text(encoding="utf-8")
         self.assertIn("orientation: landscape", mobile_style)
-        self.assertIn("width: 100dvw", mobile_style)
-        self.assertIn(".mobile-fullscreen-exit", mobile_style)
-        self.assertIn(".map-widget { position: fixed", mobile_style)
+        self.assertIn("body.mobile-console.mobile-shell-generic", mobile_style)
+        self.assertIn(".mobile-shell-bar", mobile_style)
+        self.assertIn(".mobile-shell-nav", mobile_style)
+        self.assertNotIn("mobile-viewer-fullscreen-active", mobile_style)
+        self.assertNotIn("#08111f", mobile_style)
 
     def test_scenario_setup_applies_only_registered_targets_and_refuses_unsafe_restore(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -270,6 +330,21 @@ class OfflineModuleTests(unittest.TestCase):
             with self.assertRaises(ObservationError):
                 manager.preview("../not-a-map")
 
+    def test_observation_port_probe_reads_listener_table_without_a_websocket_connection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            listener_table = Path(directory) / "tcp"
+            listener_table.write_text(
+                "  sl  local_address rem_address   st\n"
+                "   0: 0100007F:223F 00000000:0000 0A\n"
+                "   1: 0100007F:222E 00000000:0000 01\n",
+                encoding="ascii",
+            )
+            self.assertEqual(ObservationManager._listening_tcp_ports((listener_table,)), {8767})
+            with patch.object(ObservationManager, "_listening_tcp_ports", return_value={8767}) as probe:
+                self.assertTrue(ObservationManager._port_open("127.0.0.1", 8767))
+                self.assertFalse(ObservationManager._port_open("192.168.1.20", 8767))
+            probe.assert_called_once_with()
+
     def test_live_observation_matches_map_walls_from_current_ros_map_metadata(self):
         """实时页不依赖轨迹任务，也能按实际 /map 找到同目录虚拟墙。"""
         with tempfile.TemporaryDirectory() as directory:
@@ -310,10 +385,11 @@ class OfflineModuleTests(unittest.TestCase):
         """避免直连模式只收到 TF、却因白名单遗漏而永远不请求 /map。"""
         source = Path("frontend/src/liveObservation.js").read_text(encoding="utf-8")
         self.assertIn("const TOPICS = new Set(['/map', '/amcl_pose'", source)
-        self.assertIn("else if (channel.topic === '/map') { mapChannel = channel; beginMapProbe(); }", source)
-        self.assertIn("function isDepthTransport(channel)", source)
-        self.assertIn("isCameraCandidate(channel)", source)
-        self.assertIn("原始图像（高带宽，可能增加延迟）", source)
+        self.assertIn("if (channel.topic === '/map') { mapChannel = channel; beginMapProbe(); }", source)
+        # 相机预览不再经过 Foxglove Bridge；这里仅订阅地图、定位、TF 与点云。
+        self.assertNotIn("function isDepthTransport(channel)", source)
+        self.assertNotIn("isCameraCandidate(channel)", source)
+        self.assertNotIn("原始图像（高带宽，可能增加延迟）", source)
         self.assertIn("/api/observation/live-layers", source)
         self.assertIn("/api/observation/active-map", source)
         self.assertIn("const ACTIVE_MAP_SYNC_MS = 1000;", source)
@@ -339,11 +415,14 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("function renderStaticWorld()", source)
         self.assertIn("pixiWorld.scale.set(layout.ratio, layout.ratio);", source)
         self.assertIn("mapTexture = createRgbaTexture(pixels, info.width, info.height);", source)
-        self.assertIn("async function initializeCameraRenderer(slot)", source)
-        self.assertIn("function presentCameraTexture(slot, texture, width, height, imageBitmap)", source)
-        self.assertIn("state.imageBitmap?.close();", source)
+        self.assertNotIn("cameraChannels", source)
+        self.assertNotIn("cameraSlots", source)
+        self.assertNotIn("async function initializeCameraRenderer(slot)", source)
+        self.assertNotIn("function presentCameraTexture(slot, texture, width, height, imageBitmap)", source)
         self.assertNotIn("getContext('2d')", source)
-        self.assertIn("points.fill(0x8058ff);", source)
+        self.assertIn("points.fill((mobileConsoleEnabled() ? MAP_PALETTE : DESKTOP_MAP_PALETTE).cloud);", source)
+        self.assertIn("const DESKTOP_MAP_PALETTE", source)
+        self.assertIn("pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiWallLayer, pixiCloudLayer);", source)
         self.assertNotIn("liveCloudWorker", source)
         self.assertIn("回退到原始点云时仍保持保守限速", source)
         self.assertIn("function followVehicleCenter(vehicle)", source)
@@ -571,49 +650,66 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertEqual([(item.name, item.status) for item in processes], [("NODE:1", "RUNNING"), ("NODE:2", "STOPPED")])
         with self.assertRaisesRegex(RuntimeError, "节点名称不合法"):
             client.restart("NODE:1 invalid")
+        with self.assertRaisesRegex(RuntimeError, "节点名称不合法"):
+            client.start("--all")
         with self.assertRaisesRegex(RuntimeError, "必须以 status 结尾"):
             SupervisorClient("supervisorctl restart", 1)._base_args()
+
+    def test_supervisor_sudoers_are_scoped_to_declared_programs(self):
+        postinst = Path("packaging/debian/postinst").read_text(encoding="utf-8")
+        self.assertIn("SUPERVISOR_NODES=(", postinst)
+        self.assertIn("SUPERVISOR_NODES+=(\"$node\")", postinst)
+        self.assertIn('sudoers_node="${node//:/\\\\:}"', postinst)
+        self.assertIn("%s start %s, %s restart %s", postinst)
+        self.assertNotIn("%s start *, %s restart *", postinst)
+        self.assertIn("systemctl disable ry-aletheia.service", postinst)
+        self.assertNotIn("systemctl disable --now ry-aletheia.service", postinst)
 
     def test_upgrade_package_validation_and_report_path_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "VERSION").write_text("0.1\n", encoding="utf-8")
             binary = b"valid binary payload"
-            manifest = {
-                "schema": UpgradeManager.SCHEMA,
-                "version": "0.2",
-                "created_at": "2026-08-13T00:00:00+08:00",
-                "binary": {"path": "ry-aletheia", "size": len(binary), "md5": hashlib.md5(binary).hexdigest()},
-            }
+            manifest, test_public_key = _signed_upgrade_manifest(binary)
             archive = root / "valid.zip"
             with zipfile.ZipFile(archive, "w") as bundle:
                 bundle.writestr("manifest.json", json.dumps(manifest))
                 bundle.writestr("ry-aletheia", binary)
             manager = UpgradeManager(root, root / "ry-aletheia", True)
-            self.assertEqual(manager.status()["current_version"], "0.1")
-            manifest_result, extracted = manager._validate_package(archive, root)
-            self.assertEqual(manifest_result["version"], "0.2")
-            self.assertEqual(extracted.read_bytes(), binary)
+            with patch.object(upgrade_signature, "RELEASE_PUBLIC_KEY_B64", test_public_key):
+                self.assertEqual(manager.status()["current_version"], "0.1")
+                manifest_result, extracted = manager._validate_package(archive, root)
+                self.assertEqual(manifest_result["version"], "0.2")
+                self.assertEqual(extracted.read_bytes(), binary)
 
-            bad = root / "bad.zip"
-            with zipfile.ZipFile(bad, "w") as bundle:
-                bundle.writestr("manifest.json", json.dumps(manifest))
-                bundle.writestr("ry-aletheia", binary)
-                bundle.writestr("unexpected.txt", "x")
-            with self.assertRaisesRegex(UpgradeError, "只能包含"):
-                manager._validate_package(bad, root)
+                bad = root / "bad.zip"
+                with zipfile.ZipFile(bad, "w") as bundle:
+                    bundle.writestr("manifest.json", json.dumps(manifest))
+                    bundle.writestr("ry-aletheia", binary)
+                    bundle.writestr("unexpected.txt", "x")
+                with self.assertRaisesRegex(UpgradeError, "只能包含"):
+                    manager._validate_package(bad, root)
 
-            previous_binary = b"previous binary payload"
-            (root / "ry-aletheia").write_bytes(previous_binary)
-            old_backups = root / "updates" / "backups"
-            old_backups.mkdir(parents=True)
-            (old_backups / "ry-aletheia_older.bak").write_bytes(b"obsolete")
-            result = manager.apply(io.BytesIO(archive.read_bytes()), archive.stat().st_size, archive.name)
-            self.assertEqual(result["version"], "0.2")
-            self.assertEqual((root / "ry-aletheia").read_bytes(), binary)
-            backups = list(old_backups.glob("*.bak"))
-            self.assertEqual([item.name for item in backups], ["ry-aletheia.bak"])
-            self.assertEqual(backups[0].read_bytes(), previous_binary)
+                tampered_manifest = json.loads(json.dumps(manifest))
+                tampered_manifest["version"] = "0.3"
+                signed_but_tampered = root / "tampered.zip"
+                with zipfile.ZipFile(signed_but_tampered, "w") as bundle:
+                    bundle.writestr("manifest.json", json.dumps(tampered_manifest))
+                    bundle.writestr("ry-aletheia", binary)
+                with self.assertRaisesRegex(UpgradeError, "发布签名校验失败"):
+                    manager._validate_package(signed_but_tampered, root)
+
+                previous_binary = b"previous binary payload"
+                (root / "ry-aletheia").write_bytes(previous_binary)
+                old_backups = root / "updates" / "backups"
+                old_backups.mkdir(parents=True)
+                (old_backups / "ry-aletheia_older.bak").write_bytes(b"obsolete")
+                result = manager.apply(io.BytesIO(archive.read_bytes()), archive.stat().st_size, archive.name)
+                self.assertEqual(result["version"], "0.2")
+                self.assertEqual((root / "ry-aletheia").read_bytes(), binary)
+                backups = list(old_backups.glob("*.bak"))
+                self.assertEqual([item.name for item in backups], ["ry-aletheia.bak"])
+                self.assertEqual(backups[0].read_bytes(), previous_binary)
 
             reports = root / "reports"
             reports.mkdir()

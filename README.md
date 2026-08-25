@@ -2,7 +2,7 @@
 
 RY Aletheia 是部署在机器人小车本机的离线自动测试平台，用于管理测试用例、恢复受控运行依赖、执行多轮任务、记录多地图轨迹，并生成可离线查看的测试报告。
 
-它不替代小车已有的导航、定位、地图或安全控制系统；实时页面仅用于只读观察地图、车体、虚拟墙、点云和按需图像。
+它不替代小车已有的导航、定位、地图或安全控制系统；实时页面仅用于只读观察地图、车体、虚拟墙、点云和按需低延迟相机视频。
 
 ## 快速开始
 
@@ -19,16 +19,29 @@ ry-aletheia
 http://<小车IP>:8087
 ```
 
-已部署旧版本时，优先在“运行配置 → 工具离线升级”上传 `ry-aletheia_<版本号>.zip`；无需重新安装 DEB。
+已部署旧版本时，优先在“运行配置 → 工具离线升级”上传维护人员发布的 `ry-aletheia_<版本号>.zip`；无需重新安装 DEB。新版本会在替换前校验 Ed25519 发布签名与 SHA-256 完整性，校验失败不会替换当前程序。
+
+实时观测中的“低延迟相机流”默认关闭。页面既可统一启停全部视频，也可逐路任意开关；视频窗口会随当前启用的路数自适应排布。关闭最后一路后，工具会停止并回收自己的 MediaMTX、视频编码与 ROS 订阅进程，不需要使用 Supervisor 或额外的常驻管理命令。
 
 完整安装、移动端使用、页面操作、人工恢复、升级和常见问题请阅读 [USER_GUIDE.md](USER_GUIDE.md)。
 
+## 运行与维护边界
+
+维护前先明确以下归属，避免工具升级意外影响正在运行的小车：
+
+- **机器人系统拥有**：相机 USB 设备、`/dev/video*`/v4l2loopback 映射、ROS 相机节点、定位、导航、地图、雷达和底盘控制。
+- **Aletheia 只读使用**：地图、TF、点云和既有 `sensor_msgs/Image` 话题。视频旁路的唯一输入绑定是 `config/video.json` 中的 `source_topic`，不会直接打开摄像头设备。
+- **Aletheia 自己拥有**：8087 控制台、按需运行的私有 Foxglove Bridge、`/_aletheia/live_*` 预处理话题，以及按需运行的 MediaMTX 和视频编码进程。它们不由 Supervisor 管理。
+- **用户数据不随 ZIP 覆盖**：`tasks/`、`config/`、报告、地图缓存和日志都被保留。升级包只替换程序二进制，并自动留下可回退备份。
+
+现场先用 `ry-aletheia-status --once` 确认控制台与视频运行器的资源状态；再从“运行配置”或 `GET /api/observation`、`GET /api/video/status` 判断观测链路。不要为排障停止或重启小车已有的相机、导航、定位和 Supervisor 进程。
+
 ## 版本与发布
 
-当前正式版本为 `v1.0.0`。发布包仅通过 [GitHub Releases](https://github.com/Bobiloveu/ry-aletheia/releases) 交付：
+发布包仅通过 [GitHub Releases](https://github.com/Bobiloveu/ry-aletheia/releases) 交付：
 
-- `ry-aletheia_1.0.0.zip`：已安装工具的小车在网页中离线升级使用。
-- `ry-aletheia_1.0.0_amd64.deb`：新小车首次部署或需要完整重装时使用。
+- `ry-aletheia_<版本号>.zip`：已安装工具的小车在网页中离线升级使用。
+- `ry-aletheia_<版本号>_amd64.deb`：新小车首次部署或需要完整重装时使用。
 
 仓库中的 `releases/` 是本地构建输出目录，默认不纳入版本控制；不要将 ZIP、DEB、日志、报告或车辆配置提交到源码仓库。
 
@@ -41,19 +54,19 @@ http://<小车IP>:8087
 | 实时二维地图 | Canvas 静态地图、点云 Canvas/Worker 合成 | PixiJS 场景树：地图纹理、虚拟墙与最新点云独立图层 |
 | 地图交互与车体 | CSS 视图变换、DOM 车体层 | PixiJS 世界容器变换、保留 DOM 车体层 |
 | 点云时效策略 | 单槽 latest-wins、限频合成 | 保持相同单槽 latest-wins、限频与过期帧丢弃策略 |
-| 相机预览 | 原生 Canvas 2D 绘制 | PixiJS 纹理与精灵渲染；保留原始/压缩图像解码及最新帧优先策略 |
-| ROS/Bridge/API | 既有实现 | 保持不变 |
+| 相机预览 | 原生 Canvas 2D 绘制 | 可选的 MediaMTX + WHEP/WebRTC 直出；浏览器原生视频元素解码，视频帧不经过 Python 或 Foxglove Bridge |
+| ROS/Bridge/API | 既有实现 | 保持既有控制边界；新增受控的视频状态与启停 API，不新增机器人控制接口 |
 | 开发工具链 | 手工管理 Python、Node 与构建工具 | 根目录 `pixi.toml`/`pixi.lock` 锁定 Python 3.10、Node 20、CMake、编译器、PyInstaller 与 pytest |
 
-`v2.0` 仅重构浏览器侧实时可视化渲染引擎：地图、点云和相机预览均改用 PixiJS；不改变任务下发、Supervisor 编排、ROS2 话题、Foxglove Bridge、后端 API 或机器人控制边界。详细设计和环境边界见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)。
+`v2.0` 将地图、虚拟墙和点云重构为 PixiJS 分层渲染；相机则采用独立的按需 WebRTC 链路。视频只读取既有 ROS 图像话题并在工具私有运行时内编码、转发，不改变任务下发、Supervisor 编排、ROS2 原有节点或机器人控制边界。详细设计和环境边界见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)。
 
 ## 主要能力
 
 - 测试用例导入、校验、别名管理及跨车用例包交付。
 - 多轮串行测试、场景前置参数受控替换、Supervisor 依赖编排与人工恢复。
 - 多地图轨迹、理想路径与虚拟墙证据，以及 HTML/CSV 离线报告。
-- 低延迟实时观测：PixiJS 渲染地图、虚拟墙、点云与相机图像，DOM 覆盖车体，并按需订阅图像。
-- PC 桌面布局与独立移动端界面；手机实时观测支持横竖屏全屏地图。
+- 低延迟实时观测：PC 保持原有高对比地图观测界面；移动端由 PixiJS 渲染深色占据地图、自适应米制格栅、虚拟墙和点云，DOM 覆盖车体。四路工业相机和一路目标检测结果图经可选 MediaMTX/WebRTC 直出，并可由网页按需启停。
+- PC 桌面布局与独立移动端界面；全部 `/m/` 业务页使用统一的品牌栏、五项底部导航和石墨暖灰主题。手机实时观测同时适配横屏、竖屏及带常驻地址栏的低高度视口：浅横屏优先呈现可读的横向地图工作区，可在地图与五路 WebRTC 相机之间单触切换。页面缩放被锁定，双指缩放仅作用于地图世界视图。
 - 完整离线 DEB 可内置工具私有 Foxglove Bridge，不改写系统已有 Bridge 或 ROS 环境。
 
 ## 系统结构
@@ -61,18 +74,20 @@ http://<小车IP>:8087
 ```text
 浏览器（PC / 手机）
   ├─ HTTP :8087：控制台、任务、报告与配置
-  └─ WebSocket :8767：实时观测直连
+  ├─ WebSocket :8767：实时观测直连
        └─ PixiJS：地图栅格、虚拟墙、最新点云
+  └─ WHEP/WebRTC :8889：低延迟相机视频直出
              │
 RY Aletheia（小车普通账户）
   ├─ Python 控制台与测试编排
   ├─ C++ 实时预处理：/collision_voxel_layer/points（Livox 原始流回退）→ 网页专用点云/位姿流
-  └─ 工具私有 Foxglove Bridge（按需启动）
+  ├─ 工具私有 Foxglove Bridge（按需启动）
+  └─ 可选视频运行时：ROS Image → 原生 RGB 输入 → VAAPI H.264 → 本机 MediaMTX
              │
 小车已有 ROS 2 Humble、定位、地图、导航与传感器节点
 ```
 
-实时位姿和点云分别使用网页专用流，浏览器侧采用独立连接与“只保留最新帧”策略。PixiJS 只更新地图世界容器或最新点云几何，车体仍由独立 DOM 层显示，避免大点云帧拖慢车体显示。
+实时位姿和点云分别使用网页专用流，浏览器侧采用独立连接与“只保留最新帧”策略。PixiJS 只更新地图世界容器或最新点云几何，车体仍由独立 DOM 层显示，避免大点云帧拖慢车体显示。视频走浏览器与 MediaMTX 的直连 WebRTC 会话：Python 只负责配置、进程生命周期和健康状态，绝不转发视频帧。
 
 ## 文档
 
@@ -89,6 +104,7 @@ RY Aletheia（小车普通账户）
 autodrive_console/  Python 业务模块、正式网页资源与移动端壳层
 frontend/            Vue/Vite 前端源码与 PixiJS 实时地图渲染
 live_preprocessor/   ROS 2 C++ 实时点云与位姿预处理节点
+                     及 ROS 图像到 H.264 的原生视频输入节点
 tests/               自动化回归测试
 docs/images/         用户操作指南配图
 packaging/           Debian 安装、启动与卸载脚本

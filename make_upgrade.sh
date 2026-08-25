@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 开发机一键生成网页离线升级 ZIP；--deb 始终生成内置私有 Bridge 的完整首次安装 DEB。
+# 开发机一键生成网页离线升级 ZIP；--deb 始终生成内置私有 Bridge、MediaMTX
+# 与 VAAPI GStreamer runtime、普通账户视频启动器的完整首次安装 DEB。
 # 用法：./make_upgrade.sh <版本号> [--deb]
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 SETUP="$ROOT/install/setup.bash"

@@ -1,0 +1,70 @@
+{
+  "schema": "ry-aletheia-video/v1",
+  "enabled": false,
+  "ros_domain_id": 66,
+  "gateway": {
+    "kind": "mediamtx",
+    "management": "console",
+    "owner": "ry-aletheia",
+    "api_url": "http://127.0.0.1:9997/v3/paths/list",
+    "whep_port": 8889,
+    "rtsp_port": 8554
+  },
+  "runtime": {
+    "encoder": "vaapih264enc",
+    "vaapi_device": "/dev/dri/renderD128",
+    "gst_launch": "runtime/video/bin/gst-launch-1.0"
+  },
+  "streams": [
+    {
+      "name": "front_camera",
+      "path": "front_camera",
+      "enabled": false,
+      "source_topic": "/front_camera/image_raw",
+      "encoding": "rgb8",
+      "resolution": "640x480",
+      "fps": 15,
+      "bitrate_kbps": 1200
+    },
+    {
+      "name": "back_camera",
+      "path": "back_camera",
+      "enabled": false,
+      "source_topic": "/back_camera/image_raw",
+      "encoding": "rgb8",
+      "resolution": "640x480",
+      "fps": 15,
+      "bitrate_kbps": 1200
+    },
+    {
+      "name": "left_camera",
+      "path": "left_camera",
+      "enabled": false,
+      "source_topic": "/left_camera/image_raw",
+      "encoding": "rgb8",
+      "resolution": "640x480",
+      "fps": 15,
+      "bitrate_kbps": 1200
+    },
+    {
+      "name": "right_camera",
+      "path": "right_camera",
+      "enabled": false,
+      "source_topic": "/right_camera/image_raw",
+      "encoding": "rgb8",
+      "resolution": "640x480",
+      "fps": 15,
+      "bitrate_kbps": 1200
+    },
+    {
+      "name": "detection_camera",
+      "path": "detection_camera",
+      "enabled": false,
+      "source_topic": "/annotated_image",
+      "encoding": "rgb8",
+      "resolution": "640x480",
+      "fps": 10,
+      "bitrate_kbps": 800
+    }
+  ]
+}

@@ -10,7 +10,7 @@ const expected = [
   ['运行配置页面骨架', ['page-main', 'page-header', 'page-grid', 'CONSOLE SETTINGS', '本机运行参数']],
   ['运行参数字段与保存操作', ['任务目标目录', 'Supervisor 查询超时（秒）', '保存配置']],
   ['测试依赖说明', ['DEPENDENCY ORCHESTRATION', '测试依赖编排']],
-  ['离线升级组件', ['OFFLINE CONSOLE UPGRADE', '工具离线升级', 'upgrade-panel', 'upgrade-dropzone', '校验并应用升级', '升级时执行 MD5 校验']],
+  ['离线升级组件', ['OFFLINE CONSOLE UPGRADE', '工具离线升级', 'upgrade-panel', 'upgrade-dropzone', '校验并应用升级', 'Ed25519', 'SHA-256']],
   ['升级安全边界', ['UPGRADE SAFETY', '升级边界']],
 ];
 

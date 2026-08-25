@@ -60,6 +60,21 @@ cmake -S "$BUILD_ROOT/live_preprocessor" -B "$BUILD_ROOT/build/live_preprocessor
 cmake --build "$BUILD_ROOT/build/live_preprocessor" --parallel 2
 LIVE_PREPROCESSOR="$BUILD_ROOT/build/live_preprocessor/aletheia_live_cloud"
 [[ -x "$LIVE_PREPROCESSOR" ]] || { echo "实时点云预处理节点构建失败。" >&2; exit 1; }
+VIDEO_INGEST="$BUILD_ROOT/build/live_preprocessor/aletheia_video_ingest"
+[[ -x "$VIDEO_INGEST" ]] || { echo "原生视频输入节点构建失败。" >&2; exit 1; }
+# 网页 ZIP 升级只替换单文件二进制。将私有视频 runtime 一同封入该二进制，
+# 新版本首次启用视频时便可安全刷新 $WORKSPACE/runtime/video，无需改用 DEB。
+VIDEO_RUNTIME="${RY_ALETHEIA_VIDEO_RUNTIME:-}"
+if [[ -z "$VIDEO_RUNTIME" ]]; then
+  VIDEO_RUNTIME_PARENT="$(mktemp -d)"
+  VIDEO_RUNTIME="$VIDEO_RUNTIME_PARENT/runtime"
+  trap 'rm -rf "$VIDEO_RUNTIME_PARENT"' EXIT
+  "$BUILD_ROOT/build_video_runtime.sh" --output-dir "$VIDEO_RUNTIME"
+fi
+[[ -f "$VIDEO_RUNTIME/ry-aletheia-runtime.json" ]] || {
+  echo "私有视频 runtime 不完整：缺少 ry-aletheia-runtime.json" >&2
+  exit 1
+}
 ROSIDL_LIBRARIES=()
 # Python 的 --collect-all 不会稳定收集 ROS2 运行时动态选择的类型支持库。
 # 任务服务和 TF 监听均需要它们；从所有已 source 的 prefix 收集，兼容接口包位于
@@ -102,7 +117,10 @@ python3 -m PyInstaller \
   --name ry-aletheia \
   --add-data "autodrive_console/web:autodrive_console/web" \
   --add-data "autodrive_console/web-vue:autodrive_console/web-vue" \
+  --add-data "config/video.json:config" \
+  --add-data "$VIDEO_RUNTIME:runtime/video" \
   --add-binary "$LIVE_PREPROCESSOR:." \
+  --add-binary "$VIDEO_INGEST:." \
   --hidden-import rclpy \
   --hidden-import master_interfaces.srv \
   --collect-all rclpy \

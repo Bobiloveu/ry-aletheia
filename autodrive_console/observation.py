@@ -6,7 +6,6 @@ import logging
 import os
 import shutil
 import signal
-import socket
 import subprocess
 import threading
 import time
@@ -38,7 +37,7 @@ class ObservationManager:
     不订阅 ``/map``、``/odom`` 或点云。轨迹记录器仍是唯一的地图缓存生产者；
     实时数据由 Aletheia 自己创建的 Bridge 在观测页开启期间独立处理。为避免影响
     机器人上原有的 Foxglove Bridge，控制台绝不复用占用中的外部端口；受控进程仅在
-    专用端口仅绑定本机回环地址，经控制台代理提供给浏览器，且在观测页空闲后自动退出。
+    专用端口仅供受控测试网内的浏览器直连，且在观测页空闲后自动退出。
     """
 
     _PACKAGE_CACHE_SECONDS = 15.0
@@ -639,11 +638,36 @@ class ObservationManager:
 
     @staticmethod
     def _port_open(host: str, port: int) -> bool:
-        try:
-            with socket.create_connection((host, int(port)), timeout=0.25):
-                return True
-        except OSError:
+        """无连接地检查本机 TCP 监听端口。
+
+        Foxglove 是 WebSocket 服务。此前用裸 TCP ``connect`` 做健康检查会让
+        服务端收到没有 Upgrade 请求的客户端，因而每次状态轮询都记录一次
+        ``handshake failed``。Linux 的 ``/proc/net/tcp*`` 已提供监听状态，读取
+        它既能识别端口冲突，也绝不创建会被 WebSocket 误判的连接。
+        """
+        if str(host).lower() not in {"127.0.0.1", "::1", "localhost"}:
             return False
+        return int(port) in ObservationManager._listening_tcp_ports()
+
+    @staticmethod
+    def _listening_tcp_ports(proc_files: tuple[Path, ...] | None = None) -> set[int]:
+        """读取 Linux TCP/TCP6 监听表；不可读时安全地视为没有监听端口。"""
+        files = proc_files or (Path("/proc/net/tcp"), Path("/proc/net/tcp6"))
+        listening: set[int] = set()
+        for source in files:
+            try:
+                rows = source.read_text(encoding="ascii", errors="ignore").splitlines()[1:]
+            except OSError:
+                continue
+            for row in rows:
+                fields = row.split()
+                if len(fields) < 4 or fields[3] != "0A":  # TCP_LISTEN
+                    continue
+                try:
+                    listening.add(int(fields[1].rsplit(":", 1)[1], 16))
+                except (IndexError, ValueError):
+                    continue
+        return listening
 
     @staticmethod
     def _cached_asset(target: Path) -> CachedMapAsset | None:

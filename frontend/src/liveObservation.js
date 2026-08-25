@@ -46,12 +46,6 @@ const TF_MIN_INTERVAL_MS = 33;
 const MAP_RENDER_INTERVAL_MS = 16;
 // 地图源本身约为千级像素；限制到 CSS 像素级可避免在高 DPI 电脑上反复旋转
 // 超采样的渲染目标，显著降低主视图卡顿，同时不压缩或修改原始地图数据。
-// 图像是观测页中带宽和解码开销最大的内容。实时查看应优先展示最新状态，
-// 而不是让浏览器逐帧补完历史画面；否则延迟会持续累积并明显落后于 RViz2。
-// 压缩图像由浏览器异步解码，直接调度最新帧；原始图像需要逐像素转换，
-// 因此保守限速以免抢占地图和点云的主线程时间。两者均只绘制最新帧。
-const COMPRESSED_CAMERA_RENDER_INTERVAL_MS = 0;
-const RAW_CAMERA_RENDER_INTERVAL_MS = 200;
 // /map 是 transient-local 的静态资产。保持一个订阅即可收到首次地图以及
 // map_server 切图时发布的新地图，不能用定时退订/重订来“探测”切图：那会把
 // 完整 OccupancyGrid 周期性塞回主线程，造成点云和车体同时掉帧。
@@ -77,19 +71,39 @@ const FOLLOW_CENTER_SNAP_DISTANCE_M = 1.5;
 // 平滑接近目标后必须停止补帧。否则静止小车持续发布的 TF 会不断延长动画窗口，
 // 使页面在没有可见变化时仍维持高频重绘。
 const FOLLOW_CENTER_SETTLE_DISTANCE_M = 0.008;
-// 静止定位仍会有毫米级浮动。显示层使用 2.5 cm 滞回，累计位移超过阈值才更新，
-// 不修改 ROS 原始位姿；缓慢真实移动会自然越过阈值而继续显示。
+// 静止定位仍会有毫米级浮动。由显示层的 α-β 校正吸收小误差；不能把原始位姿
+// 锁在锚点上，否则低速直行或原地缓转会积累为一次明显跳步。
 const VEHICLE_POSITION_DEADBAND_M = 0.006;
 const VEHICLE_VELOCITY_DEADBAND_MPS = 0.05;
-const VEHICLE_STILL_HOLD_DISTANCE_M = 0.025;
-const VEHICLE_STILL_RELEASE_DISTANCE_M = 0.045;
-const VEHICLE_STILL_HOLD_YAW_RAD = 0.025;
-const VEHICLE_STILL_RELEASE_YAW_RAD = 0.05;
-const VEHICLE_STILL_SETTLE_MS = 220;
+// 仅用于判断何时刷新“速度估计”，不截断位置或朝向本身。低于该值的更新仍会
+// 交给显示滤波器，因此车体会连续移动，而不会被静止判定冻结。
+const LIVE_MOTION_POSITION_EPSILON_M = 0.008;
+const LIVE_MOTION_YAW_EPSILON_RAD = 0.008;
 const MAX_VEHICLE_PREDICTION_MS = 300;
 const ALPHA_BETA_POSITION_GAIN = 0.72;
 const ALPHA_BETA_VELOCITY_GAIN = 0.12;
 const MAX_VEHICLE_YAW_RATE_RADPS = 2.8;
+// 手机地图采用钛灰仪表底色：能量橙只服务机器人与当前焦点，深紫服务
+// 实时激光点云，红色仅表示虚拟墙。色彩层级由数据语义决定，而不是装饰效果。
+const MAP_PALETTE = {
+  unknown: [216, 221, 227],
+  free: [246, 247, 248],
+  occupied: [105, 116, 126],
+  gridMinor: 0xbac2c9,
+  gridMajor: 0x8f9ba6,
+  // 亮紫色点云与红色虚拟墙在浅色栅格上清晰分离；点尺寸保持原有标定值。
+  cloud: 0x8b5cf6,
+  virtualWall: 0xd63142,
+};
+// PC 保持原有高对比观测配色与无格栅画面。手机专用主题和米制格栅只在
+// `html.mobile-console` 已由 setupMobileConsole 显式启用时参与渲染。
+const DESKTOP_MAP_PALETTE = {
+  unknown: [174, 174, 174],
+  free: [245, 245, 245],
+  occupied: [36, 36, 36],
+  cloud: 0x8058ff,
+  virtualWall: 0xd63142,
+};
 const $ = (id) => document.getElementById(id);
 let client;
 // 位姿使用独立 TCP/WebSocket。即使点云连接正在传输大帧，也不会在浏览器
@@ -112,12 +126,14 @@ let mapGeneration = 0;
 let pixiApp;
 let pixiWorld;
 let pixiMapLayer;
+let pixiGridLayer;
 let pixiWallLayer;
 let pixiCloudLayer;
 let pixiMapSprite;
 let pixiMapTexture;
 let pixiReady = false;
 let pixiInitialization;
+let metricGridSignature;
 const mapViewport = { width: 1, height: 1 };
 let pendingCloudPacket;
 let cloudPacketQueued = false;
@@ -130,9 +146,7 @@ let renderedVehicleAt = 0;
 let livePoseSourceAgeMs = 0;
 let liveCloudSourceAgeMs = 0;
 const clientPerformance = { startedAt: performance.now(), posePackets: 0, poseApplied: 0, cloudPackets: 0, vehicleFrames: 0, vehicleLongFrames: 0, vehicleFrameIntervalMs: 0, lastVehicleFrameAt: 0 };
-let vehicleStillAnchor;
-let vehicleStillCandidate;
-let vehicleStillCandidateAt = 0;
+let latestLiveMotion;
 let cloud;
 let virtualWalls = [];
 let wallStatus = '等待虚拟墙匹配';
@@ -143,8 +157,16 @@ const transforms = new Map();
 // 不同车型/定位栈对底盘坐标系的命名可能不同。/amcl_pose 暂时不可用时，
 // 直接从 TF 的 map -> base_* 链路绘制车体，不能因单一定位话题短暂缺帧而消失。
 const VEHICLE_BASE_FRAMES = ['base_footprint', 'base_link', 'base_footprint_link'];
-const cameraChannels = new Map();
-const cameraSlots = { A: {}, B: {} };
+// 工业相机不经过 Foxglove WebSocket：每张卡片都由 HTMLVideoElement 接收
+// WHEP/WebRTC，再由 PixiJS Video Texture 合成。即便新增流失败，也不会影响
+// 现有地图、点云或诊断图像订阅。
+const webrtcPlayers = new Map();
+let webrtcStatusTimer;
+let webrtcVideoEnabled = false;
+let webrtcToggleInFlight = false;
+const webrtcStreamTogglesInFlight = new Set();
+let webrtcConfiguredStreams = [];
+let mobilePrimaryWebRtcStream;
 let readers;
 let subscriptions;
 let mapChannel;
@@ -179,12 +201,27 @@ let vehicleModel = { id: 'ry-standard', name: 'RY 标准小车', length_m: 1.0, 
 const mapView = { pixelsPerMeter: undefined, followVehicle: true, followOffset: { x: 0, y: 0 }, center: undefined };
 let overviewUntilMovement = true;
 let overviewPoseAnchor;
-const LAYOUT_KEY = 'ry-aletheia-live-workspace-v2';
-const DEFAULT_LAYOUT = { mapRatio: 76, imageRatio: 50, cameraA: true, cameraB: true, cameraPriority: false };
-let workspaceLayout;
 let lastDiagnosticsAt = 0;
+const MOBILE_VIEW_KEY = 'ry-aletheia-mobile-view-v1';
+const MOBILE_CONSOLE_QUERY = '(hover: none) and (pointer: coarse)';
+const mobileConsoleMedia = window.matchMedia(MOBILE_CONSOLE_QUERY);
+const mobileConsoleForced = window.location.pathname.startsWith('/m/') || new URLSearchParams(window.location.search).get('mobile') === '1';
+let mobileConsoleView = 'map';
 
-function setText(id, value) { $(id).textContent = value; }
+function mobileConsoleEnabled() { return document.documentElement.classList.contains('mobile-console'); }
+function mobileWebRtcPlaybackAllowed() { return !mobileConsoleEnabled() || mobileConsoleView === 'camera'; }
+function mirrorMobileConnection(id, value) {
+  if (id === 'connectionState') {
+    setText('mobileConnectionState', value);
+    const signal = $('mobileConnectionSignal');
+    signal?.classList.toggle('online', value === '已连接');
+    signal?.classList.toggle('warning', value.includes('连接中') || value.includes('启动中'));
+  } else if (id === 'connectionDetail') setText('mobileConnectionDetail', value);
+}
+function setText(id, value) {
+  const target = $(id); if (target) target.textContent = value;
+  if (id === 'connectionState' || id === 'connectionDetail') mirrorMobileConnection(id, value);
+}
 function request(url, options = {}) {
   return fetch(url, { cache: 'no-store', ...options }).then(async (response) => {
     const body = await response.json().catch(() => ({}));
@@ -240,140 +277,309 @@ function initializeTheme() {
   });
   apply();
 }
-function isImageChannel(channel) {
-  return channel.encoding === 'cdr' && ['sensor_msgs/msg/Image', 'sensor_msgs/msg/CompressedImage'].includes(channel.schemaName);
+function updateMobileViewport() {
+  if (!mobileConsoleEnabled()) return;
+  const viewport = window.visualViewport;
+  const width = Math.round(viewport?.width || window.innerWidth);
+  const height = Math.round(viewport?.height || window.innerHeight);
+  document.documentElement.style.setProperty('--mobile-viewport-width', `${width}px`);
+  document.documentElement.style.setProperty('--mobile-viewport-height', `${height}px`);
+  document.documentElement.classList.toggle('mobile-portrait', height >= width);
+  if (mapInfo) scheduleMapDraw(true);
 }
-function isDepthTransport(channel) { return /\/compressedDepth$/i.test(String(channel.topic || '')); }
-function isCompressedCamera(channel) { return channel.schemaName === 'sensor_msgs/msg/CompressedImage' && !isDepthTransport(channel); }
-function isCameraCandidate(channel) { return isImageChannel(channel) && !isDepthTransport(channel); }
-function setCameraState(slot, value) { setText(`cameraState${slot}`, value); }
+function setupMobileZoomPolicy() {
+  const insideMap = (target) => target instanceof Element && Boolean(target.closest('.local-map-wrap'));
+  // Safari 的 gesture* 事件独立于 Pointer Events。始终阻止浏览器缩放，地图
+  // 自己通过双 Pointer 的距离和中点完成米制视图缩放，不改变整个页面比例。
+  for (const name of ['gesturestart', 'gesturechange', 'gestureend']) {
+    document.addEventListener(name, (event) => event.preventDefault(), { passive: false });
+  }
+  document.addEventListener('touchmove', (event) => {
+    if (event.touches.length > 1 && !insideMap(event.target)) event.preventDefault();
+  }, { passive: false, capture: true });
+  // 触控板捏合通常表现为 ctrl+wheel；地图外禁止页面缩放，地图内交给 onWheel。
+  window.addEventListener('wheel', (event) => {
+    if (event.ctrlKey && !insideMap(event.target)) event.preventDefault();
+  }, { passive: false, capture: true });
+}
+function setMobileConsoleView(view, persist = true) {
+  if (!mobileConsoleEnabled() || !['map', 'camera'].includes(view)) return;
+  mobileConsoleView = view; document.documentElement.dataset.mobileView = view;
+  document.querySelectorAll('[data-mobile-view-target]').forEach((button) => {
+    const active = button.dataset.mobileViewTarget === view;
+    button.classList.toggle('active', active); button.setAttribute('aria-selected', String(active));
+  });
+  if (persist) localStorage.setItem(MOBILE_VIEW_KEY, view);
+  if (view === 'map') {
+    for (const state of webrtcPlayers.values()) closeWebRtcPlayer(state, '相机页未显示，浏览器解码已暂停。');
+    if (client) activateVisualizationStreams();
+    if (mapInfo) scheduleMapDraw(true);
+  } else {
+    if (client) stopVisualizationStreams();
+    stopRenderScheduling(); refreshWebRtcVideoStatus();
+  }
+}
+function setupMobileConsole() {
+  // 真实手机由粗指针能力判定；?mobile=1 只用于工程视觉验收，不改变生产默认。
+  const mobile = mobileConsoleForced || mobileConsoleMedia.matches;
+  if (!mobile) return;
+  document.documentElement.classList.add('mobile-console');
+  const savedView = localStorage.getItem(MOBILE_VIEW_KEY);
+  setMobileConsoleView(savedView === 'camera' ? 'camera' : 'map', false);
+  setupMobileZoomPolicy(); updateMobileViewport();
+  document.querySelectorAll('[data-mobile-view-target]').forEach((button) => button.addEventListener('click', () => setMobileConsoleView(button.dataset.mobileViewTarget)));
+  window.addEventListener('resize', updateMobileViewport, { passive: true });
+  window.visualViewport?.addEventListener('resize', updateMobileViewport, { passive: true });
+  window.visualViewport?.addEventListener('scroll', updateMobileViewport, { passive: true });
+  screen.orientation?.addEventListener?.('change', updateMobileViewport);
+}
 function createRgbaTexture(pixels, width, height) {
   return new Texture({ source: new BufferImageSource({ resource: pixels, width, height, format: 'rgba8unorm' }) });
 }
-function layoutCameraSprite(state) {
-  if (!state.sprite || !state.viewport || !state.frameWidth || !state.frameHeight) return;
-  const scale = Math.min(state.viewport.width / state.frameWidth, state.viewport.height / state.frameHeight);
-  state.sprite.width = state.frameWidth * scale; state.sprite.height = state.frameHeight * scale;
+function setWebRtcGatewayState(online, detail) {
+  const badge = $('webrtcGatewayBadge');
+  badge.textContent = online ? '网关在线' : '网关离线';
+  badge.className = `badge ${online ? '' : 'muted'}`;
+  setText('webrtcGatewayState', detail || (online ? 'MediaMTX 已就绪，等待相机流。' : 'MediaMTX 未运行。'));
+}
+function setWebRtcVideoToggle(enabled, busy = false) {
+  const button = $('webrtcVideoToggle'); if (!button) return;
+  button.disabled = busy; button.setAttribute('aria-pressed', String(enabled));
+  button.textContent = busy ? (enabled ? '正在启用…' : '正在关闭…') : (enabled ? '关闭全部视频' : '启用视频');
+}
+function webRtcStreamLabel(stream) {
+  const labels = { front_camera: '前向相机', back_camera: '后向相机', left_camera: '左侧相机', right_camera: '右侧相机', detection_camera: '目标检测' };
+  return labels[stream.name] || stream.name;
+}
+function preferredMobileWebRtcStream(streams) {
+  const preference = ['front_camera', 'detection_camera', 'back_camera', 'left_camera', 'right_camera'];
+  return [...streams].sort((left, right) => {
+    const leftIndex = preference.indexOf(left.name); const rightIndex = preference.indexOf(right.name);
+    return (leftIndex < 0 ? preference.length : leftIndex) - (rightIndex < 0 ? preference.length : rightIndex);
+  })[0]?.name;
+}
+function setMobilePrimaryWebRtcStream(name) {
+  if (!mobileConsoleEnabled() || !webrtcPlayers.has(name)) return;
+  mobilePrimaryWebRtcStream = name;
+  const grid = $('webrtcVideoGrid');
+  grid.dataset.primary = name;
+  for (const [streamName, state] of webrtcPlayers) state.card.dataset.primary = String(streamName === name);
+  document.querySelectorAll('.webrtc-stream-toggle').forEach((button) => {
+    button.dataset.primary = String(button.dataset.stream === name);
+  });
+}
+function syncMobilePrimaryWebRtcStream(streams) {
+  if (!streams.some((stream) => stream.name === mobilePrimaryWebRtcStream)) {
+    mobilePrimaryWebRtcStream = preferredMobileWebRtcStream(streams);
+  }
+  if (mobilePrimaryWebRtcStream) setMobilePrimaryWebRtcStream(mobilePrimaryWebRtcStream);
+}
+function setWebRtcStreamToggle(button, stream, busy = false) {
+  const selected = stream.enabled === true;
+  button.disabled = busy || webrtcToggleInFlight;
+  button.setAttribute('aria-pressed', String(selected));
+  button.innerHTML = '';
+  const title = document.createElement('strong'); title.textContent = webRtcStreamLabel(stream);
+  const state = document.createElement('em'); state.textContent = busy ? '切换中…' : (selected ? '已开启' : '已关闭');
+  button.append(title, state);
+}
+function renderWebRtcStreamControls(streams) {
+  const root = $('webrtcStreamControls'); if (!root) return;
+  // 手机上每张视频卡都带有自己的开关。把旧的顶部开关容器从布局树中移除，
+  // 不只是依赖样式隐藏它，避免浏览器在横竖屏切换时为一个不可见网格预留行高。
+  const mobile = mobileConsoleEnabled();
+  root.hidden = mobile;
+  root.setAttribute('aria-hidden', String(mobile));
+  root.replaceChildren();
+  for (const stream of streams) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'webrtc-stream-toggle';
+    button.dataset.stream = stream.name;
+    const busy = webrtcStreamTogglesInFlight.has(stream.name); setWebRtcStreamToggle(button, stream, busy);
+    button.addEventListener('click', () => toggleWebRtcStream(stream)); root.append(button);
+  }
+}
+function setWebRtcPlayerState(state, detail) {
+  state.detail.textContent = detail;
+  state.label.textContent = state.streamStatus || '等待中';
+}
+function layoutWebRtcSprite(state) {
+  if (!state.sprite || !state.viewport) return;
+  const width = state.video.videoWidth || 640; const height = state.video.videoHeight || 480;
+  const scale = Math.min(state.viewport.width / width, state.viewport.height / height);
+  state.sprite.width = width * scale; state.sprite.height = height * scale;
   state.sprite.position.set((state.viewport.width - state.sprite.width) / 2, (state.viewport.height - state.sprite.height) / 2);
 }
-function clearCameraTexture(state) {
-  state.sprite?.destroy(); state.sprite = undefined;
-  state.texture?.destroy(true); state.texture = undefined;
-  state.imageBitmap?.close(); state.imageBitmap = undefined;
-  state.frameWidth = undefined; state.frameHeight = undefined;
-}
-function presentCameraTexture(slot, texture, width, height, imageBitmap) {
-  const state = cameraSlots[slot];
-  if (!state.app) { texture.destroy(true); imageBitmap?.close(); return; }
-  clearCameraTexture(state);
-  state.texture = texture; state.imageBitmap = imageBitmap; state.frameWidth = width; state.frameHeight = height;
-  state.sprite = new Sprite(texture); state.app.stage.addChild(state.sprite);
-  layoutCameraSprite(state); state.app.render();
-}
-async function initializeCameraRenderer(slot) {
-  const state = cameraSlots[slot]; const host = $(`cameraView${slot}`);
-  if (!host || state.initialization) return state.initialization;
+async function initializeWebRtcRenderer(state) {
+  if (state.initialization) return state.initialization;
   state.initialization = (async () => {
-    const rect = host.getBoundingClientRect(); const width = Math.max(1, Math.round(rect.width) || 640); const height = Math.max(1, Math.round(rect.height) || 360);
+    const rect = state.surface.getBoundingClientRect(); const width = Math.max(1, Math.round(rect.width) || 320); const height = Math.max(1, Math.round(rect.height) || 240);
     const app = new Application();
     await app.init({ width, height, background: 0x02070d, antialias: false, autoDensity: true, resolution: window.devicePixelRatio || 1 });
-    app.ticker.stop(); app.canvas.classList.add('pixi-camera-canvas'); app.canvas.setAttribute('aria-hidden', 'true');
-    host.replaceChildren(app.canvas); state.app = app; state.viewport = { width, height };
-    const resize = () => {
-      const next = host.getBoundingClientRect(); const nextWidth = Math.max(1, Math.round(next.width)); const nextHeight = Math.max(1, Math.round(next.height));
+    app.ticker.stop(); app.canvas.classList.add('pixi-webrtc-canvas'); app.canvas.setAttribute('aria-hidden', 'true');
+    state.surface.append(app.canvas); state.app = app; state.viewport = { width, height };
+    state.resizeObserver = new ResizeObserver(() => {
+      const next = state.surface.getBoundingClientRect(); const nextWidth = Math.max(1, Math.round(next.width)); const nextHeight = Math.max(1, Math.round(next.height));
       if (state.viewport.width === nextWidth && state.viewport.height === nextHeight) return;
-      state.viewport = { width: nextWidth, height: nextHeight }; app.renderer.resize(nextWidth, nextHeight); layoutCameraSprite(state); app.render();
-    };
-    state.resizeObserver = new ResizeObserver(resize); state.resizeObserver.observe(host); resize();
-  })();
+      state.viewport = { width: nextWidth, height: nextHeight }; app.renderer.resize(nextWidth, nextHeight); layoutWebRtcSprite(state); app.render();
+    });
+    state.resizeObserver.observe(state.surface);
+  })().catch((error) => { setWebRtcPlayerState(state, `PixiJS 初始化失败：${error?.message || '未知错误'}`); throw error; });
   return state.initialization;
 }
-function clearCamera(slot) {
-  const state = cameraSlots[slot]; clearCameraTexture(state); state.app?.render();
+function stopWebRtcFramePump(state) {
+  if (state.videoFrameRequest && state.video.cancelVideoFrameCallback) state.video.cancelVideoFrameCallback(state.videoFrameRequest);
+  state.videoFrameRequest = undefined;
 }
-function refreshCameraOptions() {
-  const candidates = [...cameraChannels.values()].sort((left, right) => {
-    const leftCompressed = isCompressedCamera(left) ? 0 : 1;
-    const rightCompressed = isCompressedCamera(right) ? 0 : 1;
-    return leftCompressed - rightCompressed || left.topic.localeCompare(right.topic);
+function startWebRtcFramePump(state) {
+  stopWebRtcFramePump(state);
+  const render = () => {
+    if (!state.pc || state.video.paused || state.video.ended) return;
+    // Pixi v8 VideoSource 在这里按实际解码帧更新，而不是启动全局 ticker 空转。
+    state.texture?.source?.update?.(); layoutWebRtcSprite(state); state.app?.render();
+    if (state.video.requestVideoFrameCallback) state.videoFrameRequest = state.video.requestVideoFrameCallback(render);
+    else state.videoFrameRequest = requestAnimationFrame(render);
+  };
+  if (state.video.requestVideoFrameCallback) state.videoFrameRequest = state.video.requestVideoFrameCallback(render);
+  else state.videoFrameRequest = requestAnimationFrame(render);
+}
+function clearWebRtcTexture(state) {
+  stopWebRtcFramePump(state);
+  state.sprite?.destroy(); state.sprite = undefined;
+  state.texture?.destroy(true); state.texture = undefined;
+}
+function closeWebRtcPlayer(state, message) {
+  clearWebRtcTexture(state);
+  if (state.sessionUrl) fetch(state.sessionUrl, { method: 'DELETE', keepalive: true }).catch(() => {});
+  state.sessionUrl = undefined;
+  state.pc?.close(); state.pc = undefined;
+  state.video.pause(); state.video.srcObject = null;
+  if (message) setWebRtcPlayerState(state, message);
+}
+function destroyWebRtcPlayer(name) {
+  const state = webrtcPlayers.get(name); if (!state) return;
+  closeWebRtcPlayer(state); state.resizeObserver?.disconnect(); state.app?.destroy(true, { children: true }); state.card.remove(); webrtcPlayers.delete(name);
+}
+function createWebRtcPlayer(stream) {
+  const card = document.createElement('article'); card.className = 'webrtc-video-card'; card.dataset.stream = stream.name;
+  const header = document.createElement('header'); const title = document.createElement('h3'); title.textContent = webRtcStreamLabel(stream); const label = document.createElement('span');
+  const actions = document.createElement('div'); actions.className = 'webrtc-video-card-actions'; const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'webrtc-video-card-toggle'; toggle.textContent = '开启'; actions.append(label, toggle); header.append(title, actions);
+  const surface = document.createElement('div'); surface.className = 'webrtc-video-surface';
+  const video = document.createElement('video'); video.className = 'webrtc-video-source'; video.autoplay = true; video.muted = true; video.playsInline = true; video.setAttribute('aria-hidden', 'true');
+  const detail = document.createElement('p'); detail.textContent = '等待网关状态。'; surface.append(video); card.append(header, surface, detail); $('webrtcVideoGrid').append(card);
+  const state = { card, title, label, toggle, surface, video, detail, stream, url: undefined, retryAfter: 0, streamStatus: '等待中' };
+  toggle.addEventListener('click', () => toggleWebRtcStream(state.stream));
+  card.addEventListener('click', (event) => {
+    if (event.target instanceof Element && event.target.closest('button')) return;
+    setMobilePrimaryWebRtcStream(stream.name);
   });
-  for (const slot of ['A', 'B']) {
-    const select = $(`cameraSelect${slot}`); const selected = cameraSlots[slot].channelId || '';
-    select.replaceChildren(new Option('不订阅图像', ''));
-    candidates.forEach((channel) => select.add(new Option(`${channel.topic} · ${isCompressedCamera(channel) ? '压缩图像（低延迟推荐）' : '原始图像（高带宽，可能增加延迟）'}`, String(channel.id))));
-    select.value = String(selected);
-    if (!select.value) { cameraSlots[slot].channelId = undefined; setCameraState(slot, candidates.length ? '请选择图像话题' : '未发现 sensor_msgs 图像话题'); }
+  video.addEventListener('loadedmetadata', () => layoutWebRtcSprite(state));
+  webrtcPlayers.set(stream.name, state);
+  return state;
+}
+function waitForIceGathering(peer) {
+  if (peer.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((resolve) => {
+    const timeout = window.setTimeout(done, 1200);
+    function done() { window.clearTimeout(timeout); peer.removeEventListener('icegatheringstatechange', onChange); resolve(); }
+    function onChange() { if (peer.iceGatheringState === 'complete') done(); }
+    peer.addEventListener('icegatheringstatechange', onChange);
+  });
+}
+async function connectWebRtcPlayer(state, stream) {
+  if (!window.RTCPeerConnection) { setWebRtcPlayerState(state, '当前浏览器不支持 WebRTC。'); return; }
+  if (!stream.url || performance.now() < state.retryAfter) return;
+  closeWebRtcPlayer(state); state.url = stream.url; setWebRtcPlayerState(state, '正在建立 WHEP/WebRTC 会话…');
+  const peer = new RTCPeerConnection(); state.pc = peer;
+  peer.addTransceiver('video', { direction: 'recvonly' });
+  peer.ontrack = async (event) => {
+    if (state.pc !== peer) return;
+    state.video.srcObject = event.streams[0] || new MediaStream([event.track]);
+    try {
+      await state.video.play();
+      await initializeWebRtcRenderer(state);
+      if (state.pc !== peer) return;
+      if (!state.texture) { state.texture = Texture.from(state.video); state.sprite = new Sprite(state.texture); state.app?.stage.addChild(state.sprite); }
+      startWebRtcFramePump(state); setWebRtcPlayerState(state, `${stream.resolution} · H.264 · WebRTC`);
+    } catch (error) { setWebRtcPlayerState(state, `浏览器播放被阻止：${error?.message || '未知原因'}`); }
+  };
+  peer.onconnectionstatechange = () => {
+    if (state.pc !== peer) return;
+    if (peer.connectionState === 'connected') setWebRtcPlayerState(state, `${stream.resolution} · H.264 · WebRTC`);
+    if (['failed', 'disconnected', 'closed'].includes(peer.connectionState)) {
+      state.retryAfter = performance.now() + 3000;
+      if (peer.connectionState !== 'closed') closeWebRtcPlayer(state, 'WebRTC 已断开，等待重连。');
+    }
+  };
+  try {
+    const offer = await peer.createOffer(); await peer.setLocalDescription(offer); await waitForIceGathering(peer);
+    const response = await fetch(stream.url, { method: 'POST', headers: { Accept: 'application/sdp', 'Content-Type': 'application/sdp' }, body: peer.localDescription?.sdp || '' });
+    if (!response.ok) throw new Error(`WHEP HTTP ${response.status}`);
+    const location = response.headers.get('Location'); state.sessionUrl = location ? new URL(location, stream.url).toString() : undefined;
+    await peer.setRemoteDescription({ type: 'answer', sdp: await response.text() });
+  } catch (error) {
+    if (state.pc === peer) { state.retryAfter = performance.now() + 3000; closeWebRtcPlayer(state, `WebRTC 连接失败：${error?.message || '未知错误'}`); }
   }
 }
-function selectCamera(slot, selectedId) {
-  const state = cameraSlots[slot];
-  if (state.subscriptionId !== undefined) { client?.unsubscribe(state.subscriptionId); subscriptions?.delete(state.subscriptionId); }
-  state.subscriptionId = undefined; state.channelId = selectedId ? Number(selectedId) : undefined;
-  state.pendingFrame = undefined; state.renderQueued = false; state.rendering = false; state.nextRenderAt = 0;
-  clearCamera(slot);
-  subscribeCamera(slot);
-  activateVisualizationStreams();
+function applyWebRtcVideoStatus(payload) {
+  const enabled = payload?.enabled === true; const gateway = payload?.gateway || {}; const configuredStreams = Array.isArray(payload?.streams) ? payload.streams : [];
+  const activeStreams = enabled ? configuredStreams.filter((stream) => stream.enabled === true) : [];
+  // 手机端的五路卡片同时就是五路控制入口：开关不再占据顶部空间。桌面仍只
+  // 呈现已启用流及原有控制条，保持其既有工作台节奏。
+  const streams = mobileConsoleEnabled() ? configuredStreams : activeStreams;
+  webrtcConfiguredStreams = configuredStreams;
+  webrtcVideoEnabled = enabled; setWebRtcVideoToggle(enabled, webrtcToggleInFlight);
+  setText('mobileCameraSummary', `视频 ${activeStreams.filter((stream) => stream.status === 'online').length} / ${configuredStreams.length}`);
+  setWebRtcGatewayState(gateway.online === true, gateway.detail);
+  renderWebRtcStreamControls(configuredStreams);
+  const grid = $('webrtcVideoGrid'); grid.dataset.count = String(streams.length);
+  const empty = $('webrtcVideoEmpty'); empty.hidden = streams.length > 0;
+  empty.textContent = enabled ? '未选择任何相机流。' : '视频已关闭。';
+  for (const name of [...webrtcPlayers.keys()]) if (!streams.some((stream) => stream.name === name)) destroyWebRtcPlayer(name);
+  for (const stream of streams) {
+    const state = webrtcPlayers.get(stream.name) || createWebRtcPlayer(stream); state.stream = stream;
+    const active = enabled && stream.enabled === true;
+    state.card.dataset.active = String(active);
+    state.card.dataset.standby = String(!active);
+    state.streamStatus = active ? (stream.status === 'online' ? '在线' : (stream.status === 'waiting' ? '等待相机' : '离线')) : '待机';
+    state.toggle.disabled = webrtcToggleInFlight || webrtcStreamTogglesInFlight.has(stream.name);
+    state.toggle.textContent = webrtcStreamTogglesInFlight.has(stream.name) ? '切换中…' : (active ? '关闭' : '开启');
+    if (active && stream.status === 'online' && mobileWebRtcPlaybackAllowed()) {
+      if (state.url !== stream.url || !state.pc || ['failed', 'closed'].includes(state.pc.connectionState)) connectWebRtcPlayer(state, stream);
+    } else if (active && stream.status === 'online') closeWebRtcPlayer(state, '相机页未显示，浏览器解码已暂停。');
+    else closeWebRtcPlayer(state, active && stream.status === 'waiting' ? '编码端正在等待 ROS 图像。' : (active ? 'MediaMTX 未就绪。' : '该路视频处于待机状态。'));
+  }
+  syncMobilePrimaryWebRtcStream(activeStreams.length ? activeStreams : streams);
 }
-function subscribeCamera(slot) {
-  const state = cameraSlots[slot];
-  if (state.subscriptionId !== undefined) { client?.unsubscribe(state.subscriptionId); subscriptions?.delete(state.subscriptionId); state.subscriptionId = undefined; }
-  if (!state.channelId) { setCameraState(slot, '未订阅图像'); return; }
-  const channel = cameraChannels.get(state.channelId);
-  if (!channel || !client || !readers?.has(channel.id)) { setCameraState(slot, '图像话题暂不可用'); return; }
-  state.subscriptionId = client.subscribe(channel.id); subscriptions.set(state.subscriptionId, { topic: channel.topic, channelId: channel.id, cameraSlot: slot });
-  setCameraState(slot, isCompressedCamera(channel) ? `订阅中 · ${channel.topic}` : `订阅原始图像 · ${channel.topic}（高带宽）`);
+async function refreshWebRtcVideoStatus() {
+  try { applyWebRtcVideoStatus(await request('/api/video/status')); }
+  catch (error) { setWebRtcGatewayState(false, `读取视频状态失败：${error.message}`); }
 }
-function setupCameraSelectors() {
-  for (const slot of ['A', 'B']) {
-    clearCamera(slot);
-    $(`cameraSelect${slot}`).addEventListener('change', (event) => selectCamera(slot, event.target.value));
+async function toggleWebRtcVideo() {
+  if (webrtcToggleInFlight || webrtcStreamTogglesInFlight.size) return;
+  const enabled = !webrtcVideoEnabled; webrtcToggleInFlight = true; setWebRtcVideoToggle(enabled, true);
+  try {
+    applyWebRtcVideoStatus(await request('/api/video/control', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) }));
+  } catch (error) {
+    setWebRtcGatewayState(false, `视频切换失败：${error.message}`);
+  } finally {
+    webrtcToggleInFlight = false; setWebRtcVideoToggle(webrtcVideoEnabled, false); renderWebRtcStreamControls(webrtcConfiguredStreams);
   }
 }
-function validLayout(value) {
-  if (!value || !Number.isFinite(value.mapRatio) || !Number.isFinite(value.imageRatio)) return undefined;
-  return { mapRatio: Math.max(55, Math.min(88, value.mapRatio)), imageRatio: Math.max(25, Math.min(75, value.imageRatio)), cameraA: value.cameraA !== false, cameraB: value.cameraB !== false, cameraPriority: value.cameraPriority === true };
-}
-function loadWorkspaceLayout() {
-  try { return validLayout(JSON.parse(localStorage.getItem(LAYOUT_KEY))) || structuredClone(DEFAULT_LAYOUT); } catch (_) { return structuredClone(DEFAULT_LAYOUT); }
-}
-function saveWorkspaceLayout() { localStorage.setItem(LAYOUT_KEY, JSON.stringify(workspaceLayout)); }
-function applyWorkspaceLayout() {
-  const workspace = $('viewerWorkspace'); const visible = [workspaceLayout.cameraA, workspaceLayout.cameraB].filter(Boolean).length;
-  workspace.style.setProperty('--map-ratio', `${workspaceLayout.mapRatio}%`); workspace.style.setProperty('--image-ratio', `${workspaceLayout.imageRatio}%`);
-  workspace.dataset.imageMode = visible === 0 ? 'none' : (visible === 1 ? (workspaceLayout.cameraA ? 'single-a' : 'single-b') : 'dual');
-  document.querySelector('[data-widget="cameraA"]').hidden = !workspaceLayout.cameraA; document.querySelector('[data-widget="cameraB"]').hidden = !workspaceLayout.cameraB;
-  $('showCameraA').checked = workspaceLayout.cameraA; $('showCameraB').checked = workspaceLayout.cameraB; $('cameraPriority').checked = workspaceLayout.cameraPriority; drawMap();
-}
-function setupWorkspace() {
-  workspaceLayout = loadWorkspaceLayout(); applyWorkspaceLayout();
-  const workspace = $('viewerWorkspace'); let operation;
-  const finish = () => { if (!operation) return; $(operation).classList.remove('dragging'); operation = undefined; saveWorkspaceLayout(); };
-  for (const splitter of ['verticalSplitter', 'horizontalSplitter']) $(splitter).addEventListener('pointerdown', (event) => { operation = splitter; $(splitter).classList.add('dragging'); event.preventDefault(); });
-  window.addEventListener('pointermove', (event) => {
-    if (!operation) return; const rect = workspace.getBoundingClientRect();
-    if (operation === 'verticalSplitter') workspaceLayout.mapRatio = Math.max(55, Math.min(88, (event.clientX - rect.left) / rect.width * 100));
-    else workspaceLayout.imageRatio = Math.max(25, Math.min(75, (event.clientY - rect.top) / rect.height * 100));
-    applyWorkspaceLayout();
-  });
-  window.addEventListener('pointerup', finish); window.addEventListener('pointercancel', finish);
-  $('toggleWorkspaceControls').addEventListener('click', () => { const body = $('workspaceControlsBody'); body.hidden = !body.hidden; });
-  for (const slot of ['A', 'B']) {
-    $(`showCamera${slot}`).addEventListener('change', (event) => {
-      const key = `camera${slot}`; workspaceLayout[key] = event.target.checked;
-      if (event.target.checked) subscribeCamera(slot);
-      else {
-        const state = cameraSlots[slot];
-        if (state.subscriptionId !== undefined) { client?.unsubscribe(state.subscriptionId); subscriptions?.delete(state.subscriptionId); state.subscriptionId = undefined; }
-        clearCamera(slot); setCameraState(slot, '窗口已隐藏，已停止订阅');
-      }
-      activateVisualizationStreams(); applyWorkspaceLayout(); saveWorkspaceLayout();
-    });
+async function toggleWebRtcStream(stream) {
+  if (!stream?.name || webrtcToggleInFlight || webrtcStreamTogglesInFlight.size) return;
+  webrtcStreamTogglesInFlight.add(stream.name); renderWebRtcStreamControls(webrtcConfiguredStreams);
+  try {
+    const payload = await request('/api/video/control', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stream: stream.name, enabled: stream.enabled !== true }) });
+    applyWebRtcVideoStatus(payload);
+  } catch (error) {
+    setWebRtcGatewayState(false, `视频流切换失败：${error.message}`);
+  } finally {
+    webrtcStreamTogglesInFlight.delete(stream.name); renderWebRtcStreamControls(webrtcConfiguredStreams); refreshWebRtcVideoStatus();
   }
-  $('cameraPriority').addEventListener('change', (event) => {
-    workspaceLayout.cameraPriority = event.target.checked;
-    activateVisualizationStreams(); saveWorkspaceLayout(); updateDiagnostics();
-  });
-  $('resetWorkspace').addEventListener('click', () => { workspaceLayout = structuredClone(DEFAULT_LAYOUT); applyWorkspaceLayout(); for (const slot of ['A', 'B']) subscribeCamera(slot); activateVisualizationStreams(); saveWorkspaceLayout(); });
+}
+function startWebRtcVideoStatus() {
+  refreshWebRtcVideoStatus();
+  webrtcStatusTimer = window.setInterval(refreshWebRtcVideoStatus, 3000);
 }
 function setupMapInteraction() {
   const interaction = $('mapInteraction');
@@ -540,68 +746,6 @@ function setupMapInteraction() {
     if (!touchPoints.size) { pinch = undefined; finishPan(event); setInteractionActive(false); }
   });
 }
-function drawRawImage(slot, message) {
-  const width = Number(message.width); const height = Number(message.height); const encoding = String(message.encoding || '').toLowerCase(); const source = message.data;
-  if (!width || !height || !source || !['rgb8', 'bgr8', 'rgba8', 'bgra8', 'mono8'].includes(encoding)) { setCameraState(slot, `暂不支持编码：${encoding || '未知'}`); return; }
-  const channels = encoding === 'mono8' ? 1 : (encoding === 'rgb8' || encoding === 'bgr8' ? 3 : 4); const step = Number(message.step) || width * channels;
-  if (source.byteLength < step * height) { setCameraState(slot, '图像数据不完整'); return; }
-  const pixels = new Uint8Array(width * height * 4);
-  for (let row = 0; row < height; row += 1) for (let column = 0; column < width; column += 1) {
-    const from = row * step + column * channels; const to = (row * width + column) * 4;
-    if (encoding === 'mono8') pixels[to] = pixels[to + 1] = pixels[to + 2] = source[from];
-    else if (encoding === 'bgr8' || encoding === 'bgra8') { pixels[to] = source[from + 2]; pixels[to + 1] = source[from + 1]; pixels[to + 2] = source[from]; }
-    else { pixels[to] = source[from]; pixels[to + 1] = source[from + 1]; pixels[to + 2] = source[from]; }
-    pixels[to + 3] = channels === 4 ? source[from + 3] : 255;
-  }
-  presentCameraTexture(slot, createRgbaTexture(pixels, width, height), width, height);
-  setCameraState(slot, `${width} × ${height} · ${encoding}`);
-}
-async function drawCompressedImage(slot, message, sequence) {
-  const bytes = message.data; if (!bytes?.byteLength) { setCameraState(slot, '压缩图像为空'); return; }
-  const format = String(message.format || '').toLowerCase(); const mime = format.includes('png') ? 'image/png' : 'image/jpeg';
-  try {
-    const bitmap = await createImageBitmap(new Blob([bytes], { type: mime })); const state = cameraSlots[slot];
-    // 解码期间如果已有更新帧到达，旧帧直接丢弃。此前旧帧仍会绘制，造成
-    // 画面看起来稳定落后于 RViz2；这里确保浏览器只展示最新可解码画面。
-    if (state.latestSequence !== sequence) { bitmap.close(); return; }
-    const width = bitmap.width; const height = bitmap.height;
-    presentCameraTexture(slot, Texture.from(bitmap), width, height, bitmap);
-    setCameraState(slot, `${message.format || 'compressed'} · ${width} × ${height}`);
-  } catch (_) { setCameraState(slot, '压缩图像解码失败'); }
-}
-function queueCameraFrame(slot, channel, data) {
-  if (!channel) { setCameraState(slot, '图像话题已移除'); return; }
-  const state = cameraSlots[slot];
-  // 不解析、也不复制已经过期的帧：新的帧会直接替换待渲染帧。
-  state.latestSequence = (state.latestSequence || 0) + 1;
-  state.pendingFrame = { channel, data, sequence: state.latestSequence };
-  if (state.rendering || state.renderQueued) return;
-  state.renderQueued = true;
-  window.setTimeout(() => renderLatestCameraFrame(slot), Math.max(0, (state.nextRenderAt || 0) - performance.now()));
-}
-function renderLatestCameraFrame(slot) {
-  const state = cameraSlots[slot]; state.renderQueued = false;
-  if (state.rendering || !state.pendingFrame) return;
-  const frame = state.pendingFrame; state.pendingFrame = undefined; state.rendering = true;
-  try {
-    const reader = readers?.get(frame.channel.id);
-    if (!reader) throw new Error('图像类型定义不可用');
-    const message = reader.readMessage(frame.data);
-    const compressed = frame.channel.schemaName.endsWith('CompressedImage');
-    const render = compressed ? drawCompressedImage(slot, message, frame.sequence) : drawRawImage(slot, message);
-    Promise.resolve(render).catch(() => {}).finally(() => {
-      state.rendering = false;
-      state.nextRenderAt = performance.now() + (compressed ? COMPRESSED_CAMERA_RENDER_INTERVAL_MS : RAW_CAMERA_RENDER_INTERVAL_MS);
-      if (state.pendingFrame) queueCameraFrame(slot, state.pendingFrame.channel, state.pendingFrame.data);
-    });
-  } catch (_) {
-    const compressed = frame.channel.schemaName.endsWith('CompressedImage');
-    state.rendering = false; state.nextRenderAt = performance.now() + (compressed ? COMPRESSED_CAMERA_RENDER_INTERVAL_MS : RAW_CAMERA_RENDER_INTERVAL_MS);
-    setCameraState(slot, '图像帧解析失败');
-    if (state.pendingFrame) queueCameraFrame(slot, state.pendingFrame.channel, state.pendingFrame.data);
-  }
-}
-
 function normalizeAngle(value) {
   let angle = value;
   while (angle > Math.PI) angle -= Math.PI * 2;
@@ -630,9 +774,10 @@ async function initializePixiRenderer() {
     pixiApp = app;
     pixiWorld = new Container();
     pixiMapLayer = new Container();
+    pixiGridLayer = new Container();
     pixiWallLayer = new Container();
     pixiCloudLayer = new Container();
-    pixiWorld.addChild(pixiMapLayer, pixiWallLayer, pixiCloudLayer);
+    pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiWallLayer, pixiCloudLayer);
     app.stage.addChild(pixiWorld);
     pixiReady = true;
     renderStaticWorld();
@@ -691,9 +836,12 @@ function renderedVehiclePoseInMap() {
   const target = vehiclePoseInMap();
   if (!target?.position) return undefined;
   const now = performance.now();
-  // 预测窗口包含 ROS 源时间到浏览器的已测年龄及本显示帧等待时间。它不缓存
-  // 历史样本，始终朝“现在”外推，因而不会用流畅换取额外显示延迟。
-  const predictionSeconds = Math.min(MAX_VEHICLE_PREDICTION_MS / 1000, Math.max(0, now - Number(target.receivedAt || now)) / 1000 + (target.sourceAgeMs || 0) / 1000);
+  // `receivedAt` 表示链路仍活跃：轻量 Pose 节点会以 60 Hz 发送相同坐标的心跳。
+  // 它不能作为外推起点，否则每个重复包都会把预测时间归零，并把动画车体拉回
+  // 旧的真实测量位置。live 流单独保留最后一次实际位置/航向变化的时刻；兼容
+  // TF 路径则仍以接收时刻为准。两者都被 300 ms 硬上限约束，不会用平滑掩盖失联。
+  const motionMeasuredAt = target.source === 'live' ? target.motionMeasuredAt : target.receivedAt;
+  const predictionSeconds = Math.min(MAX_VEHICLE_PREDICTION_MS / 1000, Math.max(0, now - Number(motionMeasuredAt || target.receivedAt || now)) / 1000 + (target.sourceAgeMs || 0) / 1000);
   const desired = predictVehicleMotion(target, predictionSeconds);
   if (!renderedVehiclePose || now - renderedVehicleAt > 1200
     || Math.hypot(desired.position.x - renderedVehiclePose.position.x, desired.position.y - renderedVehiclePose.position.y) > 2.5) {
@@ -785,11 +933,22 @@ function currentMapLayout() {
   }
   if (!mapView.center) mapView.center = fallbackCenter;
   if (!mapView.pixelsPerMeter) {
-    const fullMapScale = Math.min(mapViewport.width / (mapInfo.width * mapInfo.resolution), mapViewport.height / (mapInfo.height * mapInfo.resolution)) * 0.92;
+    const worldWidth = mapInfo.width * mapInfo.resolution;
+    const worldHeight = mapInfo.height * mapInfo.resolution;
+    const fullMapScale = Math.min(mapViewport.width / worldWidth, mapViewport.height / worldHeight) * 0.92;
+    const viewportAspect = mapViewport.width / Math.max(1, mapViewport.height);
+    const mapAspect = worldWidth / Math.max(1e-6, worldHeight);
+    // 手机上的横屏 WebView 常常只剩下一条很浅的可视区域。若仍强行把整张
+    // 近方形地图塞入其中，地图会缩成中央一张小邮票，格栅和车体都无法阅读。
+    // 这时以地图宽度建立初始工作视图：保留完整横向路线，裁去上下远端；用户
+    // 仍可双指缩放/拖动，车辆移动后也会自然进入标准 16m 跟车尺度。
+    const shallowLandscape = viewportAspect >= Math.max(2.1, mapAspect * 1.65) && mapViewport.height < 360;
+    const focusedLandscapeScale = (mapViewport.width / worldWidth) * 0.94;
     mapView.pixelsPerMeter = overviewUntilMovement
       // 初始概览必须完整容纳地图；不能套用近景视图的最小缩放限制，
-      // 否则在大地图上仍会出现边缘被裁切的“概览”。
-      ? Math.max(1, fullMapScale)
+      // 否则在大地图上仍会出现边缘被裁切的“概览”。浅横屏例外见上：
+      // 优先可读性而不是留出大量无效背景。
+      ? Math.max(1, shallowLandscape ? focusedLandscapeScale : fullMapScale)
       : Math.max(MIN_PIXELS_PER_METER, Math.min(MAX_PIXELS_PER_METER, mapViewport.width / DEFAULT_VIEW_METERS));
   }
   const ratio = mapInfo.resolution * mapView.pixelsPerMeter;
@@ -831,12 +990,71 @@ function stopRenderScheduling() {
   if (vehicleAnimationFrame) window.cancelAnimationFrame(vehicleAnimationFrame);
   vehicleAnimationFrame = undefined;
 }
+function metricGridStep(pixelsPerMeter) {
+  let step = pixelsPerMeter >= 28 ? 1 : (pixelsPerMeter >= 12 ? 2 : 5);
+  const mapExtent = mapInfo ? (mapInfo.width + mapInfo.height) * mapInfo.resolution : 0;
+  while (mapExtent / step > 600) step *= 2;
+  return step;
+}
+function updateMapScale(layout, gridStep) {
+  const root = $('mapScale'); const bar = $('mapScaleBar');
+  if (!root || !bar) return;
+  if (!mobileConsoleEnabled()) { root.hidden = true; return; }
+  const candidates = [0.5, 1, 2, 5, 10, 20, 50, 100];
+  const scaleDistance = candidates.reduce((best, value) => {
+    const width = value * layout.pixelsPerMeter;
+    const score = width >= 48 && width <= 132 ? Math.abs(width - 88) : 1000 + Math.abs(width - 88);
+    return score < best.score ? { value, score } : best;
+  }, { value: 1, score: Infinity }).value;
+  root.hidden = false;
+  bar.style.width = `${Math.max(36, Math.min(132, scaleDistance * layout.pixelsPerMeter))}px`;
+  setText('mapScaleLabel', `${scaleDistance} m`);
+  setText('mapGridLabel', `${gridStep} m 小格 · ${gridStep * 5} m 主格`);
+}
+function renderMetricGrid(layout) {
+  if (!pixiGridLayer || !mapInfo) return;
+  if (!mobileConsoleEnabled()) {
+    metricGridSignature = undefined;
+    pixiGridLayer.removeChildren().forEach((child) => child.destroy());
+    $('mapScale').hidden = true;
+    return;
+  }
+  const step = metricGridStep(layout.pixelsPerMeter); const majorStep = step * 5;
+  // 线宽按当前屏幕缩放反算到地图像素，缩放前后始终保持约 0.65/1.1 CSS px。
+  const widthBucket = Math.max(1, Math.round(layout.pixelsPerMeter / 4));
+  const signature = `${mapGeneration}:${step}:${widthBucket}`;
+  updateMapScale(layout, step);
+  if (signature === metricGridSignature) return;
+  metricGridSignature = signature;
+  pixiGridLayer.removeChildren().forEach((child) => child.destroy());
+  const minX = Number(mapInfo.origin.x); const minY = Number(mapInfo.origin.y);
+  const maxX = minX + mapInfo.width * mapInfo.resolution;
+  const maxY = minY + mapInfo.height * mapInfo.resolution;
+  const drawLines = (spacing, graphics) => {
+    const firstX = Math.ceil((minX - 1e-9) / spacing) * spacing;
+    const firstY = Math.ceil((minY - 1e-9) / spacing) * spacing;
+    for (let worldX = firstX, count = 0; worldX <= maxX + 1e-7 && count < 1000; worldX += spacing, count += 1) {
+      const x = (worldX - minX) / mapInfo.resolution;
+      graphics.moveTo(x, 0); graphics.lineTo(x, mapInfo.height);
+    }
+    for (let worldY = firstY, count = 0; worldY <= maxY + 1e-7 && count < 1000; worldY += spacing, count += 1) {
+      const y = mapInfo.height - (worldY - minY) / mapInfo.resolution;
+      graphics.moveTo(0, y); graphics.lineTo(mapInfo.width, y);
+    }
+  };
+  const minor = new Graphics(); drawLines(step, minor);
+  minor.stroke({ color: MAP_PALETTE.gridMinor, width: 0.65 / layout.ratio, alpha: 0.16 });
+  const major = new Graphics(); drawLines(majorStep, major);
+  major.stroke({ color: MAP_PALETTE.gridMajor, width: 1.1 / layout.ratio, alpha: 0.28 });
+  pixiGridLayer.addChild(minor, major);
+}
 function drawMap() {
   if (!mapInfo || !mapTexture || !pixiReady) return;
   // 地图纹理、虚拟墙和点云均由 PixiJS 的同一世界容器渲染。此处只更新
   // GPU 相机矩阵，不重新上传静态地图纹理或重建点云几何。
   const layout = currentMapLayout();
   lastMapLayout = layout;
+  renderMetricGrid(layout);
   pixiWorld.position.set(layout.left, layout.top);
   pixiWorld.scale.set(layout.ratio, layout.ratio);
   pixiWorld.rotation = layout.rotation;
@@ -854,9 +1072,13 @@ function renderStaticWorld() {
   pixiMapSprite.width = mapInfo.width;
   pixiMapSprite.height = mapInfo.height;
   pixiMapLayer.addChild(pixiMapSprite);
+  metricGridSignature = undefined;
+  pixiGridLayer.removeChildren().forEach((child) => child.destroy());
   pixiWallLayer.removeChildren().forEach((child) => child.destroy());
   const walls = new Graphics();
-  const lineWidth = Math.max(1, 0.06 / mapInfo.resolution);
+  const mobile = mobileConsoleEnabled();
+  // 手机地图的墙线比原始占据栅格更粗，并带一层深红细边；不会与紫色点云或栅格混在一起。
+  const lineWidth = mobile ? Math.max(1.8, 0.11 / mapInfo.resolution) : Math.max(1, 0.06 / mapInfo.resolution);
   for (const wall of virtualWalls) {
     const points = Array.isArray(wall.points) ? wall.points : [];
     if (points.length < 2) continue;
@@ -869,7 +1091,8 @@ function renderStaticWorld() {
       if (index === 0) walls.moveTo(targetX, targetY); else walls.lineTo(targetX, targetY);
     });
   }
-  walls.stroke({ color: 0xd63142, width: lineWidth, cap: 'round', join: 'round' });
+  if (mobile) walls.stroke({ color: 0x6f1f2a, width: lineWidth + 1.4, alpha: 0.72, cap: 'round', join: 'round' });
+  walls.stroke({ color: (mobile ? MAP_PALETTE : DESKTOP_MAP_PALETTE).virtualWall, width: lineWidth, cap: 'round', join: 'round' });
   pixiWallLayer.addChild(walls);
   pixiApp.render();
 }
@@ -878,12 +1101,16 @@ function renderCloudPoints(packedPoints) {
   pixiCloudLayer.removeChildren().forEach((child) => child.destroy());
   if (!packedPoints?.length) { pixiApp.render(); return; }
   const points = new Graphics();
+  const mobile = mobileConsoleEnabled();
+  // 点尺寸保持克制，不借由加粗来制造可见度；移动端通过更明亮的语义紫色
+  // 与红色虚拟墙、灰色栅格区分。
+  const pointRadius = mobile ? 0.82 : 0.35;
   for (let index = 0; index < packedPoints.length; index += 2) {
     const x = (packedPoints[index] - mapInfo.origin.x) / mapInfo.resolution;
     const y = mapInfo.height - (packedPoints[index + 1] - mapInfo.origin.y) / mapInfo.resolution;
-    if (x >= 0 && x < mapInfo.width && y >= 0 && y < mapInfo.height) points.rect(x - 0.35, y - 0.35, 0.7, 0.7);
+    if (x >= 0 && x < mapInfo.width && y >= 0 && y < mapInfo.height) points.rect(x - pointRadius, y - pointRadius, pointRadius * 2, pointRadius * 2);
   }
-  points.fill(0x8058ff);
+  points.fill((mobileConsoleEnabled() ? MAP_PALETTE : DESKTOP_MAP_PALETTE).cloud);
   pixiCloudLayer.addChild(points);
   pixiApp.render();
 }
@@ -953,31 +1180,40 @@ function sourcePoseAge(message) {
   // ROS 时间可能使用仿真时钟或与浏览器主机不同步；仅接纳可信的正向年龄。
   return age >= 0 && age <= 2000 ? age : 0;
 }
-function stabilizeStationaryVehicle(position, yaw, now) {
+function estimateLiveMotion(position, yaw, now) {
   const raw = { position: { x: Number(position.x), y: Number(position.y) }, yaw };
-  if (vehicleStillAnchor) {
-    const distance = Math.hypot(raw.position.x - vehicleStillAnchor.position.x, raw.position.y - vehicleStillAnchor.position.y);
-    const yawDelta = Math.abs(normalizeAngle(raw.yaw - vehicleStillAnchor.yaw));
-    if (distance < VEHICLE_STILL_RELEASE_DISTANCE_M && yawDelta < VEHICLE_STILL_RELEASE_YAW_RAD) return { ...vehicleStillAnchor, stationary: true };
-    vehicleStillAnchor = undefined;
-    vehicleStillCandidate = raw;
-    vehicleStillCandidateAt = now;
-    return { ...raw, stationary: false };
+  const previous = latestLiveMotion;
+  if (!previous) {
+    latestLiveMotion = { ...raw, measuredAt: now, velocity: { x: 0, y: 0 }, yawRate: 0 };
+    return latestLiveMotion;
   }
-  if (!vehicleStillCandidate) {
-    vehicleStillCandidate = raw;
-    vehicleStillCandidateAt = now;
-    return { ...raw, stationary: false };
+  const distance = Math.hypot(raw.position.x - previous.position.x, raw.position.y - previous.position.y);
+  const yawDelta = normalizeAngle(raw.yaw - previous.yaw);
+  const changed = distance >= LIVE_MOTION_POSITION_EPSILON_M || Math.abs(yawDelta) >= LIVE_MOTION_YAW_EPSILON_RAD;
+  if (changed) {
+    const elapsedSeconds = (now - previous.measuredAt) / 1000;
+    let velocity = { x: 0, y: 0 };
+    let yawRate = 0;
+    if (elapsedSeconds >= 0.01 && elapsedSeconds <= 0.8) {
+      const vx = (raw.position.x - previous.position.x) / elapsedSeconds;
+      const vy = (raw.position.y - previous.position.y) / elapsedSeconds;
+      if (Math.hypot(vx, vy) <= 3.0) velocity = { x: vx, y: vy };
+      const candidateYawRate = yawDelta / elapsedSeconds;
+      if (Math.abs(candidateYawRate) <= MAX_VEHICLE_YAW_RATE_RADPS) yawRate = candidateYawRate;
+    }
+    latestLiveMotion = { ...raw, measuredAt: now, velocity, yawRate };
   }
-  const distance = Math.hypot(raw.position.x - vehicleStillCandidate.position.x, raw.position.y - vehicleStillCandidate.position.y);
-  const yawDelta = Math.abs(normalizeAngle(raw.yaw - vehicleStillCandidate.yaw));
-  if (distance >= VEHICLE_STILL_HOLD_DISTANCE_M || yawDelta >= VEHICLE_STILL_HOLD_YAW_RAD) {
-    vehicleStillCandidate = raw;
-    vehicleStillCandidateAt = now;
-    return { ...raw, stationary: false };
-  }
-  if (now - vehicleStillCandidateAt >= VEHICLE_STILL_SETTLE_MS) vehicleStillAnchor = vehicleStillCandidate;
-  return vehicleStillAnchor ? { ...vehicleStillAnchor, stationary: true } : { ...raw, stationary: false };
+  // TF 偶发短暂停顿时，最多沿最后一个可信速度外推 300 ms；超过窗口立即停止，
+  // 因而不会把图标平滑成与实车脱节的历史回放。
+  const motionAge = now - latestLiveMotion.measuredAt;
+  return {
+    ...raw,
+    // 不能用每个 60 Hz 心跳包的 receivedAt 代替这个值；渲染层必须知道最后一帧
+    // 真正改变的测量是什么时候到达，才可以平滑跨过 TF 的短暂停顿。
+    motionMeasuredAt: latestLiveMotion.measuredAt,
+    velocity: motionAge <= MAX_VEHICLE_PREDICTION_MS ? latestLiveMotion.velocity : { x: 0, y: 0 },
+    yawRate: motionAge <= MAX_VEHICLE_PREDICTION_MS ? latestLiveMotion.yawRate : 0,
+  };
 }
 function updateLivePose(message) {
   const position = message?.pose?.position;
@@ -989,24 +1225,13 @@ function updateLivePose(message) {
   vehicleUpdatedAt = livePoseUpdatedAt;
   // 轻量流恢复后立即卸载兼容 TF，避免浏览器继续接收大批量变换消息。
   if (visualizationStreams.tf.subscriptionId !== undefined) stopStreamProbe('tf');
-  const previous = tfVehiclePose?.source === 'live' ? tfVehiclePose : undefined;
-  const elapsedSeconds = previous ? (livePoseUpdatedAt - previous.receivedAt) / 1000 : 0;
-  const stabilized = stabilizeStationaryVehicle(position, yawOf(orientation), livePoseUpdatedAt);
-  const stablePosition = stabilized.position;
-  const yaw = stabilized.yaw;
-  let velocity = { x: 0, y: 0 };
-  let yawRate = 0;
-  if (!stabilized.stationary && elapsedSeconds >= 0.01 && elapsedSeconds <= 0.3) {
-    const vx = (stablePosition.x - previous.position.x) / elapsedSeconds;
-    const vy = (stablePosition.y - previous.position.y) / elapsedSeconds;
-    // 室内小车的显示预测绝不接受异常跳点或不现实的高速值。
-    if (Math.hypot(vx, vy) <= 3.0) velocity = { x: vx, y: vy };
-    const candidateYawRate = normalizeAngle(yaw - previous.yaw) / elapsedSeconds;
-    if (Math.abs(candidateYawRate) <= MAX_VEHICLE_YAW_RATE_RADPS) yawRate = candidateYawRate;
-  }
+  const motion = estimateLiveMotion(position, yawOf(orientation), livePoseUpdatedAt);
+  const stablePosition = motion.position;
+  const yaw = motion.yaw;
+  const { velocity, yawRate, motionMeasuredAt } = motion;
   const measuredAge = sourcePoseAge(message);
   livePoseSourceAgeMs = measuredAge > 0 ? livePoseSourceAgeMs * 0.82 + measuredAge * 0.18 : livePoseSourceAgeMs * 0.82;
-  tfVehiclePose = { position: stablePosition, orientation, yaw, source: 'live', receivedAt: livePoseUpdatedAt, velocity, yawRate, sourceAgeMs: livePoseSourceAgeMs };
+  tfVehiclePose = { position: stablePosition, orientation, yaw, source: 'live', receivedAt: livePoseUpdatedAt, motionMeasuredAt, velocity, yawRate, sourceAgeMs: livePoseSourceAgeMs };
   // 轻量位姿是当前性能路径；它也必须能驱动概览 -> 随车视图，不能依赖
   // /amcl_pose 恰好同时到达，否则小车会一直缩在大地图中，看似“消失”。
   leaveOverviewAfterMovement(stablePosition);
@@ -1126,13 +1351,9 @@ function subscribeLivePoseStream() {
     subscribeVisualizationStream('livePose', livePoseChannel);
   }
 }
-function hasActiveCameraSubscription() {
-  return ['A', 'B'].some((slot) => workspaceLayout?.[`camera${slot}`] && cameraSlots[slot].channelId);
-}
-function pauseCloudForCamera() {
-  return Boolean(workspaceLayout?.cameraPriority && hasActiveCameraSubscription());
-}
+function pauseCloudForCamera() { return false; }
 function activateVisualizationStreams() {
+  if (mobileConsoleEnabled() && mobileConsoleView !== 'map') { stopVisualizationStreams(); return; }
   const usePreprocessedStream = cloudTopic === LIVE_CLOUD_TOPIC && livePoseChannel;
   subscribeLivePoseStream();
   // 预处理流已经把点云投影至 map，且轻量位姿已由 C++ 计算，不再把完整 /tf
@@ -1211,10 +1432,16 @@ function updateMap(message) {
   virtualWalls = []; wallStatus = '正在匹配当前地图的虚拟墙';
   resolveLiveWalls(mapInfo, signature);
   const pixels = new Uint8Array(info.width * info.height * 4);
+  const palette = mobileConsoleEnabled() ? MAP_PALETTE : DESKTOP_MAP_PALETTE;
   for (let row = 0; row < info.height; row += 1) for (let col = 0; col < info.width; col += 1) {
     const occupancy = message.data[(info.height - 1 - row) * info.width + col];
-    const color = occupancy < 0 ? 174 : occupancy >= 65 ? 36 : 245;
-    const index = (row * info.width + col) * 4; pixels[index] = color; pixels[index + 1] = color; pixels[index + 2] = color; pixels[index + 3] = 255;
+    let color;
+    if (occupancy < 0) color = palette.unknown;
+    else {
+      const weight = Math.max(0, Math.min(1, occupancy / 65));
+      color = palette.free.map((channel, index) => Math.round(channel + (palette.occupied[index] - channel) * weight));
+    }
+    const index = (row * info.width + col) * 4; pixels[index] = color[0]; pixels[index + 1] = color[1]; pixels[index + 2] = color[2]; pixels[index + 3] = 255;
   }
   mapTexture?.destroy(true); mapTexture = createRgbaTexture(pixels, info.width, info.height); $('mapEmpty').hidden = true; renderStaticWorld(); scheduleCloudRasterBuild(); updateDiagnostics(); scheduleMapDraw();
   activateVisualizationStreams();
@@ -1462,11 +1689,12 @@ function connect(payload) {
     setText('connectionState', '已断开'); setText('sideState', '观测已断开'); setText('connectionDetail', detail); reportObservation('WARNING', `${url}；${detail}`);
   });
   client.on('advertise', (channels) => channels.forEach((channel) => {
-    if (!TOPICS.has(channel.topic) && !isImageChannel(channel)) return;
+    // 只接受地图、定位、TF 与点云的最小观测集。旧的 Foxglove 图像预览已
+    // 被 WebRTC 相机区替代，因此不能再为任意 Image 话题创建 reader 或订阅。
+    if (!TOPICS.has(channel.topic)) return;
     try {
       readers.set(channel.id, new MessageReader(parse(channel.schema, { ros2: true })));
-      if (isCameraCandidate(channel)) { cameraChannels.set(channel.id, channel); refreshCameraOptions(); }
-      else if (channel.topic === '/map') { mapChannel = channel; beginMapProbe(); }
+      if (channel.topic === '/map') { mapChannel = channel; beginMapProbe(); }
       else if (channel.topic === '/amcl_pose') subscriptions.set(client.subscribe(channel.id), { topic: channel.topic, channelId: channel.id });
       else if (channel.topic === LIVE_POSE_TOPIC) {
         livePoseChannel = channel;
@@ -1487,21 +1715,15 @@ function connect(payload) {
     }
   }));
   client.on('unadvertise', (channelIds) => {
-    channelIds.forEach((channelId) => cameraChannels.delete(channelId));
     if (channelIds.includes(tfChannel?.id)) { tfChannel = undefined; stopStreamProbe('tf'); }
     if (channelIds.includes(livePoseChannel?.id)) { livePoseChannel = undefined; stopStreamProbe('livePose'); if (mapInfo) activateVisualizationStreams(); }
     if (channelIds.includes(cloudChannel?.id)) { cloudChannel = undefined; stopStreamProbe('cloud'); }
     if (channelIds.includes(staticTfChannel?.id)) { staticTfChannel = undefined; stopStaticTfSubscription(); }
     if (channelIds.includes(mapChannel?.id)) { mapChannel = undefined; stopMapProbeSubscription(); }
-    for (const slot of ['A', 'B']) {
-      if (channelIds.includes(cameraSlots[slot].channelId)) selectCamera(slot, '');
-    }
-    refreshCameraOptions();
   });
   client.on('message', ({ subscriptionId, data }) => {
     const subscription = subscriptions.get(subscriptionId); const topic = subscription?.topic; const reader = readers.get(subscription?.channelId);
     if (!topic || !reader) return;
-    if (subscription.cameraSlot) { queueCameraFrame(subscription.cameraSlot, cameraChannels.get(subscription.channelId), data); return; }
     // 先只保留最新二进制帧，延迟到下一个显示帧再反序列化。不能在 WebSocket
     // 回调逐包解码，否则页面一旦落后就会持续处理已经没有价值的旧点云。
     if (topic === cloudTopic) { scheduleLatestCloudPacket(reader, data); return; }
@@ -1518,7 +1740,7 @@ function connect(payload) {
   connectPoseLane(url);
 }
 async function main() {
-  initializeTheme(); setupCameraSelectors(); setupWorkspace(); setupMapInteraction(); await initializePixiRenderer(); await Promise.all(['A', 'B'].map(initializeCameraRenderer));
+  initializeTheme(); setupMobileConsole(); setupMapInteraction(); $('webrtcVideoToggle')?.addEventListener('click', toggleWebRtcVideo); startWebRtcVideoStatus(); await initializePixiRenderer();
   try {
     const [settings, upgrade] = await Promise.all([request('/api/settings'), request('/api/system/upgrade')]);
     setText('consoleVersion', upgrade.current_version ? `v${upgrade.current_version}` : '开发版');
@@ -1538,7 +1760,7 @@ async function main() {
     window.setInterval(() => { request('/api/observation/active-map').then(refreshActiveMap).catch(() => {}); }, ACTIVE_MAP_SYNC_MS);
   } catch (error) { setText('connectionState', '不可用'); setText('connectionDetail', error.message); reportObservation('ERROR', `实时观测初始化失败：${error.message}`); }
 }
-window.addEventListener('beforeunload', () => { stopRenderScheduling(); stopMapProbeSubscription(); stopVisualizationStreams(); poseClient?.close(); client?.close(); });
+window.addEventListener('beforeunload', () => { window.clearInterval(webrtcStatusTimer); [...webrtcPlayers.keys()].forEach(destroyWebRtcPlayer); stopRenderScheduling(); stopMapProbeSubscription(); stopVisualizationStreams(); poseClient?.close(); client?.close(); });
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) stopRenderScheduling();
   else if (mapInfo) scheduleMapDraw();

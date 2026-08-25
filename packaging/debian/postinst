@@ -42,16 +42,14 @@ if [[ -z "$RUN_HOME" || ! -d "$RUN_HOME" ]]; then
   exit 1
 fi
 
-SUPERVISORCTL="$(command -v supervisorctl || true)"
-if [[ -z "$SUPERVISORCTL" ]]; then
-  echo "RY Aletheia：未找到 supervisorctl，拒绝完成安装以免控制台无法执行节点预检。" >&2
-  exit 1
-fi
-
 ROOT="$RUN_HOME/ry_aletheia"
 DEFAULTS=/usr/lib/ry-aletheia/defaults
 PRIVATE_BRIDGE=/usr/lib/ry-aletheia/foxglove_bridge_runtime
-install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0755 "$ROOT/dist" "$ROOT/tasks" "$ROOT/config" "$ROOT/reports" "$ROOT/updates" "$ROOT/maps_cache" "$ROOT/runtime/foxglove_bridge"
+PRIVATE_VIDEO=/usr/lib/ry-aletheia/video_runtime
+SUPERVISORCTL="$(command -v supervisorctl || true)"
+TEMP_SUDOERS=""
+trap 'rm -f "$TEMP_SUDOERS"' EXIT
+install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0755 "$ROOT/dist" "$ROOT/tasks" "$ROOT/config" "$ROOT/reports" "$ROOT/updates" "$ROOT/maps_cache" "$ROOT/logs" "$ROOT/runtime/foxglove_bridge" "$ROOT/runtime/video"
 install -o "$RUN_USER" -g "$RUN_GROUP" -m 0755 /usr/lib/ry-aletheia/ry-aletheia "$ROOT/dist/ry-aletheia"
 install -o "$RUN_USER" -g "$RUN_GROUP" -m 0644 /usr/lib/ry-aletheia/VERSION "$ROOT/VERSION"
 if [[ -d "$DEFAULTS/tasks" ]]; then
@@ -61,17 +59,90 @@ if [[ -d "$DEFAULTS/tasks" ]]; then
     [[ -e "$destination" ]] || install -o "$RUN_USER" -g "$RUN_GROUP" -m 0644 "$task" "$destination"
   done < <(find "$DEFAULTS/tasks" -maxdepth 1 -type f -name '*.json' -print0)
 fi
+# 视频默认配置仅在首次缺失时安装；重装与 DEB 升级绝不覆盖已按车辆调整的相机、
+# 硬件编码器或网关参数。
+if [[ -f "$DEFAULTS/config/video.json" ]]; then
+  [[ -e "$ROOT/config/video.json" ]] || install -o "$RUN_USER" -g "$RUN_GROUP" -m 0644 "$DEFAULTS/config/video.json" "$ROOT/config/video.json"
+fi
 if [[ -d "$PRIVATE_BRIDGE/share/ament_index/resource_index/packages" ]]; then
   # 这份前缀仅由 ObservationManager 启动 Bridge 子进程时注入环境；不触碰系统 ROS。
   cp -a "$PRIVATE_BRIDGE/." "$ROOT/runtime/foxglove_bridge/"
 fi
+if [[ -x "$PRIVATE_VIDEO/mediamtx/mediamtx" && -x "$PRIVATE_VIDEO/bin/gst-launch-1.0" ]]; then
+  # 视频运行时是 DEB 的私有负载。升级时更新二进制和锁定库，但配置仍留在
+  # $ROOT/config/video.json，生成的 MediaMTX 配置会由运行器按当前配置重建。
+  cp -a "$PRIVATE_VIDEO/." "$ROOT/runtime/video/"
+fi
 chown -R "$RUN_USER:$RUN_GROUP" "$ROOT"
 
-TEMP_SUDOERS="$(mktemp)"
-trap 'rm -f "$TEMP_SUDOERS"' EXIT
-printf '%s ALL=(root) NOPASSWD: %s status, %s start *, %s restart *\n' "$RUN_USER" "$SUPERVISORCTL" "$SUPERVISORCTL" "$SUPERVISORCTL" > "$TEMP_SUDOERS"
-visudo -cf "$TEMP_SUDOERS"
-install -o root -g root -m 0440 "$TEMP_SUDOERS" /etc/sudoers.d/ry-aletheia-supervisor
+# Versions through 2.0.3 registered only the optional video process group in
+# Supervisor.  Remove that project-owned residual group on upgrade; the core
+# robot Supervisor configuration and the console's existing vehicle controls
+# remain untouched.
+if [[ -f /etc/supervisor/conf.d/ry-aletheia-video.conf ]]; then
+  supervisorctl stop ry_aletheia_video:mediamtx >/dev/null 2>&1 || true
+  rm -f /etc/supervisor/conf.d/ry-aletheia-video.conf
+  supervisorctl reread >/dev/null 2>&1 || true
+  supervisorctl update >/dev/null 2>&1 || true
+fi
+
+if [[ -n "$SUPERVISORCTL" ]]; then
+  TEMP_SUDOERS="$(mktemp)"
+  # Status remains read-only, but control permission must never be a wildcard:
+  # a network request may only start/restart the current vehicle's declared
+  # node set.  Keep existing customized plans usable by importing their
+  # validated names during this upgrade; later additions require a deliberate
+  # package/admin update instead of silently expanding root authority.
+  SUPERVISOR_NODES=(
+    "DRIVERS:102-chassis_node"
+    "DRIVERS:111-elevator_server"
+    "MODULES:209-lightning"
+    "MODULES:211-navigate_todoor_server"
+    "MODULES:212-task_execute_server"
+    "MODULES:214-fcrp_bringup"
+  )
+  if command -v python3 >/dev/null 2>&1 && [[ -f "$ROOT/config/console.json" ]]; then
+    while IFS= read -r node; do
+      [[ "$node" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(:[A-Za-z0-9][A-Za-z0-9_.-]{0,127})?$ ]] && SUPERVISOR_NODES+=("$node")
+    done < <(python3 - "$ROOT/config/console.json" <<'PY'
+import json
+import sys
+
+try:
+    raw = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    raw = {}
+
+items = []
+items.extend(node.get("supervisor") for node in raw.get("nodes", []) if isinstance(node, dict))
+items.extend(raw.get("monitor_nodes", []) if isinstance(raw.get("monitor_nodes"), list) else [])
+for step in raw.get("dependency_plan", {}).get("steps", []) if isinstance(raw.get("dependency_plan"), dict) else []:
+    if isinstance(step, dict) and isinstance(step.get("nodes"), list):
+        items.extend(step["nodes"])
+for item in items:
+    if isinstance(item, str):
+        print(item)
+PY
+)
+  fi
+  mapfile -t SUPERVISOR_NODES < <(printf '%s\n' "${SUPERVISOR_NODES[@]}" | sort -u)
+  {
+    printf '%s ALL=(root) NOPASSWD: %s status' "$RUN_USER" "$SUPERVISORCTL"
+    for node in "${SUPERVISOR_NODES[@]}"; do
+      # sudoers 把冒号用于语法分隔；Supervisor 的 group:program 名称必须
+      # 转义后才能作为精确的命令参数白名单写入（例如 DRIVERS\:102）。
+      sudoers_node="${node//:/\\:}"
+      printf ', %s start %s, %s restart %s' "$SUPERVISORCTL" "$sudoers_node" "$SUPERVISORCTL" "$sudoers_node"
+    done
+    printf '\n'
+  } > "$TEMP_SUDOERS"
+  visudo -cf "$TEMP_SUDOERS"
+  install -o root -g root -m 0440 "$TEMP_SUDOERS" /etc/sudoers.d/ry-aletheia-supervisor
+else
+  # Supervisor belongs to the existing vehicle stack, not this tool.  Keep
+  # installation usable for observation-only work if that stack is absent.
+  echo "RY Aletheia：未找到小车 Supervisor；自动测试编排不可用，实时观测不受影响。" >&2
+fi
 
 TASK_TARGET=/opt/ry/data/tasks/origin_tasks
 if [[ -d "$TASK_TARGET" ]] && command -v setfacl >/dev/null 2>&1; then
@@ -80,10 +151,12 @@ if [[ -d "$TASK_TARGET" ]] && command -v setfacl >/dev/null 2>&1; then
 fi
 
 rm -f "$ROOT/run_ry_aletheia.sh" "$ROOT/RY Aletheia.desktop"
-# 清理旧版 systemd 系统服务；后续完全由普通用户按需启动，不注册开机自启。
-systemctl disable --now ry-aletheia.service >/dev/null 2>&1 || true
+# 清理旧版 systemd 的开机自启注册，但绝不在升级过程中停止已经运行的控制台。
+# 新版工具由普通用户按需启动；当前会话由操作者自行重启后才切换到新二进制。
+systemctl disable ry-aletheia.service >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/ry-aletheia.service
 systemctl daemon-reload >/dev/null 2>&1 || true
 echo "RY Aletheia 安装完成：版本 $(cat "$ROOT/VERSION")。"
 echo "工具未自动启动、不会开机自启。请以普通账户执行：ry-aletheia"
+echo "视频日常由“实时运行观测”页的开关启用/关闭；ry-aletheia-video 仅用于维护排障。"
 echo "启动后浏览器打开：http://<小车IP>:8087"

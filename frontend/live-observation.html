@@ -2,7 +2,11 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="theme-color" content="#d8dde3" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <title>实时运行观测 · RY Aletheia</title>
   </head>
   <body>
@@ -36,6 +40,21 @@
         </div>
       </aside>
       <main class="page-main">
+        <header class="mobile-console-bar">
+          <a class="mobile-console-brand" href="/" aria-label="返回任务指挥台">
+            <span class="mobile-console-mark" aria-hidden="true">
+              <svg viewBox="0 0 32 32"><path d="M5 24 16 4l11 20-11 4z"/><path d="m11 21 5-10 5 10-5 2z"/></svg>
+            </span>
+            <span><strong>Aletheia</strong><small>Mobile Console</small></span>
+          </a>
+          <div class="mobile-console-live" id="mobileConnectionSignal">
+            <i aria-hidden="true"></i>
+            <span><strong id="mobileConnectionState">检查中</strong><small id="mobileConnectionDetail">正在连接实时观测</small></span>
+          </div>
+          <div class="mobile-console-actions">
+            <span class="mobile-camera-summary" id="mobileCameraSummary">视频 0 / 0</span>
+          </div>
+        </header>
         <header class="page-header">
           <div>
             <p class="eyebrow">LOCAL LIVE VIEW / 2D</p>
@@ -45,99 +64,59 @@
             </p>
           </div>
         </header>
-        <section
-          class="local-viewer-workspace"
-          id="viewerWorkspace"
-          aria-label="可调整的实时观测工作区"
-        >
+        <section class="local-viewer-workspace" id="viewerWorkspace" aria-label="实时二维地图工作区">
           <article class="workspace-widget map-widget" data-widget="map">
-            <header class="widget-header">
-              <div>
-                <p class="eyebrow">MAP / VEHICLE / LIDAR</p>
-                <h2>实时二维运行视图</h2>
-              </div>
-              <div class="viewer-state">
-                <span class="badge" id="connectionState">检查中</span
-                ><span class="page-muted" id="connectionDetail"
-                  >正在读取本机观测配置。</span
-                ><button
-                  id="toggleWorkspaceControls"
-                  class="outline-button workspace-settings-button"
-                  type="button"
-                >
-                  ⚙ 设置
-                </button>
-              </div>
-            </header>
             <div class="local-map-wrap">
               <div id="worldStage" class="world-stage">
                 <div id="mapWorld" class="map-world" aria-label="PixiJS 实时地图"></div>
               </div>
-              <div id="vehicleLayer" aria-label="小车实时位置"><i></i></div>
+              <div id="vehicleLayer" aria-label="小车实时位置及车头方向"><i></i></div>
               <div id="mapInteraction" class="map-interaction-layer" aria-label="地图缩放与拖动交互"></div>
               <div class="local-map-empty" id="mapEmpty">正在获取当前地图…</div>
-              <div class="map-legend">
-                <span><i class="legend-wall"></i>虚拟墙</span
-                ><span><i class="legend-vehicle"></i>小车</span
-                ><span><i class="legend-cloud"></i>激光点云</span>
-              </div>
               <div class="map-diagnostics" id="mapDiagnostics">
                 等待地图、定位与点云数据
               </div>
+              <div class="map-scale" id="mapScale" aria-label="地图距离比例尺" hidden>
+                <span id="mapGridLabel">米制格栅</span>
+                <i id="mapScaleBar" aria-hidden="true"></i>
+                <strong id="mapScaleLabel">— m</strong>
+              </div>
             </div>
           </article>
-          <article class="workspace-widget image-widget" data-widget="cameraA">
-            <header class="widget-header">
-              <label
-                >图像窗口 1
-                <select id="cameraSelectA">
-                  <option value="">不订阅图像</option>
-                </select></label
-              >
-            </header>
-            <div id="cameraViewA" class="camera-view" aria-label="图像窗口 1 预览"></div>
-            <p id="cameraStateA">等待选择图像话题</p>
-          </article>
-          <article class="workspace-widget image-widget" data-widget="cameraB">
-            <header class="widget-header">
-              <label
-                >图像窗口 2
-                <select id="cameraSelectB">
-                  <option value="">不订阅图像</option>
-                </select></label
-              >
-            </header>
-            <div id="cameraViewB" class="camera-view" aria-label="图像窗口 2 预览"></div>
-            <p id="cameraStateB">等待选择图像话题</p>
-          </article>
-          <div
-            class="workspace-splitter vertical-splitter"
-            id="verticalSplitter"
-            aria-label="调整地图与图像区域宽度"
-            role="separator"
-          ></div>
-          <div
-            class="workspace-splitter horizontal-splitter"
-            id="horizontalSplitter"
-            aria-label="调整图像窗口高度"
-            role="separator"
-          ></div>
-          <div class="workspace-controls">
-            <div id="workspaceControlsBody" hidden>
-              <p class="eyebrow">WINDOW MANAGEMENT</p>
-              <label
-                ><input id="showCameraA" type="checkbox" checked /> 显示图像窗口
-                1</label
-              ><label
-                ><input id="showCameraB" type="checkbox" checked /> 显示图像窗口
-                2</label
-              ><label
-                ><input id="cameraPriority" type="checkbox" />
-                图像低延迟优先</label
-              ><button id="resetWorkspace" type="button">恢复默认布局</button>
-            </div>
-          </div>
         </section>
+        <section class="webrtc-video-section" aria-labelledby="webrtcVideoTitle">
+          <header class="webrtc-video-header">
+            <div>
+              <p class="eyebrow">INDUSTRIAL CAMERA / WEBRTC</p>
+              <h2 id="webrtcVideoTitle">低延迟相机流</h2>
+              <p class="page-muted" id="webrtcGatewayState">正在读取本机视频网关状态。</p>
+            </div>
+            <div class="webrtc-video-actions">
+              <button id="webrtcVideoToggle" class="outline-button webrtc-video-toggle" type="button" aria-pressed="false">启用视频</button>
+              <span class="badge muted" id="webrtcGatewayBadge">检查中</span>
+            </div>
+          </header>
+          <div id="webrtcStreamControls" class="webrtc-stream-controls" aria-label="按路控制低延迟相机流"></div>
+          <div id="webrtcVideoGrid" class="webrtc-video-grid" aria-live="polite"></div>
+          <p id="webrtcVideoEmpty" class="webrtc-video-empty">未启用 WebRTC 相机流；现有地图、点云与诊断图像功能不受影响。</p>
+        </section>
+        <nav class="mobile-bottom-nav" aria-label="手机端主导航">
+          <button class="mobile-nav-item active" type="button" data-mobile-view-target="map" aria-selected="true">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Z"/><path d="M9 3v15M15 6v15"/></svg><span>地图</span>
+          </button>
+          <button class="mobile-nav-item" type="button" data-mobile-view-target="camera" aria-selected="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="14" height="12" rx="2"/><path d="m17 10 4-2v8l-4-2"/></svg><span>相机</span>
+          </button>
+          <a class="mobile-nav-item" href="/">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></svg><span>任务</span>
+          </a>
+          <a class="mobile-nav-item" href="/reports.html">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a7 7 0 0 0-7 7v4l-2 3h18l-2-3v-4a7 7 0 0 0-7-7Z"/><path d="M9 20h6"/></svg><span>报告</span>
+          </a>
+          <a class="mobile-nav-item" href="/runtime-settings.html">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.1.38.3.72.6 1 .3.27.68.4 1.1.4h.1v4h-.1a1.7 1.7 0 0 0-1.7.6Z"/></svg><span>设置</span>
+          </a>
+        </nav>
       </main>
     </div>
     <script type="module" src="/src/liveObservation.js"></script>

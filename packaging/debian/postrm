@@ -4,7 +4,11 @@ set -euo pipefail
 case "${1:-}" in
   remove|purge)
     systemctl disable --now ry-aletheia.service 2>/dev/null || true
-    rm -f /etc/systemd/system/ry-aletheia.service /etc/sudoers.d/ry-aletheia-supervisor
+    /usr/bin/ry-aletheia-video stop >/dev/null 2>&1 || true
+    supervisorctl stop ry_aletheia_video:mediamtx >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/ry-aletheia.service /etc/sudoers.d/ry-aletheia-supervisor /etc/supervisor/conf.d/ry-aletheia-video.conf
+    supervisorctl reread >/dev/null 2>&1 || true
+    supervisorctl update >/dev/null 2>&1 || true
     systemctl daemon-reload 2>/dev/null || true
     # 普通账户目录中的任务、配置、报告和升级备份属于测试证据，卸载时保留。
     ;;

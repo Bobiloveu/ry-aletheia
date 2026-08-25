@@ -1,98 +1,773 @@
-/* 独立移动端壳层：仅由 /m/ 页面加载，绝不参与桌面页面的样式计算。 */
+/*
+ * Shared mobile console skin for every `/m/` page except the dedicated live
+ * observation shell.  It deliberately does not restyle desktop routes.
+ */
+:root {
+  /* Mobile industrial design tokens.  These are intentionally neutral and
+     reusable; individual pages opt in during the visual-system migration. */
+  --ui-bg-canvas: #d8dde3;
+  --ui-bg-surface: #f6f7f8;
+  --ui-bg-subtle: #e7ebef;
+  --ui-bg-hover: #dfe5e9;
+  --ui-text: #303844;
+  --ui-text-secondary: #4f5964;
+  --ui-text-tertiary: #78828c;
+  --ui-border: #bdc6cf;
+  --ui-border-strong: #98a4af;
+  --ui-accent: #f28c28;
+  --ui-accent-strong: #c96e18;
+  --ui-accent-soft: #f9e4ce;
+  --ui-success: #4d7967;
+  --ui-warning: #a7773b;
+  --ui-danger: #a95f5b;
+  --ui-offline: #78858a;
+  --ui-info: #3f7180;
+  --ui-info-soft: #dce9eb;
+  --ui-success-soft: #dce9e3;
+  --ui-warning-soft: #f4e7d7;
+  --ui-danger-soft: #f3e2df;
+  --ui-radius-control: 4px;
+  --ui-radius-button: 6px;
+  --ui-radius-panel: 8px;
+  --ui-radius-frame: 10px;
+  --ui-space-1: 4px;
+  --ui-space-2: 8px;
+  --ui-space-3: 12px;
+  --ui-space-4: 16px;
+  --ui-shadow-float: 0 8px 20px rgb(35 52 56 / 12%);
+  --ui-font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --ui-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 @media (max-width: 900px), (pointer: coarse) {
-  html { min-width: 320px; background: #08111f; }
-  body.mobile-console { min-height: 100svh; overflow-x: hidden; background: radial-gradient(ellipse at 50% -20%, #183b62 0, #08111f 48%); }
-  .mobile-console aside {
-    position: fixed !important; z-index: 90; top: 0; bottom: 0; left: 0; display: flex !important;
-    width: min(84vw, 326px) !important; height: 100svh; padding: calc(22px + env(safe-area-inset-top)) 16px calc(18px + env(safe-area-inset-bottom));
-    overflow-y: auto; transform: translateX(-105%); transition: transform .22s ease; box-shadow: 18px 0 44px #000a;
+  :root {
+    --mobile-bg: var(--ui-bg-canvas);
+    --mobile-bg-raised: var(--ui-bg-surface);
+    --mobile-panel: var(--ui-bg-surface);
+    --mobile-panel-strong: var(--ui-bg-subtle);
+    --mobile-line: var(--ui-border);
+    --mobile-ink: var(--ui-text);
+    --mobile-muted: var(--ui-text-secondary);
+    --mobile-sand: var(--ui-accent);
+    --mobile-sand-soft: var(--ui-accent-soft);
+    --mobile-sage: var(--ui-success);
+    --mobile-danger: var(--ui-danger);
+    --mobile-shadow: none;
   }
-  .mobile-console.mobile-nav-open aside { transform: translateX(0); }
-  .mobile-console aside nav { display: grid !important; margin-top: 34px; gap: 4px; }
-  .mobile-console aside nav a { min-height: 48px; margin: 0; padding: 14px; font-size: 14px; }
-  .mobile-console aside .side-status { margin-top: auto; padding-top: 16px; }
-  .mobile-console .mobile-nav-toggle {
-    position: fixed; z-index: 80; top: max(12px, env(safe-area-inset-top)); left: 12px; display: grid; width: 44px; height: 44px;
-    padding: 11px; gap: 5px; border: 1px solid #38617c; border-radius: 9px; background: #0c2235eF; box-shadow: 0 8px 20px #0007;
+
+  html.mobile-console { min-width: 320px; background: var(--mobile-bg); }
+  body.mobile-console.mobile-shell-generic {
+    min-height: 100svh;
+    overflow-x: hidden;
+    color: var(--mobile-ink);
+    background:
+      radial-gradient(100% 58% at 100% -8%, rgb(166 126 75 / 14%), transparent 62%),
+      radial-gradient(80% 54% at -8% 28%, rgb(89 140 111 / 10%), transparent 65%),
+      var(--mobile-bg);
   }
-  .mobile-console .mobile-nav-toggle span { display: block; height: 2px; border-radius: 2px; background: #d7edf9; }
-  .mobile-console .mobile-nav-scrim { position: fixed; z-index: 70; inset: 0; display: none; margin: 0; border: 0; border-radius: 0; background: #02081299; box-shadow: none; }
-  .mobile-console.mobile-nav-open .mobile-nav-scrim { display: block; }
-  .mobile-console .mobile-desktop-link { display: block; width: max-content; margin-top: 12px; color: #95bfd9; font: 10px ui-monospace, monospace; text-decoration: none; }
 
-  .mobile-console main, .mobile-console .page-main {
-    width: 100%; max-width: none; min-height: 100svh; margin: 0 !important;
-    padding: calc(70px + env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) calc(28px + env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left)) !important;
+  /* The desktop rail remains in the DOM for its existing page logic, but the
+     fixed mobile navigation below is now the single source of page navigation. */
+  body.mobile-console.mobile-shell-generic > aside,
+  body.mobile-console.mobile-shell-generic #app > aside,
+  body.mobile-console.mobile-shell-generic .mobile-nav-toggle,
+  body.mobile-console.mobile-shell-generic .mobile-nav-scrim,
+  body.mobile-console.mobile-shell-generic .mobile-desktop-link,
+  body.mobile-console.mobile-shell-generic .mobile-viewer-fullscreen,
+  body.mobile-console.mobile-shell-generic .mobile-fullscreen-exit {
+    display: none !important;
   }
-  .mobile-console header, .mobile-console .page-header { display: block; margin-bottom: 20px; }
-  .mobile-console header h1, .mobile-console .page-header h1 { font-size: clamp(24px, 7vw, 30px); line-height: 1.18; }
-  .mobile-console .sub { font-size: 13px; line-height: 1.6; }
-  .mobile-console .header-meta, .mobile-console .asset-header-actions, .mobile-console .scenario-actions, .mobile-console .observation-actions, .mobile-console .log-header-actions { display: flex; align-items: stretch; flex-wrap: wrap; gap: 9px; margin-top: 16px; text-align: left; }
-  .mobile-console .header-meta > *, .mobile-console .asset-header-actions > *, .mobile-console .scenario-actions > *, .mobile-console .observation-actions > *, .mobile-console .log-header-actions > * { flex: 1 1 145px; }
 
-  .mobile-console .metrics, .mobile-console .grid, .mobile-console .page-grid, .mobile-console .node-grid, .mobile-console .settings-form { grid-template-columns: minmax(0, 1fr) !important; }
-  .mobile-console .metrics { gap: 10px; }.mobile-console .metrics article { padding: 16px; }
-  .mobile-console .grid, .mobile-console .page-grid { gap: 12px; }
-  .mobile-console .page-grid > .panel, .mobile-console .page-grid > .span-5, .mobile-console .page-grid > .span-7 { grid-column: 1 / -1; }
-  .mobile-console .panel { padding: 16px; border-radius: 8px; }
-  .mobile-console .panel-title { align-items: flex-start; flex-wrap: wrap; gap: 11px; margin-bottom: 16px; }
-  .mobile-console .panel-title > :last-child { max-width: 100%; }
-  .mobile-console .page-stat { font-size: 25px; }
-  .mobile-console .fields, .mobile-console .settings-form { gap: 10px; }
-  .mobile-console .fields { grid-template-columns: minmax(0, 1fr); }
-  .mobile-console label { font-size: 11px; }
-  .mobile-console input, .mobile-console select, .mobile-console textarea { min-height: 44px; padding: 10px; font-size: 14px; }
-  .mobile-console button, .mobile-console .compact-action, .mobile-console .page-top-action, .mobile-console .outline-button { min-height: 44px; padding: 10px 12px; font-size: 12px; }
-  .mobile-console .text-button, .mobile-console .compact-action { width: auto; }
-  .mobile-console .route-progress { padding: 13px; }.mobile-console .route-progress-head { align-items: flex-start; }.mobile-console .route-progress-head strong { font-size: 22px; }
-  .mobile-console .route-progress-meta { align-items: flex-start; flex-direction: column; }.mobile-console .route-progress-meta span:last-child { white-space: normal; text-align: left; }
-  .mobile-console .chart { height: 108px; }.mobile-console .table-wrap { margin-right: -3px; }.mobile-console table { min-width: 680px; }
-
-  .mobile-console .asset-row, .mobile-console .report-row, .mobile-console .scenario-profile, .mobile-console .vehicle-model-row { grid-template-columns: minmax(0, 1fr) !important; gap: 10px; }
-  .mobile-console .asset-row, .mobile-console .report-row { padding: 13px; }.mobile-console .case-controls { grid-column: 1 / -1; grid-template-columns: minmax(0, 1fr); }.mobile-console .case-controls button { width: 100%; }
-  .mobile-console .upgrade-actions { align-items: stretch; flex-direction: column; }.mobile-console .upgrade-actions button { width: 100%; }
-  .mobile-console .asset-dropzone, .mobile-console .upgrade-dropzone { min-height: 112px; padding: 14px; }
-  .mobile-console .file-preview { max-height: 320px; font-size: 11px; }.mobile-console .scenario-browser-dialog, .mobile-console .dependency-dialog, .mobile-console .trajectory-dialog { width: calc(100vw - 20px); max-height: calc(100svh - 20px); padding: 16px; }
-  .mobile-console .dialog { width: calc(100vw - 28px); padding: 18px; }.mobile-console .dialog-actions { flex-direction: column-reverse; }.mobile-console .dialog-actions button { width: 100%; }
-
-  .mobile-console .local-viewer-workspace { min-height: max(640px, calc(100svh - 110px)); }
-  .mobile-console .workspace-controls > div { width: min(320px, calc(100vw - 44px)); }
-  .mobile-console .mobile-viewer-fullscreen { min-height: 38px; padding: 7px 9px; white-space: nowrap; }
-  .mobile-console.mobile-viewer-fullscreen-active { overflow: hidden; }
-  .mobile-console.mobile-viewer-fullscreen-active .mobile-nav-toggle,
-  .mobile-console.mobile-viewer-fullscreen-active > aside,
-  .mobile-console.mobile-viewer-fullscreen-active > main > :not(.local-viewer-workspace),
-  .mobile-console.mobile-viewer-fullscreen-active > .page-main > :not(.local-viewer-workspace),
-  .mobile-console.mobile-viewer-fullscreen-active #app > aside,
-  .mobile-console.mobile-viewer-fullscreen-active #app > main > :not(.local-viewer-workspace) { display: none !important; }
-  /* 不是把工作区压缩进全屏，而是让地图 widget 自身成为唯一的全视口图层。 */
-  .mobile-console.mobile-viewer-fullscreen-active .local-viewer-workspace {
-    position: fixed; z-index: 120; inset: 0 !important; display: block; box-sizing: border-box; width: 100dvw; max-width: none; height: 100dvh; min-height: 100dvh;
-    overflow: visible; border: 0; border-radius: 0; background: transparent;
+  .mobile-shell-bar {
+    position: fixed;
+    z-index: 80;
+    top: 0;
+    right: 0;
+    left: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-sizing: border-box;
+    height: calc(58px + env(safe-area-inset-top));
+    padding: calc(9px + env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 9px max(16px, env(safe-area-inset-left));
+    border-bottom: 1px solid rgb(114 129 120 / 36%);
+    background: rgb(16 21 20 / 92%);
+    box-shadow: 0 8px 20px rgb(0 0 0 / 14%);
+    backdrop-filter: blur(18px);
   }
-  .mobile-console.mobile-viewer-fullscreen-active .local-viewer-workspace .map-widget { position: fixed !important; z-index: 130; inset: 0 !important; display: flex; width: 100dvw !important; max-width: none; height: 100dvh !important; min-height: 100dvh; grid-column: auto; grid-row: auto; border: 0; border-radius: 0; }
-  .mobile-console.mobile-viewer-fullscreen-active .local-viewer-workspace .image-widget,
-  .mobile-console.mobile-viewer-fullscreen-active .local-viewer-workspace .workspace-splitter { display: none !important; }
-  .mobile-console.mobile-viewer-fullscreen-active .map-widget .widget-header,
-  .mobile-console.mobile-viewer-fullscreen-active .workspace-controls { display: none !important; }
-  .mobile-console.mobile-viewer-fullscreen-active .local-map-wrap { min-height: 0; }
-  .mobile-console.mobile-viewer-fullscreen-active .map-legend { top: 8px; left: 8px; }
-  .mobile-console.mobile-viewer-fullscreen-active .map-diagnostics { right: 8px; bottom: 8px; }
-  .mobile-console .mobile-fullscreen-exit { display: none; }
-  .mobile-console.mobile-viewer-fullscreen-active .mobile-fullscreen-exit { position: absolute; z-index: 12; top: max(10px, env(safe-area-inset-top)); right: max(10px, env(safe-area-inset-right)); display: block; width: auto; min-height: 38px; margin: 0; padding: 8px 11px; border: 1px solid #6a9fbd; border-radius: 7px; background: rgb(7 28 43 / 90%); color: #edf9ff; box-shadow: 0 5px 18px rgb(0 0 0 / 32%); }
+  .mobile-shell-brand {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    gap: 9px;
+    color: var(--mobile-ink);
+    text-decoration: none;
+  }
+  .mobile-shell-mark {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
+    place-items: center;
+    border: 1px solid rgb(235 208 164 / 66%);
+    border-radius: 8px;
+    color: #292319;
+    background: linear-gradient(145deg, #e6c18d, #b88954);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 38%);
+    font: 700 15px/1 ui-sans-serif, system-ui, sans-serif;
+  }
+  .mobile-shell-brand strong,
+  .mobile-shell-brand small { display: block; }
+  .mobile-shell-brand strong { font: 700 14px/1.1 ui-sans-serif, system-ui, sans-serif; letter-spacing: -.01em; }
+  .mobile-shell-brand small { margin-top: 3px; color: #a9b1aa; font: 600 7px/1 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .14em; text-transform: uppercase; }
+  .mobile-shell-state {
+    display: inline-flex;
+    align-items: center;
+    max-width: 45vw;
+    gap: 6px;
+    overflow: hidden;
+    color: #b6c3ba;
+    font: 600 10px/1.2 ui-sans-serif, system-ui, sans-serif;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .mobile-shell-state i { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--mobile-sage); box-shadow: 0 0 0 3px rgb(121 173 140 / 12%); }
+  .mobile-shell-state b { overflow: hidden; font-weight: 600; text-overflow: ellipsis; }
+
+  .mobile-shell-nav {
+    position: fixed;
+    z-index: 80;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    box-sizing: border-box;
+    min-height: calc(64px + env(safe-area-inset-bottom));
+    padding: 5px max(8px, env(safe-area-inset-right)) calc(5px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+    border-top: 1px solid rgb(114 129 120 / 38%);
+    background: rgb(16 21 20 / 94%);
+    box-shadow: 0 -8px 20px rgb(0 0 0 / 13%);
+    backdrop-filter: blur(20px);
+  }
+  .mobile-shell-nav-item {
+    display: grid;
+    min-width: 0;
+    min-height: 53px;
+    place-items: center;
+    align-content: center;
+    gap: 3px;
+    border-radius: 9px;
+    color: #a4aea7;
+    font: 600 9px/1.15 ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: .02em;
+    text-decoration: none;
+  }
+  .mobile-shell-nav-item svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+  .mobile-shell-nav-item.is-active { color: #f0d0a0; background: linear-gradient(180deg, rgb(196 150 91 / 19%), rgb(196 150 91 / 5%)); box-shadow: inset 0 0 0 1px rgb(224 187 133 / 19%); }
+  .mobile-shell-nav-item:focus-visible,
+  .mobile-shell-brand:focus-visible { outline: 2px solid var(--mobile-sand-soft); outline-offset: -2px; }
+
+  body.mobile-console.mobile-shell-generic main,
+  body.mobile-console.mobile-shell-generic .page-main,
+  body.mobile-console.mobile-shell-generic #app > main {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: none;
+    min-height: 100svh;
+    margin: 0 !important;
+    padding: calc(76px + env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) calc(82px + env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left)) !important;
+    color: var(--mobile-ink);
+    background: transparent;
+  }
+  body.mobile-console.mobile-shell-generic main > header,
+  body.mobile-console.mobile-shell-generic .page-main > header,
+  body.mobile-console.mobile-shell-generic .page-header {
+    display: block;
+    margin: 0 0 18px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+  }
+  body.mobile-console.mobile-shell-generic main h1,
+  body.mobile-console.mobile-shell-generic .page-main h1 {
+    margin: 0;
+    color: var(--mobile-ink);
+    font-size: clamp(25px, 7vw, 31px);
+    line-height: 1.12;
+    letter-spacing: -.035em;
+  }
+  body.mobile-console.mobile-shell-generic main h2,
+  body.mobile-console.mobile-shell-generic .page-main h2 { color: var(--mobile-ink); font-size: 17px; line-height: 1.28; }
+  body.mobile-console.mobile-shell-generic .eyebrow { margin-bottom: 8px; color: var(--mobile-sand); font: 700 10px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .14em; }
+  body.mobile-console.mobile-shell-generic .sub,
+  body.mobile-console.mobile-shell-generic .page-header p { max-width: 690px; margin: 9px 0 0; color: var(--mobile-muted); font-size: 13px; line-height: 1.55; }
+  body.mobile-console.mobile-shell-generic .header-meta,
+  body.mobile-console.mobile-shell-generic .asset-header-actions,
+  body.mobile-console.mobile-shell-generic .scenario-actions,
+  body.mobile-console.mobile-shell-generic .observation-actions,
+  body.mobile-console.mobile-shell-generic .log-header-actions {
+    display: flex;
+    align-items: stretch;
+    flex-wrap: wrap;
+    gap: 9px;
+    margin-top: 15px;
+    text-align: left;
+  }
+  body.mobile-console.mobile-shell-generic .header-meta > *,
+  body.mobile-console.mobile-shell-generic .asset-header-actions > *,
+  body.mobile-console.mobile-shell-generic .scenario-actions > *,
+  body.mobile-console.mobile-shell-generic .observation-actions > *,
+  body.mobile-console.mobile-shell-generic .log-header-actions > * { flex: 1 1 132px; }
+
+  body.mobile-console.mobile-shell-generic .metrics,
+  body.mobile-console.mobile-shell-generic .grid,
+  body.mobile-console.mobile-shell-generic .page-grid,
+  body.mobile-console.mobile-shell-generic .node-grid,
+  body.mobile-console.mobile-shell-generic .settings-form,
+  body.mobile-console.mobile-shell-generic .fields { grid-template-columns: minmax(0, 1fr) !important; }
+  body.mobile-console.mobile-shell-generic .metrics { gap: 10px; }
+  body.mobile-console.mobile-shell-generic .metrics article,
+  body.mobile-console.mobile-shell-generic .panel,
+  body.mobile-console.mobile-shell-generic .route-progress,
+  body.mobile-console.mobile-shell-generic .asset-row,
+  body.mobile-console.mobile-shell-generic .report-row,
+  body.mobile-console.mobile-shell-generic .scenario-profile,
+  body.mobile-console.mobile-shell-generic .vehicle-model-row {
+    border-color: var(--mobile-line);
+    border-radius: 12px;
+    color: var(--mobile-ink);
+    background: linear-gradient(145deg, rgb(32 40 37 / 94%), rgb(22 28 26 / 94%));
+    box-shadow: var(--mobile-shadow);
+  }
+  body.mobile-console.mobile-shell-generic .metrics article,
+  body.mobile-console.mobile-shell-generic .panel { padding: 16px; }
+  body.mobile-console.mobile-shell-generic .grid,
+  body.mobile-console.mobile-shell-generic .page-grid { gap: 12px; }
+  body.mobile-console.mobile-shell-generic .page-grid > .panel,
+  body.mobile-console.mobile-shell-generic .page-grid > .span-5,
+  body.mobile-console.mobile-shell-generic .page-grid > .span-7 { grid-column: 1 / -1; }
+  body.mobile-console.mobile-shell-generic .panel-title { align-items: flex-start; flex-wrap: wrap; gap: 10px; margin-bottom: 15px; }
+  body.mobile-console.mobile-shell-generic .panel-title > :last-child { max-width: 100%; }
+  body.mobile-console.mobile-shell-generic .panel-title h2,
+  body.mobile-console.mobile-shell-generic .panel-title strong,
+  body.mobile-console.mobile-shell-generic .metrics strong { color: var(--mobile-ink); }
+  body.mobile-console.mobile-shell-generic .metric-label,
+  body.mobile-console.mobile-shell-generic .muted,
+  body.mobile-console.mobile-shell-generic .panel p { color: var(--mobile-muted); }
+  body.mobile-console.mobile-shell-generic .page-stat { color: var(--mobile-sand-soft); font-size: 25px; }
+
+  body.mobile-console.mobile-shell-generic label { color: #c9d0c9; font-size: 11px; }
+  body.mobile-console.mobile-shell-generic input,
+  body.mobile-console.mobile-shell-generic select,
+  body.mobile-console.mobile-shell-generic textarea {
+    box-sizing: border-box;
+    min-height: 44px;
+    border-color: #43504a;
+    border-radius: 8px;
+    color: var(--mobile-ink);
+    background: #111715;
+    font-size: 14px;
+  }
+  body.mobile-console.mobile-shell-generic input:focus,
+  body.mobile-console.mobile-shell-generic select:focus,
+  body.mobile-console.mobile-shell-generic textarea:focus { border-color: var(--mobile-sand); outline: 2px solid rgb(199 165 117 / 21%); }
+  body.mobile-console.mobile-shell-generic button,
+  body.mobile-console.mobile-shell-generic .compact-action,
+  body.mobile-console.mobile-shell-generic .page-top-action,
+  body.mobile-console.mobile-shell-generic .outline-button {
+    min-height: 42px;
+    margin: 0;
+    padding: 9px 12px;
+    border-color: #55625b;
+    border-radius: 8px;
+    color: #eff1ec;
+    background: #28312d;
+    box-shadow: none;
+    font-size: 12px;
+  }
+  body.mobile-console.mobile-shell-generic button:hover,
+  body.mobile-console.mobile-shell-generic button:focus-visible { border-color: var(--mobile-sand); color: #fff7e8; background: #394039; }
+  body.mobile-console.mobile-shell-generic button.primary,
+  body.mobile-console.mobile-shell-generic .primary-action,
+  body.mobile-console.mobile-shell-generic button[type="submit"] { border-color: #d0ae7c; color: #2d2519; background: linear-gradient(180deg, #e3c28f, #c4935f); }
+  body.mobile-console.mobile-shell-generic button.danger,
+  body.mobile-console.mobile-shell-generic .danger-action { border-color: #bd6c63; color: #ffdeda; background: #623b37; }
+  body.mobile-console.mobile-shell-generic .text-button,
+  body.mobile-console.mobile-shell-generic .compact-action { width: auto; }
+  body.mobile-console.mobile-shell-generic .status-ok,
+  body.mobile-console.mobile-shell-generic .connected,
+  body.mobile-console.mobile-shell-generic .success { color: #9dd4ad; }
+
+  body.mobile-console.mobile-shell-generic .route-progress { padding: 13px; }
+  body.mobile-console.mobile-shell-generic .route-progress-head { align-items: flex-start; }
+  body.mobile-console.mobile-shell-generic .route-progress-head strong { color: var(--mobile-sand-soft); font-size: 22px; }
+  body.mobile-console.mobile-shell-generic .route-progress-meta { align-items: flex-start; flex-direction: column; }
+  body.mobile-console.mobile-shell-generic .route-progress-meta span:last-child { white-space: normal; text-align: left; }
+  body.mobile-console.mobile-shell-generic .config-note {
+    margin: 13px 0 0;
+    padding: 11px 12px;
+    border-left: 2px solid var(--mobile-sand);
+    border-radius: 0 8px 8px 0;
+    color: #bfc8bf;
+    background: rgb(77 65 45 / 29%);
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  body.mobile-console.mobile-shell-generic .inline-message { color: #a4d7b3; }
+  body.mobile-console.mobile-shell-generic .upgrade-panel {
+    border-color: #665238 !important;
+    background: linear-gradient(145deg, #25221c, #191d1b) !important;
+  }
+  body.mobile-console.mobile-shell-generic .upgrade-meta,
+  body.mobile-console.mobile-shell-generic .upgrade-actions span { color: var(--mobile-muted); }
+  body.mobile-console.mobile-shell-generic .upgrade-meta code,
+  body.mobile-console.mobile-shell-generic .upgrade-panel code { color: #e2c493; }
+  body.mobile-console.mobile-shell-generic .checkbox-setting input[type="checkbox"] { accent-color: var(--mobile-sand); }
+  body.mobile-console.mobile-shell-generic .chart { height: 108px; }
+  body.mobile-console.mobile-shell-generic .table-wrap { margin-right: -3px; overflow-x: auto; }
+  body.mobile-console.mobile-shell-generic table { min-width: 680px; color: var(--mobile-ink); }
+  body.mobile-console.mobile-shell-generic th { color: #bac2ba; background: #222a27; }
+  body.mobile-console.mobile-shell-generic td { border-color: #35403c; }
+
+  body.mobile-console.mobile-shell-generic .asset-row,
+  body.mobile-console.mobile-shell-generic .report-row,
+  body.mobile-console.mobile-shell-generic .scenario-profile,
+  body.mobile-console.mobile-shell-generic .vehicle-model-row { grid-template-columns: minmax(0, 1fr) !important; gap: 10px; padding: 13px; }
+  body.mobile-console.mobile-shell-generic .case-controls { grid-column: 1 / -1; grid-template-columns: minmax(0, 1fr); }
+  body.mobile-console.mobile-shell-generic .case-controls button,
+  body.mobile-console.mobile-shell-generic .upgrade-actions button { width: 100%; }
+  body.mobile-console.mobile-shell-generic .upgrade-actions { align-items: stretch; flex-direction: column; }
+  body.mobile-console.mobile-shell-generic .asset-dropzone,
+  body.mobile-console.mobile-shell-generic .upgrade-dropzone { min-height: 112px; padding: 14px; border-color: #58655e; color: #c5cdc5; background: rgb(17 23 21 / 68%); }
+  body.mobile-console.mobile-shell-generic .file-preview { max-height: 320px; font-size: 11px; }
+  body.mobile-console.mobile-shell-generic .scenario-browser-dialog,
+  body.mobile-console.mobile-shell-generic .dependency-dialog,
+  body.mobile-console.mobile-shell-generic .trajectory-dialog,
+  body.mobile-console.mobile-shell-generic .dialog {
+    width: calc(100vw - 24px);
+    max-height: calc(100svh - 24px);
+    padding: 16px;
+    border-color: #58645d;
+    border-radius: 12px;
+    color: var(--mobile-ink);
+    background: #1a201e;
+  }
+  body.mobile-console.mobile-shell-generic .dialog-actions { flex-direction: column-reverse; }
+  body.mobile-console.mobile-shell-generic .dialog-actions button { width: 100%; }
 }
 
 @media (max-width: 420px) {
-  .mobile-console main, .mobile-console .page-main { padding-right: 11px !important; padding-left: 11px !important; }
-  .mobile-console .panel { padding: 13px; }.mobile-console .eyebrow { font-size: 9px; }
-  .mobile-console .mobile-nav-toggle { left: 10px; }
+  body.mobile-console.mobile-shell-generic main,
+  body.mobile-console.mobile-shell-generic .page-main,
+  body.mobile-console.mobile-shell-generic #app > main { padding-right: 11px !important; padding-left: 11px !important; }
+  body.mobile-console.mobile-shell-generic .panel,
+  body.mobile-console.mobile-shell-generic .metrics article { padding: 13px; }
+  body.mobile-console.mobile-shell-generic .eyebrow { font-size: 9px; }
 }
 
-/* 横屏手机的高度最宝贵：控制条固定为单行，地图占满剩余的动态视口。 */
-@media (max-width: 900px) and (pointer: coarse) and (orientation: landscape) and (max-height: 600px) {
-  .mobile-console.mobile-viewer-fullscreen-active .local-viewer-workspace,
-  .mobile-console.mobile-viewer-fullscreen-active .local-viewer-workspace .map-widget { width: 100dvw !important; height: 100dvh !important; min-height: 100dvh; }
-  .mobile-console.mobile-viewer-fullscreen-active .map-legend { padding: 5px 7px; font-size: 10px; }
-  .mobile-console.mobile-viewer-fullscreen-active .map-diagnostics { display: none; }
-  .mobile-console.mobile-viewer-fullscreen-active .mobile-fullscreen-exit { top: max(7px, env(safe-area-inset-top)); right: max(7px, env(safe-area-inset-right)); min-height: 32px; padding: 6px 8px; font-size: 11px; }
+/* Landscape browsers often reserve nearly half the screen for browser chrome.
+   The console remains usable without forcing the OS orientation. */
+@media (max-width: 900px) and (orientation: landscape) and (max-height: 520px) {
+  .mobile-shell-bar { height: calc(48px + env(safe-area-inset-top)); padding-top: calc(6px + env(safe-area-inset-top)); padding-bottom: 6px; }
+  .mobile-shell-mark { width: 24px; height: 24px; flex-basis: 24px; border-radius: 7px; font-size: 13px; }
+  .mobile-shell-brand small { display: none; }
+  .mobile-shell-nav { min-height: calc(46px + env(safe-area-inset-bottom)); padding-top: 3px; padding-bottom: calc(3px + env(safe-area-inset-bottom)); }
+  .mobile-shell-nav-item { min-height: 39px; grid-auto-flow: column; grid-template-columns: auto auto; justify-content: center; gap: 5px; font-size: 9px; }
+  .mobile-shell-nav-item svg { width: 15px; height: 15px; }
+  body.mobile-console.mobile-shell-generic main,
+  body.mobile-console.mobile-shell-generic .page-main,
+  body.mobile-console.mobile-shell-generic #app > main { min-height: 100svh; padding-top: calc(59px + env(safe-area-inset-top)) !important; padding-bottom: calc(56px + env(safe-area-inset-bottom)) !important; }
+  body.mobile-console.mobile-shell-generic main > header,
+  body.mobile-console.mobile-shell-generic .page-main > header,
+  body.mobile-console.mobile-shell-generic .page-header { margin-bottom: 12px; }
+  body.mobile-console.mobile-shell-generic main h1,
+  body.mobile-console.mobile-shell-generic .page-main h1 { font-size: 22px; }
+  body.mobile-console.mobile-shell-generic .sub,
+  body.mobile-console.mobile-shell-generic .page-header p { font-size: 11px; line-height: 1.35; }
+
+  /* 横屏不是放大的单列手机页：任务与资料页按工作台节奏并排，让首屏
+     同时出现状态、主要操作和下一步信息。只有语义上需要全宽的卡片例外。 */
+  body.mobile-console.mobile-shell-generic .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; gap: 8px; }
+  body.mobile-console.mobile-shell-generic .metrics article { min-width: 0; padding: 12px; }
+  body.mobile-console.mobile-shell-generic .metrics article b { font-size: 24px; }
+  body.mobile-console.mobile-shell-generic .page-grid,
+  body.mobile-console.mobile-shell-generic .grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; align-items: start; }
+  body.mobile-console.mobile-shell-generic .page-grid > .panel,
+  body.mobile-console.mobile-shell-generic .page-grid > .span-5,
+  body.mobile-console.mobile-shell-generic .page-grid > .span-7 { grid-column: auto; }
+  body.mobile-console.mobile-shell-generic .fields,
+  body.mobile-console.mobile-shell-generic .settings-form { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  body.mobile-console.mobile-shell-generic .panel { min-width: 0; padding: 13px; }
+  body.mobile-console.mobile-shell-generic .panel-title { margin-bottom: 11px; }
+  body.mobile-console.mobile-shell-generic .asset-dropzone,
+  body.mobile-console.mobile-shell-generic .upgrade-dropzone { min-height: 84px; }
+  body.mobile-console.mobile-shell-generic .asset-row,
+  body.mobile-console.mobile-shell-generic .report-row { grid-template-columns: minmax(0, 1fr) auto !important; }
+  body.mobile-console.mobile-shell-generic .case-controls { grid-column: 1 / -1; }
+
+  /* 事件、报告、车型编辑和运行结果都有横向表格或长内容，应保留一个清晰的
+     全宽阅读列，而不是被硬塞进半屏。 */
+  body.mobile-console.mobile-shell-generic[data-mobile-route="/reports.html"] .page-grid > .panel:nth-child(3),
+  body.mobile-console.mobile-shell-generic[data-mobile-route="/tool-logs.html"] .page-grid > .panel:nth-child(3),
+  body.mobile-console.mobile-shell-generic[data-mobile-route="/"] .readiness,
+  body.mobile-console.mobile-shell-generic[data-mobile-route="/"] .results,
+  body.mobile-console.mobile-shell-generic .vehicle-library-panel { grid-column: 1 / -1 !important; }
+}
+
+/* Final shared mobile shell --------------------------------------------------------
+ * These selectors intentionally follow the former migration rules above.  They
+ * replace the remaining dark demo skin in one place, while desktop routes never
+ * receive the `.mobile-shell-generic` class.  Color is informative: orange marks
+ * focus or primary action, blue-green carries live data, and semantic colors only
+ * describe actual runtime state. */
+@media (max-width: 900px), (pointer: coarse) {
+  html.mobile-console,
+  body.mobile-console.mobile-shell-generic {
+    background: var(--ui-bg-canvas);
+    color: var(--ui-text);
+    font-family: var(--ui-font);
+    font-variant-numeric: tabular-nums;
+  }
+  body.mobile-console.mobile-shell-generic { background-image: none; }
+
+  .mobile-shell-bar {
+    border-color: var(--ui-border);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+  .mobile-shell-brand { color: var(--ui-text); }
+  .mobile-shell-mark {
+    border-color: var(--ui-accent-strong);
+    border-radius: var(--ui-radius-button);
+    background: var(--ui-accent);
+    box-shadow: none;
+    color: #fff;
+  }
+  .mobile-shell-mark svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 2.3; stroke-linejoin: round; }
+  .mobile-shell-brand strong { color: var(--ui-text); font-family: var(--ui-font); font-weight: 600; }
+  .mobile-shell-brand small { color: var(--ui-text-tertiary); font-family: var(--ui-mono); font-weight: 500; }
+  .mobile-shell-state { color: var(--ui-text-secondary); font-family: var(--ui-font); font-weight: 500; }
+  .mobile-shell-state i { background: var(--ui-success); box-shadow: none; }
+
+  .mobile-shell-nav {
+    border-top-color: var(--ui-border);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+  .mobile-shell-nav-item {
+    position: relative;
+    border-radius: 0;
+    color: var(--ui-text-tertiary);
+    font-family: var(--ui-font);
+    font-weight: 500;
+    letter-spacing: 0;
+  }
+  .mobile-shell-nav-item.is-active {
+    color: var(--ui-accent-strong);
+    background: transparent;
+    box-shadow: none;
+  }
+  .mobile-shell-nav-item.is-active::before {
+    position: absolute;
+    top: 0;
+    width: 24px;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--ui-accent);
+    content: '';
+  }
+  .mobile-shell-nav-item:active { background: var(--ui-bg-subtle); }
+  .mobile-shell-nav-item:focus-visible,
+  .mobile-shell-brand:focus-visible { outline: 2px solid rgb(242 140 40 / 45%); outline-offset: -2px; }
+
+  body.mobile-console.mobile-shell-generic main,
+  body.mobile-console.mobile-shell-generic .page-main,
+  body.mobile-console.mobile-shell-generic #app > main { color: var(--ui-text); }
+  body.mobile-console.mobile-shell-generic main h1,
+  body.mobile-console.mobile-shell-generic .page-main h1,
+  body.mobile-console.mobile-shell-generic main h2,
+  body.mobile-console.mobile-shell-generic .page-main h2 { color: var(--ui-text); font-weight: 600; }
+  body.mobile-console.mobile-shell-generic .eyebrow { color: var(--ui-info); font-weight: 500; }
+  body.mobile-console.mobile-shell-generic .sub,
+  body.mobile-console.mobile-shell-generic .page-header p,
+  body.mobile-console.mobile-shell-generic .metric-label,
+  body.mobile-console.mobile-shell-generic .muted,
+  body.mobile-console.mobile-shell-generic .panel p { color: var(--ui-text-secondary); }
+
+  body.mobile-console.mobile-shell-generic .metrics article,
+  body.mobile-console.mobile-shell-generic .panel,
+  body.mobile-console.mobile-shell-generic .route-progress,
+  body.mobile-console.mobile-shell-generic .asset-row,
+  body.mobile-console.mobile-shell-generic .report-row,
+  body.mobile-console.mobile-shell-generic .scenario-profile,
+  body.mobile-console.mobile-shell-generic .vehicle-model-row {
+    border-color: var(--ui-border);
+    border-radius: var(--ui-radius-panel);
+    color: var(--ui-text);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+  }
+  body.mobile-console.mobile-shell-generic .panel-title h2,
+  body.mobile-console.mobile-shell-generic .panel-title strong,
+  body.mobile-console.mobile-shell-generic .metrics strong { color: var(--ui-text); }
+  body.mobile-console.mobile-shell-generic .page-stat { color: var(--ui-accent-strong); }
+  body.mobile-console.mobile-shell-generic .status-ok,
+  body.mobile-console.mobile-shell-generic .connected,
+  body.mobile-console.mobile-shell-generic .success,
+  body.mobile-console.mobile-shell-generic .inline-message { color: var(--ui-success); }
+
+  body.mobile-console.mobile-shell-generic label { color: var(--ui-text-secondary); }
+  body.mobile-console.mobile-shell-generic input,
+  body.mobile-console.mobile-shell-generic select,
+  body.mobile-console.mobile-shell-generic textarea {
+    border-color: var(--ui-border-strong);
+    border-radius: var(--ui-radius-button);
+    color: var(--ui-text);
+    background: #fff;
+  }
+  body.mobile-console.mobile-shell-generic input:focus,
+  body.mobile-console.mobile-shell-generic select:focus,
+  body.mobile-console.mobile-shell-generic textarea:focus {
+    border-color: var(--ui-accent);
+    outline: 2px solid rgb(242 140 40 / 24%);
+  }
+  body.mobile-console.mobile-shell-generic button,
+  body.mobile-console.mobile-shell-generic .compact-action,
+  body.mobile-console.mobile-shell-generic .page-top-action,
+  body.mobile-console.mobile-shell-generic .outline-button {
+    border-color: var(--ui-border-strong);
+    border-radius: var(--ui-radius-button);
+    color: var(--ui-text-secondary);
+    background: var(--ui-bg-surface);
+  }
+  body.mobile-console.mobile-shell-generic button:hover,
+  body.mobile-console.mobile-shell-generic button:focus-visible {
+    border-color: var(--ui-accent);
+    color: var(--ui-accent-strong);
+    background: var(--ui-accent-soft);
+  }
+  body.mobile-console.mobile-shell-generic button.primary,
+  body.mobile-console.mobile-shell-generic .primary-action,
+  body.mobile-console.mobile-shell-generic button[type="submit"] {
+    border-color: var(--ui-accent-strong);
+    color: #fff;
+    background: var(--ui-accent);
+  }
+  body.mobile-console.mobile-shell-generic button.danger,
+  body.mobile-console.mobile-shell-generic .danger-action {
+    border-color: var(--ui-danger);
+    color: var(--ui-danger);
+    background: var(--ui-danger-soft);
+  }
+  body.mobile-console.mobile-shell-generic .config-note {
+    border-left-color: var(--ui-warning);
+    border-radius: 0 var(--ui-radius-panel) var(--ui-radius-panel) 0;
+    color: var(--ui-text-secondary);
+    background: var(--ui-warning-soft);
+  }
+  body.mobile-console.mobile-shell-generic .route-progress-head strong { color: var(--ui-accent-strong); }
+  body.mobile-console.mobile-shell-generic .upgrade-panel {
+    border-color: #dfc7aa !important;
+    background: #f8f0e7 !important;
+  }
+  body.mobile-console.mobile-shell-generic .upgrade-meta code,
+  body.mobile-console.mobile-shell-generic .upgrade-panel code { color: var(--ui-info); }
+  body.mobile-console.mobile-shell-generic .checkbox-setting input[type="checkbox"] { accent-color: var(--ui-accent); }
+  body.mobile-console.mobile-shell-generic th { color: var(--ui-text-secondary); background: var(--ui-bg-subtle); }
+  body.mobile-console.mobile-shell-generic td { border-color: var(--ui-border); }
+  body.mobile-console.mobile-shell-generic .asset-dropzone,
+  body.mobile-console.mobile-shell-generic .upgrade-dropzone {
+    border-color: var(--ui-border-strong);
+    color: var(--ui-text-secondary);
+    background: var(--ui-bg-subtle);
+  }
+  body.mobile-console.mobile-shell-generic .scenario-browser-dialog,
+  body.mobile-console.mobile-shell-generic .dependency-dialog,
+  body.mobile-console.mobile-shell-generic .trajectory-dialog,
+  body.mobile-console.mobile-shell-generic .dialog {
+    border-color: var(--ui-border-strong);
+    border-radius: var(--ui-radius-panel);
+    color: var(--ui-text);
+    background: var(--ui-bg-surface);
+    box-shadow: var(--ui-shadow-float);
+  }
+}
+
+/* Remaining legacy application components -----------------------------------------
+ * Static task pages and the Vue settings page load their own historical styles.
+ * Keep their semantics, but bring every nested control back to the same mobile
+ * instrument system instead of leaving isolated dark panels in a light console. */
+@media (max-width: 900px), (pointer: coarse) {
+  body.mobile-console.mobile-shell-generic #app {
+    min-height: 100svh;
+    background: var(--ui-bg-canvas) !important;
+  }
+  body.mobile-console.mobile-shell-generic .badge,
+  body.mobile-console.mobile-shell-generic .file-kind {
+    border-color: #a9c9cf;
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-info-soft);
+    color: var(--ui-info);
+    box-shadow: none;
+  }
+  body.mobile-console.mobile-shell-generic .badge.muted,
+  body.mobile-console.mobile-shell-generic #statusBadge.badge.muted {
+    border-color: var(--ui-border);
+    background: var(--ui-bg-subtle);
+    color: var(--ui-text-secondary);
+  }
+  body.mobile-console.mobile-shell-generic .sync-status {
+    border-color: #d8bf99;
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-warning-soft);
+    color: var(--ui-warning);
+    box-shadow: none;
+  }
+  body.mobile-console.mobile-shell-generic .case-meta,
+  body.mobile-console.mobile-shell-generic .gate-note {
+    border-color: #a9c9cf;
+    border-left: 2px solid var(--ui-info);
+    border-radius: 0 var(--ui-radius-control) var(--ui-radius-control) 0;
+    background: var(--ui-info-soft);
+    color: #385d66;
+  }
+  body.mobile-console.mobile-shell-generic .rviz-option,
+  body.mobile-console.mobile-shell-generic .trajectory-option {
+    border-color: var(--ui-border);
+    border-radius: var(--ui-radius-button);
+    background: var(--ui-bg-subtle);
+  }
+  body.mobile-console.mobile-shell-generic .rviz-option b,
+  body.mobile-console.mobile-shell-generic .trajectory-option b { color: var(--ui-text); }
+  body.mobile-console.mobile-shell-generic .rviz-option small,
+  body.mobile-console.mobile-shell-generic .trajectory-option small,
+  body.mobile-console.mobile-shell-generic .settings-note { color: var(--ui-text-secondary); }
+  body.mobile-console.mobile-shell-generic .rviz-option > span,
+  body.mobile-console.mobile-shell-generic .trajectory-option > span {
+    border-color: var(--ui-border-strong);
+    background: #fff;
+  }
+  body.mobile-console.mobile-shell-generic .rviz-option > input:checked + span,
+  body.mobile-console.mobile-shell-generic .trajectory-option > input:checked + span {
+    border-color: var(--ui-accent-strong);
+    background: var(--ui-accent);
+  }
+  body.mobile-console.mobile-shell-generic .trajectory-option b em { color: var(--ui-warning); }
+  body.mobile-console.mobile-shell-generic .checkbox-setting {
+    border-color: var(--ui-border);
+    border-radius: var(--ui-radius-button);
+    background: var(--ui-bg-subtle);
+    color: var(--ui-text-secondary);
+  }
+  body.mobile-console.mobile-shell-generic .checkbox-setting input[type="checkbox"] {
+    border-color: var(--ui-border-strong);
+    background: #fff;
+    box-shadow: none;
+  }
+  body.mobile-console.mobile-shell-generic .checkbox-setting input[type="checkbox"]:checked {
+    border-color: var(--ui-accent-strong);
+    background: var(--ui-accent);
+    box-shadow: 0 0 0 3px rgb(242 140 40 / 18%);
+  }
+  body.mobile-console.mobile-shell-generic #startButton,
+  body.mobile-console.mobile-shell-generic #saveSettings,
+  body.mobile-console.mobile-shell-generic #saveDependencyPlan,
+  body.mobile-console.mobile-shell-generic #applyUpgrade,
+  body.mobile-console.mobile-shell-generic .recovery-action button {
+    border-color: var(--ui-accent-strong);
+    color: #fff;
+    background: var(--ui-accent);
+  }
+  body.mobile-console.mobile-shell-generic .cancel-button,
+  body.mobile-console.mobile-shell-generic .danger-outline {
+    border-color: var(--ui-danger);
+    background: var(--ui-danger-soft);
+    color: var(--ui-danger);
+    box-shadow: none;
+  }
+  body.mobile-console.mobile-shell-generic button:disabled,
+  body.mobile-console.mobile-shell-generic .cancel-button:disabled {
+    border-color: var(--ui-border);
+    background: var(--ui-bg-subtle);
+    color: var(--ui-text-tertiary);
+    opacity: 1;
+  }
+  body.mobile-console.mobile-shell-generic .progress,
+  body.mobile-console.mobile-shell-generic .route-progress-track {
+    border-color: var(--ui-border);
+    background: var(--ui-bg-subtle);
+  }
+  body.mobile-console.mobile-shell-generic .progress div,
+  body.mobile-console.mobile-shell-generic .route-progress-track > div {
+    background: var(--ui-accent);
+    box-shadow: none;
+  }
+  body.mobile-console.mobile-shell-generic .node,
+  body.mobile-console.mobile-shell-generic .dependency-builder > section,
+  body.mobile-console.mobile-shell-generic .flow-step {
+    border-color: var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-subtle);
+    color: var(--ui-text);
+  }
+  body.mobile-console.mobile-shell-generic .node .node-top,
+  body.mobile-console.mobile-shell-generic .dependency-builder h3,
+  body.mobile-console.mobile-shell-generic .process-choice { color: var(--ui-text); }
+  body.mobile-console.mobile-shell-generic .node small,
+  body.mobile-console.mobile-shell-generic .dependency-builder h3 small,
+  body.mobile-console.mobile-shell-generic .process-choice small,
+  body.mobile-console.mobile-shell-generic .flow-index small { color: var(--ui-text-secondary); }
+  body.mobile-console.mobile-shell-generic .dependency-toolbar {
+    border: 0 !important;
+    background: transparent !important;
+  }
+  body.mobile-console.mobile-shell-generic .dependency-toolbar .dependency-switch {
+    border-color: #a9c9cf;
+    border-radius: var(--ui-radius-panel);
+    background: var(--ui-info-soft);
+    box-shadow: inset 3px 0 var(--ui-info);
+    color: var(--ui-text);
+  }
+  body.mobile-console.mobile-shell-generic .dependency-toolbar .dependency-switch:has(input:checked) {
+    border-color: #78a99e;
+    background: var(--ui-success-soft);
+    box-shadow: inset 3px 0 var(--ui-success);
+  }
+  body.mobile-console.mobile-shell-generic .dependency-toolbar .dependency-switch b { color: var(--ui-text); }
+  body.mobile-console.mobile-shell-generic .dependency-toolbar .dependency-switch b:before { color: var(--ui-info); }
+  body.mobile-console.mobile-shell-generic .dependency-toolbar .dependency-switch b:after { color: var(--ui-text-secondary); }
+  body.mobile-console.mobile-shell-generic .discovered-processes { border-color: var(--ui-border); }
+  body.mobile-console.mobile-shell-generic .process-choice { border-color: var(--ui-border); }
+  body.mobile-console.mobile-shell-generic .flow-index { color: var(--ui-info); }
+  body.mobile-console.mobile-shell-generic .flow-nodes span {
+    border-color: #a9c9cf;
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-info-soft);
+    color: var(--ui-info);
+  }
+  body.mobile-console.mobile-shell-generic .flow-step label,
+  body.mobile-console.mobile-shell-generic .flow-arrow,
+  body.mobile-console.mobile-shell-generic .dependency-intro { color: var(--ui-text-secondary); }
+  body.mobile-console.mobile-shell-generic .flow-actions button {
+    width: 28px;
+    min-height: 28px;
+    padding: 0;
+    border-color: var(--ui-border-strong);
+    background: var(--ui-bg-surface);
+    color: var(--ui-text-secondary);
+  }
+  body.mobile-console.mobile-shell-generic .flow-actions .remove-step { border-color: var(--ui-danger); background: var(--ui-danger-soft); color: var(--ui-danger); }
+  body.mobile-console.mobile-shell-generic .trajectory-tools,
+  body.mobile-console.mobile-shell-generic .route-progress-meta,
+  body.mobile-console.mobile-shell-generic .route-progress p,
+  body.mobile-console.mobile-shell-generic .cancel-hint { color: var(--ui-text-secondary); }
+  body.mobile-console.mobile-shell-generic .trajectory-canvas { border-color: var(--ui-border); background: var(--ui-bg-subtle); }
+  body.mobile-console.mobile-shell-generic .issues div { border-color: #dbc08f; background: var(--ui-warning-soft); color: #765a32; }
+  body.mobile-console.mobile-shell-generic .table-wrap { scrollbar-color: var(--ui-border-strong) var(--ui-bg-subtle); }
+  body.mobile-console.mobile-shell-generic .table-wrap::-webkit-scrollbar { width: 8px; height: 8px; }
+  body.mobile-console.mobile-shell-generic .table-wrap::-webkit-scrollbar-track { background: var(--ui-bg-subtle); }
+  body.mobile-console.mobile-shell-generic .table-wrap::-webkit-scrollbar-thumb { border: 2px solid var(--ui-bg-subtle); border-radius: 6px; background: var(--ui-border-strong); }
 }

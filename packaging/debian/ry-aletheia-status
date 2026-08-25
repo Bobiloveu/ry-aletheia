@@ -1,26 +1,161 @@
 #!/usr/bin/env bash
 # RY Aletheia 按需资源状态页。工具由普通用户直接运行，不依赖 systemd。
+#
+# PyInstaller onefile 会留下一个很轻的引导父进程，再由子进程提供 Web 服务。
+# 因此不能再用 pgrep 的第一个命中项作为主进程；这里以实际占用 8087 的服务
+# 进程为准，并单独汇总隔离的 video-runner 进程组。
 set -euo pipefail
 
 INTERVAL_S=1
+ONCE=false
 
-while true; do
-  pid="$(pgrep -f '/ry_aletheia/dist/ry-aletheia([[:space:]]|$)' | head -n 1 || true)"
+usage() {
+  printf '用法：ry-aletheia-status [--once]\n'
+}
 
-  printf '\033[H\033[2J'
-  printf 'RY Aletheia · 实时资源状态（每 %ss 刷新，Ctrl+C 退出）\n\n' "$INTERVAL_S"
-  if [[ -z "$pid" ]]; then
-    printf '工具状态:     未运行\n\n'
-    printf '提示：双击 ~/ry_aletheia/RY Aletheia.desktop，或执行 ~/ry_aletheia/run_ry_aletheia.sh\n'
-    exit 0
+case "${1:-}" in
+  '') ;;
+  --once) ONCE=true ;;
+  -h|--help) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+console_pid() {
+  local pid command
+
+  # ss 给出真正监听 Web 端口的子进程 PID；同一用户可读取，不需要 sudo。
+  pid="$(ss -ltnpH 2>/dev/null | sed -nE '/:8087([[:space:]]|$)/ s/.*pid=([0-9]+).*/\1/p' | head -n 1 || true)"
+  if [[ -n "$pid" ]]; then
+    command="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    if [[ "$command" == *'/ry_aletheia/dist/ry-aletheia'* ]]; then
+      printf '%s\n' "$pid"
+      return
+    fi
   fi
-  read -r cpu memory threads elapsed command < <(ps -p "$pid" -o %cpu=,rss=,nlwp=,etime=,args=)
-  printf '工具状态:     运行中\n'
-  printf '主进程 PID:   %s\n' "$pid"
+
+  # 端口尚未就绪时才降级为进程匹配，优先选有同名父进程的运行子进程。
+  local candidate parent parent_command fallback=''
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    command="$(ps -p "$candidate" -o args= 2>/dev/null || true)"
+    [[ "$command" == *' --video-runner'* ]] && continue
+    fallback="$candidate"
+    parent="$(ps -p "$candidate" -o ppid= 2>/dev/null | tr -d ' ' || true)"
+    parent_command="$(ps -p "${parent:-0}" -o args= 2>/dev/null || true)"
+    if [[ "$parent_command" == *'/ry_aletheia/dist/ry-aletheia'* ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done < <(pgrep -f '/ry_aletheia/dist/ry-aletheia([[:space:]]|$)' 2>/dev/null || true)
+  printf '%s\n' "$fallback"
+}
+
+video_runner_pid() {
+  pgrep -f '/ry_aletheia/dist/ry-aletheia --video-runner([[:space:]]|$)' 2>/dev/null | head -n 1 || true
+}
+
+format_mib() {
+  awk -v value="${1:-0}" 'BEGIN { printf "%.1f", value / 1024 }'
+}
+
+print_process_metrics() {
+  local pid="$1" cpu rss threads elapsed command
+  read -r cpu rss threads elapsed command < <(ps -p "$pid" -o %cpu=,rss=,nlwp=,etime=,args= 2>/dev/null || true)
+  printf '服务 PID:     %s\n' "$pid"
   printf 'CPU 占用:     %s%%  （进程平均值；100%% = 一个逻辑 CPU 核心）\n' "${cpu:-—}"
-  printf '内存占用:     %s MiB\n' "$(awk -v value="${memory:-0}" 'BEGIN { printf "%.1f", value / 1024 }')"
+  printf '内存占用:     %s MiB\n' "$(format_mib "${rss:-0}")"
   printf '线程数:       %s\n' "${threads:-—}"
   printf '运行时长:     %s\n' "${elapsed:-—}"
   printf '命令:         %s\n' "${command:-—}"
+}
+
+print_video_metrics() {
+  local runner pgid metrics count cpu rss threads
+  runner="$(video_runner_pid)"
+  if [[ -z "$runner" ]]; then
+    printf '视频运行器:   未运行\n'
+    return
+  fi
+
+  pgid="$(ps -p "$runner" -o pgid= 2>/dev/null | tr -d ' ' || true)"
+  if [[ -z "$pgid" ]]; then
+    printf '视频运行器:   PID %s（正在退出）\n' "$runner"
+    return
+  fi
+  metrics="$(ps -eo pgid=,pcpu=,rss=,nlwp= | awk -v target="$pgid" '
+    $1 == target { count += 1; cpu += $2; rss += $3; threads += $4 }
+    END { printf "%d %.1f %d %d", count, cpu, rss, threads }
+  ')"
+  read -r count cpu rss threads <<< "$metrics"
+  printf '视频运行器:   运行中（PID %s，进程组 %s）\n' "$runner" "$pgid"
+  printf '视频资源:     %s 个进程 · %s%% CPU · %s MiB · %s 线程\n' \
+    "$count" "$cpu" "$(format_mib "$rss")" "$threads"
+}
+
+print_video_api_status() {
+  local payload
+  payload="$(curl -fsS --connect-timeout 1 --max-time 2 http://127.0.0.1:8087/api/video/status 2>/dev/null || true)"
+  if [[ -z "$payload" ]]; then
+    printf '视频流状态:   状态接口不可用\n'
+    return
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '视频流状态:   状态接口可达（未安装 Python，无法展开各路状态）\n'
+    return
+  fi
+
+  printf '%s' "$payload" | python3 -c '
+import json
+import sys
+
+try:
+    document = json.load(sys.stdin)
+except (json.JSONDecodeError, TypeError):
+    print("视频流状态:   状态接口返回无效数据")
+    raise SystemExit(0)
+
+state_names = {
+    "online": "在线",
+    "waiting": "等待 ROS 图像",
+    "offline": "离线",
+    "disabled": "已关闭",
+    "error": "异常",
+}
+print("视频总开关:   {}".format("已启用" if document.get("enabled") else "已关闭"))
+for stream in document.get("streams", []):
+    name = stream.get("name", "unknown")
+    enabled = "开" if stream.get("enabled") else "关"
+    state = state_names.get(stream.get("status"), stream.get("status", "未知"))
+    print("  - {:<18} {} / {}".format(name, enabled, state))
+'
+}
+
+render_status() {
+  local pid
+  pid="$(console_pid)"
+
+  if [[ "$ONCE" == false ]]; then
+    printf '\033[H\033[2J'
+    printf 'RY Aletheia · 实时资源状态（每 %ss 刷新，Ctrl+C 退出）\n\n' "$INTERVAL_S"
+  else
+    printf 'RY Aletheia · 资源状态\n\n'
+  fi
+
+  if [[ -z "$pid" ]]; then
+    printf '工具状态:     未运行（8087 未监听）\n\n'
+    printf '提示：请以普通账户执行 ry-aletheia 启动控制台。\n'
+    return
+  fi
+
+  printf '工具状态:     运行中（8087 已监听）\n'
+  print_process_metrics "$pid"
+  printf '\n'
+  print_video_metrics
+  print_video_api_status
+}
+
+while true; do
+  render_status
+  [[ "$ONCE" == true ]] && exit 0
   sleep "$INTERVAL_S"
 done

@@ -2,6 +2,8 @@
 
 > 面向维护、开发、构建与现场排障人员。项目入口见 [README.md](README.md)；日常安装、使用和升级请优先阅读 [USER_GUIDE.md](USER_GUIDE.md) 与 [GitHub Releases](https://github.com/Bobiloveu/ry-aletheia/releases)。
 
+本文也是交接基线：新增功能、替换依赖或在新车型部署前，先核对本文的接口契约、数据所有权和发布检查表，再开始实现。文中“不得”表示不能为临时排障绕过的运行边界。
+
 ## 1. 工程定位与边界
 
 RY Aletheia 是部署在机器人小车 Ubuntu 主机上的离线自动测试平台。测试人员通过同一 Wi-Fi 下的浏览器访问 `http://<小车IP>:8087`；任务调用、ROS2 通信、Supervisor 操作、地图缓存与报告生成均在小车本机完成。
@@ -11,7 +13,7 @@ RY Aletheia 是部署在机器人小车 Ubuntu 主机上的离线自动测试平
 - 任务仅通过既有 `/start_execute_tasks` 服务下发，不向底盘或导航发布控制指令。
 - 不修改任务 JSON；别名、依赖编排和场景方案均保存在工具配置目录。
 - 场景前置配置只替换启动脚本中已登记的 FCRP 与 lightning 参数，具备预览、备份、原子替换和恢复。
-- 实时观测采用“时效优先”：过期帧直接丢弃，不追赶历史画面。
+- 实时观测采用“时效优先”：点云/位姿过期帧直接丢弃，不追赶历史画面；可选视频走独立的低延迟 WebRTC 链路。
 - 小车运行阶段不依赖互联网、Node.js、npm 或开发源码；主程序必须以普通账户运行。
 
 ## 2. 功能域
@@ -23,7 +25,7 @@ RY Aletheia 是部署在机器人小车 Ubuntu 主机上的离线自动测试平
 | 场景前置配置 | 选择 FCRP `.launch.py` 与 lightning YAML，受控替换 `handle_modules.sh`，测试结束自动恢复。 |
 | 多地图轨迹 | 缓存实际地图，叠加实际轨迹、理想路线、虚拟墙并归档。 |
 | 报告中心 | 生成、预览、下载、删除可离线查看的单文件 HTML 报告。 |
-| 实时运行观测 | 地图、虚拟墙、车体轮廓、定位、点云和按需图像话题。 |
+| 实时运行观测 | 地图、虚拟墙、车体轮廓、定位、点云，以及网页按需启停的低延迟相机视频。 |
 | 运行配置 | 依赖编排、车型、实时观测、升级和持久化设置。 |
 | 工具日志 | 独立记录升级、ROS2、Bridge、观测和异常诊断。 |
 
@@ -33,18 +35,23 @@ RY Aletheia 是部署在机器人小车 Ubuntu 主机上的离线自动测试平
 同网段浏览器
   │ HTTP :8087（控制台、API、报告）
   │ WebSocket :8767（默认，实时观测直连）
+  │ WHEP/WebRTC :8889（可选相机直出）
   ▼
 RY Aletheia（普通账户）
   ├─ Python 控制台：计划、任务、Supervisor、轨迹、报告、配置、升级
   ├─ C++ 轻量位姿进程：最新 TF map → base_* → /_aletheia/live_pose（60Hz，ROS 2 hidden）
   ├─ C++ 轻量点云进程：/collision_voxel_layer/points（或 /livox/lidar 回退）→ /_aletheia/live_points（到达即发布，ROS 2 hidden）
-  └─ Aletheia 私有 Foxglove Bridge（按需运行）
+  ├─ Aletheia 私有 Foxglove Bridge（按需运行）
+  ├─ 可选视频运行时（由控制台拥有）
+       ├─ 原生 `aletheia_video_ingest`：ROS Image → rawvideoparse → VAAPI H.264 → 本机 RTSP
+       └─ 私有 MediaMTX：RTSP 输入 → WHEP/WebRTC 输出
+  └─ 已有机器人系统的受限集成
        ├─ ROS2：/map、/odom、TF、/amcl_pose、/start_execute_tasks、/collision_voxel_layer/points
        ├─ Supervisor：受限 sudo supervisorctl status/start/restart
        └─ 运行数据：tasks、config、reports、maps_cache、updates、logs
 ```
 
-测试执行经 HTTP API 进入 `RunManager`。实时观测则由浏览器直连 Aletheia 私有 Bridge，不再经过 `8087 → Python → Bridge` 中转，避免 Python 复制高频点云/图像造成额外延迟。浏览器再以两条 WebSocket 分离数据：位姿专线只订阅 `/_aletheia/live_pose`，主连接承载地图、点云和按需图像，避免大点云帧阻塞车体位姿。
+测试执行经 HTTP API 进入 `RunManager`。地图、点云与位姿由浏览器直连 Aletheia 私有 Bridge，不再经过 `8087 → Python → Bridge` 中转，避免 Python 复制高频数据。浏览器以两条 WebSocket 分离数据：位姿专线只订阅 `/_aletheia/live_pose`，主连接承载地图和点云，避免大点云帧阻塞车体位姿。相机视频不走 Bridge：浏览器用 WHEP 与本机 MediaMTX 建立 WebRTC 会话，Python 只提供受控的状态与开关 API。
 
 ## 4. 目录与数据所有权
 
@@ -53,6 +60,7 @@ RY Aletheia（普通账户）
 | `dist/ry-aletheia` | 最终控制台二进制 | 是 |
 | `tasks/` | 测试任务 JSON | 否 |
 | `config/console.json` | 运行、依赖、车型、观测配置 | 否 |
+| `config/video.json` | 视频开关、ROS 域、网关、编码器与流配置 | 否 |
 | `config/scenario_setup.json` | 场景方案与用例绑定 | 否 |
 | `config/case_workspace.json` | 用例版本、状态、标签、说明、来源与任务指纹 | 否 |
 | `config/scenario_backups/` | 场景应用时的常规配置备份 | 否 |
@@ -60,6 +68,7 @@ RY Aletheia（普通账户）
 | `maps_cache/` | 地图、虚拟墙、观测底图缓存 | 否 |
 | `updates/` | 升级暂存与唯一 `.bak` 备份 | 否 |
 | `runtime/foxglove_bridge/` | 完整离线包部署的私有 Foxglove Bridge | 否 |
+| `runtime/video/` | 内置 MediaMTX、最小 GStreamer/VAAPI 与驱动的私有视频运行时 | 启用视频时按二进制内嵌版本原子刷新；不改写 `config/video.json` |
 | `logs/` | 控制台、Bridge、预处理与错误日志 | 否 |
 | `autodrive_console/` | Python 业务源码、正式网页输出 | 仅构建时 |
 | `frontend/` | Vue/Vite 源码 | 仅开发机 |
@@ -68,6 +77,12 @@ RY Aletheia（普通账户）
 | `releases/` | ZIP、校验文件和可选 DEB 的本地构建输出；正式交付通过 GitHub Releases | 开发机输出，忽略 |
 
 升级必须只替换程序产物，不能覆盖任务、报告、缓存或用户配置。
+
+### 4.1 `video.json` 配置契约
+
+`config/video.json` 只描述 Aletheia 视频旁路：总开关、DDS 域、受控网关、私有编码器和每路 `source_topic`、分辨率、帧率、码率。它不是小车相机驱动配置，**不得**记录或修改 USB 路径、`/dev/video*`、v4l2loopback、相机 UVC 控制项或原相机节点参数；这些均属于既有机器人系统。
+
+每个 `source_topic` 必须是已经存在的 `sensor_msgs/msg/Image`（当前 `rgb8`）话题。旁路进程订阅该话题后才创建编码器，因此视频启停不会抢占物理相机，也不会改变自动驾驶、目标检测或原有相机 ROS 节点。升级迁移只能补齐缺失的默认流或移除已废弃且未使用的旁路元数据；不得重置用户的视频开关、话题或码率选择。
 
 ## 5. 后端模块职责
 
@@ -88,6 +103,7 @@ RY Aletheia（普通账户）
 | `navigation_status.py` | 电梯任务阶段识别，抑制合理等待期间的误告警。 |
 | `map_assets.py` / `trajectory_render.py` | 地图、路线、虚拟墙缓存及轨迹 SVG 渲染。 |
 | `observation.py` | 私有 Bridge/C++ 预处理生命周期、地图缓存和观测诊断。 |
+| `video.py` | 视频配置校验、MediaMTX 健康状态、WHEP 地址生成与控制台拥有的视频进程树生命周期。 |
 | `tool_logging.py` | 工具级日志。 |
 | `upgrade_manager.py` | 清单/MD5 校验、备份、原子替换与重启交接。 |
 
@@ -151,7 +167,7 @@ PixiJS 最新点云几何       ├─ Pixi 世界容器：缩放、拖动（固
 车体 DOM 覆盖层           ┘
 ```
 
-实时二维地图由 PixiJS 管理：地图栅格为纹理，虚拟墙和点云为独立图层；首次取得或切图时才更新静态地图纹理。拖动、缩放与位姿跟随只更新 Pixi 世界容器变换，点云只替换最新一帧几何，均不重绘静态底图。缩放以鼠标位置为中心，中键或左键拖动仅改变视图变换。地图必须稳定保持原始 `map` 坐标朝向，不能在进入页面时按车体初始航向旋转；只允许车体 DOM 图标旋转。相机预览同样由独立的 PixiJS 应用以纹理和精灵显示，不使用原生 Canvas 2D 绘制。
+实时二维地图由 PixiJS 管理：静态占据地图为纹理，虚拟墙和点云为独立图层；首次取得或切图时才更新静态地图纹理。PC 保留原有高对比蓝色观测主题和无格栅画面；仅移动端的 `html.mobile-console` 额外绘制严格对齐 `map` 世界坐标的米制格栅，并按当前缩放在 1m、2m、5m 小格之间自适应，主格恒为小格的 5 倍。移动端比例尺反算当前 `pixelsPerMeter`，线宽也反算到地图像素，因而缩放后仍保持稳定的屏幕可读性。拖动、缩放与位姿跟随只更新 Pixi 世界容器变换，点云只替换最新一帧几何，均不重绘静态底图。缩放以鼠标位置为中心，中键或左键拖动仅改变视图变换。地图必须稳定保持原始 `map` 坐标朝向，不能在进入页面时按车体初始航向旋转；只允许车体 DOM 图标旋转。相机视频先由独立的浏览器原生 `<video>` 元素接收 WHEP/WebRTC，再作为 PixiJS `Video Texture` 合成到相机卡片；视频数据本身不进入 Canvas 2D、WebSocket 或 Python。
 
 ### 9.2 时效优先与背压
 
@@ -159,11 +175,13 @@ PixiJS 最新点云几何       ├─ Pixi 世界容器：缩放、拖动（固
 | --- | --- | --- |
 | 点云 | C++ `keep_last(1)`，3000 点；扫描回调到达即处理，PixiJS 单槽最新帧渲染 | 节点内最新槽停留超过 140ms 才丢弃；浏览器包超过 100ms 丢弃；仅绘制最新一帧固定不透明点 |
 | 位姿 | 独立 C++ 进程发布最新 `map → base_*` TF，浏览器独立动画 | 超过 250ms 丢弃；60Hz 发布；独立 WebSocket 专线 |
-| 浏览器 WebSocket | 点云/地图/图像走主连接，位姿走第二条连接；均为容量 1 的 latest-wins 队列 | 新包覆盖未解码旧包，避免 TCP 队头阻塞 |
+| 浏览器 WebSocket | 点云/地图走主连接，位姿走第二条连接；均为容量 1 的 latest-wins 队列 | 新包覆盖未解码旧包，避免 TCP 队头阻塞 |
 | 地图 | 短订阅读取；仅切图时再更新 | 不持续传输大栅格 |
-| 图像 | 仅订阅用户选中的话题，优先最新压缩帧 | 不追赶旧图像 |
+| 相机视频 | 独立 WHEP/WebRTC 会话；每路只保留编码器与浏览器各自需要的实时缓冲 | 不通过 WebSocket、Python 或 Foxglove Bridge 追传历史图像 |
 
 短暂 Wi-Fi 抖动时允许跳帧，但恢复后必须尽快回到实车当前状态，不能显示数秒前的历史画面。
+
+位姿流的 60 Hz 发布率是链路心跳率，不等同于底层 TF 每一包都有新的坐标。浏览器必须分开保存“最近收到消息时间”和“最近一次位置/航向真实变化时间”：前者用于判断断链，后者才是车体平滑外推的起点。重复 Pose 心跳包不能重置该测量时刻，否则渲染器会每帧把图标拉回旧坐标，表现为卡住后跳变。显示层的预测窗口严格不超过 300 ms；超过窗口即停止外推，等待真实新位姿。
 
 ### 9.3 C++ 预处理节点
 
@@ -179,11 +197,39 @@ PixiJS 最新点云几何       ├─ Pixi 世界容器：缩放、拖动（固
 
 现场排障优先看 `logs/live_preprocessor_cloud.log`、`logs/live_preprocessor_pose.log`、`logs/foxglove_bridge.log` 和工具日志，再检查 `/_aletheia/live_points`、`/_aletheia/live_pose` 的频率与时间戳（使用 `ros2 topic list --include-hidden-topics`）。页面保持打开约 10 秒后，可从 `GET /api/observation` 的 `client_metrics` 读取 `cloud_source_age_ms`、`cloud_packet_rate_hz`、位姿年龄、渲染帧率和长帧计数，以区分激光源、车端预处理、网络和 PixiJS 图层更新问题。实车参考：原始与预处理点云约 10Hz，前端为降低点云几何更新竞争主动消费约 8Hz。
 
+### 9.4 可选低延迟相机链路
+
+视频是实时页的独立能力，默认关闭。页面提供全局开关与五路独立开关：全局开关启动/停止当前选中的流；MediaMTX 在至少一路启用期间保持不变，单路开关只增删该路原生编码进程，不会重连其他流的 WebRTC 会话；关闭最后一路才停止整个进程组。配置写入 `config/video.json`，控制台以普通账户拥有其生命周期；因此不占用 ROS 图像订阅、GPU 编码器或网络带宽的时间只发生在用户实际选择的流上。它不交由 Supervisor 管理，也不要求操作员额外执行 `ry-aletheia-video start|stop|status|restart`；后者仅可作为维护诊断入口，不能成为正常使用前置条件。
+
+```text
+既有相机 ROS 话题（sensor_msgs/Image, rgb8）
+  ├─ /front_camera/image_raw
+  ├─ /back_camera/image_raw
+  ├─ /left_camera/image_raw
+  ├─ /right_camera/image_raw
+  └─ /annotated_image（`object_detection_node` 的目标检测结果图）
+          │
+          ▼
+原生 aletheia_video_ingest（每路一进程）
+  fd 字节流 → rawvideoparse → videoconvert → vaapih264enc → h264parse → RTSP :8554（localhost）
+          │
+          ▼
+工具私有 MediaMTX
+  RTSP 输入 → WHEP 端点 :8889/<path>/whep → 浏览器 WebRTC <video>
+```
+
+- 运行时固定面向 `amd64` / Ubuntu 22.04 基线，并携带受锁定版本约束的 MediaMTX、最小 GStreamer 插件、VAAPI 用户态库和 Intel `iHD` 驱动；目标车无需为该功能另装 apt 包、Node.js、npm 或开发工具。
+- `rawvideoparse` 是链路必需部分：管道读取可能把一帧 RGB 数据拆成多段，不能假设一次读取就是一帧图像。
+- Python 不传递视频帧。`GET /api/video/status` 只返回配置、MediaMTX 健康和逐路状态；`POST /api/video/control` 只接受全局布尔开关，或已配置流名加布尔开关。后端拒绝浏览器提交的路径、话题、命令或可执行文件。视频数据只在原生编码器、MediaMTX 和浏览器之间流动。
+- 视频配置允许逐流启用；网页首次整体打开时使用配置中的已启用流。默认包含四路工业相机和一路 `detection_camera`：后者订阅 `object_detection_node` 已发布的 `/annotated_image`（`rgb8`、640×480、10 FPS），只旁路编码检测结果，不读取或控制深度相机驱动，不修改检测节点，也不向自动驾驶链路发布任何消息。每一路配置都要与实际 ROS 话题、像素格式、分辨率、帧率、码率以及 `/dev/dri/renderD128` 的访问权限相匹配。
+- `video.json` 的相机输入只允许是 ROS `source_topic`；不要为方便排障把物理 USB 路径或虚拟 V4L2 节点重新写入该文件。原相机驱动与其设备映射已经由小车系统维护，视频旁路不应拥有第二份配置真相。
+- 升级 ZIP 仍维持既有的单文件升级协议。视频运行时被内嵌到核心二进制；新二进制下一次启用视频时会将 `runtime/video/` 原子刷新到匹配版本，同时保留用户的 `config/video.json`。控制台启动时会以追加方式迁移缺失的默认视频流（例如新增的 `detection_camera`），绝不覆盖既有流的开关或其他用户配置。因此已安装工具的小车可以只上传升级 ZIP，无需仅为视频改走 DEB。
+
 ## 10. 前端维护
 
-前端源位于 `frontend/src/`，构建产物输出到 `autodrive_console/web-vue/`。主要页面为任务指挥台、实时运行观测、测试用例管理、场景前置配置、报告中心、运行配置和工具日志。实时观测页依赖 `pixi.js`：`liveObservation.js` 负责地图纹理、虚拟墙、点云图层和两个相机预览的 Pixi 应用；保留 DOM 车体层和 DOM 交互层。
+前端源位于 `frontend/src/`，构建产物输出到 `autodrive_console/web-vue/`。主要页面为任务指挥台、实时运行观测、测试用例管理、场景前置配置、报告中心、运行配置和工具日志。实时观测页依赖 `pixi.js`：`liveObservation.js` 负责地图纹理、虚拟墙、点云图层、DOM 车体层与页面交互；PC 地图独占工作区，旧 Foxglove 图像选择器及其图像订阅已移除。相机卡片以原生 `<video>` 接收 WHEP/WebRTC，并转为 PixiJS `Video Texture`。桌面网格按启用路数自适应列数；移动端每张卡片自带逐路开关，五路全开时使用一张主画面和四张预览，竖屏则让主画面在上、四张预览组成 2 × 2 检查矩阵。控制调用 `/api/video/status` 与 `/api/video/control`，不会直接接触 ROS 或 MediaMTX。
 
-共享视觉样式集中在 `autodrive_console/web/*.css` 与 `frontend/src/*.css`。深/浅主题只写浏览器 Local Storage，不写机器人配置。新页面默认避免冗余说明文字，但必须保留必要的安全状态和错误反馈。
+共享视觉样式集中在 `autodrive_console/web/*.css` 与 `frontend/src/*.css`。PC 与移动端必须有明确样式边界：移动主题仅以 `html.mobile-console` 或 `/m/` 壳层选择器生效，不能用未限定的 `:root`、`body`、`aside`、地图配色或格栅逻辑覆盖 PC。深/浅主题只写浏览器 Local Storage，不写机器人配置。新页面默认避免冗余说明文字，但必须保留必要的安全状态和错误反馈。
 
 ### 10.1 PC 与移动端入口
 
@@ -191,15 +237,15 @@ PixiJS 最新点云几何       ├─ Pixi 世界容器：缩放、拖动（固
 
 `/m/` 页面由服务端在原页面中注入下列独立资源，调用的是相同受控 API 与页面控制器：
 
-- `autodrive_console/web/mobile_console.js`：移动端抽屉导航、页面链接改写、桌面版回退和实时观测全屏状态；
-- `autodrive_console/web/mobile_console.css`：安全区、单列布局、最小 44px 触控目标及横竖屏规则；仅通过 `/m/` 页面加载，不能被桌面页面引用；
-- `frontend/src/liveObservation.css`：PixiJS 地图视图在窄屏和横屏下的尺寸、工具条与诊断信息降级规则。
+- `autodrive_console/web/mobile_console.js`：通用页面的固定品牌栏、五项底部导航和页面链接改写；识别实时观测的专用响应式壳层后只改写链接，绝不叠加第二个导航、抽屉或旧全屏按钮；
+- `autodrive_console/web/mobile_console.css`：共享的石墨、暖灰、砂金与鼠尾草绿视觉令牌，以及安全区、单列内容区、最小 42px 触控目标和横竖屏规则；仅通过 `/m/` 页面加载，不能被桌面页面引用；
+- `frontend/src/liveObservation.css` 与 `liveObservation.js`：实时观测的横竖屏响应式壳层、刘海安全区、真实可视视口高度、地图/相机单主视图切换、五路视频自适应栅格和地图专属触控手势。
 
-移动端实时观测的“全屏地图”必须只保留观测窗口：优先使用浏览器 Fullscreen API；不支持时（尤其 iOS）使用 CSS 沉浸模式作为等价回退。横屏和竖屏均需保持地图可见、退出控件可达，退出后恢复原滚动位置和页面交互。不得以全局媒体查询修改 PC 布局，也不得为移动端复制一套 API、实时流或业务状态。
+移动端实时观测同时支持横屏和竖屏。布局高度使用 `VisualViewport` 的实时尺寸写入 CSS 变量，避免 Safari/Chrome 常驻地址栏把固定 `100dvh` 工作区压扁；横屏低高度使用紧凑顶栏和底栏，并把初始地图改为横向路线优先的工作视图，避免近方形全图在浅视口缩成中央小图；竖屏保留完整地图，并让相机卡片在主视图内部纵向滚动。页面通过 viewport 策略、`touch-action` 和 Safari `gesture*` 事件共同禁止整体捏合缩放；地图交互层保持 `touch-action: none`，由 Pointer Events 独立实现单指拖动及双指以中点为锚的缩放/平移。全屏按钮只改变浏览器显示状态，不再强制锁定屏幕方向。地图页停止手机端 WebRTC 解码，相机页停止点云/位姿可视化订阅与地图绘制，切回时恢复对应实时链路，避免手机同时承担两套重渲染。不得以全局媒体查询修改 PC 布局，也不得为移动端复制一套 API、实时流或业务状态。
 
 ### 10.2 前端修改自检
 
-涉及移动端时，至少检查桌面宽度、手机竖屏、手机横屏和实时观测全屏/退出全屏。桌面页面应不加载 `mobile_console.*`，移动端所有导航页面应保留与 PC 相同的功能入口；自动分流、`?view=desktop` 回退、浏览器刷新及屏幕旋转都不能造成状态丢失或重复订阅。
+涉及移动端时，至少检查桌面宽度、390×844 与 430×932 竖屏、932×430、667×375 及 720×300 低高度横屏、全屏进入/退出、地图单指拖动/双指缩放、页面级缩放锁定、地图/相机切换以及 1～5 路视频排布。桌面页面应不加载 `mobile_console.*`，移动端所有导航页面应保留与 PC 相同的功能入口；自动分流、`?view=desktop` 回退、浏览器刷新及屏幕旋转都不能造成状态丢失或重复订阅。
 
 ```bash
 ./run_vue_preview.sh
@@ -269,7 +315,7 @@ test -f install/setup.bash && test -f build-deps-manifest.json
 # 浏览器：http://127.0.0.1:5173
 ```
 
-修改 C++ 预处理节点时，先在已 source 的 ROS 环境中进行独立编译：
+修改 C++ 预处理节点或视频输入节点时，先在已 source 的 ROS 环境中进行独立编译：
 
 ```bash
 source install/setup.bash
@@ -277,43 +323,54 @@ cmake -S live_preprocessor -B build/live_preprocessor -DCMAKE_BUILD_TYPE=Release
 cmake --build build/live_preprocessor --parallel 2
 ```
 
-完整构建由 `build_binary.sh` 统一执行：它先构建 Vue 产物和 C++ 预处理节点，再生成 `dist/ry-aletheia`。可通过 `ROVER_QA_ROS_SETUP=/path/to/setup.bash` 指定参考小车的 ROS 工作空间；未指定时依次使用 `/opt/ry/install/setup.bash` 和工程内 `install/setup.bash`。
+完整构建由 `build_binary.sh` 统一执行：它先构建 Vue 产物、C++ 预处理节点和视频输入节点，再构建锁定的视频私有运行时，最后生成 `dist/ry-aletheia`。可通过 `ROVER_QA_ROS_SETUP=/path/to/setup.bash` 指定参考小车的 ROS 工作空间；未指定时依次使用 `/opt/ry/install/setup.bash` 和工程内 `install/setup.bash`。视频私有运行时也可单独生成，便于检查其锁定依赖：
 
 ```bash
 ./build_binary.sh
+
+# 仅生成私有 MediaMTX / GStreamer / VAAPI runtime（不安装到系统）
+./build_video_runtime.sh
 ```
 
 ### 11.4 私有 Foxglove Bridge 的边界
 
 所有目标车均以 ROS Humble 作为基础运行环境，因此完整离线包只内置锁定版本的 Foxglove Bridge，不复制整套 Humble。`ObservationManager` 优先直接执行 `runtime/foxglove_bridge/lib/foxglove_bridge/foxglove_bridge`，不会通过系统 `ros2 launch` 解析 Bridge 版本。私有前缀仅影响 Aletheia 创建的 Bridge 与点云/位姿预处理子进程，不能写入 `/opt/ros`、覆盖系统 Bridge 或改变其他节点环境。
 
+Bridge 健康检查只能读取本机监听表（`/proc/net/tcp*`）或使用其正式 HTTP/API 接口；**不得**对 Foxglove WebSocket 端口做裸 TCP `connect()` 探测。后者不是合法 WebSocket 握手，会在 Bridge 日志制造反复出现的 `handshake failed`，同时污染真实连接诊断。
+
 车端 ROS Humble 与业务 ROS 图仍是明确集成契约：`/start_execute_tasks`、TF、地图、雷达驱动、导航、`master_interfaces` 及 Supervisor 属于机器人系统，不随工具复制。完整包只要求目标车为匹配 CPU 架构的 ROS Humble 平台。
 
-### 11.5 发布构建
+### 11.5 私有视频运行时与显卡边界
+
+`build_video_runtime.sh` 仅在开发/构建机执行。它根据 `tools/video-runtime-packages.lock` 下载并校验 Ubuntu 22.04 `amd64` 归档，解包为受限的私有运行时；不会在小车或开发机执行 `apt install`，也不会覆盖系统 GStreamer、VAAPI、ROS 或 MediaMTX。构建后的运行时只暴露受控 `RGB → VAAPI H.264 → RTSP` 链路所需的插件，MediaMTX 版本同样由脚本固定并校验。
+
+目标车仍须满足硬件与权限契约：相机节点持续发布配置的 `sensor_msgs/msg/Image`，运行账户可访问相应 ROS 域以及 VAAPI 渲染节点（通常是 `/dev/dri/renderD128`，需要 `render` 权限或等价 ACL）。NVIDIA、纯软件编码或其他 GPU 不会被自动假装成 Intel VAAPI；不满足契约时视频应在页面显示可诊断错误，而不影响地图、点云、任务或报告功能。
+
+### 11.6 发布构建
 
 ```bash
 # 生成升级 ZIP
-./make_upgrade.sh 1.0.0
+./make_upgrade.sh <版本号>
 
 # 同时生成完整首次安装 DEB：自动使用已校验的缓存 Bridge；缓存缺失时下载锁定版本。
-./make_upgrade.sh 1.0.0 --deb
+./make_upgrade.sh <版本号> --deb
 ```
 
-完整包输出到 `releases/<版本>/`，其 `DEB` 控制字段不依赖系统 `ros-humble-foxglove-bridge`，且包内必须包含私有 Bridge 可执行文件。`build_offline_foxglove_bundle.sh` 仍保留给只需单独生成完整 DEB 的维护场景，输出到 `releases/<版本>-offline/`。普通网页升级 ZIP 不更新 Bridge。
+完整包输出到 `releases/<版本>/`，其 `DEB` 控制字段不依赖系统 `ros-humble-foxglove-bridge`，且包内包含私有 Bridge、MediaMTX 和最小视频运行时。`build_offline_foxglove_bundle.sh` 仍保留给只需单独生成完整 DEB 的维护场景，输出到 `releases/<版本>-offline/`。网页升级 ZIP 不替换私有 Bridge；视频运行时则随新的核心二进制内嵌，并在下一次启用视频时自动、安全地同步。ZIP 始终仅含 `manifest.json` 和 `ry-aletheia` 两项：清单同时保留 MD5（供旧升级器过渡读取）、SHA-256 和 Ed25519 发布签名；新控制台必须验证内置公钥对应的签名。发布私钥通过 `RY_ALETHEIA_UPGRADE_SIGNING_KEY` 指定，默认位于被 Git 忽略且仅发布人员可读的位置，绝不可随源码或发布包分发。
 
 版本号必须为数字点号格式。脚本会拒绝覆盖已有发布目录，并在 `releases/<版本>/` 输出 ZIP、`SHA256SUMS`、说明和可选 DEB。
 
-### 11.6 每次改动后的最小验证集
+发布前要在干净工作树或明确记录的变更集上完成：校验 `SHA256SUMS`、`unzip -t` 升级 ZIP、确认 ZIP 中没有车辆配置/日志/私钥，并检查 `postinst` 的 `visudo -cf`。首次安装 DEB 与已安装车的 ZIP 升级分别验证；不要因 ZIP 正常就假设 DEB 的安装脚本也正常。
+
+### 11.7 每次改动后的最小验证集
 
 ```bash
-python3 -m pytest -q tests/test_offline_modules.py tests/test_trajectory_integrity.py
-python3 -m pytest -q tests/test_live_observation_realtime.py
-npm --prefix frontend run build
-node --check frontend/src/liveObservation.js
-cmake --build build/live_preprocessor -j2
+env -u PYTHONPATH pixi run verify
+npm --prefix frontend run check
+cmake --build build/live_preprocessor --parallel 2
 ```
 
-发布前仍需低风险实车验证：任务下发、Supervisor 阶段等待、方案应用/恢复、地图切换、报告下载、升级回滚和实时观测的移动/缩放表现。
+发布前仍需低风险实车验证：任务下发、Supervisor 阶段等待、方案应用/恢复、地图切换、报告下载、升级回滚和实时观测的移动/缩放表现。涉及视频时，额外验证五路流（含 `/annotated_image`）的 MediaMTX `ready/online` 状态、浏览器 WebRTC 播放、关闭后进程树回收，以及视频失败不影响其余观测功能或自动驾驶执行。
 
 ## 12. 常见排障
 
@@ -323,8 +380,12 @@ cmake --build build/live_preprocessor -j2
 | 重启节点后立即失败 | 编排是否等待每阶段全部 `RUNNING` 和稳定时间；方案应用后是否留出稳定窗口。 |
 | 无点云或位姿 | 先看 `/api/observation`：Bridge 是否 online、`client_metrics.cloud_packet_rate_hz` 是否非零；再看 `/_aletheia/live_points` 的发布者/订阅者和 QoS。点云输出必须是 reliable，Bridge 必须 `include_hidden:=true`。先确认 `/collision_voxel_layer/points` 是否有发布者和非零频率；主流缺失 500ms 后才会尝试 `/livox/lidar` 回退。 |
 | 观测落后实车 | 先读取 `/api/observation` 的 `client_metrics`：位姿年龄低而 `cloud_source_age_ms` 高时优先检查激光源时间戳/频率；再检查预处理日志、Wi-Fi 与浏览器长帧。不要提高队列深度或恢复长点云历史。 |
+| 点云基本正常但车体图标卡顿 | 先比较 `pose_packet_rate_hz`、`pose_applied_rate_hz`、`pose_source_age_ms`、`vehicle_render_rate_hz` 和长帧数；再采样 `/_aletheia/live_pose` 及 `map→odom→base_*` 的真实值变化。若链路心跳连续但坐标变化稀疏，检查前端是否把重复 Pose 的接收时间误作最后真实测量时间。 |
 | 地图/墙体不对齐 | `/map` origin/resolution、map_server 当前 YAML、缓存 ID、实际墙体文件。 |
 | 轨迹缺段 | map/TF 可用性、切图、坐标变换拒绝原因和报告中的证据提示。 |
+| 视频卡片一直“等待相机” | 先看 `GET /api/video/status` 与 MediaMTX paths；再确认对应 ROS 图像话题有发布者、`ROS_DOMAIN_ID` 与控制台一致、像素格式/分辨率符合 `config/video.json`。 |
+| 视频启动失败或无硬件编码 | 检查 `runtime/video/` 是否完整、`/dev/dri/renderD128` 的 ACL/`render` 组、Intel `iHD` 驱动、`logs/` 中视频运行时错误；不要为此修改系统 GStreamer 或让工具接管原相机驱动的 Supervisor 组。 |
+| 升级后视频无法启动 | 确认升级 ZIP 已替换核心二进制；打开网页视频开关以触发私有运行时同步，检查 `runtime/video/ry-aletheia-runtime.json`，同时保留并核对既有 `config/video.json`。 |
 | 升级后不能启动 | `updates/` 备份、`logs/ry-aletheia-error.log`、8087 端口占用、二进制权限。 |
 
 ## 13. 安全红线与维护准则
@@ -335,6 +396,31 @@ cmake --build build/live_preprocessor -j2
 - 不将场景前置功能扩展为无约束的任意文件写入器。
 - 不在 `running`、`cancelling`、`awaiting_recovery` 状态升级。
 - 不以提高队列深度或保存历史帧换取“连续感”；实时性优先。
+- 不对 Foxglove WebSocket 端口做裸 TCP 探测，也不把由此产生的 `handshake failed` 当作网络故障。
 - 未经明确确认，不自动创建升级包、DEB 或部署到小车。
 
 工程维护遵循：静态数据缓存、动态数据分层；高频路径限频/单槽队列/背压/超时丢弃；低频配置原子写入与备份；每次修改必须有编译、构建或回归测试，并定义缺地图、缺 TF、缺接口、端口冲突、权限不足等失败降级路径。
+
+## 14. 维护交接清单
+
+### 14.1 先定位责任边界
+
+| 变更目标 | 首选代码位置 | 必须保持不变的边界 |
+| --- | --- | --- |
+| 测试流程、恢复、报告 | `autodrive_console/run_manager.py` 及相关后端模块 | 不扩大 Supervisor 白名单；场景配置必须可恢复。 |
+| 实时地图、位姿、点云 | `frontend/src/liveObservation.js`、`live_preprocessor/`、`observation.py` | ROS 原话题只读；容量 1、latest-wins、过期丢弃。 |
+| 视频按钮、流布局与播放 | `frontend/src/liveObservation.*`、`autodrive_console/video.py` | 只订阅 ROS Image；Python 不承载视频帧；不管理物理相机。 |
+| 通用移动端壳层 | `autodrive_console/web/mobile_console.*` | 仅 `/m/` 或明确限定选择器生效，不能污染 PC。 |
+| 离线包、安装/卸载 | `make_upgrade.sh`、`build_*`、`packaging/debian/` | 保留用户数据；ZIP 与 DEB 都必须可校验、可回退。 |
+
+### 14.2 每次合并前的最低检查
+
+1. 运行 `env -u PYTHONPATH pixi run verify`；前端改动还必须完成生产构建。
+2. 审查 `git diff --check` 与 `git status --short`，确认没有构建产物、车辆配置、日志、报告、缓存或凭据进入提交。
+3. 实时链路改动须验证缺地图、缺 TF、Bridge 不在线、浏览器后台、网络恢复五种降级；不能只在正常网络下看一次页面。
+4. 移动端改动按 10.2 的横竖屏、低高度和 1～5 路视频矩阵实测，同时复查 PC 页面未被影响。
+5. 准备发布时分别走 ZIP 升级和全新 DEB 安装的检查表，确认程序版本、配置保留、备份回滚和观测/视频按需启动。
+
+### 14.3 现场信息收集顺序
+
+先记录工具版本、复现时间、浏览器/设备类型和是否开启视频；随后导出工具日志并采集 `ry-aletheia-status --once`、`/api/observation`、`/api/video/status`。只有在这些证据指向小车 ROS 链路时，再请机器人系统维护者检查对应话题、TF 或相机驱动。这样能避免把网页问题误处理为导航问题，也避免为视频问题重启整车相机栈。

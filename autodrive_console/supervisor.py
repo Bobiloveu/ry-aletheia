@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import re
 from dataclasses import dataclass
+
+
+# A Supervisor name is data, never an argument fragment.  Grouped processes
+# use ``GROUP:PROGRAM``; a single program name is also valid.  Keep this shared
+# boundary strict even though subprocess is invoked without a shell.
+SUPERVISOR_PROCESS_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(?::[A-Za-z0-9][A-Za-z0-9_.-]{0,127})?\Z")
 
 
 @dataclass(frozen=True)
@@ -41,7 +48,7 @@ class SupervisorClient:
         self._control("start", process_name)
 
     def _control(self, action: str, process_name: str) -> None:
-        if not process_name or any(char.isspace() for char in process_name):
+        if action not in {"start", "restart"} or not isinstance(process_name, str) or not SUPERVISOR_PROCESS_NAME.fullmatch(process_name):
             raise RuntimeError("Supervisor 节点名称不合法")
         result = self._run([*self._base_args(), action, process_name])
         if result.returncode != 0:

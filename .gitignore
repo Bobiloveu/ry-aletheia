@@ -13,6 +13,7 @@ build/
 dist/
 releases/
 .cache/
+.ry-aletheia-signing/
 *.deb
 *.tar.gz
 

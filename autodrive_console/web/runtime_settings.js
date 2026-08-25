@@ -19,7 +19,7 @@ async function loadUpgradeStatus() {
     upgradeSupported = Boolean(data.supported);
     $('upgradeState').textContent = upgradeSupported ? '可升级' : '不可用';
     $('upgradeState').className = `badge ${upgradeSupported ? '' : 'muted'}`;
-    $('upgradeCurrentMd5').textContent = '升级时校验';
+    $('upgradeCurrentMd5').textContent = 'Ed25519 签名与 SHA-256 校验';
     $('upgradeMessage').textContent = '';
     updateUpgradeButton();
   } catch (error) { $('upgradeState').textContent = '检查失败'; $('upgradeMessage').textContent = error.message; }
@@ -49,7 +49,7 @@ function waitForUpgradeRestart() {
 }
 function uploadUpgrade() {
   if (!selectedUpgradeFile || !upgradeSupported) return;
-  if (!window.confirm(`确认应用升级包“${selectedUpgradeFile.name}”？\n\n将先校验 MD5，备份当前程序，再自动重启控制台。`)) return;
+  if (!window.confirm(`确认应用升级包“${selectedUpgradeFile.name}”？\n\n将先校验 Ed25519 发布签名和 SHA-256，备份当前程序，再自动重启控制台。`)) return;
   const button = $('applyUpgrade'); const request = new XMLHttpRequest(); button.disabled = true; $('upgradeProgress').textContent = '正在上传 0%';
   request.open('POST', '/api/system/upgrade'); request.setRequestHeader('Content-Type', 'application/zip'); request.setRequestHeader('X-Upgrade-Filename', selectedUpgradeFile.name);
   request.upload.onprogress = event => { if (event.lengthComputable) $('upgradeProgress').textContent = `正在上传 ${Math.round(event.loaded / event.total * 100)}%`; };

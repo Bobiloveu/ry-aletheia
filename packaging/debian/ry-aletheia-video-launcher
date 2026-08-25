@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# User-owned lifecycle for the optional local MediaMTX/ROS video process tree.
+# It intentionally creates no systemd or Supervisor unit.
+set -euo pipefail
+
+if [[ "${EUID}" -eq 0 ]]; then
+  RUN_USER="${RY_ALETHEIA_USER:-${SUDO_USER:-ry}}"
+  if ! [[ "$RUN_USER" =~ ^[a-z_][a-z0-9_-]*\$?$ ]] || ! id "$RUN_USER" >/dev/null 2>&1; then
+    echo "RY Aletheia：无法以 root 确定视频运行账户。请切换到普通账户后执行。" >&2
+    exit 2
+  fi
+  RUN_HOME="$(getent passwd "$RUN_USER" | awk -F: '{print $6}')"
+  exec runuser -u "$RUN_USER" -- env HOME="$RUN_HOME" USER="$RUN_USER" "$0" "$@"
+fi
+
+ROOT="${RY_ALETHEIA_ROOT:-$HOME/ry_aletheia}"
+RUNNER="$ROOT/dist/ry-aletheia"
+RUNTIME_DIR="$ROOT/runtime/video"
+PID_FILE="$RUNTIME_DIR/runner.pid"
+LOCK_FILE="$RUNTIME_DIR/runner.lock"
+LOG_FILE="$ROOT/logs/video-runtime.log"
+
+if [[ ! -x "$RUNNER" ]]; then
+  echo "RY Aletheia 视频运行时未安装到 $ROOT，或当前账户不是安装账户。" >&2
+  exit 1
+fi
+
+load_ros_environment() {
+  if [[ -f "$HOME/.bashrc" ]]; then
+    set +u
+    source "$HOME/.bashrc"
+    set -u
+  fi
+  if [[ -f /opt/ry/install/setup.bash ]]; then
+    set +u
+    source /opt/ry/install/setup.bash
+    set -u
+  fi
+}
+
+runner_pid() {
+  [[ -r "$PID_FILE" ]] || return 1
+  local pid
+  read -r pid < "$PID_FILE"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  local command
+  command="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+  [[ "$command" == *"$RUNNER --video-runner"* ]] || return 1
+  printf '%s\n' "$pid"
+}
+
+runner_has_private_process_group() {
+  # New runners are started with setsid, so their PID is also the process-group
+  # ID.  Do not send a negative-PID signal to a legacy runner: it may still
+  # share the invoking terminal's process group.
+  local pid="$1" pgid
+  pgid="$(ps -p "$pid" -o pgid= 2>/dev/null | tr -d '[:space:]')"
+  [[ "$pgid" == "$pid" ]]
+}
+
+signal_runner_tree() {
+  local signal="$1" pid="$2"
+  if runner_has_private_process_group "$pid"; then
+    kill "-$signal" -- "-$pid"
+  else
+    # Transitional compatibility for a 2.0.28-or-earlier PID file.  The next
+    # start creates an isolated process group, after which the full tree is
+    # always reaped without touching the caller's shell.
+    echo "检测到旧版视频运行器，正在仅终止主进程；下次启动将启用完整进程组回收。" >&2
+    kill "-$signal" "$pid"
+  fi
+}
+
+runner_tree_alive() {
+  local pid="$1"
+  if runner_has_private_process_group "$pid"; then
+    kill -0 -- "-$pid" 2>/dev/null
+  else
+    kill -0 "$pid" 2>/dev/null
+  fi
+}
+
+clear_stale_pid() {
+  if ! runner_pid >/dev/null 2>&1; then
+    rm -f "$PID_FILE"
+  fi
+}
+
+start_runner() {
+  clear_stale_pid
+  local existing
+  if existing="$(runner_pid)"; then
+    echo "视频运行时已在运行：pid=$existing"
+    return 0
+  fi
+  mkdir -p "$RUNTIME_DIR" "$(dirname -- "$LOG_FILE")"
+  load_ros_environment
+  cd "$ROOT"
+  # A separate session makes this maintenance launcher as robust as the web
+  # console's managed runtime: stop/restart always reaps MediaMTX, the ingest
+  # helper and any hardware encoder children together.
+  PYINSTALLER_RESET_ENVIRONMENT=1 setsid "$RUNNER" --video-runner \
+    </dev/null >>"$LOG_FILE" 2>&1 &
+  local pid=$!
+  printf '%s\n' "$pid" > "$PID_FILE"
+  echo "视频运行时已启动：pid=$pid；日志：$LOG_FILE"
+}
+
+stop_runner() {
+  local pid
+  if ! pid="$(runner_pid)"; then
+    clear_stale_pid
+    echo "视频运行时未运行。"
+    return 0
+  fi
+  signal_runner_tree TERM "$pid"
+  for _ in {1..50}; do
+    runner_tree_alive "$pid" || break
+    sleep 0.1
+  done
+  if runner_tree_alive "$pid"; then
+    # All PIDs in this group originated from this launcher.  A final KILL is
+    # safer than leaking camera/VAAPI resources into the next start attempt.
+    echo "视频运行时未在 5 秒内退出，正在回收其专属进程组。" >&2
+    signal_runner_tree KILL "$pid"
+    for _ in {1..20}; do
+      runner_tree_alive "$pid" || break
+      sleep 0.1
+    done
+  fi
+  if runner_tree_alive "$pid"; then
+    echo "视频运行时进程组仍未退出。请检查：$LOG_FILE" >&2
+    return 1
+  fi
+  rm -f "$PID_FILE"
+  echo "视频运行时已停止。"
+}
+
+status_runner() {
+  local pid
+  if pid="$(runner_pid)"; then
+    echo "视频运行时：运行中（pid=$pid）"
+  else
+    clear_stale_pid
+    echo "视频运行时：未运行"
+    return 1
+  fi
+}
+
+usage() {
+  echo "用法：ry-aletheia-video {start|stop|status|restart}" >&2
+}
+
+mkdir -p "$RUNTIME_DIR"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "视频运行时操作正在进行，请稍后重试。" >&2
+  exit 1
+fi
+
+case "${1:-}" in
+  start) start_runner ;;
+  stop) stop_runner ;;
+  status) status_runner ;;
+  restart) stop_runner; start_runner ;;
+  *) usage; exit 2 ;;
+esac

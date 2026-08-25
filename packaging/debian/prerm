@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 工具由普通用户按需直接运行，不由 systemd 托管。
+# 视频由普通用户启动器管理。升级时停止它，避免覆盖私有运行时文件时旧进程
+# 仍在使用它们；绝不触碰小车原有的 Supervisor 服务。
+case "${1:-}" in
+  upgrade|remove|deconfigure)
+    /usr/bin/ry-aletheia-video stop >/dev/null 2>&1 || true
+    ;;
+esac

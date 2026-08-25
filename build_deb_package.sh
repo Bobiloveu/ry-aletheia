@@ -53,7 +53,11 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 PKG="$STAGE/ry-aletheia"
 OUT="$OUTPUT_DIR/ry-aletheia_${VERSION}_${ARCH}.deb"
-mkdir -p "$PKG/DEBIAN" "$PKG/usr/lib/ry-aletheia/defaults/tasks" "$PKG/usr/lib/ry-aletheia" "$PKG/usr/bin" "$PKG/usr/share/doc/ry-aletheia/docs/images"
+mkdir -p "$PKG/DEBIAN" "$PKG/usr/lib/ry-aletheia/defaults/tasks" "$PKG/usr/lib/ry-aletheia/defaults/config" "$PKG/usr/lib/ry-aletheia" "$PKG/usr/bin" "$PKG/usr/share/doc/ry-aletheia/docs/images"
+
+echo "正在组装锁定的私有视频运行时（开发机下载，目标小车无需 apt）..."
+VIDEO_RUNTIME="$STAGE/video-runtime"
+RY_ALETHEIA_VIDEO_ARCH="$ARCH" "$ROOT/build_video_runtime.sh" --output-dir "$VIDEO_RUNTIME"
 
 if [[ -n "$BRIDGE_DEB" ]]; then
   # 只提取官方 Bridge 的 ROS 前缀，并安装到 Aletheia 私有目录。绝不写入
@@ -96,11 +100,14 @@ install -m 0755 "$ROOT/packaging/debian/postinst" "$PKG/DEBIAN/postinst"
 install -m 0755 "$ROOT/packaging/debian/prerm" "$PKG/DEBIAN/prerm"
 install -m 0755 "$ROOT/packaging/debian/postrm" "$PKG/DEBIAN/postrm"
 install -m 0755 "$ROOT/packaging/debian/ry-aletheia-launcher" "$PKG/usr/bin/ry-aletheia"
+install -m 0755 "$ROOT/packaging/debian/ry-aletheia-video-launcher" "$PKG/usr/bin/ry-aletheia-video"
 install -m 0755 "$ROOT/packaging/debian/ry-aletheia-status" "$PKG/usr/bin/ry-aletheia-status"
 # 运行目录根部保留面向使用者的入口文档；不再依赖已废弃的手工部署说明。
 install -m 0644 "$ROOT/USER_GUIDE.md" "$PKG/usr/lib/ry-aletheia/README.md"
 install -m 0644 "$ROOT/USER_GUIDE.md" "$PKG/usr/share/doc/ry-aletheia/USER_GUIDE.md"
 install -m 0644 "$ROOT/PROJECT_OVERVIEW.md" "$PKG/usr/share/doc/ry-aletheia/PROJECT_OVERVIEW.md"
+install -m 0644 "$ROOT/config/video.json" "$PKG/usr/lib/ry-aletheia/defaults/config/video.json"
+cp -a "$VIDEO_RUNTIME" "$PKG/usr/lib/ry-aletheia/video_runtime"
 if [[ -d "$ROOT/docs/images" ]]; then
   while IFS= read -r -d '' guide_image; do
     install -m 0644 "$guide_image" "$PKG/usr/share/doc/ry-aletheia/docs/images/$(basename -- "$guide_image")"

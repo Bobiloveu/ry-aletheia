@@ -1,22 +1,27 @@
 {
-  "schema": "ry-aletheia-robot-build-deps/v1",
-  "created_at": "2026-08-12T17:46:11+08:00",
-  "source_install": "/opt/ry/install",
-  "hostname": "ry-robot",
+  "schema": "ry-aletheia-robot-build-deps/v2-minimal",
+  "created_at": "2026-08-24T10:32:56+08:00",
   "machine": "x86_64",
-  "system": "Linux-6.8.0-106-generic-x86_64-with-glibc2.35",
-  "python": "3.10.12",
+  "target_platform": "ubuntu-22.04-amd64",
+  "python_abi": "cp310",
   "ros_distro": "humble",
-  "ament_prefix_path": "/opt/ry/install/web_voice_player:/opt/ry/install/virtual_wall_rviz:/opt/ry/install/video_server:/opt/ry/install/video_record:/opt/ry/install/uss_driver:/opt/ry/install/usb_cam:/opt/ry/install/task_generate_server:/opt/ry/install/task_execute_server:/opt/ry/install/slope_detection:/opt/ry/install/robot_localization:/opt/ry/install/pointcloud_processor:/opt/ry/install/photo_upload_server:/opt/ry/install/path_record_server:/opt/ry/install/path_draw_panel:/opt/ry/install/orbbec_description:/opt/ry/install/orbbec_camera:/opt/ry/install/orbbec_camera_msgs:/opt/ry/install/object_detection_rgbd:/opt/ry/install/node_manager:/opt/ry/install/nav2_system_tests:/opt/ry/install/fcrp_bringup:/opt/ry/install/nav2_bringup:/opt/ry/install/navigation2:/opt/ry/install/navigate_todoor_server:/opt/ry/install/nav2_smoother:/opt/ry/install/nav2_rotation_shim_controller:/opt/ry/install/nav2_mppi_exact_controller:/opt/ry/install/nav2_mppi_controller:/opt/ry/install/nav2_graceful_controller:/opt/ry/install/nav2_dwb_controller:/opt/ry/install/nav2_controller:/opt/ry/install/nav_2d_utils:/opt/ry/install/nav_2d_msgs:/opt/ry/install/nav2_waypoint_follower:/opt/ry/install/nav2_waypoint_cycle:/opt/ry/install/nav2_theta_star_planner:/opt/ry/install/nav2_smac_planner:/opt/ry/install/nav2_route_polyline_planner:/opt/ry/install/nav2_regulated_pure_pursuit_controller:/opt/ry/install/nav2_planner:/opt/ry/install/nav2_navfn_planner:/opt/ry/install/nav2_constrained_smoother:/opt/ry/install/nav2_bt_navigator:/opt/ry/install/nav2_behaviors:/opt/ry/install/nav2_core:/opt/ry/install/nav2_collision_monitor:/opt/ry/install/nav2_costmap_2d:/opt/ry/install/nav2_voxel_grid:/opt/ry/install/nav2_velocity_smoother:/opt/ry/install/nav2_rviz_plugins:/opt/ry/install/nav2_map_server:/opt/ry/install/nav2_lifecycle_manager:/opt/ry/install/nav2_behavior_tree:/opt/ry/install/nav2_amcl:/opt/ry/install/nav2_util:/opt/ry/install/nav2_simple_commander:/opt/ry/install/nav2_msgs:/opt/ry/install/monitor_web_ui:/opt/ry/install/event_execution_layer:/opt/ry/install/algorithm_feedback_adapter:/opt/ry/install/nav2_monitor:/opt/ry/install/kf_hungarian_tracker:/opt/ry/install/nav2_dynamic_msgs:/opt/ry/install/nav2_common:/opt/ry/install/multi_tasks_execute_server:/opt/ry/install/master_bridge:/opt/ry/install/lightning:/opt/ry/install/elevator_service_pkg:/opt/ry/install/elevator_server:/opt/ry/install/door_server:/opt/ry/install/collision_voxel_layer:/opt/ry/install/chassis_drive:/opt/ry/install/master_interfaces:/opt/ry/install/livox_ros_driver2:/opt/ry/install/lidar_cluster:/opt/ry/install/icp_pcl:/opt/ry/install/elevator_state_detection:/opt/ros/humble",
-  "master_interfaces_present": true,
-  "master_typesupport_libraries": [
-    "libmaster_interfaces__rosidl_generator_c.so",
-    "libmaster_interfaces__rosidl_generator_py.so",
-    "libmaster_interfaces__rosidl_typesupport_c.so",
-    "libmaster_interfaces__rosidl_typesupport_cpp.so",
-    "libmaster_interfaces__rosidl_typesupport_fastrtps_c.so",
-    "libmaster_interfaces__rosidl_typesupport_fastrtps_cpp.so",
-    "libmaster_interfaces__rosidl_typesupport_introspection_c.so",
-    "libmaster_interfaces__rosidl_typesupport_introspection_cpp.so"
+  "included_packages": [
+    "master_interfaces",
+    "livox_ros_driver2"
+  ],
+  "required_system_ros_packages": [
+    "ament_cmake",
+    "rclcpp",
+    "rclpy",
+    "sensor_msgs",
+    "geometry_msgs",
+    "tf2",
+    "tf2_ros",
+    "tf2_msgs",
+    "std_msgs",
+    "nav_msgs",
+    "builtin_interfaces",
+    "action_msgs",
+    "rosidl_default_runtime"
   ]
 }

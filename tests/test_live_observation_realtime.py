@@ -36,10 +36,13 @@ def test_realtime_source_declares_single_slot_freshness_boundaries():
     source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
     assert "const CLOUD_PACKET_MAX_AGE_MS = 100;" in source
     assert "import { Application, BufferImageSource, Container, Graphics, Sprite, Texture } from 'pixi.js';" in source
-    assert "async function initializeCameraRenderer(slot)" in source
+    assert "cameraSlots" not in source
+    assert "function initializeCameraRenderer(slot)" not in source
     assert "getContext('2d')" not in source
     assert "function renderCloudPoints(packedPoints)" in source
-    assert "points.fill(0x8058ff);" in source
+    assert "const DESKTOP_MAP_PALETTE" in source
+    assert "points.fill((mobileConsoleEnabled() ? MAP_PALETTE : DESKTOP_MAP_PALETTE).cloud);" in source
+    assert "points.fill(0x8058ff);" not in source
     assert "const POSE_PACKET_MAX_AGE_MS = 250;" in source
     assert "const LIVE_POSE_FALLBACK_MS = 450;" in source
     assert "function armTfFallback()" in source
@@ -51,9 +54,14 @@ def test_realtime_source_declares_single_slot_freshness_boundaries():
     assert "function predictVehicleMotion(pose, seconds)" in source
     assert "α-β 预测—校正" in source
     assert "function sourcePoseAge(message)" in source
-    assert "function stabilizeStationaryVehicle(position, yaw, now)" in source
-    assert "const VEHICLE_STILL_HOLD_DISTANCE_M = 0.025;" in source
-    assert "const VEHICLE_STILL_RELEASE_DISTANCE_M = 0.045;" in source
+    assert "function estimateLiveMotion(position, yaw, now)" in source
+    assert "const LIVE_MOTION_POSITION_EPSILON_M = 0.008;" in source
+    assert "const LIVE_MOTION_YAW_EPSILON_RAD = 0.008;" in source
+    assert "vehicleStillAnchor" not in source
+    # 高频轻量 Pose 会重复发布同一位置以维持链路；外推必须以最后一次实际测量
+    # 为起点，不能被每个心跳包的 receivedAt 反复归零。
+    assert "motionMeasuredAt: latestLiveMotion.measuredAt" in source
+    assert "const motionMeasuredAt = target.source === 'live' ? target.motionMeasuredAt : target.receivedAt;" in source
     assert "function reportClientMetrics()" in source
     assert "/api/observation/client-metrics" in source
     assert "translate3d(${x}px, ${y}px, 0)" in source
@@ -66,9 +74,153 @@ def test_realtime_source_declares_single_slot_freshness_boundaries():
 
 def test_live_view_has_phone_specific_safe_area_and_map_priority_rules():
     source = (ROOT / "frontend" / "src" / "liveObservation.css").read_text(encoding="utf-8")
-    assert "@media (max-width: 480px)" in source
-    assert "grid-template-rows: 70% 15% 15%" in source
+    assert "@media (orientation: portrait)" in source
+    assert "grid-template: minmax(0, 1fr) / minmax(0, 1fr)" in source
     assert "orientation: landscape" in source
+
+
+def test_mobile_console_supports_both_orientations_and_scopes_zoom_to_the_map():
+    html = (ROOT / "frontend" / "live-observation.html").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "frontend" / "src" / "liveObservation.css").read_text(encoding="utf-8")
+    source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
+    assert "viewport-fit=cover" in html
+    assert "user-scalable=no" in html
+    assert "interactive-widget=resizes-content" in html
+    assert 'id="mobileRotateGuard"' not in html
+    assert 'id="mobileFullscreenToggle"' not in html
+    assert 'data-mobile-view-target="map"' in html
+    assert 'data-mobile-view-target="camera"' in html
+    assert 'class="mobile-bottom-nav"' in html
+    assert "html.mobile-console #app" in stylesheet
+    assert "var(--mobile-viewport-width, 100dvw)" in stylesheet
+    assert "var(--mobile-viewport-height, 100dvh)" in stylesheet
+    assert "env(safe-area-inset-left)" in stylesheet
+    assert "html.mobile-console.mobile-portrait .page-main" in stylesheet
+    assert "html.mobile-console.mobile-portrait .webrtc-video-grid[data-count]" in stylesheet
+    assert "touch-action: pan-y" in stylesheet
+    assert 'html.mobile-console .webrtc-video-grid[data-count="5"]' in stylesheet
+    assert "screen.orientation.lock('landscape')" not in source
+    assert "window.visualViewport" in source
+    assert "function setupMobileZoomPolicy()" in source
+    assert "['gesturestart', 'gesturechange', 'gestureend']" in source
+    assert "event.touches.length > 1 && !insideMap(event.target)" in source
+    assert "function setMobileConsoleView(view" in source
+    assert "mobileWebRtcPlaybackAllowed()" in source
+    assert "stopVisualizationStreams();" in source
+    assert "相机页未显示，浏览器解码已暂停" in source
+    assert "const shallowLandscape" in source
+    assert "focusedLandscapeScale" in source
+    assert "优先可读性而不是留出大量无效背景" in source
+    assert "@media (orientation: landscape) and (max-height: 430px)" in stylesheet
+
+
+def test_map_removes_legacy_settings_entry_without_a_duplicate_status_header():
+    html = (ROOT / "frontend" / "live-observation.html").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "frontend" / "src" / "liveObservation.css").read_text(encoding="utf-8")
+    source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
+    assert 'id="toggleWorkspaceControls"' not in html
+    assert 'id="workspaceControlsBody"' not in html
+    assert '<article class="workspace-widget map-widget" data-widget="map">\n            <header class="widget-header">' not in html
+    assert "$('toggleWorkspaceControls')" not in source
+    # 地图标题条已移除，移动端顶部状态仍须独立镜像更新。
+    assert "const target = $(id); if (target) target.textContent = value;" in source
+    assert "mirrorMobileConnection(id, value);" in source
+
+
+def test_map_uses_an_adaptive_metric_grid_and_restrained_industrial_palette():
+    html = (ROOT / "frontend" / "live-observation.html").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "frontend" / "src" / "liveObservation.css").read_text(encoding="utf-8")
+    mobile_stylesheet = (ROOT / "autodrive_console" / "web" / "mobile_console.css").read_text(encoding="utf-8")
+    source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
+    assert 'id="mapScale"' in html
+    assert 'id="mapGridLabel"' in html
+    assert "let pixiGridLayer;" in source
+    assert "pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiWallLayer, pixiCloudLayer);" in source
+    assert "function metricGridStep(pixelsPerMeter)" in source
+    assert "function renderMetricGrid(layout)" in source
+    assert "renderMetricGrid(layout);" in source
+    assert "gridStep * 5" in source
+    assert "width: 0.65 / layout.ratio" in source
+    assert "width: 1.1 / layout.ratio" in source
+    assert "virtualWall: 0xd63142" in source
+    assert "cloud: 0x8b5cf6" in source
+    assert "virtualWall: 0xd63142" in source
+    assert "cloud: 0x8058ff" in source
+    assert "if (!mobileConsoleEnabled())" in source
+    assert ".map-scale" in stylesheet
+    assert "--ui-accent: #f28c28" in mobile_stylesheet
+    assert "color: var(--ui-accent-strong)" in stylesheet
+    assert "const pointRadius = mobile ? 0.82 : 0.35;" in source
+
+
+def test_vehicle_marker_has_a_minimal_rotating_front_line_without_an_arrow():
+    stylesheet = (ROOT / "frontend" / "src" / "liveObservation.css").read_text(encoding="utf-8")
+    html = (ROOT / "frontend" / "live-observation.html").read_text(encoding="utf-8")
+    assert "#vehicleLayer i" in stylesheet
+    assert "top:9%; left:20%; right:20%; height:4px" in stylesheet
+    assert "#vehicleLayer::before" not in stylesheet
+    assert "clip-path:polygon" not in stylesheet
+    assert "map-legend" not in html
+
+
+def test_industrial_video_uses_whep_html_video_and_pixi_texture_without_a_frame_relay():
+    source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
+    html = (ROOT / "frontend" / "live-observation.html").read_text(encoding="utf-8")
+    assert "request('/api/video/status')" in source
+    assert "request('/api/video/control'" in source
+    assert "function toggleWebRtcVideo()" in source
+    assert "function toggleWebRtcStream(stream)" in source
+    assert "function renderWebRtcStreamControls(streams)" in source
+    assert "webrtcStreamTogglesInFlight" in source
+    assert 'id="webrtcVideoToggle"' in html
+    assert 'id="webrtcStreamControls"' in html
+    assert "document.createElement('video')" in source
+    assert "peer.addTransceiver('video', { direction: 'recvonly' })" in source
+    assert "method: 'POST'" in source and "application/sdp" in source
+    assert "Texture.from(state.video)" in source
+    assert "new Sprite(state.texture)" in source
+    assert "WebSocket(stream.url" not in source
+    assert 'id="webrtcVideoGrid"' in html
+    stylesheet = (ROOT / "frontend" / "src" / "liveObservation.css").read_text(encoding="utf-8")
+    assert '.webrtc-video-grid[data-count="5"]' in stylesheet
+    assert '.webrtc-stream-controls' in stylesheet
+    assert "mobilePrimaryWebRtcStream" in source
+    assert "setMobilePrimaryWebRtcStream(stream.name)" in source
+    assert '.webrtc-video-card[data-primary="true"]' in stylesheet
+    # 手机端五路卡片本身就是逐路开关。即使全局视频未启用，也必须保留
+    # 已配置的五路入口；不能让顶部开关条挤压任何一张画面。
+    assert "const streams = mobileConsoleEnabled() ? configuredStreams : activeStreams;" in source
+    assert "state.card.dataset.active = String(active);" in source
+    assert "toggle.addEventListener('click', () => toggleWebRtcStream(state.stream));" in source
+    assert "html.mobile-console .webrtc-stream-controls { display: none !important; }" in stylesheet
+    assert 'html.mobile-console .webrtc-video-card[data-active="false"]' in stylesheet
+    assert 'html.mobile-console .webrtc-video-grid[data-count="5"] > .webrtc-video-card[data-primary="true"]' in stylesheet
+    assert 'object-fit: contain;' in stylesheet
+    assert 'html.mobile-console #mobileConnectionSignal::before' in stylesheet
+    # 顶部旧开关条在手机端必须从布局树移除；五路栅格要显式复位历史 span 规则，
+    # 防止在横竖屏切换后把视频卡压成细条。
+    assert "root.hidden = mobile;" in source
+    assert 'html.mobile-console .webrtc-stream-controls[hidden] { display: none !important; }' in stylesheet
+    assert 'html.mobile-console .webrtc-video-grid[data-count] > .webrtc-video-card {' in stylesheet
+    assert 'grid-column: auto;' in stylesheet
+    assert 'grid-template: minmax(0, 1fr) repeat(2, minmax(68px, .36fr)) / repeat(2, minmax(0, 1fr)) !important;' in stylesheet
+    assert "const pointRadius = mobile ? 0.82 : 0.35;" in source
+
+
+def test_desktop_map_has_no_redundant_foxglove_image_splitter_or_image_subscription():
+    html = (ROOT / "frontend" / "live-observation.html").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "frontend" / "src" / "liveObservation.css").read_text(encoding="utf-8")
+    source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
+    assert 'id="cameraSelectA"' not in html
+    assert 'id="cameraSelectB"' not in html
+    assert 'id="verticalSplitter"' not in html
+    assert 'id="horizontalSplitter"' not in html
+    assert 'aria-label="实时二维地图工作区"' in html
+    assert ".local-viewer-workspace { position: relative; display: grid;" in stylesheet
+    assert "grid-template: minmax(0, 1fr) / minmax(0, 1fr);" in stylesheet
+    assert "cameraChannels" not in source
+    assert "cameraSlots" not in source
+    assert "if (!TOPICS.has(channel.topic)) return;" in source
 
 
 

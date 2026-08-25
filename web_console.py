@@ -26,6 +26,7 @@ from autodrive_console.settings import SettingsStore
 from autodrive_console.supervisor import SupervisorClient
 from autodrive_console.tool_logging import ToolLogStore
 from autodrive_console.upgrade_manager import UpgradeError, UpgradeManager
+from autodrive_console.video import ConsoleVideoRuntime, VideoConfigurationError, VideoManager, VideoRuntime
 
 
 def ensure_ros_environment() -> None:
@@ -70,7 +71,9 @@ UPGRADES = UpgradeManager(WORKSPACE, Path(sys.executable), getattr(sys, "frozen"
 LOGS = ToolLogStore(WORKSPACE / "logs")
 LOGGER = LOGS.configure()
 _LIVE_PREPROCESSOR = ROOT / "aletheia_live_cloud" if getattr(sys, "frozen", False) else ROOT / "build" / "live_preprocessor" / "aletheia_live_cloud"
+_VIDEO_INGEST = ROOT / "aletheia_video_ingest" if getattr(sys, "frozen", False) else ROOT / "build" / "live_preprocessor" / "aletheia_video_ingest"
 OBSERVATION = ObservationManager(WORKSPACE / "maps_cache", WORKSPACE / "logs", _LIVE_PREPROCESSOR)
+VIDEO = VideoManager(CONFIG_DIR / "video.json", ROOT / "config" / "video.json")
 
 # 移动端使用独立入口（/m/），但继续调用完全相同的受控 API 与页面控制器。
 # 不依据单一 UA 字段：优先采用浏览器 Client Hint，再兼容常见移动浏览器标识。
@@ -144,10 +147,16 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         request = urlparse(self.path)
         path = request.path
         explicit_mobile_page = mobile_page_name(path)
-        preferred_view = parse_qs(request.query).get("view", [""])[0].lower()
+        query = parse_qs(request.query)
+        preferred_view = query.get("view", [""])[0].lower()
+        # ``?mobile=1`` is the supported visual-acceptance entry point.  It
+        # must use the real /m/ shell (including its tokens and bottom nav),
+        # rather than merely adding a class to desktop HTML.  ``view=desktop``
+        # remains an explicit escape hatch for support diagnostics.
+        forced_mobile = query.get("mobile", [""])[0] == "1"
         if explicit_mobile_page:
             self._mobile_page(explicit_mobile_page)
-        elif preferred_view != "desktop" and is_mobile_console_client(self.headers) and (target := mobile_url_for(path)):
+        elif preferred_view != "desktop" and (forced_mobile or is_mobile_console_client(self.headers)) and (target := mobile_url_for(path)):
             # 每个顶级页面都可直接从手机收藏夹打开；不是只有根路径才会分流。
             # API、报告下载等非页面路由不参与重定向，保持接口语义不变。
             self._redirect(target)
@@ -200,6 +209,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._json({"active_map_id": OBSERVATION.active_map_id()})
         elif path == "/api/observation":
             self._json(OBSERVATION.status(SETTINGS.load()))
+        elif path == "/api/video/status":
+            # 仅回传控制面状态；视频帧不会经过 Python 或此 HTTP 服务。
+            self._json(VIDEO.status(self.headers.get("Host")))
         elif path.startswith("/api/observation/maps/") and path.endswith("/preview.svg"):
             asset_id = path.removeprefix("/api/observation/maps/").removesuffix("/preview.svg").strip("/")
             self._observation_map_preview(asset_id, "svg")
@@ -240,6 +252,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/system/upgrade":
             self._apply_upgrade()
+            return
+        if path == "/api/video/control":
+            self._video_control()
             return
         if path.startswith("/api/observation/"):
             self._observation_action(path)
@@ -304,6 +319,37 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._json({"run": run.to_dict()}, HTTPStatus.ACCEPTED)
         except (KeyError, TypeError, ValueError, RuntimeError) as exc:
             LOGGER.warning("创建测试计划失败：%s", exc)
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
+    def _video_control(self) -> None:
+        """Persist the optional video switch and reconcile console-owned children.
+
+        This endpoint never accepts a command, path, topic, or executable from
+        the browser.  It only accepts the global boolean switch, or a
+        validated configured stream name plus its boolean switch.
+        """
+
+        try:
+            data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            if not isinstance(data, dict) or not isinstance(data.get("enabled"), bool):
+                raise ValueError("enabled 必须是布尔值")
+            runtime = getattr(self.server, "video_runtime", None)
+            if not isinstance(runtime, ConsoleVideoRuntime):
+                raise RuntimeError("视频控制器尚未初始化")
+            stream = data.get("stream")
+            if stream is None:
+                runtime.set_enabled(data["enabled"])
+                state = "启用" if data["enabled"] else "关闭"
+                LOGGER.info("操作者已%s低延迟相机流", state)
+            elif isinstance(stream, str):
+                runtime.set_stream_enabled(stream, data["enabled"])
+                state = "启用" if data["enabled"] else "关闭"
+                LOGGER.info("操作者已%s低延迟相机流：%s", state, stream)
+            else:
+                raise ValueError("stream 必须是字符串")
+            self._json(VIDEO.status(self.headers.get("Host")), HTTPStatus.ACCEPTED)
+        except (TypeError, ValueError, json.JSONDecodeError, VideoConfigurationError, RuntimeError) as exc:
+            LOGGER.warning("切换低延迟相机流失败：%s", exc)
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
     def _apply_upgrade(self) -> None:
@@ -731,7 +777,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         return
 
 
-if __name__ == "__main__":
+def run_console() -> None:
+    try:
+        if VIDEO.migrate_config():
+            LOGGER.info("已补充离线升级新增的视频流默认配置")
+    except VideoConfigurationError as exc:
+        # Do not prevent the normal console from exposing an actionable
+        # configuration error merely because an optional video migration could
+        # not run.  VideoManager.status() reports the same error to the page.
+        LOGGER.warning("视频配置迁移未执行：%s", exc)
     try:
         server = ThreadingHTTPServer(("0.0.0.0", 8087), ConsoleHandler)
     except OSError as exc:
@@ -745,6 +799,14 @@ if __name__ == "__main__":
     server.restart_command = None
     # 长连接代理不应拖住安全退出或离线升级后的新版本启动。
     server.daemon_threads = True
+    video_command = [str(sys.executable), "--video-runner"]
+    if not getattr(sys, "frozen", False):
+        video_command = [sys.executable, str(Path(__file__).resolve()), "--video-runner"]
+    video_runtime = ConsoleVideoRuntime(VIDEO, WORKSPACE, video_command)
+    # The HTTP handler may start/stop only this parent-owned controller; no
+    # Supervisor or system service participates in the optional video path.
+    server.video_runtime = video_runtime
+    video_runtime.start_if_enabled()
     print("RY Aletheia 自动测试平台：http://0.0.0.0:8087")
     print("局域网访问：http://<小车IP>:8087")
     print("按 Ctrl+C 停止服务")
@@ -753,6 +815,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         pass
     finally:
+        video_runtime.stop()
         OBSERVATION.stop()
         server.server_close()
     if server.restart_command:
@@ -763,3 +826,9 @@ if __name__ == "__main__":
         restart_environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
         restart_environment.pop("INVOCATION_ID", None)
         subprocess.Popen(server.restart_command, cwd=WORKSPACE, env=restart_environment, start_new_session=True)
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--video-runner"]:
+        raise SystemExit(VideoRuntime(VIDEO, WORKSPACE, _VIDEO_INGEST, ROOT / "runtime" / "video").run())
+    run_console()
