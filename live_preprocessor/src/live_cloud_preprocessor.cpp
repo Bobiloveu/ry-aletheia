@@ -1,19 +1,27 @@
 #include <algorithm>
+#include <arpa/inet.h>
+#include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <string>
+#include <sys/socket.h>
+#include <thread>
+#include <unordered_map>
 #include <unordered_set>
+#include <unistd.h>
 #include <vector>
 
 #include <builtin_interfaces/msg/time.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
-#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -24,6 +32,186 @@
 
 namespace aletheia_live_preprocessor {
 
+namespace {
+
+constexpr uint8_t kTelemetryVersion = 1;
+constexpr uint8_t kCloudFrame = 1;
+constexpr uint8_t kPoseFrame = 2;
+// Ethernet/Wi-Fi MTU 之下保留充足余量：UDP header 30 B + payload 1152 B。
+constexpr size_t kUdpPayloadBytes = 1152;
+constexpr size_t kUdpMaxChunks = 64;
+
+uint64_t host_to_network_u64(uint64_t value) {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+  return (static_cast<uint64_t>(htonl(static_cast<uint32_t>(value & 0xffffffffULL))) << 32) |
+         htonl(static_cast<uint32_t>(value >> 32));
+#else
+  return value;
+#endif
+}
+
+void append_u16(std::vector<uint8_t>& target, uint16_t value) {
+  const auto network = htons(value);
+  const auto* bytes = reinterpret_cast<const uint8_t*>(&network);
+  target.insert(target.end(), bytes, bytes + sizeof(network));
+}
+
+void append_u32(std::vector<uint8_t>& target, uint32_t value) {
+  const auto network = htonl(value);
+  const auto* bytes = reinterpret_cast<const uint8_t*>(&network);
+  target.insert(target.end(), bytes, bytes + sizeof(network));
+}
+
+void append_u64(std::vector<uint8_t>& target, uint64_t value) {
+  const auto network = host_to_network_u64(value);
+  const auto* bytes = reinterpret_cast<const uint8_t*>(&network);
+  target.insert(target.end(), bytes, bytes + sizeof(network));
+}
+
+void append_network_float(std::vector<uint8_t>& target, float value) {
+  uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  append_u32(target, bits);
+}
+
+class UdpLatestSender final {
+ public:
+  struct Frame {
+    uint64_t timestamp_ns;
+    uint16_t point_count;
+    std::vector<uint8_t> payload;
+  };
+
+  UdpLatestSender(uint8_t kind, const std::string& host, int port, rclcpp::Logger logger)
+      : kind_(kind), logger_(logger) {
+    socket_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (socket_ < 0) {
+      RCLCPP_ERROR(logger_, "Realtime telemetry UDP socket creation failed: %s", std::strerror(errno));
+      return;
+    }
+    const int flags = ::fcntl(socket_, F_GETFL, 0);
+    if (flags >= 0) ::fcntl(socket_, F_SETFL, flags | O_NONBLOCK);
+    destination_.sin_family = AF_INET;
+    destination_.sin_port = htons(static_cast<uint16_t>(std::clamp(port, 1, 65535)));
+    if (::inet_pton(AF_INET, host.c_str(), &destination_.sin_addr) != 1) {
+      RCLCPP_ERROR(logger_, "Realtime telemetry UDP address is invalid: %s", host.c_str());
+      ::close(socket_);
+      socket_ = -1;
+      return;
+    }
+    std::random_device device;
+    stream_id_ = static_cast<uint32_t>((static_cast<uint64_t>(device()) << 32) ^ device());
+    if (stream_id_ == 0) stream_id_ = 1;
+    worker_ = std::thread([this] { run(); });
+  }
+
+  UdpLatestSender(const UdpLatestSender&) = delete;
+  UdpLatestSender& operator=(const UdpLatestSender&) = delete;
+
+  ~UdpLatestSender() {
+    {
+      std::lock_guard<std::mutex> guard(mutex_);
+      stopping_ = true;
+      latest_.reset();
+    }
+    condition_.notify_one();
+    if (worker_.joinable()) worker_.join();
+    if (socket_ >= 0) ::close(socket_);
+  }
+
+  bool available() const { return socket_ >= 0; }
+
+  // 只替换一个待发送 frame。这个方法不会触碰 socket，因此安全地处于 ROS callback 中。
+  void publish(Frame frame) {
+    if (socket_ < 0) return;
+    {
+      std::lock_guard<std::mutex> guard(mutex_);
+      QueuedFrame queued;
+      queued.timestamp_ns = frame.timestamp_ns;
+      queued.point_count = frame.point_count;
+      queued.payload = std::move(frame.payload);
+      queued.sequence = ++sequence_;
+      latest_ = std::move(queued);
+    }
+    condition_.notify_one();
+  }
+
+ private:
+  struct QueuedFrame : Frame {
+    uint32_t sequence{0};
+  };
+
+  void run() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    while (true) {
+      condition_.wait(lock, [this] { return stopping_ || latest_.has_value(); });
+      if (stopping_) return;
+      QueuedFrame frame = std::move(*latest_);
+      latest_.reset();
+      lock.unlock();
+      send_frame(frame);
+      lock.lock();
+    }
+  }
+
+  bool superseded(uint32_t sequence) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    return latest_.has_value() && latest_->sequence != sequence;
+  }
+
+  void send_frame(const QueuedFrame& frame) {
+    if (frame.payload.empty() && frame.point_count != 0) return;
+    const size_t chunks = std::max<size_t>(1, (frame.payload.size() + kUdpPayloadBytes - 1) / kUdpPayloadBytes);
+    // 接收端只允许固定上限的分片数；当前 3000 个二维点最多 21 片。这里显式
+    // 保持两端契约，避免未来有人扩大 payload 后让网关静默拒绝整帧。
+    if (chunks > kUdpMaxChunks) return;
+    std::vector<uint8_t> datagram;
+    datagram.reserve(30 + kUdpPayloadBytes);
+    for (size_t index = 0; index < chunks; ++index) {
+      // 发送中若已有新扫描，立即中断旧帧，接收端自然只会看到新 frame。
+      if (superseded(frame.sequence)) return;
+      const size_t offset = index * kUdpPayloadBytes;
+      const size_t bytes = std::min(kUdpPayloadBytes, frame.payload.size() - offset);
+      // 每帧分片复用同一个缓冲，避免 10 Hz 点云路径每片 malloc/free。
+      datagram.clear();
+      datagram.insert(datagram.end(), {'R', 'A', 'L', 'T'});
+      datagram.push_back(kTelemetryVersion);
+      datagram.push_back(kind_);
+      append_u32(datagram, stream_id_);
+      append_u32(datagram, frame.sequence);
+      append_u64(datagram, frame.timestamp_ns);
+      append_u16(datagram, static_cast<uint16_t>(index));
+      append_u16(datagram, static_cast<uint16_t>(chunks));
+      append_u16(datagram, frame.point_count);
+      append_u16(datagram, static_cast<uint16_t>(bytes));
+      datagram.insert(datagram.end(), frame.payload.begin() + static_cast<std::ptrdiff_t>(offset),
+                      frame.payload.begin() + static_cast<std::ptrdiff_t>(offset + bytes));
+      const auto sent = ::sendto(socket_, datagram.data(), datagram.size(), MSG_DONTWAIT,
+                                 reinterpret_cast<const sockaddr*>(&destination_), sizeof(destination_));
+      if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        RCLCPP_WARN(logger_, "Realtime telemetry UDP send failed: %s", std::strerror(errno));
+        return;
+      }
+      // EAGAIN 也不等待，不重试：下一 frame 会覆盖旧 frame，符合 latest-wins。
+      if (sent < 0) return;
+    }
+  }
+
+  uint8_t kind_;
+  rclcpp::Logger logger_;
+  int socket_{-1};
+  sockaddr_in destination_{};
+  uint32_t stream_id_{0};
+  uint32_t sequence_{0};
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::optional<QueuedFrame> latest_;
+  bool stopping_{false};
+  std::thread worker_;
+};
+
+}  // namespace
+
 class LiveCloudPreprocessor final : public rclcpp::Node {
  public:
   LiveCloudPreprocessor()
@@ -33,15 +221,21 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
         // 默认复用导航正在消费的标准障碍物点云；可通过 input_topic 参数替换。
         input_topic_(declare_parameter<std::string>("input_topic", "/collision_voxel_layer/points")),
         livox_input_topic_(declare_parameter<std::string>("livox_input_topic", "/livox/lidar")),
-        // 下划线命名空间是 ROS 2 的 hidden 约定：这两条仅供 Aletheia 实时
-        // 观测使用，不应在 RViz 的常规话题选择器中被当作业务传感器话题展示。
-        output_topic_(declare_parameter<std::string>("output_topic", "/_aletheia/live_points")),
-        pose_topic_(declare_parameter<std::string>("pose_topic", "/_aletheia/live_pose")),
         cloud_enabled_(declare_parameter<bool>("enable_cloud", true)),
         pose_enabled_(declare_parameter<bool>("enable_pose", true)),
+        // collision_voxel_layer 已经是导航链路生成的稀疏障碍物点云。保留其
+        // 密度，不能再按网页传输上限做第二次均匀抽样；改用其它主输入时可显式
+        // 关闭该选项。Livox 回退仍保留 max_points_ 上限，防止原始激光流膨胀。
+        preserve_primary_density_(declare_parameter<bool>(
+            "preserve_primary_density", input_topic_ == "/collision_voxel_layer/points")),
         map_frame_(declare_parameter<std::string>("map_frame", "map")),
         base_frame_(declare_parameter<std::string>("base_frame", "base_footprint")),
-        max_points_(static_cast<int>(std::clamp<int64_t>(declare_parameter<int>("max_points", 5000), 500, 12000))),
+        udp_host_(declare_parameter<std::string>("telemetry_udp_host", "127.0.0.1")),
+        udp_port_(static_cast<int>(std::clamp<int64_t>(declare_parameter<int>("telemetry_udp_port", 8769), 1, 65535))),
+        // 网关与浏览器协议的硬上限同为 3000。主输入在此范围内仍原样保留；
+        // 若上游配置异常放大，必须在 C++ 侧安全抽样，绝不能发送一整帧随后被
+        // 网关静默拒绝的点云。
+        max_points_(static_cast<int>(std::clamp<int64_t>(declare_parameter<int>("max_points", 3000), 500, 3000))),
         rate_hz_(std::clamp(declare_parameter<double>("rate_hz", 10.0), 1.0, 20.0)),
         pose_rate_hz_(std::clamp(declare_parameter<double>("pose_rate_hz", 60.0), 10.0, 60.0)),
         // 这是“节点内最新槽”的最大停留时间，不用传感器 header 判断。部分传感器
@@ -58,12 +252,10 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
     }
     // 传感器点云通常是 best-effort；输入只保留最新一帧，不能在节点内积压。
     auto sensor_input_qos = rclcpp::SensorDataQoS().keep_last(1);
-    // Foxglove Bridge 对显式订阅的 PointCloud2 默认请求 reliable。输出也使用
-    // reliable + depth=1，既保证 DDS 能匹配，又绝不缓存历史扫描造成显示滞后。
-    auto cloud_output_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile();
-    // 位姿仅数十字节，使用可靠 depth=1 传输。它与高频 best-effort 点云分离后，
-    // 即使点云在 Wi-Fi 或 DDS 层被丢弃，车体位置仍必须优先抵达 Bridge。
-    auto pose_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile();
+    // C++ 预处理只经回环 UDP 向专用遥测网关交付紧凑数据，不再发布 hidden ROS
+    // 话题，也不引入通用 ROS-Web 桥。
+    if (cloud_enabled_) cloud_sender_ = std::make_unique<UdpLatestSender>(kCloudFrame, udp_host_, udp_port_, get_logger());
+    if (pose_enabled_) pose_sender_ = std::make_unique<UdpLatestSender>(kPoseFrame, udp_host_, udp_port_, get_logger());
     if (cloud_enabled_) {
       subscription_ = create_subscription<sensor_msgs::msg::PointCloud2>(
           input_topic_, sensor_input_qos, [this](sensor_msgs::msg::PointCloud2::ConstSharedPtr message) {
@@ -74,8 +266,7 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
               last_primary_input_at_ = std::chrono::steady_clock::now();
               latest_input_received_at_ = last_primary_input_at_;
             }
-            // 独立点云进程在扫描抵达时立刻处理，避免定时轮询额外等待一帧。
-            publish_latest();
+            maybe_publish_latest();
           });
     // 主点云短暂不可用时，部分小车仍可从原生 Livox CustomMsg 回退。
     // 在此处一次性限点转换，避免再增加一个面向自动驾驶的转换节点。
@@ -113,15 +304,14 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
             ++input_sequence_;
             latest_input_received_at_ = std::chrono::steady_clock::now();
           }
-          publish_latest();
+          maybe_publish_latest();
           });
-      publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>(output_topic_, cloud_output_qos);
     }
     if (pose_enabled_) {
-      pose_publisher_ = create_publisher<geometry_msgs::msg::PoseStamped>(pose_topic_, pose_qos);
       pose_timer_ = create_wall_timer(std::chrono::duration<double>(1.0 / pose_rate_hz_), [this] { publish_pose(); });
     }
-    RCLCPP_INFO(get_logger(), "RY Aletheia live stream: cloud=%s, pose=%s", cloud_enabled_ ? "enabled" : "disabled", pose_enabled_ ? "enabled" : "disabled");
+    RCLCPP_INFO(get_logger(), "RY Aletheia telemetry preprocessors: cloud=%s, pose=%s, udp=%s:%d",
+                cloud_enabled_ ? "enabled" : "disabled", pose_enabled_ ? "enabled" : "disabled", udp_host_.c_str(), udp_port_);
   }
 
  private:
@@ -180,6 +370,7 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
   }
 
   void publish_pose() {
+    if (!pose_sender_ || !pose_sender_->available()) return;
     std::optional<geometry_msgs::msg::TransformStamped> transform;
     for (const auto& frame : base_frames_) {
       try {
@@ -188,21 +379,41 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
         break;
       } catch (const tf2::TransformException&) { }
     }
-    if (!transform) return;
+    if (!transform) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                           "Waiting for latest %s <- base_footprint/base_link TF; pose telemetry has no frame to send",
+                           map_frame_.c_str());
+      return;
+    }
     // map->odom 往往低频，而 base->odom 高频；合成 lookup 的 header stamp 可能
     // 继承低频边而看似“过期”。这里已经请求 TimePointZero 的最新可用位姿，不能
     // 因该合成时间戳再次丢弃整条车体流，否则浏览器只能退回批量 /tf。
     if (is_stale(transform->header.stamp, max_pose_age_ms_)) {
       RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 2000, "Latest %s <- base transform stamp exceeds %d ms; publishing latest pose for display", map_frame_.c_str(), max_pose_age_ms_);
     }
-    geometry_msgs::msg::PoseStamped output;
-    output.header = transform->header;
-    output.header.frame_id = map_frame_;
-    output.pose.position.x = transform->transform.translation.x;
-    output.pose.position.y = transform->transform.translation.y;
-    output.pose.position.z = transform->transform.translation.z;
-    output.pose.orientation = transform->transform.rotation;
-    pose_publisher_->publish(output);
+    // 浏览器仅需要 map 平面位姿。四元数不再经 ROS CDR 转发，改为三个
+    // network-order float32：x、y、yaw；实际网络发送由 UdpLatestSender 线程完成。
+    const auto& rotation = transform->transform.rotation;
+    const double yaw = std::atan2(2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
+                                  1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z));
+    std::vector<uint8_t> payload;
+    payload.reserve(12);
+    append_network_float(payload, static_cast<float>(transform->transform.translation.x));
+    append_network_float(payload, static_cast<float>(transform->transform.translation.y));
+    append_network_float(payload, static_cast<float>(yaw));
+    const auto now_ns = static_cast<uint64_t>(std::max<int64_t>(0, get_clock()->now().nanoseconds()));
+    pose_sender_->publish({now_ns, 1, std::move(payload)});
+  }
+
+  void maybe_publish_latest() {
+    if (!cloud_sender_ || !cloud_sender_->available()) return;
+    const auto now = std::chrono::steady_clock::now();
+    const auto period = std::chrono::duration<double>(1.0 / rate_hz_);
+    // 上游 collision voxel 层在自动驾驶时可能高于 10 Hz。实际限频必须在 C++
+    // 生效，不能仅靠浏览器丢帧；被跳过的数据已在输入 latest slot 中自然覆盖。
+    if (last_cloud_publish_at_ != std::chrono::steady_clock::time_point{} && now - last_cloud_publish_at_ < period) return;
+    last_cloud_publish_at_ = now;
+    publish_latest();
   }
 
   void publish_latest() {
@@ -235,7 +446,14 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
       return;
     }
     const size_t input_count = input->data.size() / input->point_step;
-    const size_t stride = std::max<size_t>(1, (input_count + static_cast<size_t>(max_points_) - 1) / static_cast<size_t>(max_points_));
+    // 主 collision 层已经是上游为导航裁剪后的可视障碍物集合。这里仅作坐标
+    // 投影与距离过滤；在协议上限以内不再抽样，只有超出预算才安全均匀取样。
+    const size_t point_budget = static_cast<size_t>(max_points_);
+    // collision_voxel_layer 正常情况下已远低于预算，因此保留全部有效点；只有
+    // 配置异常或源膨胀超过协议硬上限时才均匀抽样，避免网关拒绝整帧。
+    const size_t stride = preserve_primary_density_ && input_count <= point_budget
+      ? 1
+      : std::max<size_t>(1, (input_count + point_budget - 1) / point_budget);
     constexpr int64_t kDeskewBucketNs = 5'000'000LL;
     const int64_t header_ns = static_cast<int64_t>(input->header.stamp.sec) * 1'000'000'000LL + input->header.stamp.nanosec;
     bool deskew = fields->timestamp && *fields->timestamp + sizeof(double) <= input->point_step && input_count > 0;
@@ -279,27 +497,17 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
           transform = tf_buffer_.lookupTransform(map_frame_, input->header.frame_id, tf2::TimePointZero);
           RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 2000, "Using latest %s <- %s transform after stamped lookup failed: %s", map_frame_.c_str(), input->header.frame_id.c_str(), error.what());
         } catch (const tf2::TransformException&) {
-          RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 2000, "Waiting for %s <- %s transform: %s", map_frame_.c_str(), input->header.frame_id.c_str(), error.what());
+          RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                               "Waiting for %s <- %s transform; cloud telemetry frame skipped: %s",
+                               map_frame_.c_str(), input->header.frame_id.c_str(), error.what());
           return;
         }
       }
     }
-    sensor_msgs::msg::PointCloud2 output;
-    output.header.stamp = input->header.stamp;
-    output.header.frame_id = map_frame_;
-    output.height = 1;
-    output.is_bigendian = false;
-    output.is_dense = false;
-    output.point_step = 12;
-    output.fields.resize(3);
-    for (size_t index = 0; index < output.fields.size(); ++index) {
-      auto& field = output.fields[index];
-      field.name = index == 0 ? "x" : (index == 1 ? "y" : "z");
-      field.offset = static_cast<uint32_t>(index * 4);
-      field.datatype = sensor_msgs::msg::PointField::FLOAT32;
-      field.count = 1;
-    }
-    output.data.reserve(std::min(input_count / stride, static_cast<size_t>(max_points_)) * output.point_step);
+    // 地图渲染只使用 x/y。丢弃 z 后每帧仅约 24 KiB（3000 点），并避免产生一份
+    // PointCloud2 再让其它 ROS 节点复制和序列化。
+    std::vector<uint8_t> payload;
+    payload.reserve(std::min(input_count / stride, static_cast<size_t>(max_points_)) * 8);
     const double max_squared = max_range_m_ * max_range_m_;
     for (size_t index = 0; index < input_count; index += stride) {
       const uint8_t* base = input->data.data() + index * input->point_step;
@@ -315,25 +523,33 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
       const double xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z, wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
       const float tx = static_cast<float>((1 - 2 * (yy + zz)) * x + 2 * (xy - wz) * y + 2 * (xz + wy) * z + active_transform.translation.x);
       const float ty = static_cast<float>(2 * (xy + wz) * x + (1 - 2 * (xx + zz)) * y + 2 * (yz - wx) * z + active_transform.translation.y);
-      const float tz = static_cast<float>(2 * (xz - wy) * x + 2 * (yz + wx) * y + (1 - 2 * (xx + yy)) * z + active_transform.translation.z);
-      append_float(output.data, tx); append_float(output.data, ty); append_float(output.data, tz);
+      append_network_float(payload, tx);
+      append_network_float(payload, ty);
     }
-    output.width = output.data.size() / output.point_step;
-    output.row_step = output.width * output.point_step;
-    publisher_->publish(output);
+    const auto point_count = static_cast<uint16_t>(payload.size() / 8);
+    RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "Cloud telemetry: source=%s input=%zu sent=%u mode=%s range=%.1fm",
+        input_topic_.c_str(), input_count, point_count,
+        preserve_primary_density_ ? "preserve-upstream-density" : "bounded-uniform-sample",
+        max_range_m_);
+    const auto timestamp_ns = header_ns > 0 ? static_cast<uint64_t>(header_ns)
+                                            : static_cast<uint64_t>(std::max<int64_t>(0, get_clock()->now().nanoseconds()));
+    cloud_sender_->publish({timestamp_ns, point_count, std::move(payload)});
     published_sequence_ = sequence;
   }
 
-  std::string input_topic_, livox_input_topic_, output_topic_, pose_topic_, map_frame_, base_frame_;
-  bool cloud_enabled_, pose_enabled_;
+  std::string input_topic_, livox_input_topic_, map_frame_, base_frame_, udp_host_;
+  bool cloud_enabled_, pose_enabled_, preserve_primary_density_;
   int max_points_;
+  int udp_port_;
   double rate_hz_, pose_rate_hz_, max_range_m_;
   int max_input_age_ms_, max_pose_age_ms_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr subscription_;
   rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_subscription_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_publisher_;
   rclcpp::TimerBase::SharedPtr pose_timer_;
+  std::unique_ptr<UdpLatestSender> cloud_sender_;
+  std::unique_ptr<UdpLatestSender> pose_sender_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   std::vector<std::string> base_frames_;
@@ -342,6 +558,7 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
   sensor_msgs::msg::PointCloud2::ConstSharedPtr latest_input_;
   std::chrono::steady_clock::time_point last_primary_input_at_;
   std::chrono::steady_clock::time_point latest_input_received_at_;
+  std::chrono::steady_clock::time_point last_cloud_publish_at_;
   uint64_t input_sequence_{0}, published_sequence_{0};
 };
 

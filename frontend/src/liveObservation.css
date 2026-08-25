@@ -19,13 +19,13 @@ html.mobile-console #vehicleLayer i { top:9%; left:20%; right:20%; height:4px; b
 .map-diagnostics { right: 12px; bottom: 12px; max-width: calc(100% - 24px); padding: 7px 10px; color: #b8d2e3; }
 .webrtc-video-section { margin-top: 18px; padding: 16px; border: 1px solid #28516d; border-radius: 10px; background: #0a1a29; }
 .webrtc-video-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }.webrtc-video-header h2 { margin: 3px 0 5px; font-size: 18px; }.webrtc-video-header .eyebrow { margin: 0; }.webrtc-video-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }.webrtc-video-toggle[aria-pressed="true"] { border-color: #85505d; background: #241823; color: #f0b7c2; }.webrtc-video-toggle:disabled { cursor: wait; opacity: .6; }
-.webrtc-stream-controls { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }.webrtc-stream-toggle { display: flex; min-width: 0; min-height: 38px; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; border: 1px solid #315b77; border-radius: 5px; background: #10263a; color: #a9c7d8; font: 11px/1.2 var(--mono, monospace); text-align: left; cursor: pointer; }.webrtc-stream-toggle strong { overflow: hidden; color: inherit; font: inherit; text-overflow: ellipsis; white-space: nowrap; }.webrtc-stream-toggle em { flex: 0 0 auto; color: #6f99b1; font: 10px/1 var(--mono, monospace); font-style: normal; }.webrtc-stream-toggle[aria-pressed="true"] { border-color: #2587a8; background: #103648; color: #d8f5ff; }.webrtc-stream-toggle[aria-pressed="true"] em { color: #55d8e8; }.webrtc-stream-toggle:disabled { cursor: wait; opacity: .6; }
-.webrtc-video-grid { display: grid; gap: 12px; margin-top: 14px; }.webrtc-video-grid[data-count="1"] { grid-template-columns: minmax(0, 1fr); }.webrtc-video-grid[data-count="2"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }.webrtc-video-grid[data-count="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }.webrtc-video-grid[data-count="4"] { grid-template-columns: repeat(4, minmax(0, 1fr)); }.webrtc-video-grid[data-count="5"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }.webrtc-video-empty { margin: 14px 0 0; color: var(--muted); font-size: 13px; }
+.webrtc-stream-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 8px; margin-top: 14px; }.webrtc-stream-toggle { display: flex; min-width: 0; min-height: 38px; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; border: 1px solid #315b77; border-radius: 5px; background: #10263a; color: #a9c7d8; font: 11px/1.2 var(--mono, monospace); text-align: left; cursor: pointer; }.webrtc-stream-toggle strong { overflow: hidden; color: inherit; font: inherit; text-overflow: ellipsis; white-space: nowrap; }.webrtc-stream-toggle em { flex: 0 0 auto; color: #6f99b1; font: 10px/1 var(--mono, monospace); font-style: normal; }.webrtc-stream-toggle[aria-pressed="true"] { border-color: #2587a8; background: #103648; color: #d8f5ff; }.webrtc-stream-toggle[aria-pressed="true"] em { color: #55d8e8; }.webrtc-stream-toggle:disabled { cursor: wait; opacity: .6; }
+.webrtc-video-grid { display: grid; gap: 12px; margin-top: 14px; }.webrtc-video-grid[data-count="1"] { grid-template-columns: minmax(0, 1fr); }.webrtc-video-grid[data-count="2"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }.webrtc-video-grid[data-count="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }.webrtc-video-grid[data-count="4"] { grid-template-columns: repeat(4, minmax(0, 1fr)); }.webrtc-video-grid[data-count="5"],.webrtc-video-grid[data-count="6"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }.webrtc-video-empty { margin: 14px 0 0; color: var(--muted); font-size: 13px; }
 .webrtc-video-card { display: flex; min-width: 0; min-height: 210px; flex-direction: column; overflow: hidden; border: 1px solid #28516d; border-radius: 7px; background: #02070d; }.webrtc-video-card header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #24465f; }.webrtc-video-card h3 { margin: 0; color: #d4e7f2; font: 600 13px/1.2 var(--mono, monospace); }.webrtc-video-card header span { color: #89aec4; font: 11px/1.2 var(--mono, monospace); }.webrtc-video-card-actions { display: flex; align-items: center; gap: 7px; }.webrtc-video-card-toggle { padding: 4px 6px; border: 1px solid #6c4654; border-radius: 3px; background: #241823; color: #e8aeba; font: 10px/1 var(--mono, monospace); cursor: pointer; }.webrtc-video-card-toggle:disabled { cursor: wait; opacity: .6; }
 .webrtc-video-surface { position: relative; min-height: 0; flex: 1; aspect-ratio: 4 / 3; background: #02070d; }.webrtc-video-surface canvas { display: block; width: 100%; height: 100%; }.webrtc-video-source { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }.webrtc-video-card p { min-height: 16px; margin: 0; padding: 6px 10px; overflow: hidden; color: #8fb4ca; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .theme-light .local-viewer-workspace { background: #dfeaf2; }.theme-light .workspace-widget { border-color: #a9c6d9; background: #f7fbfe; }.theme-light .local-map-wrap { background: #dfeaf2; }.theme-light .map-diagnostics { border-color: rgb(86 120 150 / 38%); background: rgb(255 255 255 / 92%); color: #27435a; }
 .theme-light .webrtc-video-section, .theme-light .webrtc-video-card { border-color: #a9c6d9; background: #f7fbfe; }.theme-light .webrtc-stream-toggle { border-color: #a9c6d9; background: #edf6fb; color: #365671; }.theme-light .webrtc-stream-toggle[aria-pressed="true"] { border-color: #3c91ae; background: #d9f2f8; color: #224e62; }.theme-light .webrtc-video-card header { border-color: #c5d9e6; }.theme-light .webrtc-video-card h3 { color: #294962; }.theme-light .webrtc-video-card p, .theme-light .webrtc-video-card header span { color: #365671; }
-/* 旧的 Foxglove 图像分栏已移除：地图在桌面和手机上均是独立工作区。
+/* 旧的图像分栏已移除：地图在桌面和手机上均是独立工作区。
  * 视频只由下方的 WebRTC 相机区承载，避免空的图像选择器占据观测面积。 */
 @media (max-width: 760px) {
   .local-viewer-workspace { min-height: max(460px, calc(100svh - 120px)); border-radius: 8px; }
@@ -460,7 +460,7 @@ html.mobile-console .webrtc-video-card:not([data-primary="true"]) header { min-h
 html.mobile-console .webrtc-video-card:not([data-primary="true"]) h3 { font-size: 8px; }
 html.mobile-console .webrtc-video-card:not([data-primary="true"]) header span { font-size: 7px; }
 
-/* 竖屏不再把开关堆成三行、也不再把五路视频做成等大的窄条。
+/* 竖屏不再把开关堆成三行、也不再把多路视频做成等大的窄条。
  * 顶栏压缩为单一操作行；主流保持可读尺寸，余下相机固定成底部预览带。 */
 html.mobile-console.mobile-portrait .page-main {
   grid-template-rows: 50px minmax(0, 1fr) 60px;
@@ -1056,5 +1056,25 @@ html.mobile-console .webrtc-video-surface canvas {
     grid-template-rows: 28px minmax(0, 1fr);
     gap: 4px;
     padding: 5px;
+  }
+}
+
+/* 六路开启时采用均衡 3×2 矩阵，保证每张 4:3 画面完整可见；不把第五、
+ * 六路挤成细条，也不在低高度横屏中裁掉半幅图像。 */
+html.mobile-console .webrtc-video-grid[data-count="6"] {
+  grid-template: repeat(2, minmax(0, 1fr)) / repeat(3, minmax(0, 1fr)) !important;
+  grid-auto-flow: row;
+}
+html.mobile-console .webrtc-video-grid[data-count="6"] > .webrtc-video-card[data-primary="true"] {
+  grid-column: auto;
+  grid-row: auto;
+}
+@media (orientation: portrait) {
+  html.mobile-console.mobile-portrait .webrtc-video-grid[data-count="6"] {
+    grid-template: repeat(3, minmax(0, 1fr)) / repeat(2, minmax(0, 1fr)) !important;
+  }
+  html.mobile-console.mobile-portrait .webrtc-video-grid[data-count="6"] > .webrtc-video-card[data-primary="true"] {
+    grid-column: auto;
+    grid-row: auto;
   }
 }

@@ -97,9 +97,23 @@ class MapAssetCache:
                         continue
             except OSError:
                 continue
-        # 同一 YAML 即使被符号路径意外重复枚举，也不能当成歧义。
-        unique = {asset.id: asset for asset in matches}
-        return next(iter(unique.values())) if len(unique) == 1 else None
+        # 相同几何元数据的不同地图绝不能互认：那会把另一楼层/场景的虚拟墙
+        # 叠到当前地图。实车上 gk1 与 gk1_ele_test 的 P2 是一个例外：两个目录
+        # 是发布历史留下的镜像副本，底图和墙文件逐字节相同。只在 *每个* 候选
+        # 都有墙文件且两份内容完全相同时，把它们视为同一个安全候选；没有墙
+        # 或任一文件不同仍按歧义拒绝。
+        if len(matches) == 1:
+            return matches[0]
+        equivalents: dict[tuple[str, str], CachedMapAsset] = {}
+        for asset in matches:
+            if not asset.cache_walls:
+                return None
+            try:
+                identity = (self._file_sha256(Path(asset.cache_image)), self._file_sha256(Path(asset.cache_walls)))
+            except OSError:
+                return None
+            equivalents.setdefault(identity, asset)
+        return next(iter(equivalents.values())) if len(equivalents) == 1 else None
 
     def _metadata_matches(
         self,
@@ -385,6 +399,15 @@ class MapAssetCache:
         temporary = target.with_suffix(target.suffix + ".tmp")
         shutil.copy2(source, temporary)
         os.replace(temporary, target)
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        """Return a bounded-memory content identity for rare map-switch matching."""
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     @staticmethod
     def _write_if_changed(target: Path, text: str) -> None:

@@ -9,9 +9,6 @@
     "check": "node check-parity.mjs && vite build --emptyOutDir --outDir ../autodrive_console/web-vue"
   },
   "dependencies": {
-    "@foxglove/rosmsg": "^5.0.5",
-    "@foxglove/rosmsg2-serialization": "^3.1.2",
-    "@foxglove/ws-protocol": "^0.8.0",
     "pixi.js": "^8.20.0",
     "three": "^0.185.1",
     "vue": "^3.5.0"

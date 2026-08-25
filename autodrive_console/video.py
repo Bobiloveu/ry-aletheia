@@ -8,6 +8,7 @@ enabled, and exposes only small status documents to the Python HTTP console.
 """
 
 import json
+import logging
 import os
 import re
 import signal
@@ -30,6 +31,7 @@ _RESOLUTION = re.compile(r"[1-9][0-9]{1,4}x[1-9][0-9]{1,4}\Z")
 _ROS_IMAGE_TOPIC = re.compile(r"/(?:[A-Za-z][A-Za-z0-9_]*)(?:/[A-Za-z][A-Za-z0-9_]*)*\Z")
 _VIDEO_OWNER = "ry-aletheia"
 _VIDEO_MAINTENANCE_LAUNCHER = "ry-aletheia-video"
+LOGGER = logging.getLogger("ry_aletheia.video")
 
 
 class VideoConfigurationError(ValueError):
@@ -158,8 +160,8 @@ class VideoManager:
             raise VideoConfigurationError("runtime.gst_launch 不是受控私有运行时路径")
 
         streams = raw.get("streams")
-        if not isinstance(streams, list) or len(streams) > 5:
-            raise VideoConfigurationError("streams 必须是最多五路的数组")
+        if not isinstance(streams, list) or len(streams) > 6:
+            raise VideoConfigurationError("streams 必须是最多六路的数组")
         clean_streams: list[dict[str, Any]] = []
         names: set[str] = set()
         paths: set[str] = set()
@@ -186,8 +188,8 @@ class VideoManager:
                 raise VideoConfigurationError(f"流 {name} 的 fps 必须介于 1 和 120")
             if not isinstance(source_topic, str) or not _ROS_IMAGE_TOPIC.fullmatch(source_topic):
                 raise VideoConfigurationError(f"流 {name} 的 source_topic 不是安全的 ROS 图像话题")
-            if encoding != "rgb8":
-                raise VideoConfigurationError(f"流 {name} 当前仅支持 rgb8 原始图像")
+            if encoding not in {"rgb8", "bgr8"}:
+                raise VideoConfigurationError(f"流 {name} 当前仅支持 rgb8 或 bgr8 原始图像")
             if not isinstance(bitrate_kbps, int) or not 250 <= bitrate_kbps <= 20000:
                 raise VideoConfigurationError(f"流 {name} 的 bitrate_kbps 必须介于 250 和 20000")
             if not isinstance(stream_enabled, bool):
@@ -414,6 +416,7 @@ class VideoManager:
             "fps": stream["fps"],
             "resolution": stream["resolution"],
             "source_topic": stream["source_topic"],
+            "encoding": stream["encoding"],
             "codec": "h264",
             "latency_ms": None,
             "url": VideoManager._whep_url(public_host, gateway["whep_port"], stream["path"]),
@@ -434,7 +437,7 @@ class VideoManager:
 
 
 class VideoRuntime:
-    """Own the native MediaMTX and RGB-to-H.264 sidecar process tree.
+    """Own the native MediaMTX and RGB/BGR-to-H.264 sidecar process tree.
 
     It is owned by the ordinary-user console process, never by an HTTP
     endpoint or a process manager.
@@ -459,14 +462,17 @@ class VideoRuntime:
         try:
             config = self.manager.load_config()
         except VideoConfigurationError as exc:
+            LOGGER.error("视频运行时未启动：配置无效：%s", exc)
             print(f"RY Aletheia 视频运行时未启动：配置无效：{exc}", flush=True)
             return 2
         if not config["enabled"]:
+            LOGGER.info("视频运行时未启动：全局视频开关关闭")
             print("RY Aletheia 视频运行时未启动：config/video.json 的 enabled 为 false。", flush=True)
             return 0
 
         streams = [stream for stream in config["streams"] if stream["enabled"]]
         if not streams:
+            LOGGER.error("视频运行时未启动：全局视频已启用但没有选择任何流")
             print("RY Aletheia 视频运行时未启动：已启用视频功能但没有启用任何相机流。", flush=True)
             return 2
         try:
@@ -482,13 +488,22 @@ class VideoRuntime:
             # live and existing WebRTC sessions are never needlessly reset.
             self._write_media_config(media_config, config, config["streams"])
         except (OSError, RuntimeError) as exc:
+            LOGGER.error("视频运行时未启动：%s", exc)
             print(f"RY Aletheia 视频运行时未启动：{exc}", flush=True)
             return 2
 
         self._install_signal_handlers()
         try:
+            LOGGER.info(
+                "启动视频运行时：ROS_DOMAIN_ID=%s streams=%s gateway_api=%s rtsp_port=%s whep_port=%s",
+                config["ros_domain_id"],
+                ", ".join(f"{stream['name']}({stream['source_topic']},{stream['resolution']}@{stream['fps']})" for stream in streams),
+                config["gateway"]["api_url"], config["gateway"]["rtsp_port"], config["gateway"]["whep_port"],
+            )
             self.media_process = subprocess.Popen([str(media_binary), str(media_config)], cwd=self.workspace)
             if not self._wait_for_gateway(config["gateway"]["api_url"]):
+                status = self.media_process.returncode if self.media_process is not None and self.media_process.poll() is not None else "running"
+                LOGGER.error("MediaMTX 未在 5 秒内就绪：status=%s api=%s", status, config["gateway"]["api_url"])
                 print("MediaMTX 未在 5 秒内就绪。", flush=True)
                 return 1
             self._reconcile_streams(config, ingest_binary, gst_launch)
@@ -499,6 +514,7 @@ class VideoRuntime:
             )
             return self._monitor_children(ingest_binary, gst_launch)
         except OSError as exc:
+            LOGGER.exception("视频子进程启动失败：%s", exc)
             print(f"RY Aletheia 视频子进程启动失败：{exc}", flush=True)
             return 1
         finally:
@@ -619,6 +635,7 @@ class VideoRuntime:
             str(ingest_binary),
             "--node-name", f"ry_aletheia_video_{stream['name']}",
             "--topic", stream["source_topic"],
+            "--encoding", stream["encoding"],
             "--gst-launch", str(gst_launch),
             "--vaapi-device", config["runtime"]["vaapi_device"],
             "--rtsp-url", f"rtsp://127.0.0.1:{config['gateway']['rtsp_port']}/{stream['path']}",
@@ -634,6 +651,11 @@ class VideoRuntime:
         ingest_environment = os.environ.copy()
         ingest_environment["ROS_DOMAIN_ID"] = str(config["ros_domain_id"])
         self.ingest_processes[stream["name"]] = subprocess.Popen(command, cwd=self.workspace, env=ingest_environment)
+        LOGGER.info(
+            "已启动视频输入：stream=%s pid=%s topic=%s expected=%s/%s fps=%s bitrate_kbps=%s ros_domain_id=%s",
+            stream["name"], self.ingest_processes[stream["name"]].pid, stream["source_topic"],
+            stream["encoding"], stream["resolution"], stream["fps"], stream["bitrate_kbps"], config["ros_domain_id"],
+        )
         print(f"RY Aletheia 已启用视频流：{stream['name']}", flush=True)
 
     @staticmethod
@@ -655,8 +677,10 @@ class VideoRuntime:
             if name not in desired:
                 self._stop_ingest(process)
                 self.ingest_processes.pop(name, None)
+                LOGGER.info("已停止视频输入：stream=%s（操作员关闭该路）", name)
                 print(f"RY Aletheia 已关闭视频流：{name}", flush=True)
             elif process.poll() is not None:
+                LOGGER.error("视频输入进程意外退出：stream=%s exit_code=%s；请查看 logs/video-runtime.log", name, process.returncode)
                 print(f"视频输入进程意外退出：{name} status={process.returncode}", flush=True)
                 return False
         for name, stream in desired.items():
@@ -678,14 +702,17 @@ class VideoRuntime:
         while not self.stopping:
             if self.media_process is None or self.media_process.poll() is not None:
                 status = self.media_process.returncode if self.media_process is not None else "unknown"
+                LOGGER.error("MediaMTX 意外退出：exit_code=%s；请查看 logs/video-runtime.log", status)
                 print(f"MediaMTX 意外退出：status={status}", flush=True)
                 return 1
             try:
                 config = self.manager.load_config()
             except VideoConfigurationError as exc:
+                LOGGER.error("视频配置在运行中失效：%s", exc)
                 print(f"视频配置已失效：{exc}", flush=True)
                 return 1
             if not config["enabled"]:
+                LOGGER.info("视频运行时停止：全局视频开关已关闭")
                 return 0
             if not self._reconcile_streams(config, ingest_binary, gst_launch):
                 return 1
@@ -759,6 +786,7 @@ class ConsoleVideoRuntime:
         try:
             config = config or self.manager.load_config()
         except VideoConfigurationError as exc:
+            LOGGER.error("视频未自动启动：配置无效：%s", exc)
             print(f"RY Aletheia 视频未自动启动：配置无效：{exc}", flush=True)
             return False
         if not config["enabled"]:
@@ -767,6 +795,7 @@ class ConsoleVideoRuntime:
             return False
         self.process = None
         if self.manager._probe_gateway(config["gateway"]["api_url"]).online:
+            LOGGER.warning("视频运行时未重复启动：检测到已有 MediaMTX 网关 api=%s", config["gateway"]["api_url"])
             print("RY Aletheia 视频网关已存在；保留当前进程，不重复启动。", flush=True)
             return False
         logs_dir = self.workspace / "logs"
@@ -787,6 +816,7 @@ class ConsoleVideoRuntime:
                 # terminate that complete tree, including native encoders.
                 start_new_session=True,
             )
+        LOGGER.info("已启动受控视频运行时：pid=%s log=%s", self.process.pid, log_file)
         print(f"RY Aletheia 已自动启动视频运行时：pid={self.process.pid}", flush=True)
         return True
 
@@ -805,6 +835,7 @@ class ConsoleVideoRuntime:
         # group is the complete console-owned video tree.
         try:
             os.killpg(process.pid, signal.SIGTERM)
+            LOGGER.info("请求停止受控视频运行时：pid=%s", process.pid)
         except ProcessLookupError:
             return
         try:
@@ -814,6 +845,7 @@ class ConsoleVideoRuntime:
             # its Popen handle, so forced cleanup cannot target another tool.
             try:
                 os.killpg(process.pid, signal.SIGKILL)
+                LOGGER.warning("视频运行时未在宽限期退出，已强制停止：pid=%s", process.pid)
             except ProcessLookupError:
                 return
             process.wait()

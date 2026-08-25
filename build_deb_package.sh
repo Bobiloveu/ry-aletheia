@@ -2,31 +2,20 @@
 set -euo pipefail
 
 # 生成首次离线部署用的 Debian 安装包。包内不包含源码、ROS install 或构建工具。
-# 用法：./build_deb_package.sh <版本号> [--output-dir <目录>] [--with-foxglove-bridge <官方 bridge .deb>]
+# 用法：./build_deb_package.sh <版本号> [--output-dir <目录>]
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 if [[ $# -lt 1 ]]; then
-  echo "用法：./build_deb_package.sh <版本号> [--output-dir <目录>] [--with-foxglove-bridge <官方 bridge .deb>]" >&2
+  echo "用法：./build_deb_package.sh <版本号> [--output-dir <目录>]" >&2
   exit 2
 fi
 VERSION="$1"
 shift
-BRIDGE_DEB=""
 OUTPUT_DIR="$ROOT/releases"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir)
       [[ $# -ge 2 ]] || { echo "--output-dir 缺少目录参数。" >&2; exit 2; }
       OUTPUT_DIR="$2"
-      shift 2
-      ;;
-    --with-foxglove-bridge)
-      [[ $# -ge 2 ]] || { echo "--with-foxglove-bridge 缺少 DEB 路径。" >&2; exit 2; }
-      BRIDGE_DEB="$(realpath "$2")"
-      [[ -f "$BRIDGE_DEB" ]] || { echo "未找到 Foxglove Bridge DEB：$BRIDGE_DEB" >&2; exit 1; }
-      [[ "$(dpkg-deb -f "$BRIDGE_DEB" Package)" == "ros-humble-foxglove-bridge" ]] || {
-        echo "提供的文件不是 ros-humble-foxglove-bridge DEB。" >&2
-        exit 1
-      }
       shift 2
       ;;
     *)
@@ -59,24 +48,7 @@ echo "正在组装锁定的私有视频运行时（开发机下载，目标小�
 VIDEO_RUNTIME="$STAGE/video-runtime"
 RY_ALETHEIA_VIDEO_ARCH="$ARCH" "$ROOT/build_video_runtime.sh" --output-dir "$VIDEO_RUNTIME"
 
-if [[ -n "$BRIDGE_DEB" ]]; then
-  # 只提取官方 Bridge 的 ROS 前缀，并安装到 Aletheia 私有目录。绝不写入
-  # /opt/ros，也不通过 Conflicts/Replaces 接管系统 ros-humble-foxglove-bridge。
-  BRIDGE_STAGE="$STAGE/foxglove-bridge"
-  [[ "$(dpkg-deb -f "$BRIDGE_DEB" Architecture)" == "$ARCH" ]] || {
-    echo "Foxglove Bridge 架构必须与目标 DEB 一致：期望 $ARCH。" >&2
-    exit 1
-  }
-  PRIVATE_RUNTIME="$PKG/usr/lib/ry-aletheia/foxglove_bridge_runtime"
-  dpkg-deb -x "$BRIDGE_DEB" "$BRIDGE_STAGE"
-  mkdir -p "$PRIVATE_RUNTIME"
-  cp -a "$BRIDGE_STAGE/opt/ros/humble/." "$PRIVATE_RUNTIME/"
-  FOXGLOVE_CONTROL=''
-  DESCRIPTION="Offline package with a private Foxglove Bridge runtime."
-else
-  FOXGLOVE_CONTROL='Depends: ros-humble-foxglove-bridge'
-  DESCRIPTION="Offline first-install package for the RY Aletheia robot QA console."
-fi
+DESCRIPTION="Offline first-install package for the RY Aletheia robot QA console."
 
 {
   printf '%s\n' \
@@ -86,9 +58,6 @@ fi
     'Priority: optional' \
     "Architecture: $ARCH" \
     'Maintainer: RY Robotics'
-  if [[ -n "$FOXGLOVE_CONTROL" ]]; then
-    printf '%s\n' "$FOXGLOVE_CONTROL"
-  fi
   printf '%s\n' \
     'Description: RY Aletheia automated testing console' \
     " $DESCRIPTION"

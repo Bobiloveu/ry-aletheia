@@ -9,12 +9,14 @@ import threading
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import web_console
 from autodrive_console.case_store import CaseStore
 from autodrive_console.models import AttemptResult, RunRecord, TaskParameters, TestCase
 from autodrive_console.map_assets import MapAssetCache
+from autodrive_console.map_snapshot import ObservationMapSnapshot
 from autodrive_console.observation import ObservationError, ObservationManager
 from autodrive_console.trajectory import ActiveMap, TrajectorySession
 from autodrive_console.run_manager import RunManager
@@ -116,6 +118,15 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn(".mobile-shell-nav", mobile_style)
         self.assertNotIn("mobile-viewer-fullscreen-active", mobile_style)
         self.assertNotIn("#08111f", mobile_style)
+
+    def test_status_counts_the_console_process_tree_including_onefile_helpers(self):
+        """状态工具不能按安装路径过滤，否则会漏掉 /tmp/_MEI* 的 C++ sidecar。"""
+        status_source = Path("packaging/debian/ry-aletheia-status").read_text(encoding="utf-8")
+        self.assertIn("tool_tree_pids()", status_source)
+        self.assertIn('pgrep -P "$current"', status_source)
+        self.assertIn('tool_tick_snapshot "$root_pid"', status_source)
+        self.assertIn('print_tool_cpu "$pid"', status_source)
+        self.assertNotIn("awk -v prefix=\"$root/\"", status_source)
 
     def test_scenario_setup_applies_only_registered_targets_and_refuses_unsafe_restore(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -280,7 +291,7 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("result.status || await request('/api/scenario-setup')", source)
         self.assertNotIn("render({ document: documentState, inspection: {}, active_backup: null })", source)
 
-    def test_observation_reuses_cached_map_and_migrates_legacy_bridge_host(self):
+    def test_observation_reuses_cached_map_and_discards_legacy_realtime_bridge_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             cache = MapAssetCache(root / "maps_cache", allowed_roots=(root,))
@@ -308,11 +319,11 @@ class OfflineModuleTests(unittest.TestCase):
             recorder._write_active_map_marker(ActiveMap(asset.id, asset.label, 1, 0.25, 2, 2, 1.0, 2.0, "map"), 3)
             self.assertEqual(manager.active_map_id(), asset.id)
             configured = SettingsStore(root / "console.json").save({"live_observation": {"enabled": True, "bridge_host": "192.168.1.20", "bridge_port": 8766}})
-            self.assertEqual(manager._options(configured)["bridge_port"], 8766)
             self.assertNotIn("bridge_host", configured.live_observation)
+            self.assertNotIn("bridge_port", configured.live_observation)
             old_proxy_path = root / "old-proxy.json"
             old_proxy_path.write_text(json.dumps({"live_observation": {"enabled": True, "bridge_host": "127.0.0.1", "bridge_port": 8765}}), encoding="utf-8")
-            self.assertEqual(SettingsStore(old_proxy_path).load().live_observation["bridge_port"], 8767)
+            self.assertNotIn("bridge_port", SettingsStore(old_proxy_path).load().live_observation)
             # 老版本只保存端口等字段；升级后必须自动补齐车型库，观测页才能安全绘制车体。
             legacy_path = root / "legacy.json"
             legacy_path.write_text(json.dumps({"live_observation": {"enabled": True, "bridge_port": 8767}}), encoding="utf-8")
@@ -321,29 +332,130 @@ class OfflineModuleTests(unittest.TestCase):
             self.assertEqual(legacy.live_observation["vehicle_models"][0]["width_m"], 0.68)
             custom = SettingsStore(root / "custom.json").save({"live_observation": {"vehicle_models": [{"id": "compact", "name": "紧凑车型", "length_m": 0.8, "width_m": 0.55}], "active_vehicle_model": "compact"}})
             self.assertEqual(custom.live_observation["active_vehicle_model"], "compact")
-            with self.assertRaisesRegex(ValueError, "8765"):
-                SettingsStore(root / "reserved-port.json").save({"live_observation": {"enabled": True, "bridge_port": 8765}})
-            manager._port_open = lambda _host, _port: True
-            with self.assertRaisesRegex(ObservationError, "外部进程占用"):
-                manager.start(configured)
             manager.stop()
             with self.assertRaises(ObservationError):
                 manager.preview("../not-a-map")
 
-    def test_observation_port_probe_reads_listener_table_without_a_websocket_connection(self):
+    def test_observation_start_is_serialized_and_stop_reaps_both_sidecars(self):
+        """两个页面同时进入不能重复 spawn，停止路径必须 wait 两个受控子进程。"""
         with tempfile.TemporaryDirectory() as directory:
-            listener_table = Path(directory) / "tcp"
-            listener_table.write_text(
-                "  sl  local_address rem_address   st\n"
-                "   0: 0100007F:223F 00000000:0000 0A\n"
-                "   1: 0100007F:222E 00000000:0000 01\n",
-                encoding="ascii",
+            root = Path(directory)
+            executable = root / "aletheia_live_cloud"
+            executable.write_text("test", encoding="utf-8")
+
+            class FakeTelemetry:
+                def __init__(self):
+                    self.online = False
+                    self.starts = 0
+                    self.stops = 0
+
+                def start(self):
+                    self.online = True
+                    self.starts += 1
+
+                def stop(self):
+                    self.online = False
+                    self.stops += 1
+
+                def status(self):
+                    return {"online": self.online, "clients": {"cloud": 0, "pose": 0}}
+
+            class FakeSnapshot:
+                def __init__(self):
+                    self.starts = 0
+                    self.stops = 0
+
+                def start(self):
+                    self.starts += 1
+
+                def stop(self):
+                    self.stops += 1
+
+                def status(self):
+                    return {"state": "idle"}
+
+            class FakeProcess:
+                next_pid = 1000
+
+                def __init__(self):
+                    self.pid = FakeProcess.next_pid
+                    FakeProcess.next_pid += 1
+                    self.returncode = None
+                    self.waited = False
+
+                def poll(self):
+                    return self.returncode
+
+                def wait(self, timeout=None):
+                    self.waited = True
+                    self.returncode = 0
+                    return 0
+
+            manager = ObservationManager(root / "maps", root / "logs", executable)
+            manager._telemetry = FakeTelemetry()
+            manager._map_snapshot = FakeSnapshot()
+            settings = RobotSettings(live_observation={"enabled": True, "idle_stop_seconds": 45, "vehicle_models": [], "active_vehicle_model": ""})
+            created: list[FakeProcess] = []
+            barrier = threading.Barrier(2)
+            failures: list[BaseException] = []
+
+            def enter_page():
+                try:
+                    barrier.wait(timeout=2)
+                    manager.start(settings)
+                except BaseException as exc:  # assertion after both callers return
+                    failures.append(exc)
+
+            def spawn(*_args, **_kwargs):
+                process = FakeProcess()
+                created.append(process)
+                return process
+
+            with patch("autodrive_console.observation.subprocess.Popen", side_effect=spawn), patch("autodrive_console.observation.os.killpg"):
+                first = threading.Thread(target=enter_page)
+                second = threading.Thread(target=enter_page)
+                first.start()
+                second.start()
+                first.join(timeout=5)
+                second.join(timeout=5)
+                self.assertFalse(first.is_alive())
+                self.assertFalse(second.is_alive())
+                self.assertEqual(failures, [])
+                self.assertEqual(len(created), 2)
+                manager.stop()
+
+            self.assertTrue(all(process.waited for process in created))
+            self.assertFalse(manager._telemetry.online)
+            self.assertEqual(manager._map_snapshot.stops, 1)
+
+    def test_live_observation_snapshot_caches_transient_ros_map_and_marks_it_active(self):
+        """没有轨迹任务时，实时页也能从当前 /map 写入既有地图缓存。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "map_sources"
+            source_root.mkdir()
+            collector = ObservationMapSnapshot(root / "maps_cache")
+            message = SimpleNamespace(
+                header=SimpleNamespace(frame_id="map"),
+                info=SimpleNamespace(
+                    resolution=0.5, width=2, height=2,
+                    origin=SimpleNamespace(position=SimpleNamespace(x=-1.0, y=2.0)),
+                    map_load_time=SimpleNamespace(sec=12, nanosec=34),
+                ),
+                data=[0, 100, -1, 50],
             )
-            self.assertEqual(ObservationManager._listening_tcp_ports((listener_table,)), {8767})
-            with patch.object(ObservationManager, "_listening_tcp_ports", return_value={8767}) as probe:
-                self.assertTrue(ObservationManager._port_open("127.0.0.1", 8767))
-                self.assertFalse(ObservationManager._port_open("192.168.1.20", 8767))
-            probe.assert_called_once_with()
+            with patch.object(MapAssetCache, "ALLOWED_ROOTS", (source_root,)):
+                collector._on_map(message)
+                # 同一 Transient Local 回放不能反复重写或生成新的资产。
+                collector._on_map(message)
+            status = collector.status()
+            self.assertEqual(status["state"], "ready")
+            self.assertTrue(status["active_map_id"])
+            manager = ObservationManager(root / "maps_cache", root / "logs")
+            self.assertEqual(manager.active_map_id(), status["active_map_id"])
+            layers = manager.layers(status["active_map_id"])
+            self.assertEqual(layers["map"]["origin"], [-1.0, 2.0, 0.0])
+            self.assertEqual(layers["map"]["width"], 2)
 
     def test_live_observation_matches_map_walls_from_current_ros_map_metadata(self):
         """实时页不依赖轨迹任务，也能按实际 /map 找到同目录虚拟墙。"""
@@ -381,30 +493,49 @@ class OfflineModuleTests(unittest.TestCase):
             cache = MapAssetCache(root / "cache", allowed_roots=(root,))
             self.assertIsNone(cache.find_matching_map(resolution=0.25, width=2, height=2, origin=[0.0, 0.0]))
 
-    def test_live_observation_frontend_subscribes_to_transient_map(self):
-        """避免直连模式只收到 TF、却因白名单遗漏而永远不请求 /map。"""
+    def test_identical_map_and_wall_mirrors_are_safe_to_deduplicate(self):
+        """发布历史留下的镜像地图可恢复相同的虚拟墙，不误认不同地图。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            map_bytes = b"P5\n2 2\n255\n\x00\xff\xff\x00"
+            walls = "virtual_walls:\n  coordinate_mode: world\n  segments:\n  - start:\n    - 0\n    - 0\n    end:\n    - 1\n    - 1\n"
+            for name in ("P2", "P2_mirror"):
+                folder = root / name
+                folder.mkdir()
+                (folder / "map.pgm").write_bytes(map_bytes)
+                (folder / "map.yaml").write_text("image: map.pgm\nresolution: 0.25\norigin: [0, 0, 0]\n", encoding="utf-8")
+                (folder / "map_walls.yaml").write_text(walls, encoding="utf-8")
+            cache = MapAssetCache(root / "cache", allowed_roots=(root,))
+            asset = cache.find_matching_map(resolution=0.25, width=2, height=2, origin=[0.0, 0.0])
+            self.assertIsNotNone(asset)
+            self.assertEqual(MapAssetCache.virtual_walls(asset)[0]["points"], [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 1.0}])
+
+    def test_live_observation_frontend_uses_cached_map_and_dedicated_binary_telemetry(self):
+        """地图缓存和实时遥测独立，浏览器不再发现或订阅 ROS 图。"""
         source = Path("frontend/src/liveObservation.js").read_text(encoding="utf-8")
-        self.assertIn("const TOPICS = new Set(['/map', '/amcl_pose'", source)
-        self.assertIn("if (channel.topic === '/map') { mapChannel = channel; beginMapProbe(); }", source)
-        # 相机预览不再经过 Foxglove Bridge；这里仅订阅地图、定位、TF 与点云。
+        self.assertIn("function connectTelemetry(payload)", source)
+        self.assertIn("openLane('cloud', '/cloud'", source)
+        self.assertIn("openLane('pose', '/pose'", source)
+        self.assertIn("function updateTelemetryCloud(data)", source)
+        self.assertIn("function updateTelemetryPose(data)", source)
+        self.assertNotIn("FoxgloveClient", source)
+        self.assertNotIn("/_aletheia/live_points", source)
         self.assertNotIn("function isDepthTransport(channel)", source)
         self.assertNotIn("isCameraCandidate(channel)", source)
         self.assertNotIn("原始图像（高带宽，可能增加延迟）", source)
-        self.assertIn("/api/observation/live-layers", source)
         self.assertIn("/api/observation/active-map", source)
         self.assertIn("const ACTIVE_MAP_SYNC_MS = 1000;", source)
-        self.assertIn("function reassertMapProbe()", source)
         self.assertIn("function invalidateMapScopedCloud()", source)
         self.assertIn("generation: mapGeneration", source)
         self.assertIn("async function refreshActiveMap(observation)", source)
         self.assertIn("if (!mapId || mapId === loadedMapId || mapId === requestedActiveMapId) return;", source)
         self.assertIn("const POINT_LIMIT = 3000;", source)
-        self.assertIn("const PREPROCESSED_CLOUD_MIN_INTERVAL_MS = 100;", source)
         self.assertIn("const CLOUD_COMPOSITE_MIN_INTERVAL_MS = 125;", source)
-        self.assertIn("const RAW_CLOUD_MIN_INTERVAL_MS = 250;", source)
         # PixiJS 世界容器仅更新相机矩阵，可按显示帧合成而不重绘栅格。
         self.assertIn("const MAP_RENDER_INTERVAL_MS = 16;", source)
-        self.assertIn("const TF_MIN_INTERVAL_MS = 33;", source)
+        # 位姿已不再走 TF/通用协议：只消费专用二进制帧并保持单槽 latest-wins。
+        self.assertIn("const TELEMETRY_HEADER_BYTES = 20;", source)
+        self.assertIn("const POSE_PACKET_MAX_AGE_MS = 250;", source)
         # 点云历史只保留极短窗口，避免与地图交互争用浏览器主线程。
         self.assertIn("import { Application, BufferImageSource, Container, Graphics, Sprite, Texture } from 'pixi.js';", source)
         self.assertIn("async function initializePixiRenderer()", source)
@@ -414,7 +545,6 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("function renderCloudPoints(packedPoints)", source)
         self.assertIn("function renderStaticWorld()", source)
         self.assertIn("pixiWorld.scale.set(layout.ratio, layout.ratio);", source)
-        self.assertIn("mapTexture = createRgbaTexture(pixels, info.width, info.height);", source)
         self.assertNotIn("cameraChannels", source)
         self.assertNotIn("cameraSlots", source)
         self.assertNotIn("async function initializeCameraRenderer(slot)", source)
@@ -424,7 +554,6 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("const DESKTOP_MAP_PALETTE", source)
         self.assertIn("pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiWallLayer, pixiCloudLayer);", source)
         self.assertNotIn("liveCloudWorker", source)
-        self.assertIn("回退到原始点云时仍保持保守限速", source)
         self.assertIn("function followVehicleCenter(vehicle)", source)
         self.assertIn("function hasPendingFollowAdjustment()", source)
         self.assertIn("const FOLLOW_CENTER_SETTLE_DISTANCE_M = 0.008;", source)
@@ -435,98 +564,11 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("PixiJS 仅更新世界容器矩阵", source)
         self.assertIn("function stopRenderScheduling()", source)
         self.assertIn("document.addEventListener('visibilitychange'", source)
-        self.assertIn("const VEHICLE_BASE_FRAMES = ['base_footprint', 'base_link', 'base_footprint_link'];", source)
         self.assertIn("function vehiclePoseInMap()", source)
-        self.assertIn("function subscribeVisualizationStream(kind, channel, streamClient = client", source)
-        self.assertIn("function connectPoseLane(url)", source)
-        self.assertIn("connectPoseLane(url);", source)
-        self.assertIn("位姿使用独立 TCP/WebSocket", source)
-        self.assertNotIn("const STREAM_PROBE_INTERVAL_MS", source)
-        self.assertIn("function activateVisualizationStreams()", source)
-        self.assertIn("else if (channel.topic === '/amcl_pose') subscriptions.set(client.subscribe(channel.id)", source)
-        self.assertIn("else if (channel.topic === '/tf') { tfChannel = channel;", source)
-        self.assertIn("const LIVE_CLOUD_TOPIC = '/_aletheia/live_points';", source)
-        self.assertIn("else if (channel.topic === cloudTopic) {", source)
-        self.assertIn("if (!pauseCloudForCamera()) subscribeVisualizationStream('cloud', cloudChannel);", source)
-        self.assertIn("subscribeLivePoseStream();", source)
-        self.assertIn("实时流不能以地图作为订阅前置条件", source)
         self.assertIn("function flushCloudRenderer()", source)
         self.assertIn("pendingCloudFrame = frame;", source)
         server_source = Path("web_console.py").read_text(encoding="utf-8")
         self.assertIn('path == "/api/observation/active-map"', server_source)
-
-    def test_private_bridge_runtime_only_changes_bridge_child_environment(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            prefix = root / "runtime" / "foxglove_bridge"
-            marker = prefix / "share" / "ament_index" / "resource_index" / "packages" / "foxglove_bridge"
-            marker.parent.mkdir(parents=True)
-            marker.write_text("", encoding="utf-8")
-            (prefix / "lib").mkdir()
-            manager = ObservationManager(root / "maps_cache", root / "logs")
-            environment = manager._bridge_environment()
-            self.assertEqual(manager._private_bridge_prefix(), prefix)
-            self.assertEqual(environment["AMENT_PREFIX_PATH"].split(os.pathsep)[0], str(prefix))
-            self.assertEqual(environment["CMAKE_PREFIX_PATH"].split(os.pathsep)[0], str(prefix))
-            self.assertEqual(environment["LD_LIBRARY_PATH"].split(os.pathsep)[0], str(prefix / "lib"))
-
-    def test_private_bridge_starts_directly_without_system_ros2_launch(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            prefix = root / "runtime" / "foxglove_bridge"
-            marker = prefix / "share" / "ament_index" / "resource_index" / "packages" / "foxglove_bridge"
-            executable = prefix / "lib" / "foxglove_bridge" / "foxglove_bridge"
-            marker.parent.mkdir(parents=True)
-            marker.write_text("", encoding="utf-8")
-            executable.parent.mkdir(parents=True)
-            executable.write_text("#!/bin/sh\n", encoding="utf-8")
-            executable.chmod(0o755)
-            manager = ObservationManager(root / "maps_cache", root / "logs")
-            settings = RobotSettings(live_observation={"enabled": True, "bridge_port": 8767})
-
-            class Process:
-                pid = 4242
-
-                @staticmethod
-                def poll():
-                    return None
-
-            with patch.object(manager, "_port_open", side_effect=[False, True]), \
-                 patch("autodrive_console.observation.subprocess.Popen", return_value=Process()) as popen, \
-                 patch("autodrive_console.observation.threading.Timer"):
-                manager.start(settings)
-            command = popen.call_args.args[0]
-            self.assertEqual(command[:3], [str(executable), "--ros-args", "-p"])
-            self.assertIn("include_hidden:=true", command)
-            self.assertNotIn("launch", command)
-            manager._process = None
-
-    def test_observation_private_bridge_listens_on_lan_and_is_checked_locally(self):
-        """性能模式直连浏览器，Bridge 必须监听全部网卡但仅用回环检查健康。"""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            manager = ObservationManager(root / "maps_cache", root / "logs")
-            settings = RobotSettings(live_observation={"enabled": True, "bridge_port": 8767})
-
-            class Process:
-                pid = 4242
-
-                @staticmethod
-                def poll():
-                    return None
-
-            with patch.object(manager, "_bridge_package", return_value=(True, "available")), \
-                 patch.object(manager, "_port_open", side_effect=[False, True]) as port_open, \
-                 patch("autodrive_console.observation.shutil.which", return_value="/opt/ros/humble/bin/ros2"), \
-                 patch("autodrive_console.observation.subprocess.Popen", return_value=Process()) as popen, \
-                 patch("autodrive_console.observation.threading.Timer"):
-                status = manager.start(settings)
-            command = popen.call_args.args[0]
-            self.assertIn("address:=0.0.0.0", command)
-            self.assertIn("max_qos_depth:=1", command)
-            self.assertEqual(port_open.call_args_list[0].args[0], "127.0.0.1")
-            self.assertEqual(status["bridge"]["access_mode"], "direct")
-            manager._process = None
 
     def test_ros_map_cache_is_independent_of_invalid_json_map_url(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -565,6 +607,29 @@ class OfflineModuleTests(unittest.TestCase):
                 '{"time":"2026-08-14 10:02:00","level":"CRITICAL","source":"console","message":"未处理异常","exception":"Traceback: detail"}\n', encoding="utf-8",
             )
             self.assertEqual(store.entries(errors_only=True)[0]["exception"], "Traceback: detail")
+            (Path(directory) / "video-runtime.log").write_text("native encoder detail\n", encoding="utf-8")
+            (Path(directory) / "live_preprocessor_cloud.log").write_text("cloud udp detail\n", encoding="utf-8")
+            self.assertEqual(
+                [path.name for path in store.diagnostic_files()],
+                ["ry-aletheia.log", "ry-aletheia-error.log", "live_preprocessor_cloud.log", "video-runtime.log"],
+            )
+            records = store.diagnostic_records()
+            self.assertEqual(records[-1]["name"], "video-runtime.log")
+            self.assertEqual(records[-1]["label"], "视频运行时")
+            self.assertEqual(store.diagnostic_file("video-runtime.log"), Path(directory) / "video-runtime.log")
+            self.assertIsNone(store.diagnostic_file("../../etc/passwd"))
+        console_source = Path("web_console.py").read_text(encoding="utf-8")
+        self.assertIn("LOGS.diagnostic_files()", console_source)
+        self.assertIn("ry-aletheia-diagnostics.zip", console_source)
+        self.assertIn('path == "/api/tool-logs/files"', console_source)
+        self.assertIn("LOGS.diagnostic_records()", console_source)
+        self.assertIn("_download_diagnostic_file", console_source)
+        log_page = (Path("autodrive_console") / "web" / "tool-logs.html").read_text(encoding="utf-8")
+        log_script = (Path("autodrive_console") / "web" / "tool-logs.js").read_text(encoding="utf-8")
+        self.assertIn('id="diagnosticFileList"', log_page)
+        self.assertIn("下载完整诊断包", log_page)
+        self.assertIn("/api/tool-logs/files", log_script)
+        self.assertIn("encodeURIComponent(file.name)", log_script)
 
     def test_upgrade_status_caches_version_without_scanning_binary(self):
         with tempfile.TemporaryDirectory() as directory:

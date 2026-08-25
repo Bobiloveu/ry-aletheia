@@ -27,14 +27,17 @@ class VideoManagerTests(unittest.TestCase):
         probe.assert_not_called()
         self.assertFalse(status["enabled"])
         self.assertFalse(status["gateway"]["online"])
-        self.assertEqual([stream["status"] for stream in status["streams"]], ["disabled"] * 5)
+        self.assertEqual([stream["status"] for stream in status["streams"]], ["disabled"] * 6)
         self.assertEqual(status["streams"][0]["url"], "http://192.168.10.42:8889/front_camera/whep")
         self.assertEqual(status["streams"][0]["source_topic"], "/front_camera/image_raw")
         self.assertEqual(status["streams"][0]["resolution"], "640x480")
         self.assertEqual(status["streams"][0]["fps"], 15)
-        self.assertEqual(status["streams"][-1]["name"], "detection_camera")
-        self.assertEqual(status["streams"][-1]["source_topic"], "/annotated_image")
-        self.assertEqual(status["streams"][-1]["fps"], 10)
+        self.assertEqual(status["streams"][-2]["name"], "detection_camera")
+        self.assertEqual(status["streams"][-2]["source_topic"], "/rfdetr_detect")
+        self.assertEqual(status["streams"][-2]["encoding"], "bgr8")
+        self.assertEqual(status["streams"][-2]["fps"], 10)
+        self.assertEqual(status["streams"][-1]["name"], "segmentation_overlay")
+        self.assertEqual(status["streams"][-1]["source_topic"], "/segmentation/overlay")
         self.assertTrue(all(stream["enabled"] is False for stream in status["streams"]))
         self.assertTrue(all("camera_pair" not in stream for stream in status["streams"]))
         self.assertEqual(status["gateway"]["management"], "console")
@@ -88,7 +91,7 @@ class VideoManagerTests(unittest.TestCase):
             manager = VideoManager(path)
             manager.set_enabled(True)
             saved = json.loads(path.read_text(encoding="utf-8"))
-        self.assertEqual([stream["enabled"] for stream in saved["streams"]], [True, False, False, False, False])
+        self.assertEqual([stream["enabled"] for stream in saved["streams"]], [True, False, False, False, False, False])
 
     def test_each_configured_stream_can_be_toggled_independently_and_last_one_stops_runtime(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -100,13 +103,13 @@ class VideoManagerTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "未找到已配置的视频流"):
                 manager.set_stream_enabled("not_configured", True)
         self.assertTrue(first["enabled"])
-        self.assertEqual([stream["enabled"] for stream in first["streams"]], [True, False, False, False, False])
-        self.assertEqual([stream["enabled"] for stream in second["streams"]], [True, False, False, False, True])
+        self.assertEqual([stream["enabled"] for stream in first["streams"]], [True, False, False, False, False, False])
+        self.assertEqual([stream["enabled"] for stream in second["streams"]], [True, False, False, False, True, False])
         self.assertTrue(last["enabled"])
         self.assertFalse(stopped["enabled"])
-        self.assertEqual([stream["enabled"] for stream in stopped["streams"]], [False, False, False, False, False])
+        self.assertEqual([stream["enabled"] for stream in stopped["streams"]], [False, False, False, False, False, False])
 
-    def test_zip_upgrade_migration_appends_detection_stream_without_replacing_existing_choices(self):
+    def test_zip_upgrade_migration_appends_new_video_streams_without_replacing_existing_choices(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             old = json.loads((ROOT / "config" / "video.json").read_text(encoding="utf-8"))
@@ -121,8 +124,8 @@ class VideoManagerTests(unittest.TestCase):
             saved = json.loads(target.read_text(encoding="utf-8"))
         self.assertTrue(migrated)
         self.assertTrue(saved["enabled"])
-        self.assertEqual([stream["name"] for stream in saved["streams"]], ["front_camera", "back_camera", "left_camera", "right_camera", "detection_camera"])
-        self.assertEqual([stream["enabled"] for stream in saved["streams"]], [True, False, False, False, False])
+        self.assertEqual([stream["name"] for stream in saved["streams"]], ["front_camera", "back_camera", "left_camera", "right_camera", "detection_camera", "segmentation_overlay"])
+        self.assertEqual([stream["enabled"] for stream in saved["streams"]], [True, False, False, False, False, False])
 
     def test_video_config_uses_the_vehicle_ros_domain_and_rejects_invalid_domains(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -131,6 +134,22 @@ class VideoManagerTests(unittest.TestCase):
             invalid = VideoManager(self._config(root, ros_domain_id=233)).status()
         self.assertEqual(configured["ros_domain_id"], 66)
         self.assertIn("ros_domain_id", invalid["gateway"]["detail"])
+
+    def test_video_config_accepts_bgr8_detection_images_and_rejects_other_encodings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            supported = VideoManager(self._config(root, streams=[
+                {"name": "detection_camera", "path": "detection_camera", "enabled": True,
+                 "source_topic": "/rfdetr_detect", "encoding": "bgr8", "resolution": "640x480", "fps": 10,
+                 "bitrate_kbps": 800},
+            ])).load_config()
+            unsupported = VideoManager(self._config(root, streams=[
+                {"name": "detection_camera", "path": "detection_camera", "enabled": True,
+                 "source_topic": "/rfdetr_detect", "encoding": "mono8", "resolution": "640x480", "fps": 10,
+                 "bitrate_kbps": 800},
+            ])).status()
+        self.assertEqual(supported["streams"][0]["encoding"], "bgr8")
+        self.assertIn("rgb8 或 bgr8", unsupported["gateway"]["detail"])
 
     def test_online_gateway_marks_only_published_paths_online(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -219,6 +238,19 @@ class VideoManagerTests(unittest.TestCase):
         first.terminate.assert_not_called()
         second.terminate.assert_called_once()
 
+    def test_native_ingest_receives_the_configured_bgr8_format(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = VideoManager(self._config(root))
+            runtime = VideoRuntime(manager, root, root / "aletheia_video_ingest")
+            detection = next(stream for stream in manager.load_config()["streams"] if stream["name"] == "detection_camera")
+            process = unittest.mock.Mock(pid=4321)
+            with patch("autodrive_console.video.subprocess.Popen", return_value=process) as popen:
+                runtime._start_ingest(detection, manager.load_config(), root / "aletheia_video_ingest", root / "gst-launch-1.0")
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("--topic") + 1], "/rfdetr_detect")
+        self.assertEqual(command[command.index("--encoding") + 1], "bgr8")
+
     def test_console_owns_an_enabled_video_runtime_and_stops_it_on_exit(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -284,7 +316,7 @@ class VideoManagerTests(unittest.TestCase):
             with patch("autodrive_console.video.subprocess.Popen") as popen, patch("autodrive_console.video.os.killpg") as killpg:
                 changed = controller.set_stream_enabled("back_camera", True)
         self.assertTrue(changed["enabled"])
-        self.assertEqual([stream["enabled"] for stream in changed["streams"]], [True, True, False, False, False])
+        self.assertEqual([stream["enabled"] for stream in changed["streams"]], [True, True, False, False, False, False])
         popen.assert_not_called()
         killpg.assert_not_called()
 
@@ -304,12 +336,19 @@ class VideoManagerTests(unittest.TestCase):
         build = (ROOT / "build_binary.sh").read_text(encoding="utf-8")
         self.assertIn('rclcpp::SensorDataQoS().keep_last(1)', source)
         self.assertIn('"--node-name"', source)
+        self.assertIn('"--encoding"', source)
         self.assertIn('Node(options.node_name)', source)
         self.assertIn('std::this_thread::sleep_until(next_frame_at)', source)
         self.assertIn('latest_frame_ = std::move(image);', source)
-        self.assertIn('"rawvideoparse", "format=rgb"', source)
+        self.assertIn('const std::string raw_format = options_.encoding == "bgr8" ? "bgr" : "rgb";', source)
+        self.assertIn('"rawvideoparse", "format=" + raw_format', source)
         self.assertIn('"vaapih264enc"', source)
         self.assertIn('"rtspclientsink"', source)
+        self.assertIn("视频输入等待首帧", source)
+        self.assertIn("视频输入已中断", source)
+        self.assertIn("视频输入已收到 %llu 个 ROS 图像但没有兼容帧", source)
+        self.assertIn("视频输入已就绪", source)
+        self.assertIn("GStreamer 输入管道已中断：errno=%d", source)
         self.assertNotIn('const std::string device = "device="', source)
         self.assertIn('"/dev/dri/renderD128"', (ROOT / "config" / "video.json").read_text(encoding="utf-8"))
         self.assertIn('add_executable(aletheia_video_ingest', cmake)
@@ -334,6 +373,8 @@ class VideoManagerTests(unittest.TestCase):
         source = (ROOT / "autodrive_console" / "video.py").read_text(encoding="utf-8")
         self.assertIn("subprocess.Popen([str(media_binary), str(media_config)]", source)
         self.assertIn('ingest_environment["ROS_DOMAIN_ID"] = str(config["ros_domain_id"])', source)
+        self.assertIn("已启动视频输入：stream=%s", source)
+        self.assertIn("视频输入进程意外退出：stream=%s", source)
         self.assertNotIn("shell=True", source)
 
     def test_embedded_zip_runtime_refreshes_workspace_before_starting_video(self):

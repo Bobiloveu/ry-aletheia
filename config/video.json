@@ -60,8 +60,18 @@
       "name": "detection_camera",
       "path": "detection_camera",
       "enabled": false,
-      "source_topic": "/annotated_image",
-      "encoding": "rgb8",
+      "source_topic": "/rfdetr_detect",
+      "encoding": "bgr8",
+      "resolution": "640x480",
+      "fps": 10,
+      "bitrate_kbps": 800
+    },
+    {
+      "name": "segmentation_overlay",
+      "path": "segmentation_overlay",
+      "enabled": false,
+      "source_topic": "/segmentation/overlay",
+      "encoding": "bgr8",
       "resolution": "640x480",
       "fps": 10,
       "bitrate_kbps": 800

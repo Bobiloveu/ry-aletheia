@@ -1,31 +1,19 @@
-import { FoxgloveClient } from '@foxglove/ws-protocol';
-import { parse } from '@foxglove/rosmsg';
-import { MessageReader } from '@foxglove/rosmsg2-serialization';
 import { Application, BufferImageSource, Container, Graphics, Sprite, Texture } from 'pixi.js';
 import '../../autodrive_console/web/styles.css';
 import '../../autodrive_console/web/refinement.css';
 import '../../autodrive_console/web/page_views.css';
 import './liveObservation.css';
 
-// 只订阅二维观测必要的话题。TF 仅用于将雷达点云投影到地图坐标，不做三维场景渲染。
-// /map 的历史样本在本车上只对 TRANSIENT_LOCAL 订阅可见。底图由轨迹记录器
-// 安全缓存后通过 HTTP 提供；浏览器直连 Aletheia 私有 Bridge 获取实时数据。
-// /map 必须进入白名单：它是 TRANSIENT_LOCAL 话题，浏览器仅在短订阅窗口内
-// 接收一次当前栅格；遗漏它会导致 Bridge 已连接但地图永远无法开始加载。
-const LIVE_CLOUD_TOPIC = '/_aletheia/live_points';
-const LIVE_POSE_TOPIC = '/_aletheia/live_pose';
-const DEFAULT_LIVE_CLOUD_SOURCE_TOPIC = '/collision_voxel_layer/points';
-const TOPICS = new Set(['/map', '/amcl_pose', LIVE_POSE_TOPIC, DEFAULT_LIVE_CLOUD_SOURCE_TOPIC, LIVE_CLOUD_TOPIC, '/tf', '/tf_static']);
-// ros-humble-foxglove-bridge 3.x 采用 Foxglove SDK 的握手标识。@foxglove/ws-protocol
-// 仍负责兼容的消息帧编解码，但其旧常量 foxglove.websocket.v1 不能通过 3.x Bridge。
-const FOXGLOVE_BRIDGE_SUBPROTOCOL = 'foxglove.sdk.v1';
+// Aletheia 专用遥测帧。地图仍从既有 HTTP 缓存读取；点云已经由小车端 C++
+// 投影至 map，仅含紧凑 x/y float32；位姿仅含 x/y/yaw。没有 ROS CDR、TF 或
+// 通用 ROS-Web 协议进入浏览器。
+const TELEMETRY_MAGIC = 'ALTM';
+const TELEMETRY_HEADER_BYTES = 20;
+const TELEMETRY_CLOUD = 1;
+const TELEMETRY_POSE = 2;
 // 3000 点足以保留室内墙面和门洞的结构感；仍在前端限频解析，避免以原始全量
 // 点云的频率占用浏览器主线程。
 const POINT_LIMIT = 3000;
-// 私有预处理节点已经在小车端限点、转换到 map 坐标并保持 depth=1，可按更高
-// 刷新率消费；回退到原始点云时仍保持保守限速，避免浏览器主线程被抢占。
-const PREPROCESSED_CLOUD_MIN_INTERVAL_MS = 100;
-const RAW_CLOUD_MIN_INTERVAL_MS = 250;
 // 实时观测只关心“现在”。页面短暂忙碌或网络抖动后，宁可跳过旧扫描也不能
 // 按顺序补绘导致画面落后实车。两个队列均为单槽 latest-wins。
 const CLOUD_PACKET_MAX_AGE_MS = 100;
@@ -36,9 +24,6 @@ const CLOUD_COMPOSITE_MIN_INTERVAL_MS = 125;
 // 窗口。保留 250 ms 仍是当前画面，不会形成历史回放，却能避免车体偶发断流。
 const POSE_PACKET_MAX_AGE_MS = 250;
 const LIVE_POSE_FALLBACK_MS = 450;
-// 实测 /tf 可稳定高频到达。仅消费约 30 Hz 已足够让车体连续运动，同时避免把
-// 数百 Hz 的 TF 批量解析和整图重绘带入浏览器主线程。
-const TF_MIN_INTERVAL_MS = 33;
 // 地图旋转、栅格缩放与高密度点云合成是最重的浏览器操作。数据接收可更快，
 // 但 PixiJS 只按可见效果提交，避免每一帧 TF 都触发整图重绘。
 // 地图世界层只更新 PixiJS 变换，不重新上传地图纹理或点云几何；因此可按显示器
@@ -46,20 +31,9 @@ const TF_MIN_INTERVAL_MS = 33;
 const MAP_RENDER_INTERVAL_MS = 16;
 // 地图源本身约为千级像素；限制到 CSS 像素级可避免在高 DPI 电脑上反复旋转
 // 超采样的渲染目标，显著降低主视图卡顿，同时不压缩或修改原始地图数据。
-// /map 是 transient-local 的静态资产。保持一个订阅即可收到首次地图以及
-// map_server 切图时发布的新地图，不能用定时退订/重订来“探测”切图：那会把
-// 完整 OccupancyGrid 周期性塞回主线程，造成点云和车体同时掉帧。
-// 点云和动态 TF 只在实时观测页打开且地图已就绪后订阅。此前短脉冲订阅会在
-// Bridge 创建 ROS 订阅或 TF 尚未到达时错过样本，表现为点云冻结；改为持续订阅，
-// 再在浏览器端限频解码最新帧，避免重复创建订阅和积压旧帧。
-const STATIC_TF_WINDOW_MS = 1400;
-// /map 本身始终是持久订阅。此轻量标记只读取 active_map.json 中的 ID，用来
-// 发现部分 map_server 在生命周期切换时未向既有 Bridge 订阅及时重放栅格的情况。
-// 确认切图后才重订阅一次 /map，绝不轮询大 OccupancyGrid。
+// active_map.json 是地图缓存的轻量标记；点云、位姿重构不改变地图加载机制。
 const ACTIVE_MAP_SYNC_MS = 1000;
-// 地图服务切换时，/map 栅格可能先到而 map_server 参数或同目录墙文件稍后才
-// 可读。未匹配不是最终状态：有限重试既能补画虚拟墙，又不在运行中持续扫描磁盘。
-const LIVE_WALL_RETRY_DELAYS_MS = [800, 2000, 5000];
+const VIDEO_INPUT_READINESS_TIMEOUT_MS = 8000;
 const DEFAULT_VIEW_METERS = 16;
 const MIN_PIXELS_PER_METER = 8;
 const MAX_PIXELS_PER_METER = 420;
@@ -71,14 +45,13 @@ const FOLLOW_CENTER_SNAP_DISTANCE_M = 1.5;
 // 平滑接近目标后必须停止补帧。否则静止小车持续发布的 TF 会不断延长动画窗口，
 // 使页面在没有可见变化时仍维持高频重绘。
 const FOLLOW_CENTER_SETTLE_DISTANCE_M = 0.008;
-// 静止定位仍会有毫米级浮动。由显示层的 α-β 校正吸收小误差；不能把原始位姿
-// 锁在锚点上，否则低速直行或原地缓转会积累为一次明显跳步。
-const VEHICLE_POSITION_DEADBAND_M = 0.006;
+// 静止定位仍会有厘米级浮动。实车采样显示 map→base 的自然噪声可接近 2.7 cm
+// 和 0.7°；先在显示输入处锁住这一区间，不能把每个 TF 微扰直接交给车体。
+// 自动驾驶的正常低速位移会累积越过该阈值，随后由 α-β 显示层连续追上。
+const STATIC_POSE_POSITION_HOLD_M = 0.03;
+const STATIC_POSE_YAW_HOLD_RAD = 0.02;
+const VEHICLE_POSITION_DEADBAND_M = 0.012;
 const VEHICLE_VELOCITY_DEADBAND_MPS = 0.05;
-// 仅用于判断何时刷新“速度估计”，不截断位置或朝向本身。低于该值的更新仍会
-// 交给显示滤波器，因此车体会连续移动，而不会被静止判定冻结。
-const LIVE_MOTION_POSITION_EPSILON_M = 0.008;
-const LIVE_MOTION_YAW_EPSILON_RAD = 0.008;
 const MAX_VEHICLE_PREDICTION_MS = 300;
 const ALPHA_BETA_POSITION_GAIN = 0.72;
 const ALPHA_BETA_VELOCITY_GAIN = 0.12;
@@ -95,25 +68,30 @@ const MAP_PALETTE = {
   cloud: 0x8b5cf6,
   virtualWall: 0xd63142,
 };
-// PC 保持原有高对比观测配色与无格栅画面。手机专用主题和米制格栅只在
+// PC 保持原有高对比观测配色与无格栅画面。点云用更深、饱和度更高的紫色，
+// 并将半径从 0.35 调至 0.52 px：大屏与缩放地图中能看清稀疏导航点，仍明显
+// 小于手机端，不会遮蔽墙体细节；实际点数、几何边界和传输链路均不改变。
+// 手机专用主题和米制格栅只在
 // `html.mobile-console` 已由 setupMobileConsole 显式启用时参与渲染。
 const DESKTOP_MAP_PALETTE = {
   unknown: [174, 174, 174],
   free: [245, 245, 245],
   occupied: [36, 36, 36],
-  cloud: 0x8058ff,
+  cloud: 0x6426d9,
   virtualWall: 0xd63142,
 };
 const $ = (id) => document.getElementById(id);
-let client;
-// 位姿使用独立 TCP/WebSocket。即使点云连接正在传输大帧，也不会在浏览器
-// 或 TCP 的有序字节流中阻塞这个小而高频的控制台状态流。
-let poseClient;
-let poseReaders;
-let poseSubscriptions;
-let poseLaneChannel;
+// 点云和位姿保持两条独立 Binary WebSocket。点云慢客户端只能阻塞自身 socket，
+// 小车端和浏览器端的位姿链路均不复用该队列。
+let cloudSocket;
+let poseSocket;
+// 断网或网关短暂重启时，两条车端数据线独立重连；不重连另一条已经健康的线，
+// 也不把任何历史帧保存在浏览器中。
+let telemetryConnectionGeneration = 0;
+const telemetryReconnectTimers = { cloud: undefined, pose: undefined };
+const telemetryLaneOpen = { cloud: false, pose: false };
+const telemetryLaneAttempts = { cloud: 0, pose: 0 };
 let cloudUpdatedAt = 0;
-let tfUpdatedAt = 0;
 let livePoseUpdatedAt = 0;
 let vehicleUpdatedAt = 0;
 let mapInfo;
@@ -139,7 +117,6 @@ let pendingCloudPacket;
 let cloudPacketQueued = false;
 let pendingPosePacket;
 let posePacketQueued = false;
-let pose;
 let tfVehiclePose;
 let renderedVehiclePose;
 let renderedVehicleAt = 0;
@@ -150,14 +127,9 @@ let latestLiveMotion;
 let cloud;
 let virtualWalls = [];
 let wallStatus = '等待虚拟墙匹配';
-let loadedWallMapId;
 let loadedMapId;
 let requestedActiveMapId;
-const transforms = new Map();
-// 不同车型/定位栈对底盘坐标系的命名可能不同。/amcl_pose 暂时不可用时，
-// 直接从 TF 的 map -> base_* 链路绘制车体，不能因单一定位话题短暂缺帧而消失。
-const VEHICLE_BASE_FRAMES = ['base_footprint', 'base_link', 'base_footprint_link'];
-// 工业相机不经过 Foxglove WebSocket：每张卡片都由 HTMLVideoElement 接收
+// 工业相机不经过实时遥测：每张卡片都由 HTMLVideoElement 接收
 // WHEP/WebRTC，再由 PixiJS Video Texture 合成。即便新增流失败，也不会影响
 // 现有地图、点云或诊断图像订阅。
 const webrtcPlayers = new Map();
@@ -167,27 +139,6 @@ let webrtcToggleInFlight = false;
 const webrtcStreamTogglesInFlight = new Set();
 let webrtcConfiguredStreams = [];
 let mobilePrimaryWebRtcStream;
-let readers;
-let subscriptions;
-let mapChannel;
-let mapProbeSubscriptionId;
-let mapFingerprint;
-let resolvedWallFingerprint;
-let liveWallRetryTimer;
-let liveWallRetryCount = 0;
-let tfChannel;
-let staticTfChannel;
-let livePoseChannel;
-let cloudChannel;
-let cloudTopic = DEFAULT_LIVE_CLOUD_SOURCE_TOPIC;
-let staticTfSubscriptionId;
-let staticTfStopTimer;
-let tfFallbackTimer;
-const visualizationStreams = {
-  tf: { channel: undefined, subscriptionId: undefined },
-  livePose: { channel: undefined, subscriptionId: undefined },
-  cloud: { channel: undefined, subscriptionId: undefined },
-};
 let drawQueued = false;
 let drawDeferredTimer;
 let drawAnimationFrame;
@@ -207,6 +158,9 @@ const MOBILE_CONSOLE_QUERY = '(hover: none) and (pointer: coarse)';
 const mobileConsoleMedia = window.matchMedia(MOBILE_CONSOLE_QUERY);
 const mobileConsoleForced = window.location.pathname.startsWith('/m/') || new URLSearchParams(window.location.search).get('mobile') === '1';
 let mobileConsoleView = 'map';
+const activeObservationDiagnostics = new Set();
+const videoWaitingSince = new Map();
+let videoGatewayOfflineSince = 0;
 
 function mobileConsoleEnabled() { return document.documentElement.classList.contains('mobile-console'); }
 function mobileWebRtcPlaybackAllowed() { return !mobileConsoleEnabled() || mobileConsoleView === 'camera'; }
@@ -234,6 +188,14 @@ function reportObservation(level, message) {
   // 诊断日志是辅助功能：浏览器无法写入时不能反过来影响只读观测。
   fetch('/api/observation/client-log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
 }
+function reportObservationOnce(key, level, message) {
+  if (activeObservationDiagnostics.has(key)) return;
+  activeObservationDiagnostics.add(key); reportObservation(level, message);
+}
+function resolveObservationDiagnostic(key, message) {
+  if (!activeObservationDiagnostics.delete(key)) return;
+  reportObservation('INFO', message);
+}
 function reportClientMetrics() {
   const now = performance.now(); const elapsedSeconds = Math.max(0.001, (now - clientPerformance.startedAt) / 1000);
   const body = JSON.stringify({
@@ -254,15 +216,6 @@ function normalizeFrame(value) { return String(value || '').replace(/^\/+|\/+$/g
 function yawOf(quaternion = {}) {
   const { x = 0, y = 0, z = 0, w = 1 } = quaternion;
   return Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z));
-}
-function compose(first, second) {
-  // 先应用 first、再应用 second。
-  const cosine = Math.cos(second.yaw); const sine = Math.sin(second.yaw);
-  return { yaw: first.yaw + second.yaw, x: cosine * first.x - sine * first.y + second.x, y: sine * first.x + cosine * first.y + second.y };
-}
-function invert(transform) {
-  const yaw = -transform.yaw; const cosine = Math.cos(yaw); const sine = Math.sin(yaw);
-  return { yaw, x: -(cosine * transform.x - sine * transform.y), y: -(sine * transform.x + cosine * transform.y) };
 }
 
 function initializeTheme() {
@@ -312,10 +265,8 @@ function setMobileConsoleView(view, persist = true) {
   if (persist) localStorage.setItem(MOBILE_VIEW_KEY, view);
   if (view === 'map') {
     for (const state of webrtcPlayers.values()) closeWebRtcPlayer(state, '相机页未显示，浏览器解码已暂停。');
-    if (client) activateVisualizationStreams();
     if (mapInfo) scheduleMapDraw(true);
   } else {
-    if (client) stopVisualizationStreams();
     stopRenderScheduling(); refreshWebRtcVideoStatus();
   }
 }
@@ -348,11 +299,11 @@ function setWebRtcVideoToggle(enabled, busy = false) {
   button.textContent = busy ? (enabled ? '正在启用…' : '正在关闭…') : (enabled ? '关闭全部视频' : '启用视频');
 }
 function webRtcStreamLabel(stream) {
-  const labels = { front_camera: '前向相机', back_camera: '后向相机', left_camera: '左侧相机', right_camera: '右侧相机', detection_camera: '目标检测' };
+  const labels = { front_camera: '前向相机', back_camera: '后向相机', left_camera: '左侧相机', right_camera: '右侧相机', detection_camera: '目标检测', segmentation_overlay: '可通行区域分割' };
   return labels[stream.name] || stream.name;
 }
 function preferredMobileWebRtcStream(streams) {
-  const preference = ['front_camera', 'detection_camera', 'back_camera', 'left_camera', 'right_camera'];
+  const preference = ['front_camera', 'detection_camera', 'segmentation_overlay', 'back_camera', 'left_camera', 'right_camera'];
   return [...streams].sort((left, right) => {
     const leftIndex = preference.indexOf(left.name); const rightIndex = preference.indexOf(right.name);
     return (leftIndex < 0 ? preference.length : leftIndex) - (rightIndex < 0 ? preference.length : rightIndex);
@@ -486,7 +437,11 @@ function waitForIceGathering(peer) {
   });
 }
 async function connectWebRtcPlayer(state, stream) {
-  if (!window.RTCPeerConnection) { setWebRtcPlayerState(state, '当前浏览器不支持 WebRTC。'); return; }
+  if (!window.RTCPeerConnection) {
+    setWebRtcPlayerState(state, '当前浏览器不支持 WebRTC。');
+    reportObservationOnce(`webrtc-${stream.name}`, 'ERROR', `视频流无法播放：${stream.name} 的浏览器不支持 WebRTC。`);
+    return;
+  }
   if (!stream.url || performance.now() < state.retryAfter) return;
   closeWebRtcPlayer(state); state.url = stream.url; setWebRtcPlayerState(state, '正在建立 WHEP/WebRTC 会话…');
   const peer = new RTCPeerConnection(); state.pc = peer;
@@ -500,13 +455,18 @@ async function connectWebRtcPlayer(state, stream) {
       if (state.pc !== peer) return;
       if (!state.texture) { state.texture = Texture.from(state.video); state.sprite = new Sprite(state.texture); state.app?.stage.addChild(state.sprite); }
       startWebRtcFramePump(state); setWebRtcPlayerState(state, `${stream.resolution} · H.264 · WebRTC`);
-    } catch (error) { setWebRtcPlayerState(state, `浏览器播放被阻止：${error?.message || '未知原因'}`); }
+      resolveObservationDiagnostic(`webrtc-${stream.name}`, `视频流已恢复播放：${stream.name}（${stream.source_topic}）。`);
+    } catch (error) {
+      const detail = error?.message || '未知原因'; setWebRtcPlayerState(state, `浏览器播放被阻止：${detail}`);
+      reportObservationOnce(`webrtc-${stream.name}`, 'ERROR', `视频流浏览器播放失败：${stream.name}；${detail}`);
+    }
   };
   peer.onconnectionstatechange = () => {
     if (state.pc !== peer) return;
     if (peer.connectionState === 'connected') setWebRtcPlayerState(state, `${stream.resolution} · H.264 · WebRTC`);
     if (['failed', 'disconnected', 'closed'].includes(peer.connectionState)) {
       state.retryAfter = performance.now() + 3000;
+      if (peer.connectionState !== 'closed') reportObservationOnce(`webrtc-${stream.name}`, 'WARNING', `视频流 WebRTC 连接中断：${stream.name}；状态=${peer.connectionState}，将自动重连。`);
       if (peer.connectionState !== 'closed') closeWebRtcPlayer(state, 'WebRTC 已断开，等待重连。');
     }
   };
@@ -517,19 +477,58 @@ async function connectWebRtcPlayer(state, stream) {
     const location = response.headers.get('Location'); state.sessionUrl = location ? new URL(location, stream.url).toString() : undefined;
     await peer.setRemoteDescription({ type: 'answer', sdp: await response.text() });
   } catch (error) {
-    if (state.pc === peer) { state.retryAfter = performance.now() + 3000; closeWebRtcPlayer(state, `WebRTC 连接失败：${error?.message || '未知错误'}`); }
+    if (state.pc === peer) {
+      const detail = error?.message || '未知错误'; state.retryAfter = performance.now() + 3000;
+      closeWebRtcPlayer(state, `WebRTC 连接失败：${detail}`);
+      reportObservationOnce(`webrtc-${stream.name}`, 'ERROR', `视频流 WHEP/WebRTC 建连失败：${stream.name} (${stream.source_topic})；${detail}`);
+    }
+  }
+}
+function diagnoseWebRtcStatus(enabled, gateway, streams) {
+  const now = performance.now();
+  if (enabled && gateway.online !== true) {
+    if (!videoGatewayOfflineSince) videoGatewayOfflineSince = now;
+    if (now - videoGatewayOfflineSince >= VIDEO_INPUT_READINESS_TIMEOUT_MS) {
+      reportObservationOnce('video-gateway', 'ERROR', `视频网关未就绪：${gateway.detail || 'MediaMTX API 不可用'}。请查看 logs/video-runtime.log。`);
+    }
+  } else {
+    videoGatewayOfflineSince = 0;
+    resolveObservationDiagnostic('video-gateway', '视频网关已恢复就绪。');
+  }
+  const configured = new Set(streams.map((stream) => stream.name));
+  for (const [name] of videoWaitingSince) if (!configured.has(name)) videoWaitingSince.delete(name);
+  for (const stream of streams) {
+    const key = `video-input-${stream.name}`;
+    if (!enabled || stream.enabled !== true) {
+      videoWaitingSince.delete(stream.name); activeObservationDiagnostics.delete(key); continue;
+    }
+    if (stream.status === 'online') {
+      videoWaitingSince.delete(stream.name);
+      resolveObservationDiagnostic(key, `视频输入已恢复：${stream.name}（${stream.source_topic}）已发布到 MediaMTX。`);
+      continue;
+    }
+    if (stream.status === 'waiting') {
+      const since = videoWaitingSince.get(stream.name) || now; videoWaitingSince.set(stream.name, since);
+      if (now - since >= VIDEO_INPUT_READINESS_TIMEOUT_MS) {
+        reportObservationOnce(key, 'WARNING', `视频输入等待超时：${stream.name} 正在等待 ${stream.source_topic} 的 ${stream.encoding} ${stream.resolution} 首帧。请查看 logs/video-runtime.log 中该流的 publishers、编码和分辨率诊断。`);
+      }
+      continue;
+    }
+    videoWaitingSince.delete(stream.name);
+    reportObservationOnce(key, 'ERROR', `视频流不可用：${stream.name}；状态=${stream.status || 'unknown'}，网关=${gateway.detail || '未知'}。请查看 logs/video-runtime.log。`);
   }
 }
 function applyWebRtcVideoStatus(payload) {
   const enabled = payload?.enabled === true; const gateway = payload?.gateway || {}; const configuredStreams = Array.isArray(payload?.streams) ? payload.streams : [];
   const activeStreams = enabled ? configuredStreams.filter((stream) => stream.enabled === true) : [];
-  // 手机端的五路卡片同时就是五路控制入口：开关不再占据顶部空间。桌面仍只
+  // 手机端的每路卡片同时就是独立控制入口：开关不再占据顶部空间。桌面仍只
   // 呈现已启用流及原有控制条，保持其既有工作台节奏。
   const streams = mobileConsoleEnabled() ? configuredStreams : activeStreams;
   webrtcConfiguredStreams = configuredStreams;
   webrtcVideoEnabled = enabled; setWebRtcVideoToggle(enabled, webrtcToggleInFlight);
   setText('mobileCameraSummary', `视频 ${activeStreams.filter((stream) => stream.status === 'online').length} / ${configuredStreams.length}`);
   setWebRtcGatewayState(gateway.online === true, gateway.detail);
+  diagnoseWebRtcStatus(enabled, gateway, configuredStreams);
   renderWebRtcStreamControls(configuredStreams);
   const grid = $('webrtcVideoGrid'); grid.dataset.count = String(streams.length);
   const empty = $('webrtcVideoEmpty'); empty.hidden = streams.length > 0;
@@ -552,7 +551,10 @@ function applyWebRtcVideoStatus(payload) {
 }
 async function refreshWebRtcVideoStatus() {
   try { applyWebRtcVideoStatus(await request('/api/video/status')); }
-  catch (error) { setWebRtcGatewayState(false, `读取视频状态失败：${error.message}`); }
+  catch (error) {
+    setWebRtcGatewayState(false, `读取视频状态失败：${error.message}`);
+    reportObservationOnce('video-status-api', 'WARNING', `读取视频状态失败：${error.message}`);
+  }
 }
 async function toggleWebRtcVideo() {
   if (webrtcToggleInFlight || webrtcStreamTogglesInFlight.size) return;
@@ -561,6 +563,7 @@ async function toggleWebRtcVideo() {
     applyWebRtcVideoStatus(await request('/api/video/control', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) }));
   } catch (error) {
     setWebRtcGatewayState(false, `视频切换失败：${error.message}`);
+    reportObservation('ERROR', `视频全局开关失败：${error.message}`);
   } finally {
     webrtcToggleInFlight = false; setWebRtcVideoToggle(webrtcVideoEnabled, false); renderWebRtcStreamControls(webrtcConfiguredStreams);
   }
@@ -573,6 +576,7 @@ async function toggleWebRtcStream(stream) {
     applyWebRtcVideoStatus(payload);
   } catch (error) {
     setWebRtcGatewayState(false, `视频流切换失败：${error.message}`);
+    reportObservation('ERROR', `视频流开关失败：${stream.name}；${error.message}`);
   } finally {
     webrtcStreamTogglesInFlight.delete(stream.name); renderWebRtcStreamControls(webrtcConfiguredStreams); refreshWebRtcVideoStatus();
   }
@@ -1102,9 +1106,9 @@ function renderCloudPoints(packedPoints) {
   if (!packedPoints?.length) { pixiApp.render(); return; }
   const points = new Graphics();
   const mobile = mobileConsoleEnabled();
-  // 点尺寸保持克制，不借由加粗来制造可见度；移动端通过更明亮的语义紫色
-  // 与红色虚拟墙、灰色栅格区分。
-  const pointRadius = mobile ? 0.82 : 0.35;
+  // 大屏采用 0.52 px 让抽稀后的导航点在白底图上可稳定辨识；手机保持 0.82 px
+  // 以应对更高的物理像素密度。两端共用相同点云帧，差异仅为显示尺度。
+  const pointRadius = mobile ? 0.82 : 0.52;
   for (let index = 0; index < packedPoints.length; index += 2) {
     const x = (packedPoints[index] - mapInfo.origin.x) / mapInfo.resolution;
     const y = mapInfo.height - (packedPoints[index + 1] - mapInfo.origin.y) / mapInfo.resolution;
@@ -1139,30 +1143,11 @@ function syncVehicleLayer(vehicle, layout) {
   if (element.style.transform !== transform) element.style.transform = transform;
 }
 function vehiclePoseInMap() {
-  // map->odom->base_* 通常比 /amcl_pose 频率高得多。优先使用最近 TF，才能让
-  // 车体连续跟随实际运动；TF 短暂缺失时自动回退至定位话题，不改变安全边界。
+  // 小车端 C++ 已从 map -> base_* TF 得到位姿；浏览器只消费该最小实时结果。
   if (tfVehiclePose) {
-    const maximumAge = tfVehiclePose.source === 'live' ? LIVE_POSE_FALLBACK_MS : 1500;
-    if (performance.now() - tfVehiclePose.receivedAt < maximumAge) return tfVehiclePose;
+    if (performance.now() - tfVehiclePose.receivedAt < LIVE_POSE_FALLBACK_MS) return tfVehiclePose;
   }
-  if (pose?.position) return { ...pose, yaw: yawOf(pose.orientation), source: 'pose' };
   return undefined;
-}
-function armTfFallback() {
-  // 位姿流可达 60 Hz。不能每帧 clear/setTimeout，否则会不断制造定时器任务，
-  // 在 GC 或浏览器调度时表现为周期性的轻微闪顿。始终只保留一个到期检查。
-  if (tfFallbackTimer) return;
-  const check = () => {
-    tfFallbackTimer = undefined;
-    const age = livePoseUpdatedAt ? Math.max(0, performance.now() - livePoseUpdatedAt) : Infinity;
-    if (age < LIVE_POSE_FALLBACK_MS) {
-      tfFallbackTimer = window.setTimeout(check, Math.max(1, LIVE_POSE_FALLBACK_MS - age));
-      return;
-    }
-    requestStaticTransforms(); subscribeVisualizationStream('tf', tfChannel);
-  };
-  const age = livePoseUpdatedAt ? Math.max(0, performance.now() - livePoseUpdatedAt) : 0;
-  tfFallbackTimer = window.setTimeout(check, Math.max(1, LIVE_POSE_FALLBACK_MS - age));
 }
 function leaveOverviewAfterMovement(position) {
   if (!overviewUntilMovement || !position) return;
@@ -1171,14 +1156,6 @@ function leaveOverviewAfterMovement(position) {
   overviewUntilMovement = false;
   mapView.pixelsPerMeter = undefined;
   mapView.followOffset = { x: 0, y: 0 };
-}
-function sourcePoseAge(message) {
-  const stamp = message?.header?.stamp;
-  const seconds = Number(stamp?.sec); const nanoseconds = Number(stamp?.nanosec);
-  if (!Number.isFinite(seconds) || !Number.isFinite(nanoseconds) || seconds <= 0) return 0;
-  const age = Date.now() - (seconds * 1000 + nanoseconds / 1e6);
-  // ROS 时间可能使用仿真时钟或与浏览器主机不同步；仅接纳可信的正向年龄。
-  return age >= 0 && age <= 2000 ? age : 0;
 }
 function estimateLiveMotion(position, yaw, now) {
   const raw = { position: { x: Number(position.x), y: Number(position.y) }, yaw };
@@ -1189,25 +1166,36 @@ function estimateLiveMotion(position, yaw, now) {
   }
   const distance = Math.hypot(raw.position.x - previous.position.x, raw.position.y - previous.position.y);
   const yawDelta = normalizeAngle(raw.yaw - previous.yaw);
-  const changed = distance >= LIVE_MOTION_POSITION_EPSILON_M || Math.abs(yawDelta) >= LIVE_MOTION_YAW_EPSILON_RAD;
+  const positionChanged = distance >= STATIC_POSE_POSITION_HOLD_M;
+  const yawChanged = Math.abs(yawDelta) >= STATIC_POSE_YAW_HOLD_RAD;
+  const changed = positionChanged || yawChanged;
   if (changed) {
+    // 位置与航向独立提交：例如定位位置略有噪声但正在原地转向时，不能把该
+    // 位置噪声一同写入；反之亦然。`latestLiveMotion` 是静止显示的可信锚点。
+    const committed = {
+      position: positionChanged ? raw.position : previous.position,
+      yaw: yawChanged ? raw.yaw : previous.yaw,
+    };
     const elapsedSeconds = (now - previous.measuredAt) / 1000;
     let velocity = { x: 0, y: 0 };
     let yawRate = 0;
     if (elapsedSeconds >= 0.01 && elapsedSeconds <= 0.8) {
-      const vx = (raw.position.x - previous.position.x) / elapsedSeconds;
-      const vy = (raw.position.y - previous.position.y) / elapsedSeconds;
+      const vx = (committed.position.x - previous.position.x) / elapsedSeconds;
+      const vy = (committed.position.y - previous.position.y) / elapsedSeconds;
       if (Math.hypot(vx, vy) <= 3.0) velocity = { x: vx, y: vy };
-      const candidateYawRate = yawDelta / elapsedSeconds;
+      const candidateYawRate = normalizeAngle(committed.yaw - previous.yaw) / elapsedSeconds;
       if (Math.abs(candidateYawRate) <= MAX_VEHICLE_YAW_RATE_RADPS) yawRate = candidateYawRate;
     }
-    latestLiveMotion = { ...raw, measuredAt: now, velocity, yawRate };
+    latestLiveMotion = { ...committed, measuredAt: now, velocity, yawRate };
   }
   // TF 偶发短暂停顿时，最多沿最后一个可信速度外推 300 ms；超过窗口立即停止，
   // 因而不会把图标平滑成与实车脱节的历史回放。
   const motionAge = now - latestLiveMotion.measuredAt;
   return {
-    ...raw,
+    // 必须返回锚定后的位姿，而不是 raw。旧实现仅抑制了速度估计，位置仍被
+    // 每个 60 Hz 微扰覆盖，因而静止小车依旧在地图上细微抖动。
+    position: latestLiveMotion.position,
+    yaw: latestLiveMotion.yaw,
     // 不能用每个 60 Hz 心跳包的 receivedAt 代替这个值；渲染层必须知道最后一帧
     // 真正改变的测量是什么时候到达，才可以平滑跨过 TF 的短暂停顿。
     motionMeasuredAt: latestLiveMotion.measuredAt,
@@ -1215,32 +1203,64 @@ function estimateLiveMotion(position, yaw, now) {
     yawRate: motionAge <= MAX_VEHICLE_PREDICTION_MS ? latestLiveMotion.yawRate : 0,
   };
 }
-function updateLivePose(message) {
+function updateLivePose(message, sourceAgeMs = 0) {
   const position = message?.pose?.position;
   const orientation = message?.pose?.orientation;
   if (!position || !orientation || !Number.isFinite(Number(position.x)) || !Number.isFinite(Number(position.y))) return;
-  // C++ 已完成 map->base 的查找；浏览器只处理一个极小 PoseStamped，避免解析完整 /tf。
+  // C++ 已完成 map->base 查找；浏览器只处理专用紧凑位姿帧。
   livePoseUpdatedAt = performance.now();
   clientPerformance.poseApplied += 1;
   vehicleUpdatedAt = livePoseUpdatedAt;
-  // 轻量流恢复后立即卸载兼容 TF，避免浏览器继续接收大批量变换消息。
-  if (visualizationStreams.tf.subscriptionId !== undefined) stopStreamProbe('tf');
   const motion = estimateLiveMotion(position, yawOf(orientation), livePoseUpdatedAt);
   const stablePosition = motion.position;
   const yaw = motion.yaw;
   const { velocity, yawRate, motionMeasuredAt } = motion;
-  const measuredAge = sourcePoseAge(message);
-  livePoseSourceAgeMs = measuredAge > 0 ? livePoseSourceAgeMs * 0.82 + measuredAge * 0.18 : livePoseSourceAgeMs * 0.82;
-  tfVehiclePose = { position: stablePosition, orientation, yaw, source: 'live', receivedAt: livePoseUpdatedAt, motionMeasuredAt, velocity, yawRate, sourceAgeMs: livePoseSourceAgeMs };
+  livePoseSourceAgeMs = sourceAgeMs;
+  tfVehiclePose = { position: stablePosition, orientation, yaw, source: 'live', receivedAt: livePoseUpdatedAt, motionMeasuredAt, velocity, yawRate, sourceAgeMs };
   // 轻量位姿是当前性能路径；它也必须能驱动概览 -> 随车视图，不能依赖
-  // /amcl_pose 恰好同时到达，否则小车会一直缩在大地图中，看似“消失”。
+  // 轻量位姿首次到达即可从全图进入跟车视角，不能依赖其它 ROS 话题。
   leaveOverviewAfterMovement(stablePosition);
-  armTfFallback();
   updateDiagnostics(); scheduleMapDraw(); requestFollowAnimation(); requestVehicleAnimation();
 }
-function scheduleLatestCloudPacket(reader, data) {
+function telemetryHeader(data, expectedKind) {
+  if (!(data instanceof ArrayBuffer) || data.byteLength < TELEMETRY_HEADER_BYTES) return undefined;
+  const view = new DataView(data);
+  const magic = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
+  if (magic !== TELEMETRY_MAGIC || view.getUint8(4) !== 1 || view.getUint8(5) !== expectedKind) return undefined;
+  return { view, sequence: view.getUint32(6, false), timestampNs: view.getBigUint64(10, false), pointCount: view.getUint16(18, false) };
+}
+function telemetrySourceAgeMs(timestampNs) {
+  const sentAtMs = Number(timestampNs / 1000000n);
+  const age = Date.now() - sentAtMs;
+  // ROS 仿真时钟或未校时的浏览器不应把无意义的时间差误报为流故障。
+  return Number.isFinite(age) && age >= 0 && age <= 5000 ? age : 0;
+}
+function updateTelemetryPose(data) {
+  const header = telemetryHeader(data, TELEMETRY_POSE);
+  if (!header || header.pointCount !== 1 || data.byteLength !== TELEMETRY_HEADER_BYTES + 12) return;
+  const x = header.view.getFloat32(TELEMETRY_HEADER_BYTES, false);
+  const y = header.view.getFloat32(TELEMETRY_HEADER_BYTES + 4, false);
+  const yaw = header.view.getFloat32(TELEMETRY_HEADER_BYTES + 8, false);
+  if (![x, y, yaw].every(Number.isFinite)) return;
+  updateLivePose({ pose: { position: { x, y }, orientation: { x: 0, y: 0, z: Math.sin(yaw / 2), w: Math.cos(yaw / 2) } } }, telemetrySourceAgeMs(header.timestampNs));
+}
+function updateTelemetryCloud(data) {
+  const header = telemetryHeader(data, TELEMETRY_CLOUD);
+  if (!header || header.pointCount > POINT_LIMIT || data.byteLength !== TELEMETRY_HEADER_BYTES + header.pointCount * 8) return;
+  const packedMapPoints = new Float32Array(header.pointCount * 2);
+  for (let index = 0; index < header.pointCount; index += 1) {
+    const offset = TELEMETRY_HEADER_BYTES + index * 8;
+    packedMapPoints[index * 2] = header.view.getFloat32(offset, false);
+    packedMapPoints[index * 2 + 1] = header.view.getFloat32(offset + 4, false);
+  }
+  cloudUpdatedAt = performance.now();
+  liveCloudSourceAgeMs = telemetrySourceAgeMs(header.timestampNs);
+  cloud = { frameId: mapInfo?.frameId || 'map', packedMapPoints, mapPointCount: header.pointCount };
+  recordCloudFrame(); updateDiagnostics();
+}
+function scheduleLatestCloudPacket(data) {
   clientPerformance.cloudPackets += 1;
-  pendingCloudPacket = { reader, data, receivedAt: performance.now() };
+  pendingCloudPacket = { data, receivedAt: performance.now() };
   if (cloudPacketQueued) return;
   cloudPacketQueued = true;
   requestAnimationFrame(flushLatestCloudPacket);
@@ -1249,16 +1269,16 @@ function flushLatestCloudPacket() {
   cloudPacketQueued = false;
   const packet = pendingCloudPacket; pendingCloudPacket = undefined;
   if (packet && performance.now() - packet.receivedAt <= CLOUD_PACKET_MAX_AGE_MS) {
-    try { updateCloud(packet.reader.readMessage(packet.data)); } catch (_) { /* 单帧异常不影响下一帧。 */ }
+    try { updateTelemetryCloud(packet.data); } catch (_) { /* 单帧异常不影响下一帧。 */ }
   }
   if (pendingCloudPacket && !cloudPacketQueued) {
     cloudPacketQueued = true;
     requestAnimationFrame(flushLatestCloudPacket);
   }
 }
-function scheduleLatestPosePacket(reader, data) {
+function scheduleLatestPosePacket(data) {
   clientPerformance.posePackets += 1;
-  pendingPosePacket = { reader, data, receivedAt: performance.now() };
+  pendingPosePacket = { data, receivedAt: performance.now() };
   if (posePacketQueued) return;
   posePacketQueued = true;
   requestAnimationFrame(flushLatestPosePacket);
@@ -1267,7 +1287,7 @@ function flushLatestPosePacket() {
   posePacketQueued = false;
   const packet = pendingPosePacket; pendingPosePacket = undefined;
   if (packet && performance.now() - packet.receivedAt <= POSE_PACKET_MAX_AGE_MS) {
-    try { updateLivePose(packet.reader.readMessage(packet.data)); } catch (_) { /* 保持观测连接可用。 */ }
+    try { updateTelemetryPose(packet.data); } catch (_) { /* 保持观测连接可用。 */ }
   }
   if (pendingPosePacket && !posePacketQueued) {
     posePacketQueued = true;
@@ -1283,8 +1303,8 @@ function updateDiagnostics(force = false) {
   const mapText = mapInfo ? `${mapInfo.width} × ${mapInfo.height} 地图` : '等待地图';
   const vehicle = vehiclePoseInMap();
   const inMap = vehicle?.position && mapInfo && vehicle.position.x >= mapInfo.origin.x && vehicle.position.x <= mapInfo.origin.x + mapInfo.width * mapInfo.resolution && vehicle.position.y >= mapInfo.origin.y && vehicle.position.y <= mapInfo.origin.y + mapInfo.height * mapInfo.resolution;
-  const source = vehicle?.source === 'live' ? '实时位姿' : (vehicle?.source === 'tf' ? 'TF' : '定位');
-  const poseText = vehicle ? (inMap ? `${source} x ${vehicle.position.x.toFixed(2)} · y ${vehicle.position.y.toFixed(2)} · 小车已绘制` : `${source}不在当前地图范围`) : '等待定位/TF';
+  const source = '实时位姿';
+  const poseText = vehicle ? (inMap ? `${source} x ${vehicle.position.x.toFixed(2)} · y ${vehicle.position.y.toFixed(2)} · 小车已绘制` : `${source}不在当前地图范围`) : '等待实时位姿';
   const cloudAge = cloud ? Math.max(0, (performance.now() - cloudUpdatedAt) / 1000) : 0;
   const cloudCount = cloud?.mapPointCount ?? cloud?.mapPoints?.length ?? 0;
   const cloudText = pauseCloudForCamera()
@@ -1294,107 +1314,7 @@ function updateDiagnostics(force = false) {
   setText('mapDiagnostics', `${mapText} · ${poseText} · ${cloudText} · ${wallText}`);
 }
 
-function mapSignature(info, data) {
-  const stamp = info.map_load_time || {};
-  // 只读取少量抽样值，避免每一张大图都额外扫描一遍；足以在 map_server 切图时识别版本。
-  const sample = data ? [data[0], data[Math.floor(data.length / 2)], data[data.length - 1]].join(',') : '';
-  return [info.width, info.height, info.resolution, info.origin?.position?.x, info.origin?.position?.y, stamp.sec, stamp.nanosec, sample].join('|');
-}
-function stopMapProbeSubscription() {
-  if (mapProbeSubscriptionId !== undefined) {
-    client?.unsubscribe(mapProbeSubscriptionId); subscriptions?.delete(mapProbeSubscriptionId); mapProbeSubscriptionId = undefined;
-  }
-}
-
-function stopStaticTfSubscription() {
-  if (staticTfStopTimer) { window.clearTimeout(staticTfStopTimer); staticTfStopTimer = undefined; }
-  if (staticTfSubscriptionId !== undefined) {
-    client?.unsubscribe(staticTfSubscriptionId); subscriptions?.delete(staticTfSubscriptionId); staticTfSubscriptionId = undefined;
-  }
-}
-function requestStaticTransforms() {
-  if (!staticTfChannel || staticTfSubscriptionId !== undefined || !client || !readers?.has(staticTfChannel.id)) return;
-  try {
-    staticTfSubscriptionId = client.subscribe(staticTfChannel.id);
-    subscriptions.set(staticTfSubscriptionId, { topic: '/tf_static', channelId: staticTfChannel.id, staticTf: true });
-    staticTfStopTimer = window.setTimeout(stopStaticTfSubscription, STATIC_TF_WINDOW_MS);
-  } catch (_) { /* 静态变换缺失时，点云仅降级为不投影。 */ }
-}
-function stopStreamProbe(kind) {
-  const state = visualizationStreams[kind]; if (!state) return;
-  if (state.subscriptionId !== undefined) {
-    state.client?.unsubscribe(state.subscriptionId); state.subscriptions?.delete(state.subscriptionId); state.subscriptionId = undefined;
-  }
-  state.client = undefined; state.subscriptions = undefined;
-}
-function subscribeVisualizationStream(kind, channel, streamClient = client, streamReaders = readers, streamSubscriptions = subscriptions) {
-  const state = visualizationStreams[kind]; if (!state || !channel || !streamClient || !streamReaders?.has(channel.id)) return;
-  if (state.channel?.id === channel.id && state.client === streamClient && state.subscriptionId !== undefined) return;
-  stopStreamProbe(kind); state.channel = channel;
-  try {
-    state.subscriptionId = streamClient.subscribe(channel.id);
-    state.client = streamClient; state.subscriptions = streamSubscriptions;
-    streamSubscriptions.set(state.subscriptionId, { topic: channel.topic, channelId: channel.id, visualizationKind: kind });
-  } catch (error) {
-    state.subscriptionId = undefined;
-    // 不能让单个频道的订阅失败静默地表现为“等待点云”。诊断记录只包含
-    // 话题和简短错误，不上传任何实时数据。
-    reportObservation('WARNING', `实时流订阅失败：${channel.topic}；${error?.message || '未知错误'}`);
-  }
-}
-function subscribeLivePoseStream() {
-  // 专线短暂不可用时自动回退主连接，保留既有 TF watchdog 的兼容性；专线一旦
-  // 广播到位姿通道，会立即替换主连接订阅，不会让两个连接重复解码同一位姿。
-  if (poseClient && poseLaneChannel && poseReaders?.has(poseLaneChannel.id)) {
-    subscribeVisualizationStream('livePose', poseLaneChannel, poseClient, poseReaders, poseSubscriptions);
-  } else {
-    subscribeVisualizationStream('livePose', livePoseChannel);
-  }
-}
 function pauseCloudForCamera() { return false; }
-function activateVisualizationStreams() {
-  if (mobileConsoleEnabled() && mobileConsoleView !== 'map') { stopVisualizationStreams(); return; }
-  const usePreprocessedStream = cloudTopic === LIVE_CLOUD_TOPIC && livePoseChannel;
-  subscribeLivePoseStream();
-  // 预处理流已经把点云投影至 map，且轻量位姿已由 C++ 计算，不再把完整 /tf
-  // 送到浏览器。原始点云或轻量位姿暂不可用时，保留历史兼容回退链路。
-  if (usePreprocessedStream) {
-    stopStreamProbe('tf'); stopStaticTfSubscription();
-    // advertise 并不代表轻量位姿已有数据；每次新位姿都会重置 watchdog，
-    // 因而运行中的偶发断流也能迅速回退到兼容 TF 链路。
-    armTfFallback();
-  } else {
-    if (tfFallbackTimer) { window.clearTimeout(tfFallbackTimer); tfFallbackTimer = undefined; }
-    requestStaticTransforms(); subscribeVisualizationStream('tf', tfChannel);
-  }
-  // 高密度 PointCloud2 会在同一 WebSocket 上挤压相机帧。相机打开且操作者
-  // 选择低延迟优先时，仅暂停点云订阅；地图、定位、TF、虚拟墙和车体照常更新。
-  if (pauseCloudForCamera()) stopStreamProbe('cloud');
-  else subscribeVisualizationStream('cloud', cloudChannel);
-}
-function stopVisualizationStreams() {
-  if (tfFallbackTimer) { window.clearTimeout(tfFallbackTimer); tfFallbackTimer = undefined; }
-  stopStaticTfSubscription();
-  for (const kind of Object.keys(visualizationStreams)) {
-    const state = visualizationStreams[kind]; stopStreamProbe(kind);
-    state.channel = undefined;
-  }
-}
-function beginMapProbe() {
-  // 正常行驶期间只创建一次 ROS /map 订阅。确认 map_server 已切图时，
-  // reassertMapProbe() 才会进行一次定向重订阅以取得新 publisher 的瞬态栅格。
-  if (mapProbeSubscriptionId !== undefined) return;
-  if (!client || !mapChannel || !readers?.has(mapChannel.id)) return;
-  try {
-    mapProbeSubscriptionId = client.subscribe(mapChannel.id);
-    subscriptions.set(mapProbeSubscriptionId, { topic: '/map', channelId: mapChannel.id, mapProbe: true });
-  } catch (_) { /* Bridge 短暂不可用时由频道重新广播或页面重连恢复。 */ }
-}
-function reassertMapProbe() {
-  // 不把重订阅放到定时器里：仅 active_map_id 确认变化才执行一次，避免静态
-  // OccupancyGrid 在运行中反复进入浏览器主线程。
-  stopMapProbeSubscription(); beginMapProbe();
-}
 function invalidateMapScopedCloud() {
   // map 坐标系在切图时会重置。丢弃旧图的待解码/待绘制扫描，并给渲染器加
   // generation 栅栏，杜绝上一张图的异步点云在新图就绪后闪现一帧。
@@ -1403,166 +1323,12 @@ function invalidateMapScopedCloud() {
   if (cloudRenderTimer) { window.clearTimeout(cloudRenderTimer); cloudRenderTimer = undefined; }
   renderCloudPoints();
 }
-function resetLiveWallRetry() {
-  if (liveWallRetryTimer) { window.clearTimeout(liveWallRetryTimer); liveWallRetryTimer = undefined; }
-  liveWallRetryCount = 0;
-}
-function scheduleLiveWallRetry(info, fingerprint) {
-  if (liveWallRetryTimer || liveWallRetryCount >= LIVE_WALL_RETRY_DELAYS_MS.length) return;
-  const delay = LIVE_WALL_RETRY_DELAYS_MS[liveWallRetryCount++];
-  liveWallRetryTimer = window.setTimeout(() => {
-    liveWallRetryTimer = undefined;
-    // 地图已切换时不能把上一张图的异步补偿结果画到新图上。
-    if (mapFingerprint !== fingerprint || !mapInfo) return;
-    resolveLiveWalls(mapInfo, fingerprint, true);
-  }, delay);
-}
-function updateMap(message) {
-  const info = message.info; if (!info?.width || !info?.height || !message.data || !(info.resolution > 0)) return;
-  const signature = mapSignature(info, message.data);
-  const changed = signature !== mapFingerprint;
-  mapFingerprint = signature;
-  if (!changed && mapTexture) { $('mapEmpty').hidden = true; return; }
-  // 切图时旧图坐标系的扫描绝不能投影到新图上；等待下一帧最新点云即可。
-  invalidateMapScopedCloud();
-  mapInfo = { width: info.width, height: info.height, resolution: info.resolution, origin: info.origin.position, frameId: normalizeFrame(message.header?.frame_id) || 'map' };
-  // 地图本身由浏览器直连 Bridge 接收；只把必要元数据交给控制台解析同目录虚拟墙。
-  // 地图切换才会调用一次，不上传栅格，不增加 ROS /map 订阅，也不持续扫描磁盘。
-  resetLiveWallRetry();
-  virtualWalls = []; wallStatus = '正在匹配当前地图的虚拟墙';
-  resolveLiveWalls(mapInfo, signature);
-  const pixels = new Uint8Array(info.width * info.height * 4);
-  const palette = mobileConsoleEnabled() ? MAP_PALETTE : DESKTOP_MAP_PALETTE;
-  for (let row = 0; row < info.height; row += 1) for (let col = 0; col < info.width; col += 1) {
-    const occupancy = message.data[(info.height - 1 - row) * info.width + col];
-    let color;
-    if (occupancy < 0) color = palette.unknown;
-    else {
-      const weight = Math.max(0, Math.min(1, occupancy / 65));
-      color = palette.free.map((channel, index) => Math.round(channel + (palette.occupied[index] - channel) * weight));
-    }
-    const index = (row * info.width + col) * 4; pixels[index] = color[0]; pixels[index + 1] = color[1]; pixels[index + 2] = color[2]; pixels[index + 3] = 255;
-  }
-  mapTexture?.destroy(true); mapTexture = createRgbaTexture(pixels, info.width, info.height); $('mapEmpty').hidden = true; renderStaticWorld(); scheduleCloudRasterBuild(); updateDiagnostics(); scheduleMapDraw();
-  activateVisualizationStreams();
-}
-
-async function resolveLiveWalls(info, fingerprint, retry = false) {
-  if (resolvedWallFingerprint === fingerprint && !retry) return;
-  resolvedWallFingerprint = fingerprint;
-  try {
-    const layers = await request('/api/observation/live-layers', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ width: info.width, height: info.height, resolution: info.resolution, origin: [info.origin.x, info.origin.y], frame_id: info.frameId }),
-    });
-    if (resolvedWallFingerprint !== fingerprint) return;
-    virtualWalls = Array.isArray(layers.virtual_walls) ? layers.virtual_walls : [];
-    wallStatus = layers.matched ? '当前地图未配置虚拟墙' : '当前地图未匹配虚拟墙';
-    loadedWallMapId = layers.map_id;
-    if (layers.map_id) loadedMapId = layers.map_id;
-    if (layers.matched) resetLiveWallRetry();
-    else scheduleLiveWallRetry(info, fingerprint);
-  } catch (_) {
-    if (resolvedWallFingerprint === fingerprint) {
-      virtualWalls = []; wallStatus = '虚拟墙读取失败'; scheduleLiveWallRetry(info, fingerprint);
-    }
-  }
-  renderStaticWorld(); updateDiagnostics(); scheduleMapDraw();
-}
-function updatePose(message) {
-  const source = message.pose?.pose; if (!source) return;
-  const x = Number(source.position?.x); const y = Number(source.position?.y);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) { pose = undefined; updateDiagnostics(); return; }
-  pose = { position: { x, y }, orientation: source.orientation || { x: 0, y: 0, z: 0, w: 1 } };
-  leaveOverviewAfterMovement(pose.position);
-  updateDiagnostics(); scheduleMapDraw(); requestFollowAnimation();
-}
-function updateTransforms(message) {
-  let affectsVehicleView = false;
-  for (const item of message.transforms || []) {
-    const parent = normalizeFrame(item.header?.frame_id); const child = normalizeFrame(item.child_frame_id);
-    if (!parent || !child || !item.transform?.translation) continue;
-    transforms.set(`${parent}>${child}`, { parent, child, x: Number(item.transform.translation.x) || 0, y: Number(item.transform.translation.y) || 0, yaw: yawOf(item.transform.rotation) });
-    // /tf 常混有相机、传感器等大量无关变换；只有地图/里程计/车体链路变动才
-    // 更新缓存后的车体位姿与画面。
-    if (mapInfo && (parent === mapInfo.frameId || child === mapInfo.frameId || parent === 'odom' || child === 'odom' || VEHICLE_BASE_FRAMES.includes(parent) || VEHICLE_BASE_FRAMES.includes(child))) affectsVehicleView = true;
-  }
-  if (!affectsVehicleView) return;
-  for (const frame of VEHICLE_BASE_FRAMES) {
-    const transform = transformToMap(frame, mapInfo.frameId);
-    if (transform && Number.isFinite(transform.x) && Number.isFinite(transform.y)) {
-      tfVehiclePose = { position: { x: transform.x, y: transform.y }, yaw: transform.yaw, source: 'tf', receivedAt: performance.now() };
-      vehicleUpdatedAt = tfVehiclePose.receivedAt;
-      break;
-    }
-  }
-  updateDiagnostics(); scheduleMapDraw(); requestFollowAnimation(); requestVehicleAnimation();
-}
-function transformToMap(source, target) {
-  source = normalizeFrame(source); target = normalizeFrame(target);
-  if (!source || !target) return undefined;
-  if (source === target) return { x: 0, y: 0, yaw: 0 };
-  const queue = [{ frame: source, transform: { x: 0, y: 0, yaw: 0 } }]; const visited = new Set([source]);
-  while (queue.length) {
-    const current = queue.shift();
-    for (const edge of transforms.values()) {
-      let next; let step;
-      if (edge.child === current.frame) { next = edge.parent; step = edge; }
-      else if (edge.parent === current.frame) { next = edge.child; step = invert(edge); }
-      else continue;
-      if (visited.has(next)) continue;
-      const transformed = compose(current.transform, step);
-      if (next === target) return transformed;
-      visited.add(next); queue.push({ frame: next, transform: transformed });
-    }
-  }
-  return undefined;
-}
-function fieldOffset(fields, name) { return fields.find((field) => field.name === name)?.offset; }
-function updateCloud(message) {
-  const data = message.data; const step = message.point_step; const xOffset = fieldOffset(message.fields || [], 'x'); const yOffset = fieldOffset(message.fields || [], 'y'); const zOffset = fieldOffset(message.fields || [], 'z');
-  if (!data || !step || xOffset === undefined || yOffset === undefined || zOffset === undefined) return;
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength); const count = Math.floor(view.byteLength / step); const stride = Math.max(1, Math.ceil(count / POINT_LIMIT));
-  const frameId = normalizeFrame(message.header?.frame_id);
-  const isMapFrame = frameId && frameId === normalizeFrame(mapInfo?.frameId);
-  // 预处理器的常规输出已在 map 坐标系。直接填充可转移的连续缓冲区，避免
-  // 每帧创建数千个 {x,y,z} 对象、再复制为 Float32Array 所导致的周期性 GC。
-  const packedMapPoints = isMapFrame ? new Float32Array(Math.ceil(count / stride) * 2) : undefined;
-  const points = isMapFrame ? undefined : [];
-  let pointOffset = 0;
-  for (let index = 0; index < count; index += stride) {
-    const offset = index * step; const x = view.getFloat32(offset + xOffset, !message.is_bigendian); const y = view.getFloat32(offset + yOffset, !message.is_bigendian); const z = view.getFloat32(offset + zOffset, !message.is_bigendian);
-    if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) && Math.abs(x) < 50 && Math.abs(y) < 50 && Math.abs(z) < 5) {
-      if (packedMapPoints) { packedMapPoints[pointOffset] = x; packedMapPoints[pointOffset + 1] = y; pointOffset += 2; }
-      else points.push({ x, y, z });
-    }
-  }
-  cloudUpdatedAt = performance.now();
-  const measuredAge = sourcePoseAge(message);
-  liveCloudSourceAgeMs = measuredAge > 0 ? liveCloudSourceAgeMs * 0.7 + measuredAge * 0.3 : liveCloudSourceAgeMs * 0.7;
-  cloud = isMapFrame
-    ? { frameId, packedMapPoints: packedMapPoints.subarray(0, pointOffset), mapPointCount: pointOffset / 2 }
-    : { frameId, points, mapPoints: [], mapPointCount: 0 };
-  if (isMapFrame) recordCloudFrame(); else projectCloud(true);
-  // 点云只更新独立 PixiJS 点云层；不能反向触发地图相机/车体同步，
-  // 否则 10~12 Hz 点云会拖慢 30 Hz 位姿视图。
-  updateDiagnostics();
-}
 function recordCloudFrame() {
   const now = performance.now();
   // 仅保留最新扫描。渲染间隔内覆盖尚未处理的帧，禁止形成延迟积压或透明拖影。
   const packedPoints = cloud.packedMapPoints || packCloudPoints(cloud.mapPoints || []);
   if (queueCloudRender({ receivedAt: now, points: packedPoints, generation: mapGeneration })) return;
   scheduleCloudRasterBuild();
-}
-function projectCloud(recordFrame = false) {
-  if (!cloud || !mapInfo) return;
-  const transform = transformToMap(cloud.frameId, mapInfo.frameId);
-  if (!transform) { cloud.mapPoints = []; cloud.mapPointCount = 0; scheduleCloudRasterBuild(); return; }
-  const cosine = Math.cos(transform.yaw); const sine = Math.sin(transform.yaw);
-  cloud.mapPoints = (cloud.points || []).map((point) => ({ x: cosine * point.x - sine * point.y + transform.x, y: sine * point.x + cosine * point.y + transform.y }));
-  cloud.mapPointCount = cloud.mapPoints.length;
-  if (recordFrame) recordCloudFrame(); else scheduleCloudRasterBuild();
 }
 function scheduleCloudRasterBuild() {
   // 拖拽和缩放时点云并不需要重新投影；保留最新数据，交互结束后再一次性刷新。
@@ -1582,23 +1348,19 @@ function rebuildCloudRaster() {
   renderCloudPoints(packedPoints || packCloudPoints(mapPoints || []));
 }
 async function refreshActiveMap(observation) {
-  // active_map.json 由轨迹记录器在确认真实 /map 后写入；它是切图的轻量可靠
-  // 信号。直接 /map 更新仍优先显示原始栅格，这里仅在其缺席时立即回退缓存图。
+  // active_map.json 由既有轨迹记录器写入；点云/位姿链路不触碰地图缓存。
   const mapId = observation.active_map_id;
   if (!mapId || mapId === loadedMapId || mapId === requestedActiveMapId) return;
   requestedActiveMapId = mapId;
   try {
     const layers = await request(`/api/observation/maps/${encodeURIComponent(mapId)}/layers`);
-    virtualWalls = Array.isArray(layers.virtual_walls) ? layers.virtual_walls : []; loadedWallMapId = mapId;
-    // 新的 active_map_id 已由运行时确认；对 /map 定向重订阅一次即可请求新
-    // publisher 的 TRANSIENT_LOCAL 栅格，后续仍保持单一订阅。
-    reassertMapProbe();
+    virtualWalls = Array.isArray(layers.virtual_walls) ? layers.virtual_walls : [];
     loadCachedMap(mapId, layers.map);
   } catch (_) {
-    // 网络短暂失败不能把这次切图永久标为“已处理”；下一次轻量标记检查会
-    // 重试，但不会在请求仍进行时重复触发 /map 重订阅。
+    // 网络短暂失败不能把这次切图永久标为“已处理”；下一次轻量标记检查会重试。
+    reportObservationOnce(`cached-map-${mapId}`, 'WARNING', `地图缓存层读取失败：map_id=${mapId}。请检查 maps_cache 与轨迹记录器。`);
     requestedActiveMapId = undefined;
-    virtualWalls = []; loadedWallMapId = mapId;
+    virtualWalls = [];
   }
   updateDiagnostics(); scheduleMapDraw();
 }
@@ -1614,7 +1376,7 @@ function loadCachedMap(mapId, metadata) {
       width: Number(metadata.width), height: Number(metadata.height), resolution: Number(metadata.resolution),
       origin: { x: Number(metadata.origin[0]) || 0, y: Number(metadata.origin[1]) || 0 }, frameId: normalizeFrame(metadata.frame_id) || 'map',
     };
-    mapTexture?.destroy(true); mapTexture = Texture.from(image); mapFingerprint = `cache:${mapId}`; $('mapEmpty').hidden = true;
+    mapTexture?.destroy(true); mapTexture = Texture.from(image); $('mapEmpty').hidden = true;
     // 进入观测页且车辆尚未提供定位时，优先展示完整地图；运行中切图则延续随车视角。
     if (!vehiclePoseInMap()?.position) {
       overviewUntilMovement = true; overviewPoseAnchor = undefined; mapView.pixelsPerMeter = undefined;
@@ -1623,121 +1385,70 @@ function loadCachedMap(mapId, metadata) {
     renderStaticWorld(); scheduleCloudRasterBuild(); updateDiagnostics(); scheduleMapDraw();
   };
   image.onerror = () => {
-    if (loadedMapId === mapId) { loadedMapId = undefined; setText('mapDiagnostics', '当前地图缓存读取失败；请在测试任务中重新开启轨迹记录。'); }
+    if (loadedMapId === mapId) {
+      loadedMapId = undefined; setText('mapDiagnostics', '当前地图缓存读取失败；请在测试任务中重新开启轨迹记录。');
+      reportObservationOnce(`cached-map-preview-${mapId}`, 'WARNING', `地图缓存预览读取失败：map_id=${mapId}；请在测试任务中重新开启轨迹记录。`);
+    }
   };
   image.src = `/api/observation/maps/${encodeURIComponent(mapId)}/preview.png`;
 }
 
-function connectPoseLane(url) {
-  const ws = new WebSocket(url, [FOXGLOVE_BRIDGE_SUBPROTOCOL]); ws.binaryType = 'arraybuffer';
-  poseClient = new FoxgloveClient({ ws }); poseReaders = new Map(); poseSubscriptions = new Map();
-  poseClient.on('open', () => {
-    reportObservation('INFO', `位姿专线已连接：${url}`);
-    if (mapInfo) activateVisualizationStreams();
-  });
-  poseClient.on('error', (error) => {
-    // 主连接仍可消费位姿/TF；专线故障不应中断实时观测页面。
-    reportObservation('WARNING', `位姿专线连接异常：${error.message || url}；将使用兼容链路`);
-  });
-  poseClient.on('close', (event) => {
-    const wasActive = visualizationStreams.livePose.client === poseClient;
-    poseLaneChannel = undefined; poseReaders = undefined; poseSubscriptions = undefined; poseClient = undefined;
-    reportObservation('WARNING', `位姿专线已关闭（代码 ${event.code || '未知'}）；将使用兼容链路`);
-    if (wasActive && mapInfo) activateVisualizationStreams();
-  });
-  poseClient.on('advertise', (channels) => channels.forEach((channel) => {
-    if (channel.topic !== LIVE_POSE_TOPIC) return;
-    try {
-      poseReaders.set(channel.id, new MessageReader(parse(channel.schema, { ros2: true })));
-      poseLaneChannel = channel;
-      // 不依赖地图先到达。部分 Bridge 会先广播轻量频道、后发送 /map；若在
-      // 此处等待 mapInfo，后续地图重放缺失时页面将永远没有位姿订阅。
-      subscribeLivePoseStream();
-      if (mapInfo) activateVisualizationStreams();
-    } catch (error) { reportObservation('WARNING', `位姿专线频道解析失败：${error?.message || '未知错误'}`); }
-  }));
-  poseClient.on('unadvertise', (channelIds) => {
-    if (!channelIds.includes(poseLaneChannel?.id)) return;
-    poseLaneChannel = undefined;
-    if (mapInfo) activateVisualizationStreams();
-  });
-  poseClient.on('message', ({ subscriptionId, data }) => {
-    const subscription = poseSubscriptions?.get(subscriptionId); const reader = poseReaders?.get(subscription?.channelId);
-    if (subscription?.topic === LIVE_POSE_TOPIC && reader) scheduleLatestPosePacket(reader, data);
-  });
+function closeTelemetryConnections() {
+  telemetryConnectionGeneration += 1;
+  for (const lane of ['cloud', 'pose']) {
+    window.clearTimeout(telemetryReconnectTimers[lane]); telemetryReconnectTimers[lane] = undefined;
+    telemetryLaneOpen[lane] = false; telemetryLaneAttempts[lane] = 0;
+  }
+  cloudSocket?.close(); poseSocket?.close(); cloudSocket = undefined; poseSocket = undefined;
 }
-
-function connect(payload) {
-  const port = Number(payload?.bridge?.port);
+function connectTelemetry(payload) {
+  const port = Number(payload?.telemetry?.websocket_port);
   const rawHost = String(location.hostname || '').trim();
-  if (!Number.isInteger(port) || !rawHost) throw new Error('未取得 Aletheia Bridge 的直连地址');
-  // Bridge 当前以明文 WebSocket 服务于受控测试 Wi-Fi；IPv6 地址需要方括号。
-  // 控制台若通过 HTTPS 提供，浏览器会阻止 ws:// 混合内容，直接提示而非反复重连。
-  if (location.protocol === 'https:') throw new Error('直连 Bridge 需要通过 HTTP 打开 Aletheia 控制台；当前 HTTPS 页面不能连接明文 ws 服务');
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || !rawHost) throw new Error('未取得 Aletheia 实时遥测地址');
+  // 小车控制台当前在受控局域网使用 HTTP；HTTPS 页面不能接入明文 ws，明确报错
+  // 而不是误把异常表现为“等待点云”。
+  if (location.protocol === 'https:') throw new Error('当前控制台使用 HTTPS，不能连接小车的明文实时遥测 WebSocket。请通过 HTTP 控制台访问。');
   const host = rawHost.includes(':') ? `[${rawHost}]` : rawHost;
-  const url = `ws://${host}:${port}`;
-  setText('connectionState', '连接中'); setText('connectionDetail', url);
-  const ws = new WebSocket(url, [FOXGLOVE_BRIDGE_SUBPROTOCOL]); ws.binaryType = 'arraybuffer'; client = new FoxgloveClient({ ws });
-  readers = new Map(); subscriptions = new Map();
-  client.on('open', () => { setText('connectionState', '已连接'); setText('sideState', '本地实时数据'); setText('connectionDetail', `Foxglove Bridge · ${url}`); reportObservation('INFO', `WebSocket 已连接：${url}`); });
-  client.on('error', (error) => {
-    const detail = error.message || `无法直连 ${url}；请确认小车与浏览器在同一 Wi‑Fi，并放行该端口`;
-    setText('connectionState', '连接失败'); setText('connectionDetail', detail); reportObservation('ERROR', `WebSocket 连接错误：${url}；${detail}`);
-  });
-  client.on('close', (event) => {
-    const detail = `WebSocket 已关闭（代码 ${event.code || '未知'}${event.reason ? `，${event.reason}` : ''}）`;
-    setText('connectionState', '已断开'); setText('sideState', '观测已断开'); setText('connectionDetail', detail); reportObservation('WARNING', `${url}；${detail}`);
-  });
-  client.on('advertise', (channels) => channels.forEach((channel) => {
-    // 只接受地图、定位、TF 与点云的最小观测集。旧的 Foxglove 图像预览已
-    // 被 WebRTC 相机区替代，因此不能再为任意 Image 话题创建 reader 或订阅。
-    if (!TOPICS.has(channel.topic)) return;
-    try {
-      readers.set(channel.id, new MessageReader(parse(channel.schema, { ros2: true })));
-      if (channel.topic === '/map') { mapChannel = channel; beginMapProbe(); }
-      else if (channel.topic === '/amcl_pose') subscriptions.set(client.subscribe(channel.id), { topic: channel.topic, channelId: channel.id });
-      else if (channel.topic === LIVE_POSE_TOPIC) {
-        livePoseChannel = channel;
-        // 实时流不能以地图作为订阅前置条件。这样即使 /map 因切图、瞬态重放
-        // 或网络时序晚到，车体和点云频道仍立即建立、只保留最新帧。
-        subscribeLivePoseStream();
-        if (mapInfo) activateVisualizationStreams();
-      }
-      else if (channel.topic === '/tf') { tfChannel = channel; if (mapInfo) activateVisualizationStreams(); }
-      else if (channel.topic === '/tf_static') { staticTfChannel = channel; if (mapInfo) activateVisualizationStreams(); }
-      else if (channel.topic === cloudTopic) {
-        cloudChannel = channel;
-        if (!pauseCloudForCamera()) subscribeVisualizationStream('cloud', cloudChannel);
-        if (mapInfo) activateVisualizationStreams();
-      }
-    } catch (error) {
-      reportObservation('WARNING', `Bridge 频道解析失败：${channel.topic}；${error?.message || '未知错误'}`);
+  const base = `ws://${host}:${port}`;
+  closeTelemetryConnections();
+  const generation = telemetryConnectionGeneration;
+  const updateConnection = () => {
+    if (telemetryLaneOpen.cloud && telemetryLaneOpen.pose) {
+      setText('connectionState', '已连接'); setText('sideState', '本地实时数据'); setText('connectionDetail', '专用二进制遥测 · 点云 UDP / 位姿 WebSocket');
+    } else if (telemetryLaneOpen.cloud || telemetryLaneOpen.pose) {
+      setText('connectionState', '部分连接'); setText('connectionDetail', telemetryLaneOpen.cloud ? '点云已连接，正在重连位姿' : '位姿已连接，正在重连点云');
+    } else {
+      setText('connectionState', '重连中'); setText('connectionDetail', '正在恢复专用实时遥测…');
     }
-  }));
-  client.on('unadvertise', (channelIds) => {
-    if (channelIds.includes(tfChannel?.id)) { tfChannel = undefined; stopStreamProbe('tf'); }
-    if (channelIds.includes(livePoseChannel?.id)) { livePoseChannel = undefined; stopStreamProbe('livePose'); if (mapInfo) activateVisualizationStreams(); }
-    if (channelIds.includes(cloudChannel?.id)) { cloudChannel = undefined; stopStreamProbe('cloud'); }
-    if (channelIds.includes(staticTfChannel?.id)) { staticTfChannel = undefined; stopStaticTfSubscription(); }
-    if (channelIds.includes(mapChannel?.id)) { mapChannel = undefined; stopMapProbeSubscription(); }
-  });
-  client.on('message', ({ subscriptionId, data }) => {
-    const subscription = subscriptions.get(subscriptionId); const topic = subscription?.topic; const reader = readers.get(subscription?.channelId);
-    if (!topic || !reader) return;
-    // 先只保留最新二进制帧，延迟到下一个显示帧再反序列化。不能在 WebSocket
-    // 回调逐包解码，否则页面一旦落后就会持续处理已经没有价值的旧点云。
-    if (topic === cloudTopic) { scheduleLatestCloudPacket(reader, data); return; }
-    if (topic === LIVE_POSE_TOPIC) { scheduleLatestPosePacket(reader, data); return; }
-    const now = performance.now();
-    if (topic === '/tf' && now - tfUpdatedAt < TF_MIN_INTERVAL_MS) return;
-    try {
-      const message = reader.readMessage(data);
-      if (topic === '/map') updateMap(message); else if (topic === '/amcl_pose') updatePose(message); else { if (topic === '/tf') tfUpdatedAt = now; updateTransforms(message); }
-    } catch (_) { /* 单帧损坏或字段变化不能中断观测。 */ }
-  });
-  // 连接在服务器端仍共享同一 ROS 图，但浏览器到 Bridge 使用第二条 TCP 流。
-  // 因而点云或相机的瞬时大帧不会产生位姿的 TCP 队头阻塞。
-  connectPoseLane(url);
+  };
+  const openLane = (lane, path, apply, label) => {
+    const socket = new WebSocket(`${base}${path}`); socket.binaryType = 'arraybuffer';
+    if (lane === 'cloud') cloudSocket = socket; else poseSocket = socket;
+    socket.addEventListener('open', () => {
+      if (generation !== telemetryConnectionGeneration) { socket.close(); return; }
+      telemetryLaneOpen[lane] = true; telemetryLaneAttempts[lane] = 0; updateConnection();
+      resolveObservationDiagnostic(`telemetry-${path}`, `${label}实时通道已恢复。`);
+      reportObservation('INFO', `${label}实时通道已连接。`);
+    });
+    socket.addEventListener('message', (event) => { if (event.data instanceof ArrayBuffer) apply(event.data); });
+    socket.addEventListener('error', () => {
+      if (generation === telemetryConnectionGeneration) reportObservationOnce(`telemetry-${path}`, 'ERROR', `${label}实时通道连接失败：${base}${path}。请检查小车端遥测网关。`);
+    });
+    socket.addEventListener('close', (event) => {
+      if (generation !== telemetryConnectionGeneration) return;
+      telemetryLaneOpen[lane] = false; updateConnection();
+      const delay = Math.min(3000, 250 * (2 ** telemetryLaneAttempts[lane]));
+      telemetryLaneAttempts[lane] = Math.min(telemetryLaneAttempts[lane] + 1, 4);
+      window.clearTimeout(telemetryReconnectTimers[lane]);
+      telemetryReconnectTimers[lane] = window.setTimeout(() => {
+        if (generation === telemetryConnectionGeneration) openLane(lane, path, apply, label);
+      }, delay);
+    });
+    return socket;
+  };
+  setText('connectionState', '连接中'); setText('connectionDetail', '正在连接专用实时遥测…');
+  openLane('cloud', '/cloud', scheduleLatestCloudPacket, '点云');
+  openLane('pose', '/pose', scheduleLatestPosePacket, '位姿');
 }
 async function main() {
   initializeTheme(); setupMobileConsole(); setupMapInteraction(); $('webrtcVideoToggle')?.addEventListener('click', toggleWebRtcVideo); startWebRtcVideoStatus(); await initializePixiRenderer();
@@ -1747,20 +1458,28 @@ async function main() {
     if (!settings.live_observation?.enabled) { setText('connectionState', '未启用'); setText('connectionDetail', '请先在运行配置启用实时运行观测。'); return; }
     const models = Array.isArray(settings.live_observation?.vehicle_models) ? settings.live_observation.vehicle_models : [];
     vehicleModel = models.find((item) => item.id === settings.live_observation?.active_vehicle_model) || models[0] || vehicleModel;
-    // 必须由受控接口确认该端口属于 Aletheia；不能因“本机端口可达”而误接入外部 Bridge。
+    // 必须由受控接口确认专用遥测已启动；不能因“本机端口可达”接入外部服务。
     let ready = await request('/api/observation/start', { method: 'POST' });
-    for (let attempt = 0; !ready.bridge?.online && attempt < 12; attempt += 1) {
-      setText('connectionState', 'Bridge 启动中'); setText('connectionDetail', `正在等待端口就绪（${attempt + 1}/12）`);
+    for (let attempt = 0; !ready.telemetry?.online && attempt < 12; attempt += 1) {
+      setText('connectionState', '遥测启动中'); setText('connectionDetail', `正在等待本地遥测网关（${attempt + 1}/12）`);
       await new Promise((resolve) => window.setTimeout(resolve, 500)); ready = await request('/api/observation');
     }
-    if (!ready.bridge?.online) { setText('connectionState', 'Bridge 未就绪'); setText('connectionDetail', '请在诊断日志中检查 foxglove_bridge 启动记录。'); return; }
-    cloudTopic = ready.bridge?.cloud_topic === LIVE_CLOUD_TOPIC ? LIVE_CLOUD_TOPIC : DEFAULT_LIVE_CLOUD_SOURCE_TOPIC;
-    await refreshActiveMap(ready); connect(ready);
+    if (!ready.telemetry?.online) { setText('connectionState', '遥测未就绪'); setText('connectionDetail', '请在诊断日志中检查实时遥测网关启动记录。'); return; }
+    await refreshActiveMap(ready); connectTelemetry(ready);
     window.setInterval(() => { reportClientMetrics(); request('/api/observation/heartbeat', { method: 'POST' }).then(refreshActiveMap).catch(() => {}); }, 5000);
     window.setInterval(() => { request('/api/observation/active-map').then(refreshActiveMap).catch(() => {}); }, ACTIVE_MAP_SYNC_MS);
   } catch (error) { setText('connectionState', '不可用'); setText('connectionDetail', error.message); reportObservation('ERROR', `实时观测初始化失败：${error.message}`); }
 }
-window.addEventListener('beforeunload', () => { window.clearInterval(webrtcStatusTimer); [...webrtcPlayers.keys()].forEach(destroyWebRtcPlayer); stopRenderScheduling(); stopMapProbeSubscription(); stopVisualizationStreams(); poseClient?.close(); client?.close(); });
+window.addEventListener('error', (event) => {
+  const location = event.filename ? `${event.filename}:${event.lineno || 0}:${event.colno || 0}` : '未知位置';
+  const detail = event.error?.message || event.message || '未知页面异常';
+  reportObservationOnce(`page-error-${location}-${detail}`, 'ERROR', `实时观测页面异常：${detail}（${location}）。`);
+});
+window.addEventListener('unhandledrejection', (event) => {
+  const detail = event.reason?.message || String(event.reason || '未知 Promise 异常');
+  reportObservationOnce(`page-rejection-${detail}`, 'ERROR', `实时观测页面未处理 Promise 异常：${detail}`);
+});
+window.addEventListener('beforeunload', () => { window.clearInterval(webrtcStatusTimer); [...webrtcPlayers.keys()].forEach(destroyWebRtcPlayer); stopRenderScheduling(); closeTelemetryConnections(); });
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) stopRenderScheduling();
   else if (mapInfo) scheduleMapDraw();

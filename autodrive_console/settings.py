@@ -44,13 +44,10 @@ class RobotSettings:
     # start_execute_tasks 在服务端会一直等到整条任务链结束才返回。电梯、多地图
     # 等用例通常超过五分钟，不能复用“服务就绪等待”的 300 秒阈值。
     task_execution_timeout_s: int = 900
-    # 实时观测默认关闭。该功能仅在操作者主动进入页面并启动后才会尝试连接/拉起
-    # Foxglove Bridge；不参与任务执行和轨迹取证。
+    # 实时观测默认关闭。该功能仅在操作者主动进入页面并启动后运行专用遥测；
+    # 不参与任务执行和轨迹取证。
     live_observation: dict = field(default_factory=lambda: {
         "enabled": False,
-        "map_source": "foxglove",
-        "embed_url": "",
-        "bridge_port": 8767,
         "idle_stop_seconds": 45,
         # 车体轮廓仅用于浏览器二维投影，不影响 ROS2 定位、导航或底盘控制。
         "vehicle_models": [dict(item) for item in DEFAULT_VEHICLE_MODELS],
@@ -81,14 +78,10 @@ class SettingsStore:
             if isinstance(stored_observation, dict):
                 observation = dict(asdict(RobotSettings())["live_observation"])
                 observation.update(stored_observation)
-                # 旧版仅供 8087 代理使用的 bridge_host 不再参与连接或监听。
-                # 新版浏览器始终直连当前小车地址，Bridge 本身监听所有局域网网卡。
-                legacy_proxy = "bridge_host" in observation
-                observation.pop("bridge_host", None)
-                # 旧版代理默认端口是 8765；该端口在目标小车上由系统保留。
-                # 只迁移明确带有旧代理字段的配置，绝不覆盖用户在新版中主动选择的端口。
-                if legacy_proxy and observation.get("bridge_port") == 8765:
-                    observation["bridge_port"] = 8767
+                # 旧版通用 ROS-Web 接入项没有等价的运行含义。升级时静默移除，
+                # 实时页固定使用本机专用 UDP/WS 遥测，操作者无需再管理端口。
+                for key in ("bridge_host", "bridge_port", "map_source", "embed_url"):
+                    observation.pop(key, None)
                 defaults["live_observation"] = observation
             return RobotSettings(**defaults)
         except (json.JSONDecodeError, TypeError, ValueError):
@@ -102,7 +95,8 @@ class SettingsStore:
         current.update(updates)
         if isinstance(observation_update, dict):
             current["live_observation"].update(observation_update)
-            current["live_observation"].pop("bridge_host", None)
+            for key in ("bridge_host", "bridge_port", "map_source", "embed_url"):
+                current["live_observation"].pop(key, None)
         elif observation_update is not None:
             current["live_observation"] = observation_update
         settings = RobotSettings(**current)
@@ -128,20 +122,10 @@ class SettingsStore:
             raise ValueError("实时观测配置格式错误")
         if not isinstance(observation.get("enabled", False), bool):
             raise ValueError("实时观测开关格式错误")
-        if observation.get("map_source", "foxglove") not in {"foxglove", "aletheia_cache"}:
-            raise ValueError("实时观测地图源配置无效")
-        embed_url = observation.get("embed_url", "")
-        if not isinstance(embed_url, str) or (embed_url and not embed_url.startswith("https://")):
-            raise ValueError("Foxglove 嵌入地址必须为空或使用 HTTPS")
         try:
-            bridge_port = int(observation.get("bridge_port", 8767))
             idle_stop_seconds = int(observation.get("idle_stop_seconds", 45))
         except (TypeError, ValueError) as exc:
-            raise ValueError("实时观测端口或自动停止时间无效") from exc
-        if not 1024 <= bridge_port <= 65535:
-            raise ValueError("Bridge 端口必须介于 1024 和 65535")
-        if bridge_port == 8765:
-            raise ValueError("8765 为小车系统保留端口；请为 Aletheia 选择 8767 或其他空闲端口")
+            raise ValueError("实时观测自动停止时间无效") from exc
         if not 20 <= idle_stop_seconds <= 600:
             raise ValueError("实时观测自动停止时间必须介于 20 和 600 秒")
         models = observation.get("vehicle_models", [])

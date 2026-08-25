@@ -79,7 +79,7 @@ fi
 printf '%s  %s\n' "$MEDIAMTX_SHA256" "$MEDIAMTX_FILE" | sha256sum -c - >&2
 tar -xzf "$MEDIAMTX_FILE" -C "$RUNTIME/mediamtx" mediamtx LICENSE
 
-# Only expose plugins required by the controlled RGB -> VAAPI H.264 -> RTSP
+# Only expose plugins required by the controlled RGB/BGR -> VAAPI H.264 -> RTSP
 # pipeline. ``rtspclientsink`` builds an internal appsrc/appsink + rtpbin
 # graph, therefore its transport plugins must remain alongside the visible
 # encoder chain. This avoids loading unrelated optional plugins on a minimal
@@ -124,7 +124,7 @@ cat > "$RUNTIME/README.txt" <<EOF
 RY Aletheia private video runtime
 MediaMTX: ${MEDIAMTX_VERSION}
 GStreamer: Ubuntu 22.04 locked archives listed in tools/video-runtime-packages.lock
-Only the controlled fdsrc -> RGB -> VAAPI H.264 -> RTSP plugins are exposed.
+Only the controlled fdsrc -> RGB/BGR -> VAAPI H.264 -> RTSP plugins are exposed.
 EOF
 cat > "$RUNTIME/ry-aletheia-runtime.json" <<EOF
 {

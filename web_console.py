@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import errno
+import io
 import mimetypes
 import os
 import re
@@ -9,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import zipfile
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -228,8 +230,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._json({"error": "日志范围无效"}, HTTPStatus.BAD_REQUEST)
             else:
                 self._json({"entries": LOGS.entries(errors_only), "scope": "errors" if errors_only else "all"})
+        elif path == "/api/tool-logs/files":
+            self._json({"files": LOGS.diagnostic_records()})
         elif path == "/api/tool-logs/download":
             self._download_tool_log(request.query == "scope=errors")
+        elif path.startswith("/api/tool-logs/files/") and path.endswith("/download"):
+            name = unquote(path.removeprefix("/api/tool-logs/files/").removesuffix("/download").strip("/"))
+            self._download_diagnostic_file(LOGS.diagnostic_file(name))
         elif path.startswith("/api/reports/") and path.endswith("/download"):
             requested = unquote(path.removeprefix("/api/reports/").removesuffix("/download").rstrip("/"))
             self._download_report(requested)
@@ -652,15 +659,54 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _download_tool_log(self, errors_only: bool) -> None:
+        if not errors_only:
+            # 现场诊断不能只给出 Python 主日志：点云、位姿和视频的真实故障通常在
+            # 预处理节点或原生编码器的 stderr 中。所有条目来自
+            # ToolLogStore 的固定白名单，不打包 logs/ 下的任意用户文件。
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+                files = LOGS.diagnostic_files()
+                if files:
+                    for target in files:
+                        bundle.writestr(target.name, target.read_bytes())
+                else:
+                    bundle.writestr("README.txt", "尚无 Aletheia 诊断日志。\n")
+            body = archive.getvalue()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", "attachment; filename=ry-aletheia-diagnostics.zip")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         target = LOGS.file(errors_only)
         if not target.is_file():
             body = b""
         else:
             body = target.read_bytes()
-        filename = "ry-aletheia-error.log" if errors_only else "ry-aletheia.log"
+        filename = "ry-aletheia-error.log"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Disposition", f"attachment; filename={filename}")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _download_diagnostic_file(self, target: Path | None) -> None:
+        """Download exactly one whitelisted diagnostic file, never a raw path."""
+        if target is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "诊断日志不存在")
+            return
+        try:
+            body = target.read_bytes()
+        except OSError:
+            self.send_error(HTTPStatus.NOT_FOUND, "诊断日志不可读")
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Disposition", f"attachment; filename={target.name}")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()

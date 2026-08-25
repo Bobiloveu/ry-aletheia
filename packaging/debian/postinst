@@ -44,12 +44,11 @@ fi
 
 ROOT="$RUN_HOME/ry_aletheia"
 DEFAULTS=/usr/lib/ry-aletheia/defaults
-PRIVATE_BRIDGE=/usr/lib/ry-aletheia/foxglove_bridge_runtime
 PRIVATE_VIDEO=/usr/lib/ry-aletheia/video_runtime
 SUPERVISORCTL="$(command -v supervisorctl || true)"
 TEMP_SUDOERS=""
 trap 'rm -f "$TEMP_SUDOERS"' EXIT
-install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0755 "$ROOT/dist" "$ROOT/tasks" "$ROOT/config" "$ROOT/reports" "$ROOT/updates" "$ROOT/maps_cache" "$ROOT/logs" "$ROOT/runtime/foxglove_bridge" "$ROOT/runtime/video"
+install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0755 "$ROOT/dist" "$ROOT/tasks" "$ROOT/config" "$ROOT/reports" "$ROOT/updates" "$ROOT/maps_cache" "$ROOT/logs" "$ROOT/runtime/video"
 install -o "$RUN_USER" -g "$RUN_GROUP" -m 0755 /usr/lib/ry-aletheia/ry-aletheia "$ROOT/dist/ry-aletheia"
 install -o "$RUN_USER" -g "$RUN_GROUP" -m 0644 /usr/lib/ry-aletheia/VERSION "$ROOT/VERSION"
 if [[ -d "$DEFAULTS/tasks" ]]; then
@@ -63,10 +62,6 @@ fi
 # 硬件编码器或网关参数。
 if [[ -f "$DEFAULTS/config/video.json" ]]; then
   [[ -e "$ROOT/config/video.json" ]] || install -o "$RUN_USER" -g "$RUN_GROUP" -m 0644 "$DEFAULTS/config/video.json" "$ROOT/config/video.json"
-fi
-if [[ -d "$PRIVATE_BRIDGE/share/ament_index/resource_index/packages" ]]; then
-  # 这份前缀仅由 ObservationManager 启动 Bridge 子进程时注入环境；不触碰系统 ROS。
-  cp -a "$PRIVATE_BRIDGE/." "$ROOT/runtime/foxglove_bridge/"
 fi
 if [[ -x "$PRIVATE_VIDEO/mediamtx/mediamtx" && -x "$PRIVATE_VIDEO/bin/gst-launch-1.0" ]]; then
   # 视频运行时是 DEB 的私有负载。升级时更新二进制和锁定库，但配置仍留在
