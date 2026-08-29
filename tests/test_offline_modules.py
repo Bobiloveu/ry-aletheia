@@ -851,14 +851,13 @@ class OfflineModuleTests(unittest.TestCase):
             store = SettingsStore(Path(directory) / "console.json")
             saved = store.save({
                 "case_aliases": {"园区_1_2_3_4.json": "电梯往返"},
-                "ui_preferences": {"case_id": "园区_1_2_3_4.json", "count": 3, "interval_seconds": 2, "open_rviz": True},
+                "ui_preferences": {"case_id": "园区_1_2_3_4.json", "count": 3, "interval_seconds": 2},
                 "monitor_nodes": ["NODE:1"],
                 "elevator_wait_timeout_s": 240,
                 "task_execution_timeout_s": 1200,
                 "dependency_plan": {"enabled": True, "steps": [{"nodes": ["NODE:1"], "wait_seconds": 0}]},
             })
             self.assertEqual(saved.case_aliases["园区_1_2_3_4.json"], "电梯往返")
-            self.assertTrue(store.load().ui_preferences["open_rviz"])
             self.assertEqual(store.load().elevator_wait_timeout_s, 240)
             self.assertEqual(store.load().task_execution_timeout_s, 1200)
             with self.assertRaisesRegex(ValueError, "只能出现在一个启动步骤"):

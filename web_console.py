@@ -369,7 +369,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             case = STORE.get_case(str(data["caseId"]))
             if not case:
                 raise ValueError("未找到指定测试用例，请刷新列表后重试")
-            run = RUNS.start(case, int(data.get("count", 1)), float(data.get("intervalSeconds", 3)), bool(data.get("openRviz", False)), True)
+            run = RUNS.start(case, int(data.get("count", 1)), float(data.get("intervalSeconds", 3)), True)
             self._json({"run": run.to_dict()}, HTTPStatus.ACCEPTED)
         except (KeyError, TypeError, ValueError, RuntimeError) as exc:
             LOGGER.warning("创建测试计划失败：%s", exc)

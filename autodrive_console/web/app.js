@@ -1,7 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const initializeTheme = () => { const key = 'ry-aletheia-theme'; const apply = () => { const light = localStorage.getItem(key) === 'light'; document.body.classList.toggle('theme-light', light); document.documentElement.style.colorScheme = light ? 'light' : 'dark'; const mark = document.querySelector('.brand .mark'); if (mark) { mark.tabIndex = 0; mark.setAttribute('role', 'button'); mark.setAttribute('aria-label', light ? '切换到深色主题' : '切换到白天主题'); mark.title = light ? '切换到深色主题' : '切换到白天主题'; } }; const toggle = () => { localStorage.setItem(key, document.body.classList.contains('theme-light') ? 'dark' : 'light'); apply(); }; const mark = document.querySelector('.brand .mark'); mark?.addEventListener('click', toggle); mark?.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); } }); apply(); };
 initializeTheme();
-let cases = [], uiPreferences = { case_id: '', count: 20, interval_seconds: 3, open_rviz: false }, dependencyPlan = { enabled: false, steps: [] }, monitorNodes = [], supervisorProcesses = [], timer = null, currentRun = null;
+let cases = [], uiPreferences = { case_id: '', count: 20, interval_seconds: 3 }, dependencyPlan = { enabled: false, steps: [] }, monitorNodes = [], supervisorProcesses = [], timer = null, currentRun = null;
 const acknowledgedStallAlerts = new Set();
 const trajectoryView = { scale: 1, x: 0, y: 0, drag: null };
 // 轮询恰好落在 TF/map 短暂切换窗口时，状态包可能没有路线百分比；同一轮
@@ -45,10 +45,10 @@ function showCase() {
 }
 function applyUiPreferences() {
   if (uiPreferences.case_id && cases.some(item => item.id === uiPreferences.case_id)) $('caseSelect').value = uiPreferences.case_id;
-  $('count').value = uiPreferences.count ?? 20; $('interval').value = uiPreferences.interval_seconds ?? 3; $('openRviz').checked = Boolean(uiPreferences.open_rviz); showCase();
+  $('count').value = uiPreferences.count ?? 20; $('interval').value = uiPreferences.interval_seconds ?? 3; showCase();
 }
 function rememberUiPreferences() {
-  uiPreferences = { case_id: $('caseSelect').value || '', count: Number($('count').value || 20), interval_seconds: Number($('interval').value || 0), open_rviz: $('openRviz').checked };
+  uiPreferences = { case_id: $('caseSelect').value || '', count: Number($('count').value || 20), interval_seconds: Number($('interval').value || 0) };
   fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ui_preferences: uiPreferences }) }).catch(() => {});
 }
 function renderNodes(preflight) {
@@ -61,7 +61,7 @@ function renderNodes(preflight) {
   const serviceStatus = preflight?.ros_service ? ` · ${preflight.ros_service.message}` : '';
   const finalGateStatus = preflight?.final_dependency_gate ? ` · 服务后总闸 ${preflight.final_dependency_gate.ok ? '通过' : '未通过'}` : '';
   const checkedAt = preflight?.node_states_checked_at ? ` · 最近检查 ${new Date(preflight.node_states_checked_at).toLocaleTimeString('zh-CN', { hour12: false })}` : '';
-  $('syncStatus').textContent = preflight ? `${scenarioStatus ? `${scenarioStatus} · ` : ''}${preflight.task_sync}${orchestrationStatus}${serviceStatus}${finalGateStatus}${preflight.rviz ? ` · ${preflight.rviz}` : ''}${mapStatus ? ` · ${mapStatus.message}` : ''}${checkedAt}` : '等待预检';
+  $('syncStatus').textContent = preflight ? `${scenarioStatus ? `${scenarioStatus} · ` : ''}${preflight.task_sync}${orchestrationStatus}${serviceStatus}${finalGateStatus}${mapStatus ? ` · ${mapStatus.message}` : ''}${checkedAt}` : '等待预检';
   $('nodeGrid').innerHTML = nodes.length ? nodes.map(node => `<div class="node"><div class="node-top"><b>${escapeHtml(node.label)}</b><span class="node-state ${node.status === 'RUNNING' ? 'running' : 'bad'}">${escapeHtml(node.status)}</span></div><small>${escapeHtml(node.supervisor)}${node.required ? ' · REQUIRED' : ' · OPTIONAL'}</small></div>`).join('') : '<div class="node-empty">开始测试后自动读取本机 Supervisor 节点状态</div>';
 }
 function renderLiveProgress(run) {
@@ -161,7 +161,7 @@ function saveDependencyPlan() {
 }
 
 $('caseSelect').addEventListener('change', () => { showCase(); rememberUiPreferences(); });
-$('count').addEventListener('change', rememberUiPreferences); $('interval').addEventListener('change', rememberUiPreferences); $('openRviz').addEventListener('change', rememberUiPreferences);
+$('count').addEventListener('change', rememberUiPreferences); $('interval').addEventListener('change', rememberUiPreferences);
 $('dependencyButton').addEventListener('click', () => { $('dependencyDialog').classList.add('show'); $('dependencyDialog').setAttribute('aria-hidden', 'false'); renderDependencyEditor(); if (!supervisorProcesses.length) discoverSupervisor(); });
 $('dependencyClose').addEventListener('click', () => { $('dependencyDialog').classList.remove('show'); $('dependencyDialog').setAttribute('aria-hidden', 'true'); });
 function closeStallDialog() { $('stallDialog').classList.remove('show'); $('stallDialog').setAttribute('aria-hidden', 'true'); }
@@ -194,7 +194,7 @@ $('trajectoryCanvas').addEventListener('pointercancel', () => { trajectoryView.d
 $('startButton').addEventListener('click', async () => {
   $('formMessage').textContent = '';
   const testCase = cases.find(item => item.id === $('caseSelect').value); const accepted = await confirmAction({ eyebrow: 'CONFIRM TEST EXECUTION', title: '确认开始自动化测试？', body: `用例：${testCase?.alias || testCase?.filename || '未选择'}；执行 ${$('count').value} 轮，每轮间隔 ${$('interval').value} 秒。`, confirmText: '确认开始' }); if (!accepted) return;
-  try { const response = await fetch('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ caseId: $('caseSelect').value, count: +$('count').value, intervalSeconds: +$('interval').value, openRviz: $('openRviz').checked, prepareTrajectoryMaps: true }) }); const data = await response.json(); if (!response.ok) throw new Error(data.error); renderRun(data.run); toast('测试计划已创建，正在执行前置条件校验。'); poll(); } catch (error) { $('formMessage').textContent = error.message; }
+  try { const response = await fetch('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ caseId: $('caseSelect').value, count: +$('count').value, intervalSeconds: +$('interval').value, prepareTrajectoryMaps: true }) }); const data = await response.json(); if (!response.ok) throw new Error(data.error); renderRun(data.run); toast('测试计划已创建，正在执行前置条件校验。'); poll(); } catch (error) { $('formMessage').textContent = error.message; }
 });
 $('cancelButton').addEventListener('click', async () => {
   if (!currentRun) return;

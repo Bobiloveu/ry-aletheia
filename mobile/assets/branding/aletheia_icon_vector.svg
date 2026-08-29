@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1254" height="1254" viewBox="0 0 1254 1254">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="46%" r="68%">
+      <stop offset="0%" stop-color="#151515"/>
+      <stop offset="62%" stop-color="#101010"/>
+      <stop offset="100%" stop-color="#080808"/>
+    </radialGradient>
+    <linearGradient id="whiteFill" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="55%" stop-color="#F8F8F8"/>
+      <stop offset="100%" stop-color="#EDEDED"/>
+    </linearGradient>
+    <linearGradient id="blueFill" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" stop-color="#2D78FF"/>
+      <stop offset="100%" stop-color="#1D5FF0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- full black canvas -->
+  <rect x="0" y="0" width="1254" height="1254" fill="#000000"/>
+
+  <!-- dark rounded app-icon surface -->
+  <rect x="72" y="62" width="1104" height="1104" rx="255" ry="255" fill="url(#bg)"/>
+
+  <!-- upper + right continuous mark -->
+  <path fill="url(#whiteFill)" d="
+    M 284 444
+    C 284 450, 286 456, 291 458
+    C 296 461, 300 458, 306 453
+    L 349 413
+    C 362 402, 375 399, 390 399
+    L 807 399
+    L 668 726
+    L 807 726
+    C 816 726, 824 723, 831 720
+    C 840 716, 846 711, 851 708
+    C 861 698, 870 686, 877 673
+    L 969 461
+    C 972 451, 970 438, 963 429
+    C 959 422, 955 417, 950 413
+    C 944 408, 938 405, 932 403
+    C 920 400, 907 399, 892 399
+    L 807 399
+    L 835 335
+    C 839 326, 840 319, 837 313
+    C 836 300, 830 289, 823 283
+    C 818 278, 813 274, 809 272
+    C 802 268, 796 266, 791 266
+    L 477 266
+    C 469 266, 462 268, 456 271
+    C 444 277, 432 286, 416 297
+    L 297 426
+    C 289 434, 285 440, 284 444
+    Z"/>
+
+  <!-- lower mark -->
+  <path fill="url(#whiteFill)" d="
+    M 452 728
+    L 667 728
+    L 844 939
+    C 850 946, 852 953, 850 957
+    C 849 963, 847 968, 846 972
+    C 840 980, 832 985, 825 987
+    L 660 987
+    C 648 986, 635 982, 625 975
+    C 615 969, 607 961, 600 953
+    L 436 770
+    C 431 765, 430 761, 431 758
+    C 431 749, 433 743, 435 740
+    C 439 734, 444 730, 452 728
+    Z"/>
+
+  <!-- blue triangular locator / robot symbol -->
+  <path fill="url(#blueFill)" d="
+    M 504 674
+    C 503 680, 505 685, 510 688
+    C 513 690, 517 690, 522 690
+    L 648 690
+    C 654 690, 659 688, 663 684
+    C 666 681, 667 676, 665 671
+    L 605 589
+    C 601 583, 596 580, 591 579
+    C 586 578, 581 579, 577 580
+    C 573 582, 570 583, 568 586
+    L 509 665
+    C 506 669, 505 672, 504 674
+    Z"/>
+</svg>

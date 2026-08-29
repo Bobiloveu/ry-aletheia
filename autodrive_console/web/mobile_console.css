@@ -634,23 +634,18 @@
     background: var(--ui-info-soft);
     color: #385d66;
   }
-  body.mobile-console.mobile-shell-generic .rviz-option,
   body.mobile-console.mobile-shell-generic .trajectory-option {
     border-color: var(--ui-border);
     border-radius: var(--ui-radius-button);
     background: var(--ui-bg-subtle);
   }
-  body.mobile-console.mobile-shell-generic .rviz-option b,
   body.mobile-console.mobile-shell-generic .trajectory-option b { color: var(--ui-text); }
-  body.mobile-console.mobile-shell-generic .rviz-option small,
   body.mobile-console.mobile-shell-generic .trajectory-option small,
   body.mobile-console.mobile-shell-generic .settings-note { color: var(--ui-text-secondary); }
-  body.mobile-console.mobile-shell-generic .rviz-option > span,
   body.mobile-console.mobile-shell-generic .trajectory-option > span {
     border-color: var(--ui-border-strong);
     background: #fff;
   }
-  body.mobile-console.mobile-shell-generic .rviz-option > input:checked + span,
   body.mobile-console.mobile-shell-generic .trajectory-option > input:checked + span {
     border-color: var(--ui-accent-strong);
     background: var(--ui-accent);

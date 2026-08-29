@@ -38,7 +38,7 @@ class RobotSettings:
     # 操作者在编排界面选择的“运行依赖就绪状态”节点；空值时兼容旧配置。
     monitor_nodes: list[str] = field(default_factory=list)
     case_aliases: dict[str, str] = field(default_factory=dict)
-    ui_preferences: dict = field(default_factory=lambda: {"case_id": "", "count": 20, "interval_seconds": 3, "open_rviz": False})
+    ui_preferences: dict = field(default_factory=lambda: {"case_id": "", "count": 20, "interval_seconds": 3})
     dependency_plan: dict = field(default_factory=lambda: {"enabled": False, "steps": []})
     elevator_wait_timeout_s: int = 180
     # start_execute_tasks 在服务端会一直等到整条任务链结束才返回。电梯、多地图
@@ -66,6 +66,15 @@ class SettingsStore:
             return RobotSettings()
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(raw.get("ui_preferences"), dict):
+                # RViz was a historical desktop-only convenience. Remove its
+                # persisted preference during migration; test trajectory
+                # evidence remains mandatory and independent of this field.
+                raw["ui_preferences"] = {
+                    key: value
+                    for key, value in raw["ui_preferences"].items()
+                    if key != "open_rviz"
+                }
             if "ssh_connect_timeout_s" in raw and "command_timeout_s" not in raw:
                 raw["command_timeout_s"] = raw["ssh_connect_timeout_s"]
             if raw.get("supervisor_command") == "supervisorctl status":
@@ -165,7 +174,7 @@ class SettingsStore:
         preferences = settings.ui_preferences
         if not isinstance(preferences, dict):
             raise ValueError("界面记忆配置格式错误")
-        if not isinstance(preferences.get("case_id", ""), str) or not 1 <= int(preferences.get("count", 20)) <= 1000 or not 0 <= float(preferences.get("interval_seconds", 3)) <= 3600 or not isinstance(preferences.get("open_rviz", False), bool):
+        if not isinstance(preferences.get("case_id", ""), str) or not 1 <= int(preferences.get("count", 20)) <= 1000 or not 0 <= float(preferences.get("interval_seconds", 3)) <= 3600:
             raise ValueError("界面记忆参数无效")
         plan = settings.dependency_plan
         if not isinstance(plan, dict) or not isinstance(plan.get("enabled", False), bool) or not isinstance(plan.get("steps", []), list):

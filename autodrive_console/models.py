@@ -39,7 +39,6 @@ class RunRecord:
     case: TestCase
     requested_count: int
     interval_s: float
-    open_rviz: bool = False
     prepare_trajectory_maps: bool = True
     status: str = "queued"
     started_at: str | None = None
@@ -74,7 +73,6 @@ class RunRecord:
             },
             "requestedCount": self.requested_count,
             "intervalSeconds": self.interval_s,
-            "openRviz": self.open_rviz,
             "prepareTrajectoryMaps": self.prepare_trajectory_maps,
             "status": self.status,
             "startedAt": self.started_at,

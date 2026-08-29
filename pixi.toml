@@ -21,8 +21,8 @@ frontend-install = { cmd = "npm ci", cwd = "frontend" }
 frontend-check = { cmd = "npm run check", cwd = "frontend" }
 # macOS 将 /var/folders 映射至 /private/var/folders；现有报告路径边界测试
 # 比较字面路径，因此仅在 macOS 固定临时目录的规范前缀。
-test = "bash -lc 'if [ \"$(uname -s)\" = Darwin ]; then TMPDIR=/private/tmp; export TMPDIR; fi; python -m pytest -q tests'"
-test-offline = "bash -lc 'if [ \"$(uname -s)\" = Darwin ]; then TMPDIR=/private/tmp; export TMPDIR; fi; python -m pytest -q tests/test_offline_modules.py tests/test_trajectory_integrity.py'"
+test = "bash -c 'if [ \"$(uname -s)\" = Darwin ]; then TMPDIR=/private/tmp; export TMPDIR; fi; python -m pytest -q tests'"
+test-offline = "bash -c 'if [ \"$(uname -s)\" = Darwin ]; then TMPDIR=/private/tmp; export TMPDIR; fi; python -m pytest -q tests/test_offline_modules.py tests/test_trajectory_integrity.py'"
 test-realtime = "python -m pytest -q tests/test_live_observation_realtime.py"
 verify = { depends-on = ["test", "frontend-check"] }
 vue-preview = "./run_vue_preview.sh"

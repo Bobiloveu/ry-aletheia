@@ -3,10 +3,8 @@ from __future__ import annotations
 import csv
 import html
 import logging
-import os
 import re
 import threading
-import time
 import uuid
 import shutil
 import subprocess
@@ -66,13 +64,13 @@ class RunManager:
         self._lock = threading.Lock()
         self._execution_lock = threading.Lock()
 
-    def start(self, case: TestCase, count: int, interval_s: float, open_rviz: bool = False, prepare_trajectory_maps: bool = True) -> RunRecord:
+    def start(self, case: TestCase, count: int, interval_s: float, prepare_trajectory_maps: bool = True) -> RunRecord:
         if not 1 <= count <= 1000:
             raise ValueError("执行次数必须介于 1 和 1000 之间")
         if not 0 <= interval_s <= 3600:
             raise ValueError("执行间隔必须介于 0 和 3600 秒之间")
         # 轨迹图是正式测试报告的必备证据，不允许创建无轨迹的执行计划。
-        run = RunRecord(id=uuid.uuid4().hex[:12], case=case, requested_count=count, interval_s=interval_s, open_rviz=open_rviz, prepare_trajectory_maps=True)
+        run = RunRecord(id=uuid.uuid4().hex[:12], case=case, requested_count=count, interval_s=interval_s, prepare_trajectory_maps=True)
         with self._lock:
             if any(item.status in {"queued", "preparing", "running", "cancelling", "awaiting_recovery", "recovering"} for item in self._runs.values()):
                 raise RuntimeError("已有任务正在执行，请等待其完成后再发起新任务")
@@ -225,12 +223,6 @@ class RunManager:
                 if cancel_event.is_set():
                     run.status = "cancelled"
                     return
-                if run.open_rviz:
-                    rviz_ok, rviz_message = self._ensure_rviz()
-                    run.preflight["rviz"] = rviz_message
-                    if not rviz_ok:
-                        run.status, run.error = "blocked", rviz_message
-                        return
                 run.status = "running"
                 index = 1
                 while index <= run.requested_count:
@@ -578,34 +570,6 @@ class RunManager:
         if not dependencies_ok:
             return False, f"依赖节点未稳定就绪：{dependencies_message}"
         return True, "依赖节点与 ROS2 服务已恢复就绪"
-
-    def _ensure_rviz(self) -> tuple[bool, str]:
-        if shutil.which("rviz2") is None:
-            return False, "未找到 rviz2，请确认已加载 ROS2 环境"
-        try:
-            already_running = subprocess.run(["pgrep", "-x", "rviz2"], capture_output=True, timeout=2, check=False).returncode == 0
-            if already_running:
-                return True, "RViz2 已在运行"
-            environment = os.environ.copy()
-            # systemd 系统服务不继承图形会话；标准机器人桌面使用 :0。若不存在 X11
-            # socket，明确报错而不是把失败伪装成“已启动”。
-            display = environment.get("DISPLAY", ":0")
-            if not Path(f"/tmp/.X11-unix/X{display.removeprefix(':')}").exists():
-                return False, f"未检测到图形会话 {display}，无法启动 RViz2"
-            environment["DISPLAY"] = display
-            xauthority = Path(environment.get("XAUTHORITY") or Path.home() / ".Xauthority")
-            if xauthority.is_file():
-                environment["XAUTHORITY"] = str(xauthority)
-            log_dir = self.report_dir.parent / "logs"
-            log_dir.mkdir(parents=True, exist_ok=True)
-            with (log_dir / "rviz2.log").open("ab") as output:
-                process = subprocess.Popen(["rviz2"], stdout=output, stderr=subprocess.STDOUT, env=environment, start_new_session=True)
-            time.sleep(0.5)
-            if process.poll() is not None:
-                return False, f"RViz2 启动后立即退出（退出码 {process.returncode}），请查看 logs/rviz2.log"
-            return True, "已启动 RViz2"
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return False, f"无法启动 RViz2：{exc}"
 
     def _write_report(self, run: RunRecord) -> None:
         self.report_dir.mkdir(parents=True, exist_ok=True)
