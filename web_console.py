@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from autodrive_console.case_store import CaseStore
 from autodrive_console.case_workspace import CasePackageError, CaseWorkspace
 from autodrive_console.observation import ObservationError, ObservationManager
+from autodrive_console.robot_gateway import RobotGateway
 from autodrive_console.ros_executor import RosTaskExecutor
 from autodrive_console.runtime_env import clear_legacy_fastdds_override
 from autodrive_console.run_manager import RunManager
@@ -76,6 +77,45 @@ _LIVE_PREPROCESSOR = ROOT / "aletheia_live_cloud" if getattr(sys, "frozen", Fals
 _VIDEO_INGEST = ROOT / "aletheia_video_ingest" if getattr(sys, "frozen", False) else ROOT / "build" / "live_preprocessor" / "aletheia_video_ingest"
 OBSERVATION = ObservationManager(WORKSPACE / "maps_cache", WORKSPACE / "logs", _LIVE_PREPROCESSOR)
 VIDEO = VideoManager(CONFIG_DIR / "video.json", ROOT / "config" / "video.json")
+SCENARIO_RUNTIME_LOCK = SCENARIO_SETUP.runtime_lock
+
+
+def restore_scenario_runtime() -> dict:
+    """完成“脚本恢复 + 依赖重启验证”的闭环，不能只改文件就宣称常规已恢复。"""
+    # ThreadingHTTPServer 可同时处理重复点击/多个网页标签。整个“回写脚本 →
+    # 重启 → 确认 → 关闭事务”必须串行，否则两个请求可能交叉重启同一批节点。
+    with SCENARIO_RUNTIME_LOCK:
+        result = SCENARIO_SETUP.restore(retain_transaction=True)
+        if not result.get("restored"):
+            return result
+        try:
+            gateway = RobotGateway(SETTINGS.load())
+            runtime_ok, runtime_message = gateway.restart_configured_dependencies()
+        except Exception as exc:
+            runtime_ok, runtime_message = False, f"恢复运行依赖时发生异常：{exc}"
+        if not runtime_ok:
+            SCENARIO_SETUP.note_runtime_recovery_failure(runtime_message)
+            raise ScenarioSetupError(f"常规启动脚本已恢复，但运行依赖未能切回常规参数：{runtime_message}")
+        return SCENARIO_SETUP.complete_runtime_restore(runtime_message)
+
+
+def apply_scenario_runtime(profile_id: str, document: dict | None = None) -> dict:
+    """应用场景并使相应运行依赖实际重新读取参数。"""
+    with SCENARIO_RUNTIME_LOCK:
+        if document is not None:
+            SCENARIO_SETUP.save(document)
+        result = SCENARIO_SETUP.apply(profile_id)
+        try:
+            gateway = RobotGateway(SETTINGS.load())
+            runtime_ok, runtime_message = gateway.restart_configured_dependencies()
+        except Exception as exc:
+            runtime_ok, runtime_message = False, f"启动运行依赖时发生异常：{exc}"
+        if not runtime_ok:
+            SCENARIO_SETUP.note_runtime_activation_failure(runtime_message)
+            raise ScenarioSetupError(f"场景启动脚本已写入，但运行依赖未能读取新参数：{runtime_message}。请恢复常规配置后重试")
+        result["runtime_restart"] = runtime_message
+        result["message"] = f"{result['message']}；{runtime_message}"
+        return result
 
 # 移动端使用独立入口（/m/），但继续调用完全相同的受控 API 与页面控制器。
 # 不依据单一 UA 字段：优先采用浏览器 Client Hint，再兼容常见移动浏览器标识。
@@ -253,6 +293,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         if path == "/api/system/shutdown":
+            if RUNS.has_active_run():
+                self._json({"error": "当前存在执行中、取消中或等待人工恢复的测试计划。请先终止并等待场景方案恢复后再退出控制台。"}, HTTPStatus.CONFLICT)
+                return
+            if SCENARIO_SETUP.has_unresolved_transaction():
+                transaction = SCENARIO_SETUP.status().get("transaction", {})
+                self._json({"error": f"当前存在未完成的场景恢复事务。{transaction.get('message', '请先恢复常规启动配置后再退出。')}"}, HTTPStatus.CONFLICT)
+                return
             LOGGER.info("操作者请求安全退出控制台")
             self._json({"message": "控制台正在安全退出"})
             threading.Thread(target=self.server.shutdown, daemon=True).start()
@@ -363,6 +410,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if RUNS.has_active_run():
             self._json({"error": "当前存在执行中、取消中或等待人工恢复的测试计划。请先安全结束测试后再升级。"}, HTTPStatus.CONFLICT)
             return
+        if SCENARIO_SETUP.has_unresolved_transaction():
+            transaction = SCENARIO_SETUP.status().get("transaction", {})
+            self._json({"error": f"当前存在未完成的场景恢复事务。{transaction.get('message', '请先恢复常规启动配置后再升级。')}"}, HTTPStatus.CONFLICT)
+            return
         if getattr(self.server, "upgrade_pending", False):
             self._json({"error": "升级已在处理，请等待控制台重启。"}, HTTPStatus.CONFLICT)
             return
@@ -398,11 +449,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             elif action == "apply":
                 if RUNS.has_active_run():
                     raise ScenarioSetupError("存在执行中测试计划，不能修改启动配置")
-                result = SCENARIO_SETUP.apply(str(data.get("profile_id", "")))
+                # “应用”必须以页面当前经过校验的内容为准。过去只应用磁盘中旧
+                # 方案，用户修改字段后直接点应用会得到与页面不一致的实际参数。
+                # 应用也必须让相关运行依赖重新读取脚本；否则页面会显示“已
+                # 应用”，车辆却仍运行上一套参数。
+                result = apply_scenario_runtime(str(data.get("profile_id", "")), data.get("document"))
             elif action == "restore":
                 if RUNS.has_active_run():
                     raise ScenarioSetupError("存在执行中测试计划，不能恢复启动配置")
-                result = SCENARIO_SETUP.restore()
+                result = restore_scenario_runtime()
             elif action == "bind-case":
                 case_id = str(data.get("case_id", ""))
                 if not STORE.get_case(case_id):

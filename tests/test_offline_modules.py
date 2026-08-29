@@ -8,9 +8,10 @@ import tempfile
 import threading
 import unittest
 import zipfile
+from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import web_console
 from autodrive_console.case_store import CaseStore
@@ -88,6 +89,21 @@ class OfflineModuleTests(unittest.TestCase):
             # 移动端切换/刷新时的正常断连不能交回 socketserver 输出 Traceback。
             self.assertIsNone(handler.handle())
 
+    def test_safe_shutdown_refuses_active_run_or_unresolved_scenario(self):
+        handler = object.__new__(web_console.ConsoleHandler)
+        handler.path = "/api/system/shutdown"
+        handler._json = Mock()
+        handler.server = SimpleNamespace(shutdown=Mock())
+        with patch.object(web_console.RUNS, "has_active_run", return_value=True):
+            handler.do_POST()
+        handler._json.assert_called_once()
+        self.assertEqual(handler._json.call_args.args[1], HTTPStatus.CONFLICT)
+        handler._json.reset_mock()
+        with patch.object(web_console.RUNS, "has_active_run", return_value=False), patch.object(web_console.SCENARIO_SETUP, "has_unresolved_transaction", return_value=True), patch.object(web_console.SCENARIO_SETUP, "status", return_value={"transaction": {"message": "待恢复"}}):
+            handler.do_POST()
+        self.assertEqual(handler._json.call_args.args[1], HTTPStatus.CONFLICT)
+        handler.server.shutdown.assert_not_called()
+
     def test_mobile_console_uses_separate_known_routes_without_changing_desktop_routes(self):
         self.assertTrue(web_console.is_mobile_console_client({"Sec-CH-UA-Mobile": "?1"}))
         self.assertTrue(web_console.is_mobile_console_client({"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)"}))
@@ -128,7 +144,7 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn('print_tool_cpu "$pid"', status_source)
         self.assertNotIn("awk -v prefix=\"$root/\"", status_source)
 
-    def test_scenario_setup_applies_only_registered_targets_and_refuses_unsafe_restore(self):
+    def test_scenario_setup_restores_registered_targets_and_preserves_unrelated_edits(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "opt" / "ry" / "config" / "localization"
@@ -153,8 +169,102 @@ class OfflineModuleTests(unittest.TestCase):
             self.assertEqual(script.read_text(encoding="utf-8"), original)
             with patch.object(store, "_validate_targets", return_value={"fcrp": "corrtest.launch.py", "lightning": "/opt/ry/config/localization/hall.yaml"}):
                 store.apply("elevator")
-            script.write_text("# changed elsewhere\n", encoding="utf-8")
-            with self.assertRaisesRegex(ScenarioSetupError, "外部修改"):
+            script.write_text(script.read_text(encoding="utf-8") + "# changed elsewhere\n", encoding="utf-8")
+            self.assertTrue(store.restore()["restored"])
+            self.assertEqual(script.read_text(encoding="utf-8"), original + "# changed elsewhere\n")
+            with patch.object(store, "_validate_targets", return_value={"fcrp": "corrtest.launch.py", "lightning": "/opt/ry/config/localization/hall.yaml"}):
+                store.apply("elevator")
+            script.write_text(script.read_text(encoding="utf-8").replace("corrtest.launch.py", "operator_override.launch.py"), encoding="utf-8")
+            with self.assertRaisesRegex(ScenarioSetupError, "被外部改为"):
+                store.restore()
+
+    def test_scenario_setup_persists_backup_before_changing_script(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "handle_modules.sh"
+            original = (
+                "ros2 launch fcrp_bringup default.launch.py\n"
+                "ros2 run lightning run_loc_online --config /opt/ry/config/default.yaml\n"
+            )
+            script.write_text(original, encoding="utf-8")
+            store = ScenarioSetupStore(root / "console")
+            store.save({"startup_script": str(script), "profiles": [{"id": "hall", "name": "大厅", "fcrp_launch": "hall.launch.py", "lightning_config": "/opt/ry/config/hall.yaml"}], "case_bindings": {}})
+            with patch.object(store, "_validate_targets", return_value={"fcrp": "hall.launch.py", "lightning": "/opt/ry/config/hall.yaml"}), patch.object(store, "_write_active", side_effect=ScenarioSetupError("磁盘写入失败")):
+                with self.assertRaisesRegex(ScenarioSetupError, "磁盘写入失败"):
+                    store.apply("hall")
+            self.assertEqual(script.read_text(encoding="utf-8"), original)
+            self.assertFalse((root / "console" / "scenario_backups" / "active.json").exists())
+
+    def test_scenario_setup_unbound_case_refuses_leftover_transaction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "handle_modules.sh"
+            original = (
+                "ros2 launch fcrp_bringup default.launch.py\n"
+                "ros2 run lightning run_loc_online --config /opt/ry/config/default.yaml\n"
+            )
+            script.write_text(original, encoding="utf-8")
+            store = ScenarioSetupStore(root / "console")
+            store.save({"startup_script": str(script), "profiles": [{"id": "hall", "name": "大厅", "fcrp_launch": "hall.launch.py", "lightning_config": "/opt/ry/config/hall.yaml"}], "case_bindings": {}})
+            with patch.object(store, "_validate_targets", return_value={"fcrp": "hall.launch.py", "lightning": "/opt/ry/config/hall.yaml"}):
+                store.apply("hall")
+            with self.assertRaisesRegex(ScenarioSetupError, "待恢复事务"):
+                store.apply_for_case("unbound.json")
+            self.assertNotEqual(script.read_text(encoding="utf-8"), original)
+            self.assertTrue(store.has_unresolved_transaction())
+
+    def test_scenario_setup_marks_corrupt_transaction_as_recovery_required(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ScenarioSetupStore(root / "console")
+            store.save({"startup_script": str(root / "handle_modules.sh"), "profiles": [], "case_bindings": {}})
+            store.backup_dir.mkdir(parents=True)
+            (store.backup_dir / "active.json").write_text('{"state":"applied"}\n', encoding="utf-8")
+            status = store.status()
+            self.assertEqual(status["transaction"]["state"], "corrupt")
+            self.assertTrue(store.has_unresolved_transaction())
+            with self.assertRaisesRegex(ScenarioSetupError, "恢复事务不可用"):
+                store.save(store.load())
+
+    def test_scenario_setup_keeps_transaction_until_runtime_restore_is_confirmed(self):
+        """脚本回写并不等于运行中节点已切回常规参数。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "handle_modules.sh"
+            original = (
+                "ros2 launch fcrp_bringup default.launch.py\n"
+                "ros2 run lightning run_loc_online --config /opt/ry/config/default.yaml\n"
+            )
+            script.write_text(original, encoding="utf-8")
+            store = ScenarioSetupStore(root / "console")
+            store.save({"startup_script": str(script), "profiles": [{"id": "hall", "name": "大厅", "fcrp_launch": "hall.launch.py", "lightning_config": "/opt/ry/config/hall.yaml"}], "case_bindings": {}})
+            with patch.object(store, "_validate_targets", return_value={"fcrp": "hall.launch.py", "lightning": "/opt/ry/config/hall.yaml"}):
+                store.apply("hall")
+            result = store.restore(retain_transaction=True)
+            self.assertTrue(result["runtime_pending"])
+            self.assertTrue(store.has_unresolved_transaction())
+            self.assertEqual(store.status()["transaction"]["phase"], "script_restored")
+            completed = store.complete_runtime_restore("定位节点已稳定 RUNNING")
+            self.assertTrue(completed["restored"])
+            self.assertFalse(store.has_unresolved_transaction())
+            self.assertEqual(script.read_text(encoding="utf-8"), original)
+
+    def test_scenario_setup_rejects_restore_when_same_prefix_position_is_shifted(self):
+        """外部插入同类启动命令时，宁可拒绝也不能回退错行。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "handle_modules.sh"
+            original = (
+                "ros2 launch fcrp_bringup default.launch.py # primary\n"
+                "ros2 run lightning run_loc_online --config /opt/ry/config/default.yaml\n"
+            )
+            script.write_text(original, encoding="utf-8")
+            store = ScenarioSetupStore(root / "console")
+            store.save({"startup_script": str(script), "profiles": [{"id": "hall", "name": "大厅", "fcrp_launch": "hall.launch.py", "lightning_config": "/opt/ry/config/hall.yaml"}], "case_bindings": {}})
+            with patch.object(store, "_validate_targets", return_value={"fcrp": "hall.launch.py", "lightning": "/opt/ry/config/hall.yaml"}):
+                store.apply("hall")
+            script.write_text("ros2 launch fcrp_bringup external.launch.py # inserted\n" + script.read_text(encoding="utf-8"), encoding="utf-8")
+            with self.assertRaisesRegex(ScenarioSetupError, "命令行.*外部修改"):
                 store.restore()
 
     def test_scenario_setup_uses_selected_command_positions_when_script_has_multiple_candidates(self):
@@ -181,6 +291,22 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("ros2 run unrelated worker --config /opt/ry/config/keep.yaml", updated)
         self.assertIn("ros2 launch fcrp_bringup selected.launch.py", updated)
         self.assertIn("ros2 run lightning run_loc_online --config /opt/ry/config/selected.yaml", updated)
+
+    def test_scenario_setup_uses_selected_occurrence_when_prefix_repeats(self):
+        text = (
+            "ros2 launch fcrp_bringup keep.launch.py\n"
+            "ros2 launch fcrp_bringup selected.launch.py\n"
+            "ros2 run lightning run_loc_online --config /opt/ry/config/old.yaml\n"
+        )
+        candidates = ScenarioSetupStore._command_candidates(text)
+        selected = [item for item in candidates if item["package"] == "fcrp_bringup"][1]
+        lightning = next(item for item in candidates if item["package"] == "lightning")
+        updated = ScenarioSetupStore(Path(tempfile.gettempdir()))._replace_targets(text, {"fcrp": "changed.launch.py", "lightning": "/opt/ry/config/new.yaml"}, {
+            "fcrp": {"kind": "launch", "prefix": selected["prefix"], "occurrence": selected["occurrence"]},
+            "lightning": {"kind": "config", "prefix": lightning["prefix"], "occurrence": lightning["occurrence"]},
+        })
+        self.assertIn("ros2 launch fcrp_bringup keep.launch.py", updated)
+        self.assertIn("ros2 launch fcrp_bringup changed.launch.py", updated)
 
     def test_scenario_setup_previews_changed_startup_script_without_writing_it(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -289,7 +415,54 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("function renderLocal()", source)
         self.assertIn("search_directories: documentState.search_directories || []", source)
         self.assertIn("result.status || await request('/api/scenario-setup')", source)
+        self.assertIn("lastTransaction.state !== 'normal'", source)
+        self.assertIn("selectedOccurrence", source)
+        self.assertIn("occurrence: candidate.occurrence", source)
+        self.assertIn("action: 'apply', profile_id: row.dataset.id, document: collect()", source)
+        self.assertIn("$('restoreDefault').hidden", source)
         self.assertNotIn("render({ document: documentState, inspection: {}, active_backup: null })", source)
+
+    def test_manual_scenario_apply_restarts_runtime_and_leaves_recovery_on_failure(self):
+        class Gateway:
+            def __init__(self, _settings):
+                pass
+
+            @staticmethod
+            def restart_configured_dependencies():
+                return True, "定位与导航启动节点已重启并稳定 RUNNING"
+
+        with patch.object(web_console.SCENARIO_SETUP, "save") as save, \
+             patch.object(web_console.SCENARIO_SETUP, "apply", return_value={"message": "已应用场景前置方案：大厅"}) as apply, \
+             patch("web_console.RobotGateway", Gateway), \
+             patch.object(web_console.SETTINGS, "load", return_value=object()):
+            result = web_console.apply_scenario_runtime("hall", {"profiles": []})
+        save.assert_called_once()
+        apply.assert_called_once_with("hall")
+        self.assertIn("稳定 RUNNING", result["message"])
+
+        class FailedGateway:
+            def __init__(self, _settings):
+                pass
+
+            @staticmethod
+            def restart_configured_dependencies():
+                return False, "MODULES:209-lightning 未稳定 RUNNING"
+
+        with patch.object(web_console.SCENARIO_SETUP, "apply", return_value={"message": "已应用场景前置方案：大厅"}), \
+             patch.object(web_console.SCENARIO_SETUP, "note_runtime_activation_failure") as note_failure, \
+             patch("web_console.RobotGateway", FailedGateway), \
+             patch.object(web_console.SETTINGS, "load", return_value=object()):
+            with self.assertRaisesRegex(ScenarioSetupError, "未能读取新参数"):
+                web_console.apply_scenario_runtime("hall")
+        note_failure.assert_called_once_with("MODULES:209-lightning 未稳定 RUNNING")
+
+    def test_manual_scenario_restore_without_transaction_does_not_restart_robot_nodes(self):
+        with patch.object(web_console.SCENARIO_SETUP, "restore", return_value={"restored": False, "message": "当前没有待恢复的场景前置配置"}) as restore, \
+             patch("web_console.RobotGateway") as gateway:
+            result = web_console.restore_scenario_runtime()
+        restore.assert_called_once_with(retain_transaction=True)
+        gateway.assert_not_called()
+        self.assertFalse(result["restored"])
 
     def test_observation_reuses_cached_map_and_discards_legacy_realtime_bridge_fields(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -6,6 +6,7 @@ ROS 启动参数，并以事务备份、校验和原子替换保护机器人常�
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -48,6 +49,10 @@ class ScenarioSetupStore:
         self.path = config_dir / "scenario_setup.json"
         self.backup_dir = config_dir / "scenario_backups"
         self._lock = threading.RLock()
+        # 覆盖“脚本替换 → Supervisor 重启 → 状态确认”的较长事务；不能仅靠
+        # 文件锁，因为 HTTP 的重复点击和测试 finally 可能在两次文件操作之间
+        # 交错重启同一批节点。
+        self.runtime_lock = threading.Lock()
 
     def load(self) -> dict:
         with self._lock:
@@ -65,24 +70,65 @@ class ScenarioSetupStore:
     def save(self, document: dict) -> dict:
         prepared = self._validate_document(document)
         with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(prepared, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            os.replace(temporary, self.path)
+            self._raise_if_transaction_unresolved()
+            temporary: Path | None = None
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp", mode="w", encoding="utf-8", delete=False) as output:
+                    output.write(json.dumps(prepared, ensure_ascii=False, indent=2) + "\n")
+                    output.flush()
+                    os.fsync(output.fileno())
+                    temporary = Path(output.name)
+                os.replace(temporary, self.path)
+                self._fsync_directory(self.path.parent)
+            except OSError as exc:
+                if temporary:
+                    try:
+                        temporary.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                raise ScenarioSetupError(f"无法安全保存场景前置配置：{exc}") from exc
         return prepared
 
     def status(self) -> dict:
-        document = self.load()
-        active = self._read_active()
-        script = Path(document["startup_script"])
-        inspection = {"path": str(script), "exists": script.is_file(), "writable": os.access(script, os.W_OK) if script.exists() else False}
-        if script.is_file():
-            try:
-                inspection.update(self._inspect_text(script.read_text(encoding="utf-8")))
-            except UnicodeDecodeError:
-                inspection["error"] = "启动脚本不是 UTF-8 文本"
-        # 文件选择改为按需逐级浏览，不在状态查询时递归扫描整棵机器人目录。
-        return {"document": document, "active_backup": active, "inspection": inspection, "files": {"scripts": [], "launch": [], "yaml": []}}
+        # 状态查询也必须与 apply/restore 使用同一把锁。否则网页刷新刚好撞上
+        # active.json 替换时，可能把瞬时空档误显示为“常规配置”。
+        with self._lock:
+            document = self.load()
+            active, transaction = self._transaction_status()
+            script = Path(document["startup_script"])
+            inspection = {"path": str(script), "exists": script.is_file(), "writable": os.access(script, os.W_OK) if script.exists() else False}
+            if script.is_file():
+                try:
+                    inspection.update(self._inspect_text(script.read_text(encoding="utf-8")))
+                except UnicodeDecodeError:
+                    inspection["error"] = "启动脚本不是 UTF-8 文本"
+            # 文件选择改为按需逐级浏览，不在状态查询时递归扫描整棵机器人目录。
+            return {
+                "document": document,
+                # 事务备份中含有常规脚本全文；状态接口只返回操作者需要的元数据。
+                "active_backup": self._public_active(active),
+                "transaction": transaction,
+                "inspection": inspection,
+                "files": {"scripts": [], "launch": [], "yaml": []},
+            }
+
+    def has_unresolved_transaction(self) -> bool:
+        """活动或损坏的恢复事务都不能被当作常规配置。"""
+        with self._lock:
+            _active, transaction = self._transaction_status()
+            return transaction["state"] != "normal"
+
+    def is_case_bound(self, case_id: str) -> bool:
+        """供执行器在写脚本前确认是否必须具备可重启的依赖编排。"""
+        with self._lock:
+            document = self.load()
+            profile_id = str(document.get("case_bindings", {}).get(case_id, "")).strip()
+            if not profile_id:
+                return False
+            if not any(item["id"] == profile_id for item in document["profiles"]):
+                raise ScenarioSetupError("该用例绑定的场景前置方案不存在；请在用例资产库重新绑定")
+            return True
 
     def browse(self, raw_path: str, kind: str) -> dict:
         """列出受控目录的一层内容，供 FCRP/lightning 文件浏览器按需使用。"""
@@ -148,23 +194,39 @@ class ScenarioSetupStore:
             profile = next((item for item in document["profiles"] if item["id"] == profile_id), None)
             if not profile:
                 raise ScenarioSetupError("未找到指定场景前置方案")
-            if self._read_active():
-                raise ScenarioSetupError("已有场景前置配置待恢复；请先恢复常规启动配置")
+            self._raise_if_transaction_unresolved()
             script = Path(document["startup_script"])
             original = self._read_script(script)
             values = self._validate_targets(profile)
-            changed = self._replace_targets(original.decode("utf-8"), values, document.get("bindings", {}))
+            try:
+                original_text = original.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ScenarioSetupError("启动脚本不是 UTF-8 文本，无法安全应用场景方案") from exc
+            bindings = self._resolve_bindings(original_text, document.get("bindings", {}))
+            targets = self._transaction_targets(original_text, bindings, values)
+            changed = self._replace_targets(original_text, values, bindings)
             if changed.encode("utf-8") == original:
                 raise ScenarioSetupError("启动参数已是该场景方案，无需重复应用")
             applied = changed.encode("utf-8")
-            self._write_script(script, applied)
             active = {
+                "schema": 3,
+                # 先落盘恢复日志，再改受控脚本。断电或磁盘异常时宁可留下待清理
+                # 事务，也绝不能留下“脚本已改、备份不存在”的不可恢复状态。
+                "state": "prepared",
                 "profile_id": profile["id"], "profile_name": profile["name"], "script": str(script),
                 "created_at": _now(), "original_sha256": _sha256(original), "applied_sha256": _sha256(applied),
                 "original_b64": base64.b64encode(original).decode("ascii"),
+                "targets": targets,
             }
             self._write_active(active)
-            return {"message": f"已应用场景前置方案：{profile['name']}", "active_backup": active}
+            try:
+                self._write_script(script, applied)
+            except ScenarioSetupError:
+                # prepared 日志保留，恢复操作会依据原始校验和安全清理它。
+                raise
+            active["state"] = "applied"
+            self._write_active(active)
+            return {"message": f"已应用场景前置方案：{profile['name']}", "active_backup": self._public_active(active)}
 
     def preview_application(self, document: dict, profile_id: str) -> dict:
         """在内存中生成方案应用后的启动脚本，绝不写入机器人文件。"""
@@ -218,6 +280,9 @@ class ScenarioSetupStore:
             document = self.load()
             profile_id = str(document.get("case_bindings", {}).get(case_id, "")).strip()
             if not profile_id:
+                _active, transaction = self._transaction_status()
+                if transaction["state"] != "normal":
+                    raise ScenarioSetupError("该用例未绑定场景方案，但当前仍有待恢复事务；请先在场景前置配置页恢复并验证常规运行依赖")
                 return {"bound": False, "profile_id": "", "profile_name": "", "message": "该用例未绑定场景方案，使用常规启动配置"}
             profile = next((item for item in document["profiles"] if item["id"] == profile_id), None)
             if not profile:
@@ -227,21 +292,82 @@ class ScenarioSetupStore:
         # 运行状态只需展示方案标识；不能把含原文件内容的事务备份暴露给前端。
         return {"bound": True, "profile_id": profile_id, "profile_name": profile_name, "message": result["message"]}
 
-    def restore(self) -> dict:
+    def restore(self, *, retain_transaction: bool = False) -> dict:
         with self._lock:
-            active = self._read_active()
+            active, transaction = self._transaction_status()
+            if transaction["state"] == "corrupt":
+                raise ScenarioSetupError(transaction["message"])
             if not active:
                 return {"message": "当前没有待恢复的场景前置配置", "restored": False}
             script = Path(str(active["script"]))
             current = self._read_script(script)
-            if _sha256(current) != active["applied_sha256"]:
-                raise ScenarioSetupError("启动脚本在方案应用后已被外部修改；为避免覆盖他人变更，已拒绝自动恢复")
-            original = base64.b64decode(active["original_b64"].encode("ascii"), validate=True)
-            if _sha256(original) != active["original_sha256"]:
-                raise ScenarioSetupError("备份校验失败，已拒绝恢复")
-            self._write_script(script, original)
-            self._active_path().unlink(missing_ok=True)
+            original = self._decode_original(active)
+            if _sha256(current) == active["original_sha256"]:
+                if retain_transaction:
+                    active["state"] = "script_restored"
+                    self._write_active(active)
+                    return {"message": f"常规启动脚本已存在，等待重启并验证依赖（原方案：{active['profile_name']}）", "restored": True, "runtime_pending": True}
+                self._clear_active()
+                return {"message": f"常规启动配置已存在，已清理恢复事务（原方案：{active['profile_name']}）", "restored": True}
+            if active.get("targets"):
+                restored = self._merge_targeted_restore(current, original, active)
+            else:
+                # 兼容旧版事务：旧记录没有可用于三方合并的目标字段，只能在
+                # 当前脚本仍严格等于工具写入版本时整文件回滚，绝不猜测覆盖。
+                if _sha256(current) != active["applied_sha256"]:
+                    raise ScenarioSetupError("旧版恢复事务对应的启动脚本已发生外部修改；请先人工核对，升级后新事务将支持保留无关修改的定向恢复")
+                restored = original
+            if restored != current:
+                self._write_script(script, restored)
+            if retain_transaction:
+                active["state"] = "script_restored"
+                self._write_active(active)
+                return {"message": f"常规启动脚本已恢复，等待重启并验证依赖（原方案：{active['profile_name']}）", "restored": True, "runtime_pending": True}
+            self._clear_active()
             return {"message": f"已恢复常规启动配置（原方案：{active['profile_name']}）", "restored": True}
+
+    def complete_runtime_restore(self, runtime_message: str = "") -> dict:
+        """仅在常规脚本已存在且相关进程重启确认后关闭恢复事务。"""
+        with self._lock:
+            active, transaction = self._transaction_status()
+            if transaction["state"] == "corrupt":
+                raise ScenarioSetupError(transaction["message"])
+            if not active:
+                return {"message": "当前没有待完成的场景恢复事务", "restored": False}
+            if active.get("state") != "script_restored":
+                raise ScenarioSetupError("常规启动脚本尚未恢复，不能完成运行时恢复")
+            current = self._read_script(Path(active["script"]))
+            if _sha256(current) != active["original_sha256"]:
+                raise ScenarioSetupError("常规启动脚本在等待运行时恢复期间又被修改，已拒绝关闭事务")
+            self._clear_active()
+            suffix = f"；{runtime_message}" if runtime_message else ""
+            return {"message": f"已恢复常规启动配置并完成运行依赖验证（原方案：{active['profile_name']}）{suffix}", "restored": True}
+
+    def note_runtime_recovery_failure(self, detail: str) -> None:
+        """保留事务以供网页重试，不能在脚本已恢复但进程未验证时伪称完成。"""
+        with self._lock:
+            active, transaction = self._transaction_status()
+            if transaction["state"] == "corrupt":
+                raise ScenarioSetupError(transaction["message"])
+            if not active:
+                raise ScenarioSetupError("恢复事务不存在，无法记录运行时恢复失败")
+            active["state"] = "script_restored"
+            active["runtime_message"] = str(detail)[:1000]
+            self._write_active(active)
+
+    def note_runtime_activation_failure(self, detail: str) -> None:
+        """保留已应用事务并说明运行依赖没有成功读取新参数。"""
+        with self._lock:
+            active, transaction = self._transaction_status()
+            if transaction["state"] == "corrupt":
+                raise ScenarioSetupError(transaction["message"])
+            if not active:
+                raise ScenarioSetupError("场景应用事务不存在，无法记录运行时启动失败")
+            if active.get("state") == "script_restored":
+                raise ScenarioSetupError("常规脚本已恢复，不能记录场景启动失败")
+            active["state"] = "applied"
+            active["runtime_message"] = str(detail)[:1000]
+            self._write_active(active)
 
     def _validate_document(self, document: dict) -> dict:
         if not isinstance(document, dict):
@@ -334,9 +460,21 @@ class ScenarioSetupStore:
     def _command_candidates(text: str) -> list[dict]:
         candidates = []
         for kind, expression in (("launch", _ROS_LAUNCH), ("config", _ROS_RUN_CONFIG)):
+            occurrences: dict[str, int] = {}
             for match in expression.finditer(text):
                 prefix = match.group("prefix")
-                candidates.append({"id": _sha256(prefix.encode("utf-8"))[:16], "kind": kind, "prefix": prefix, "current": match.group("value"), "package": match.group("package"), "executable": match.groupdict().get("executable", "")})
+                occurrence = occurrences.get(prefix, 0)
+                occurrences[prefix] = occurrence + 1
+                selector = f"{kind}\0{prefix}\0{occurrence}"
+                candidates.append({
+                    "id": _sha256(selector.encode("utf-8"))[:16],
+                    "kind": kind,
+                    "prefix": prefix,
+                    "occurrence": occurrence,
+                    "current": match.group("value"),
+                    "package": match.group("package"),
+                    "executable": match.groupdict().get("executable", ""),
+                })
         return candidates
 
     @staticmethod
@@ -354,34 +492,136 @@ class ScenarioSetupStore:
                 raise ScenarioSetupError("FCRP 必须绑定 ros2 launch 命令")
             if slot == "lightning" and item["kind"] != "config":
                 raise ScenarioSetupError("定位必须绑定带 --config 的 ros2 run 命令")
+            occurrence = item.get("occurrence")
+            if occurrence is not None and (not isinstance(occurrence, int) or isinstance(occurrence, bool) or occurrence < 0):
+                raise ScenarioSetupError("启动命令绑定位置无效")
             prepared[slot] = {"kind": item["kind"], "prefix": item["prefix"]}
+            if occurrence is not None:
+                prepared[slot]["occurrence"] = occurrence
         return prepared
 
-    def _replace_targets(self, text: str, values: dict, bindings: dict) -> str:
-        """优先按操作者明确选定的位置替换；未选择时才自动唯一识别。"""
+    @staticmethod
+    def _binding_expression(binding: dict) -> re.Pattern[str]:
+        return re.compile(re.escape(binding["prefix"]) + r"(?P<value>[^\s#]+)")
+
+    def _match_binding(self, text: str, binding: dict, slot: str) -> re.Match[str]:
+        matches = list(self._binding_expression(binding).finditer(text))
+        occurrence = binding.get("occurrence")
+        if occurrence is None:
+            if len(matches) != 1:
+                raise ScenarioSetupError(f"已选择的{slot}参数位置未能唯一匹配；请重新读取启动脚本后选择")
+            return matches[0]
+        if occurrence >= len(matches):
+            raise ScenarioSetupError(f"已选择的{slot}参数位置不存在；启动脚本可能已被外部修改")
+        return matches[occurrence]
+
+    def _binding_for_match(self, text: str, kind: str, match: re.Match[str], prefix: str | None = None) -> dict:
+        binding = {"kind": kind, "prefix": prefix if prefix is not None else match.group("prefix")}
+        matches = list(self._binding_expression(binding).finditer(text))
+        occurrence = next((index for index, item in enumerate(matches) if item.start() == match.start()), None)
+        if occurrence is None:
+            raise ScenarioSetupError("无法确定启动参数位置")
+        return {**binding, "occurrence": occurrence}
+
+    def _resolve_bindings(self, text: str, bindings: dict) -> dict:
+        """将自动识别或人工选择转为可审计的两处精确位置。"""
         if bindings:
             if not bindings.get("fcrp") or not bindings.get("lightning"):
                 raise ScenarioSetupError("已启用手动参数位置选择，请同时选择 FCRP 与 lightning 命令")
-            for slot, value in (("fcrp", values["fcrp"]), ("lightning", values["lightning"])):
-                prefix = bindings[slot]["prefix"]
-                expression = re.compile(re.escape(prefix) + r"[^\s#]+")
-                if len(expression.findall(text)) != 1:
-                    raise ScenarioSetupError(f"已选择的{slot}参数位置未能唯一匹配；请重新读取启动脚本后选择")
-                text = expression.sub(prefix + value, text, count=1)
-            return text
-        inspected = self._inspect_text(text)
-        if inspected["ready"]:
-            text = _FCRP.sub(lambda item: item.group("prefix") + values["fcrp"], text, count=1)
-            return _LIGHTNING.sub(lambda item: item.group("prefix") + values["lightning"], text, count=1)
-        candidates = inspected["candidates"]
+            resolved = {}
+            for slot in ("fcrp", "lightning"):
+                binding = dict(bindings[slot])
+                match = self._match_binding(text, binding, slot)
+                resolved[slot] = self._binding_for_match(text, binding["kind"], match, binding["prefix"])
+            return resolved
+        strict = {"fcrp": list(_FCRP.finditer(text)), "lightning": list(_LIGHTNING.finditer(text))}
+        if len(strict["fcrp"]) == 1 and len(strict["lightning"]) == 1:
+            return {
+                "fcrp": self._binding_for_match(text, "launch", strict["fcrp"][0]),
+                "lightning": self._binding_for_match(text, "config", strict["lightning"][0]),
+            }
+        candidates = self._command_candidates(text)
         launches = [item for item in candidates if item["kind"] == "launch"]
         configs = [item for item in candidates if item["kind"] == "config"]
         if len(launches) != 1 or len(configs) != 1:
             raise ScenarioSetupError("启动脚本未能自动唯一识别启动文件和定位配置命令；请保留各一个目标命令后重试")
-        for candidate, value in ((launches[0], values["fcrp"]), (configs[0], values["lightning"])):
-            expression = re.compile(re.escape(candidate["prefix"]) + r"[^\s#]+")
-            text = expression.sub(candidate["prefix"] + value, text, count=1)
+        return {
+            "fcrp": {"kind": "launch", "prefix": launches[0]["prefix"], "occurrence": launches[0]["occurrence"]},
+            "lightning": {"kind": "config", "prefix": configs[0]["prefix"], "occurrence": configs[0]["occurrence"]},
+        }
+
+    def _replace_targets(self, text: str, values: dict, bindings: dict) -> str:
+        """仅替换已解析的两处目标值，不会误改同脚本中的其他 ROS 命令。"""
+        resolved = self._resolve_bindings(text, bindings)
+        for slot, value in (("fcrp", values["fcrp"]), ("lightning", values["lightning"])):
+            match = self._match_binding(text, resolved[slot], slot)
+            text = text[:match.start("value")] + value + text[match.end("value"):]
         return text
+
+    def _transaction_targets(self, text: str, bindings: dict, values: dict) -> list[dict]:
+        """记录两个受控参数的基线和应用值，供恢复时做安全三方合并。"""
+        targets = []
+        for slot, value in (("fcrp", values["fcrp"]), ("lightning", values["lightning"])):
+            binding = bindings[slot]
+            match = self._match_binding(text, binding, slot)
+            line_start = text.rfind("\n", 0, match.start("value")) + 1
+            line_end = text.find("\n", match.end("value"))
+            if line_end < 0:
+                line_end = len(text)
+            targets.append({
+                "slot": slot,
+                "prefix": binding["prefix"],
+                "occurrence": binding["occurrence"],
+                "original_value": match.group("value"),
+                "applied_value": value,
+                # occurrence 能区分同一命令前缀的多个实例；整行上下文再防止
+                # 外部在前面插入同前缀命令时误回退到另一条命令。
+                "line_before": text[line_start:match.start("value")],
+                "line_after": text[match.end("value"):line_end],
+            })
+        return targets
+
+    def _merge_targeted_restore(self, current: bytes, _original: bytes, active: dict) -> bytes:
+        """只回退本工具写入的两个参数，保留脚本中无关的外部修改。"""
+        try:
+            text = current.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ScenarioSetupError("启动脚本已不是 UTF-8 文本，无法安全恢复") from exc
+        targets = active.get("targets")
+        if not isinstance(targets, list) or {item.get("slot") for item in targets if isinstance(item, dict)} != {"fcrp", "lightning"}:
+            raise ScenarioSetupError("恢复事务缺少受控参数记录，已拒绝覆盖")
+        for target in targets:
+            if not isinstance(target, dict):
+                raise ScenarioSetupError("恢复事务参数记录损坏，已拒绝覆盖")
+            binding = {"prefix": target.get("prefix"), "occurrence": target.get("occurrence")}
+            if not isinstance(binding["prefix"], str) or not isinstance(binding["occurrence"], int):
+                raise ScenarioSetupError("恢复事务参数位置损坏，已拒绝覆盖")
+            matches = list(self._binding_expression(binding).finditer(text))
+            occurrence = binding["occurrence"]
+            if occurrence >= len(matches):
+                raise ScenarioSetupError(f"{target.get('slot', '受控')} 参数位置已不存在；脚本结构可能已被外部修改")
+            match = matches[occurrence]
+            line_start = text.rfind("\n", 0, match.start("value")) + 1
+            line_end = text.find("\n", match.end("value"))
+            if line_end < 0:
+                line_end = len(text)
+            line_before = target.get("line_before")
+            line_after = target.get("line_after")
+            if line_before is not None or line_after is not None:
+                if not isinstance(line_before, str) or not isinstance(line_after, str):
+                    raise ScenarioSetupError("恢复事务命令上下文损坏，已拒绝覆盖")
+                if text[line_start:match.start("value")] != line_before or text[match.end("value"):line_end] != line_after:
+                    raise ScenarioSetupError(f"{target.get('slot', '受控')} 命令行在方案应用后被外部修改；为避免覆盖该变更，已拒绝恢复")
+            current_value = match.group("value")
+            original_value, applied_value = target.get("original_value"), target.get("applied_value")
+            if not isinstance(original_value, str) or not isinstance(applied_value, str):
+                raise ScenarioSetupError("恢复事务参数值损坏，已拒绝覆盖")
+            if current_value == original_value:
+                continue
+            if current_value != applied_value:
+                raise ScenarioSetupError(f"{target['slot']} 参数在方案应用后被外部改为“{current_value}”；为避免覆盖该变更，已拒绝恢复")
+            text = text[:match.start("value")] + original_value + text[match.end("value"):]
+        return text.encode("utf-8")
 
     @staticmethod
     def _allowed_root(script: Path) -> Path:
@@ -428,6 +668,7 @@ class ScenarioSetupStore:
                 output.write(data); output.flush(); os.fsync(output.fileno()); temporary = Path(output.name)
             os.chmod(temporary, mode)
             os.replace(temporary, script)
+            ScenarioSetupStore._fsync_directory(script.parent)
         except OSError as exc:
             try: temporary.unlink(missing_ok=True)  # type: ignore[has-type]
             except (UnboundLocalError, OSError): pass
@@ -436,15 +677,132 @@ class ScenarioSetupStore:
     def _active_path(self) -> Path:
         return self.backup_dir / "active.json"
 
-    def _read_active(self) -> dict | None:
+    @staticmethod
+    def _fsync_directory(directory: Path) -> None:
+        descriptor = os.open(directory, os.O_RDONLY)
         try:
-            raw = json.loads(self._active_path().read_text(encoding="utf-8"))
-            return raw if isinstance(raw, dict) else None
-        except (OSError, json.JSONDecodeError):
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _decode_original(active: dict) -> bytes:
+        try:
+            original = base64.b64decode(active["original_b64"].encode("ascii"), validate=True)
+        except (KeyError, AttributeError, UnicodeEncodeError, ValueError, binascii.Error) as exc:
+            raise ScenarioSetupError("恢复事务备份已损坏，已拒绝恢复") from exc
+        if _sha256(original) != active.get("original_sha256"):
+            raise ScenarioSetupError("恢复事务备份校验失败，已拒绝恢复")
+        return original
+
+    def _transaction_status(self) -> tuple[dict | None, dict]:
+        """读取并校验活动事务；损坏记录必须显式暴露，不能伪装成常规状态。"""
+        path = self._active_path()
+        if not path.exists():
+            return None, {"state": "normal", "message": "未检测到待恢复事务", "restore_available": False}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            active = self._validate_active(raw)
+        except (OSError, json.JSONDecodeError, ScenarioSetupError) as exc:
+            return None, {
+                "state": "corrupt",
+                "message": f"恢复事务不可用：{exc}。请勿继续应用方案、升级或退出控制台；需先人工核对启动脚本与备份。",
+                "restore_available": False,
+            }
+        state = active.get("state", "applied")
+        if state == "script_restored":
+            detail = str(active.get("runtime_message", "")).strip()
+            message = "常规启动脚本已恢复，仍须重启并验证相关运行依赖后才能关闭恢复事务。"
+            if detail:
+                message = f"{message} 最近失败原因：{detail}"
+            return active, {"state": "pending", "phase": state, "message": message, "restore_available": True}
+        detail = str(active.get("runtime_message", "")).strip()
+        if state == "prepared":
+            message = f"场景方案“{active['profile_name']}”写入状态未确认。请执行恢复以核对并回退受控参数。"
+        else:
+            message = f"待恢复：{active['profile_name']} 已于 {active['created_at']} 应用。恢复仅回退受控参数，并保留无关脚本修改。"
+            if detail:
+                message = f"{message} 最近运行时启动失败：{detail}"
+        return active, {
+            "state": "pending",
+            "phase": state,
+            "message": message,
+            "restore_available": True,
+        }
+
+    @staticmethod
+    def _validate_active(raw: object) -> dict:
+        if not isinstance(raw, dict):
+            raise ScenarioSetupError("恢复事务格式错误")
+        required = ("profile_id", "profile_name", "script", "created_at", "original_sha256", "applied_sha256", "original_b64")
+        if any(not isinstance(raw.get(key), str) or not raw[key] for key in required):
+            raise ScenarioSetupError("恢复事务字段不完整")
+        if not Path(raw["script"]).is_absolute() or "\x00" in raw["script"]:
+            raise ScenarioSetupError("恢复事务脚本路径无效")
+        if any(not re.fullmatch(r"[0-9a-f]{64}", raw[key]) for key in ("original_sha256", "applied_sha256")):
+            raise ScenarioSetupError("恢复事务校验和无效")
+        state = raw.get("state", "applied")
+        if state not in {"prepared", "applied", "script_restored"}:
+            raise ScenarioSetupError("恢复事务状态无效")
+        # 先验证备份内容，避免页面显示“可恢复”而点击后才发现没有基线。
+        ScenarioSetupStore._decode_original(raw)
+        targets = raw.get("targets")
+        if targets is not None:
+            if not isinstance(targets, list) or len(targets) != 2:
+                raise ScenarioSetupError("恢复事务受控参数记录无效")
+            slots = set()
+            for target in targets:
+                if not isinstance(target, dict):
+                    raise ScenarioSetupError("恢复事务受控参数记录无效")
+                slot = target.get("slot")
+                if slot not in {"fcrp", "lightning"} or slot in slots:
+                    raise ScenarioSetupError("恢复事务受控参数记录无效")
+                slots.add(slot)
+                if (not isinstance(target.get("prefix"), str) or not target["prefix"].startswith("ros2 ")
+                        or not isinstance(target.get("occurrence"), int) or isinstance(target.get("occurrence"), bool) or target["occurrence"] < 0
+                        or not isinstance(target.get("original_value"), str) or not isinstance(target.get("applied_value"), str)):
+                    raise ScenarioSetupError("恢复事务受控参数记录无效")
+                if (target.get("line_before") is not None and not isinstance(target.get("line_before"), str)) or (target.get("line_after") is not None and not isinstance(target.get("line_after"), str)):
+                    raise ScenarioSetupError("恢复事务命令上下文无效")
+        return raw
+
+    @staticmethod
+    def _public_active(active: dict | None) -> dict | None:
+        if not active:
             return None
+        return {key: active[key] for key in ("profile_id", "profile_name", "script", "created_at", "state") if key in active}
+
+    def _raise_if_transaction_unresolved(self) -> None:
+        _active, transaction = self._transaction_status()
+        if transaction["state"] == "normal":
+            return
+        if transaction["state"] == "corrupt":
+            raise ScenarioSetupError(transaction["message"])
+        raise ScenarioSetupError("已有场景前置配置待恢复；请先恢复常规启动配置")
+
+    def _clear_active(self) -> None:
+        try:
+            self._active_path().unlink(missing_ok=True)
+            self._fsync_directory(self.backup_dir)
+        except OSError as exc:
+            raise ScenarioSetupError(f"常规脚本已回写，但无法清理恢复事务：{exc}；请勿重新应用方案") from exc
 
     def _write_active(self, active: dict) -> None:
-        self.backup_dir.mkdir(parents=True, exist_ok=True)
-        path = self._active_path(); temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(active, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(temporary, path)
+        temporary: Path | None = None
+        try:
+            self.backup_dir.mkdir(parents=True, exist_ok=True)
+            path = self._active_path()
+            with tempfile.NamedTemporaryFile(dir=self.backup_dir, prefix=".active.", suffix=".tmp", mode="w", encoding="utf-8", delete=False) as output:
+                output.write(json.dumps(active, ensure_ascii=False, indent=2) + "\n")
+                output.flush()
+                os.fsync(output.fileno())
+                temporary = Path(output.name)
+            os.replace(temporary, path)
+            self._fsync_directory(self.backup_dir)
+        except OSError as exc:
+            if temporary:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise ScenarioSetupError(f"无法持久化恢复事务：{exc}") from exc

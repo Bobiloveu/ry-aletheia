@@ -1,4 +1,5 @@
 import unittest
+import threading
 from unittest.mock import patch
 
 from autodrive_console.robot_gateway import RobotGateway
@@ -35,6 +36,20 @@ class SupervisorMonitoringTests(unittest.TestCase):
         self.assertEqual(snapshots[0][0]["status"], "STARTING")
         self.assertEqual(snapshots[-1][0]["status"], "RUNNING")
         self.assertEqual(len(snapshots), 6)
+
+    def test_waiting_stage_honors_cancel_without_waiting_for_supervisor(self):
+        cancelled = threading.Event()
+        cancelled.set()
+        gateway = RobotGateway(RobotSettings(monitor_nodes=["MODULES:209-lightning"]))
+
+        class FakeClient:
+            @staticmethod
+            def discover():
+                raise AssertionError("取消后的等待不应继续查询 Supervisor")
+
+        ready, detail = gateway._wait_stage_running(FakeClient(), ["MODULES:209-lightning"], cancelled)
+        self.assertFalse(ready)
+        self.assertEqual(detail, "测试已取消")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ import time
 import uuid
 import shutil
 import subprocess
+from contextlib import nullcontext
 from datetime import datetime
 from math import isfinite
 from pathlib import Path
@@ -172,9 +173,12 @@ class RunManager:
                         return
                 run.preflight["task_sync"] = "正在执行运行依赖预检"
                 gateway = RobotGateway(self.settings.load(), lambda states: self._update_preflight_nodes(run, states))
-                preflight = gateway.preflight(run.case)
+                preflight = gateway.preflight(run.case, cancel_event=cancel_event)
                 # 网关返回的是节点/同步状态快照；不得覆盖此前已记录的场景方案应用状态。
                 run.preflight = {**preflight.to_dict(), "scenario": scenario_state}
+                if cancel_event.is_set():
+                    run.status = "cancelled"
+                    return
                 if not preflight.ok:
                     run.status, run.error = "blocked", preflight.message
                     return
@@ -191,9 +195,12 @@ class RunManager:
                 if not service_ok:
                     run.status, run.error = "blocked", service_message
                     return
-                dependencies_ok, dependencies_message, states = gateway.confirm_dependencies_ready()
+                dependencies_ok, dependencies_message, states = gateway.confirm_dependencies_ready(cancel_event=cancel_event)
                 run.preflight["node_states"] = states
                 run.preflight["final_dependency_gate"] = {"ok": dependencies_ok, "message": dependencies_message}
+                if cancel_event.is_set():
+                    run.status = "cancelled"
+                    return
                 if not dependencies_ok:
                     run.status, run.error = "blocked", f"ROS2 服务发现后依赖节点未稳定就绪：{dependencies_message}"
                     return
@@ -336,7 +343,10 @@ class RunManager:
                                 break
                             run.status = "recovering"
                             self._record_intervention(run, index, "recovery_requested", "操作者确认车辆已回到测试起点，开始恢复预检")
-                            recovered, recovery_message = self._recover_after_manual_intervention(run)
+                            recovered, recovery_message = self._recover_after_manual_intervention(run, cancel_event)
+                            if cancel_event.is_set():
+                                run.status = "cancelled"
+                                break
                             if recovered:
                                 self._record_intervention(run, index, "recovery_ready", recovery_message)
                                 run.status, run.error = "running", None
@@ -379,11 +389,62 @@ class RunManager:
         """必须在任何 Supervisor 编排动作前完成，以确保重启读取到新参数。"""
         if not self.scenario_setup:
             return {"ok": True, "bound": False, "applied": False, "state": "not_configured", "message": "场景前置模块未配置，使用常规启动配置"}
+        bound = False
         try:
+            is_bound = getattr(self.scenario_setup, "is_case_bound", None)
+            bound = bool(is_bound(run.case.id)) if callable(is_bound) else False
             result = self.scenario_setup.apply_for_case(run.case.id)
+            # 完整依赖编排会在紧随其后的 preflight 中重启全部节点；未启用时
+            # 立即重启定位/导航启动消费者，确保本轮确实读取刚写入的场景参数。
+            plan = getattr(self.settings.load(), "dependency_plan", {})
+            # 仅新版事务存储具备精确绑定/恢复语义，才在“无完整编排”时主动
+            # 重启最小消费者集合。旧版注入存根保留原有“后续 preflight 编排”
+            # 行为，避免测试/第三方扩展在未声明重启能力时被错误调用。
+            if callable(is_bound) and (bound or result.get("bound")) and (not isinstance(plan, dict) or not plan.get("enabled")):
+                try:
+                    runtime_ok, runtime_message = self._restart_scenario_dependencies()
+                except Exception as exc:
+                    runtime_ok, runtime_message = False, f"启动场景运行依赖时发生异常：{exc}"
+                if not runtime_ok:
+                    return {
+                        "ok": False,
+                        "bound": True,
+                        "applied": True,
+                        "state": "activation_restart_failed",
+                        "message": f"场景启动脚本已写入，但运行依赖未能读取新参数：{runtime_message}。请先恢复常规配置后重试。",
+                    }
+                result["runtime_restart"] = runtime_message
         except ScenarioSetupError as exc:
             LOGGER.error("场景方案应用失败：run=%s case=%s error=%s", run.id, run.case.id, exc)
-            return {"ok": False, "bound": True, "applied": False, "state": "apply_failed", "message": f"场景方案应用失败：{exc}"}
+            # apply 的顺序是“先持久化恢复事务、再改脚本、最后标记 applied”。
+            # 最后一步恰好失败时，脚本可能已经改变；不能因异常直接跳过 finally
+            # 的自动恢复。只要事务仍在，就让本次计划进入受控恢复路径。
+            pending = getattr(self.scenario_setup, "has_unresolved_transaction", None)
+            recovery_required = bool(pending()) if callable(pending) else False
+            return {
+                "ok": False,
+                "bound": bool(bound),
+                "applied": recovery_required,
+                "state": "apply_recovery_required" if recovery_required else "apply_failed",
+                "message": (
+                    f"场景方案写入过程未完全确认：{exc}。将自动尝试恢复常规配置。"
+                    if recovery_required else f"场景方案应用失败：{exc}"
+                ),
+            }
+        except Exception as exc:
+            LOGGER.exception("场景方案应用发生未预期异常：run=%s case=%s", run.id, run.case.id)
+            pending = getattr(self.scenario_setup, "has_unresolved_transaction", None)
+            recovery_required = bool(pending()) if callable(pending) else False
+            return {
+                "ok": False,
+                "bound": bool(bound),
+                "applied": recovery_required,
+                "state": "apply_recovery_required" if recovery_required else "apply_failed",
+                "message": (
+                    f"场景方案写入过程发生异常：{exc}。将自动尝试恢复常规配置。"
+                    if recovery_required else f"场景方案应用异常：{exc}"
+                ),
+            }
         if not result["bound"]:
             return {"ok": True, "bound": False, "applied": False, "state": "not_bound", "message": result["message"]}
         self._record_intervention(run, 0, "scenario_applied", f"测试前已应用场景方案：{result['profile_name']}")
@@ -395,10 +456,27 @@ class RunManager:
         return not cancel_event.wait(self._scenario_apply_settle_seconds)
 
     def _restore_case_scenario(self, run: RunRecord) -> None:
-        """仅恢复本运行自行应用的方案，绝不覆盖外部操作者的启动脚本变更。"""
+        """恢复脚本后重启已登记依赖，确认运行中节点也切回常规参数。"""
         scenario = (run.preflight or {}).setdefault("scenario", {})
         try:
-            result = self.scenario_setup.restore() if self.scenario_setup else {"restored": False, "message": "场景前置模块未配置"}
+            if self.scenario_setup and hasattr(self.scenario_setup, "complete_runtime_restore"):
+                # 与网页手动恢复共用场景存储的运行时锁，防止计划结束与旧网页
+                # 标签重复点击恢复时交错重启同一批 Supervisor 节点。
+                runtime_lock = getattr(self.scenario_setup, "runtime_lock", None)
+                with runtime_lock if runtime_lock is not None else nullcontext():
+                    result = self.scenario_setup.restore(retain_transaction=True)
+                    if result.get("restored"):
+                        try:
+                            runtime_ok, runtime_message = self._restart_scenario_dependencies()
+                        except Exception as exc:
+                            runtime_ok, runtime_message = False, f"恢复运行依赖时发生异常：{exc}"
+                        if not runtime_ok:
+                            self.scenario_setup.note_runtime_recovery_failure(runtime_message)
+                            raise ScenarioSetupError(f"常规启动脚本已恢复，但运行依赖未能切回常规参数：{runtime_message}")
+                        result = self.scenario_setup.complete_runtime_restore(runtime_message)
+            else:
+                # 兼容注入的旧测试存根；实际部署始终使用上方的完整事务闭环。
+                result = self.scenario_setup.restore() if self.scenario_setup else {"restored": False, "message": "场景前置模块未配置"}
             scenario.update({"restore_state": "restored" if result.get("restored") else "not_needed", "restore_message": result["message"]})
             self._record_intervention(run, 0, "scenario_restored", result["message"])
             LOGGER.info("测试结束后已恢复场景方案：run=%s", run.id)
@@ -411,6 +489,11 @@ class RunManager:
             if run.status == "completed":
                 run.status = "failed"
             LOGGER.exception("测试结束后恢复场景方案失败：run=%s", run.id)
+
+    def _restart_scenario_dependencies(self) -> tuple[bool, str]:
+        settings = self.settings.load()
+        gateway = RobotGateway(settings)
+        return gateway.restart_configured_dependencies()
 
     @staticmethod
     def _update_live_progress(run: RunRecord, attempt: int, progress: dict) -> None:
@@ -469,10 +552,10 @@ class RunManager:
     def _record_intervention(run: RunRecord, attempt: int, action: str, detail: str) -> None:
         run.interventions.append({"at": now_iso(), "attempt": attempt, "action": action, "detail": detail})
 
-    def _recover_after_manual_intervention(self, run: RunRecord) -> tuple[bool, str]:
+    def _recover_after_manual_intervention(self, run: RunRecord, cancel_event: threading.Event | None = None) -> tuple[bool, str]:
         """继续前完整重做依赖编排、服务发现与最终节点总闸。"""
         gateway = RobotGateway(self.settings.load(), lambda states: self._update_recovery_nodes(run, states))
-        preflight = gateway.preflight(run.case)
+        preflight = gateway.preflight(run.case, cancel_event=cancel_event)
         recovery = preflight.to_dict()
         run.preflight = run.preflight or {}
         run.preflight["recovery"] = recovery
@@ -481,12 +564,15 @@ class RunManager:
         recovery["ros_service"] = {"ok": None, "message": "正在等待 ROS2 服务恢复：/start_execute_tasks（最长 300 秒）"}
         service_ok, service_message = self.executor.wait_until_available(
             timeout_s=300,
+            cancel_event=cancel_event,
             status_callback=lambda message: recovery.__setitem__("ros_service", {"ok": None, "message": message}),
         )
         recovery["ros_service"] = {"ok": service_ok, "message": service_message}
+        if cancel_event and cancel_event.is_set():
+            return False, "测试已取消"
         if not service_ok:
             return False, service_message
-        dependencies_ok, dependencies_message, states = gateway.confirm_dependencies_ready()
+        dependencies_ok, dependencies_message, states = gateway.confirm_dependencies_ready(cancel_event=cancel_event)
         recovery["node_states"] = states
         recovery["final_dependency_gate"] = {"ok": dependencies_ok, "message": dependencies_message}
         if not dependencies_ok:

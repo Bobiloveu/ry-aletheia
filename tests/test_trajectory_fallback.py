@@ -9,6 +9,7 @@ from autodrive_console.models import RunRecord, TaskParameters, TestCase
 from autodrive_console.run_manager import RunManager
 from autodrive_console.ros_executor import RosTaskExecutor
 from autodrive_console.runtime_env import clear_legacy_fastdds_override
+from autodrive_console.scenario_setup import ScenarioSetupError
 
 
 class _Preflight:
@@ -25,11 +26,11 @@ class _Gateway:
         pass
 
     @staticmethod
-    def preflight(_case):
+    def preflight(_case, **_kwargs):
         return _Preflight()
 
     @staticmethod
-    def confirm_dependencies_ready():
+    def confirm_dependencies_ready(**_kwargs):
         return True, "全部 RUNNING", []
 
 
@@ -111,12 +112,12 @@ class TrajectoryFallbackTests(unittest.TestCase):
                 pass
 
             @staticmethod
-            def preflight(_case):
+            def preflight(_case, **_kwargs):
                 events.append(("orchestration", ""))
                 return _Preflight()
 
             @staticmethod
-            def confirm_dependencies_ready():
+            def confirm_dependencies_ready(**_kwargs):
                 return True, "全部 RUNNING", []
 
         class Executor:
@@ -147,6 +148,107 @@ class TrajectoryFallbackTests(unittest.TestCase):
         self.assertEqual(run.preflight["scenario"]["profile_id"], "hall")
         self.assertEqual(run.preflight["scenario"]["restore_state"], "restored")
         self.assertEqual([item["action"] for item in run.interventions], ["scenario_applied", "scenario_restored"])
+
+    def test_transactional_scenario_reloads_consumers_before_apply_and_after_restore(self):
+        """新版事务必须让运行节点分别读取场景和常规脚本，不能只回写文件。"""
+        events = []
+
+        class ScenarioStore:
+            @staticmethod
+            def is_case_bound(_case_id):
+                return True
+
+            @staticmethod
+            def apply_for_case(_case_id):
+                events.append("apply")
+                return {"bound": True, "profile_id": "hall", "profile_name": "大厅", "message": "方案已应用"}
+
+            @staticmethod
+            def restore(*, retain_transaction=False):
+                assert retain_transaction
+                events.append("script_restore")
+                return {"restored": True, "runtime_pending": True, "message": "脚本已恢复"}
+
+            @staticmethod
+            def complete_runtime_restore(message):
+                events.append(f"restore_complete:{message}")
+                return {"restored": True, "message": "常规运行依赖已验证"}
+
+            @staticmethod
+            def note_runtime_recovery_failure(message):
+                events.append(f"restore_failure:{message}")
+
+        class Gateway:
+            def __init__(self, *_args):
+                pass
+
+            @staticmethod
+            def restart_configured_dependencies():
+                events.append("runtime_restart")
+                return True, "稳定 RUNNING"
+
+            @staticmethod
+            def preflight(_case, **_kwargs):
+                events.append("preflight")
+                return _Preflight()
+
+            @staticmethod
+            def confirm_dependencies_ready(**_kwargs):
+                return True, "全部 RUNNING", []
+
+        class Executor:
+            @staticmethod
+            def wait_until_available(**_kwargs):
+                events.append("service_wait")
+                return True, "ROS2 服务已就绪"
+
+            @staticmethod
+            def execute(*_args, **_kwargs):
+                events.append("execute")
+                return True, "任务服务执行成功", 0.1
+
+        class Settings:
+            @staticmethod
+            def load():
+                return type("Options", (), {"dependency_plan": {"enabled": False}, "elevator_wait_timeout_s": 180, "task_execution_timeout_s": 900})()
+
+        case = TestCase("case", "case.json", "测试用例", TaskParameters("社区", 1, 1, 1, 1), "unused.json")
+        with tempfile.TemporaryDirectory() as directory:
+            manager = RunManager(Path(directory), Executor(), Settings(), ScenarioStore())
+            manager._scenario_apply_settle_seconds = 0
+            run = RunRecord("run", case, 1, 0, prepare_trajectory_maps=False)
+            manager._runs[run.id] = run
+            manager._cancel_events[run.id] = threading.Event()
+            manager._resume_events[run.id] = threading.Event()
+            manager._attempt_interrupt_events[run.id] = threading.Event()
+            with patch("autodrive_console.run_manager.RobotGateway", Gateway), patch.object(manager, "_write_report"):
+                manager._run(run)
+
+        self.assertEqual(events, ["apply", "runtime_restart", "preflight", "service_wait", "execute", "script_restore", "runtime_restart", "restore_complete:稳定 RUNNING"])
+        self.assertEqual(run.status, "completed")
+
+    def test_uncertain_scenario_write_forces_finally_recovery(self):
+        """写脚本后更新恢复状态失败时，也必须进入自动恢复而非遗留场景参数。"""
+        class ScenarioStore:
+            @staticmethod
+            def is_case_bound(_case_id):
+                return True
+
+            @staticmethod
+            def apply_for_case(_case_id):
+                raise ScenarioSetupError("恢复状态落盘失败")
+
+            @staticmethod
+            def has_unresolved_transaction():
+                return True
+
+        case = TestCase("case", "case.json", "测试用例", TaskParameters("社区", 1, 1, 1, 1), "unused.json")
+        run = RunRecord("run", case, 1, 0, prepare_trajectory_maps=False)
+        manager = RunManager(Path(tempfile.gettempdir()), _Executor(), _Settings(), ScenarioStore())
+        state = manager._apply_case_scenario(run)
+        self.assertFalse(state["ok"])
+        self.assertTrue(state["applied"])
+        self.assertEqual(state["state"], "apply_recovery_required")
 
     def test_clears_only_legacy_udp_override_inherited_from_0614(self):
         inherited = {"ROVER_QA_ROS_READY": "1", "FASTDDS_BUILTIN_TRANSPORTS": "UDPv4"}
