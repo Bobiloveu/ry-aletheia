@@ -455,7 +455,7 @@ async function connectWebRtcPlayer(state, stream) {
       if (state.pc !== peer) return;
       if (!state.texture) { state.texture = Texture.from(state.video); state.sprite = new Sprite(state.texture); state.app?.stage.addChild(state.sprite); }
       startWebRtcFramePump(state); setWebRtcPlayerState(state, `${stream.resolution} · H.264 · WebRTC`);
-      resolveObservationDiagnostic(`webrtc-${stream.name}`, `视频流已恢复播放：${stream.name}（${stream.source_topic}）。`);
+      resolveObservationDiagnostic(`webrtc-${stream.name}`, `视频流已恢复播放：${stream.name}（${stream.source_label || stream.source_topic || '视频输入'}）。`);
     } catch (error) {
       const detail = error?.message || '未知原因'; setWebRtcPlayerState(state, `浏览器播放被阻止：${detail}`);
       reportObservationOnce(`webrtc-${stream.name}`, 'ERROR', `视频流浏览器播放失败：${stream.name}；${detail}`);
@@ -480,7 +480,7 @@ async function connectWebRtcPlayer(state, stream) {
     if (state.pc === peer) {
       const detail = error?.message || '未知错误'; state.retryAfter = performance.now() + 3000;
       closeWebRtcPlayer(state, `WebRTC 连接失败：${detail}`);
-      reportObservationOnce(`webrtc-${stream.name}`, 'ERROR', `视频流 WHEP/WebRTC 建连失败：${stream.name} (${stream.source_topic})；${detail}`);
+      reportObservationOnce(`webrtc-${stream.name}`, 'ERROR', `视频流 WHEP/WebRTC 建连失败：${stream.name} (${stream.source_label || stream.source_topic || '视频输入'})；${detail}`);
     }
   }
 }
@@ -504,13 +504,13 @@ function diagnoseWebRtcStatus(enabled, gateway, streams) {
     }
     if (stream.status === 'online') {
       videoWaitingSince.delete(stream.name);
-      resolveObservationDiagnostic(key, `视频输入已恢复：${stream.name}（${stream.source_topic}）已发布到 MediaMTX。`);
+      resolveObservationDiagnostic(key, `视频输入已恢复：${stream.name}（${stream.source_label || stream.source_topic || '视频输入'}）已发布到 MediaMTX。`);
       continue;
     }
     if (stream.status === 'waiting') {
       const since = videoWaitingSince.get(stream.name) || now; videoWaitingSince.set(stream.name, since);
       if (now - since >= VIDEO_INPUT_READINESS_TIMEOUT_MS) {
-        reportObservationOnce(key, 'WARNING', `视频输入等待超时：${stream.name} 正在等待 ${stream.source_topic} 的 ${stream.encoding} ${stream.resolution} 首帧。请查看 logs/video-runtime.log 中该流的 publishers、编码和分辨率诊断。`);
+        reportObservationOnce(key, 'WARNING', `视频输入等待超时：${stream.name} 正在等待 ${stream.source_label || stream.source_topic || '视频输入'} 的 ${stream.encoding} ${stream.resolution} 首帧。请查看 logs/video-runtime.log 中该流的来源、编码和分辨率诊断。`);
       }
       continue;
     }

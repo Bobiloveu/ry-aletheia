@@ -81,22 +81,13 @@ SCENARIO_RUNTIME_LOCK = SCENARIO_SETUP.runtime_lock
 
 
 def restore_scenario_runtime() -> dict:
-    """完成“脚本恢复 + 依赖重启验证”的闭环，不能只改文件就宣称常规已恢复。"""
-    # ThreadingHTTPServer 可同时处理重复点击/多个网页标签。整个“回写脚本 →
-    # 重启 → 确认 → 关闭事务”必须串行，否则两个请求可能交叉重启同一批节点。
+    """只恢复受控启动脚本，不操作任何 Supervisor 节点。"""
+    # ThreadingHTTPServer 可同时处理重复点击/多个网页标签。恢复事务的“读取 →
+    # 定向回写 → 校验 → 清理”必须串行，避免两个请求交叉覆盖同一受控参数。
+    # 常规配置只在下次由机器人系统自行启动相关进程时生效；手动恢复不应
+    # 打断当前运行节点，也不应借此扩大 Aletheia 的节点控制范围。
     with SCENARIO_RUNTIME_LOCK:
-        result = SCENARIO_SETUP.restore(retain_transaction=True)
-        if not result.get("restored"):
-            return result
-        try:
-            gateway = RobotGateway(SETTINGS.load())
-            runtime_ok, runtime_message = gateway.restart_configured_dependencies()
-        except Exception as exc:
-            runtime_ok, runtime_message = False, f"恢复运行依赖时发生异常：{exc}"
-        if not runtime_ok:
-            SCENARIO_SETUP.note_runtime_recovery_failure(runtime_message)
-            raise ScenarioSetupError(f"常规启动脚本已恢复，但运行依赖未能切回常规参数：{runtime_message}")
-        return SCENARIO_SETUP.complete_runtime_restore(runtime_message)
+        return SCENARIO_SETUP.restore()
 
 
 def apply_scenario_runtime(profile_id: str, document: dict | None = None) -> dict:

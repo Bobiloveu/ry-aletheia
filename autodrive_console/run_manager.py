@@ -448,26 +448,14 @@ class RunManager:
         return not cancel_event.wait(self._scenario_apply_settle_seconds)
 
     def _restore_case_scenario(self, run: RunRecord) -> None:
-        """恢复脚本后重启已登记依赖，确认运行中节点也切回常规参数。"""
+        """测试结束后只恢复受控启动脚本，绝不重启 Supervisor 节点。"""
         scenario = (run.preflight or {}).setdefault("scenario", {})
         try:
-            if self.scenario_setup and hasattr(self.scenario_setup, "complete_runtime_restore"):
-                # 与网页手动恢复共用场景存储的运行时锁，防止计划结束与旧网页
-                # 标签重复点击恢复时交错重启同一批 Supervisor 节点。
-                runtime_lock = getattr(self.scenario_setup, "runtime_lock", None)
-                with runtime_lock if runtime_lock is not None else nullcontext():
-                    result = self.scenario_setup.restore(retain_transaction=True)
-                    if result.get("restored"):
-                        try:
-                            runtime_ok, runtime_message = self._restart_scenario_dependencies()
-                        except Exception as exc:
-                            runtime_ok, runtime_message = False, f"恢复运行依赖时发生异常：{exc}"
-                        if not runtime_ok:
-                            self.scenario_setup.note_runtime_recovery_failure(runtime_message)
-                            raise ScenarioSetupError(f"常规启动脚本已恢复，但运行依赖未能切回常规参数：{runtime_message}")
-                        result = self.scenario_setup.complete_runtime_restore(runtime_message)
-            else:
-                # 兼容注入的旧测试存根；实际部署始终使用上方的完整事务闭环。
+            # 与网页手动恢复共用锁，防止计划结束与网页重复点击交叉回写同一
+            # 启动脚本。恢复常规方案只影响下一次机器人系统自行加载该脚本的
+            # 时机；它不是依赖编排，也不得停止、启动或重启 Supervisor 节点。
+            runtime_lock = getattr(self.scenario_setup, "runtime_lock", None) if self.scenario_setup else None
+            with runtime_lock if runtime_lock is not None else nullcontext():
                 result = self.scenario_setup.restore() if self.scenario_setup else {"restored": False, "message": "场景前置模块未配置"}
             scenario.update({"restore_state": "restored" if result.get("restored") else "not_needed", "restore_message": result["message"]})
             self._record_intervention(run, 0, "scenario_restored", result["message"])

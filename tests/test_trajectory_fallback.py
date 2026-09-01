@@ -149,8 +149,8 @@ class TrajectoryFallbackTests(unittest.TestCase):
         self.assertEqual(run.preflight["scenario"]["restore_state"], "restored")
         self.assertEqual([item["action"] for item in run.interventions], ["scenario_applied", "scenario_restored"])
 
-    def test_transactional_scenario_reloads_consumers_before_apply_and_after_restore(self):
-        """新版事务必须让运行节点分别读取场景和常规脚本，不能只回写文件。"""
+    def test_transactional_scenario_reloads_consumers_only_when_applying(self):
+        """应用方案可重启消费者；恢复常规方案只回写脚本。"""
         events = []
 
         class ScenarioStore:
@@ -164,19 +164,9 @@ class TrajectoryFallbackTests(unittest.TestCase):
                 return {"bound": True, "profile_id": "hall", "profile_name": "大厅", "message": "方案已应用"}
 
             @staticmethod
-            def restore(*, retain_transaction=False):
-                assert retain_transaction
+            def restore():
                 events.append("script_restore")
-                return {"restored": True, "runtime_pending": True, "message": "脚本已恢复"}
-
-            @staticmethod
-            def complete_runtime_restore(message):
-                events.append(f"restore_complete:{message}")
-                return {"restored": True, "message": "常规运行依赖已验证"}
-
-            @staticmethod
-            def note_runtime_recovery_failure(message):
-                events.append(f"restore_failure:{message}")
+                return {"restored": True, "message": "常规启动脚本已恢复"}
 
         class Gateway:
             def __init__(self, *_args):
@@ -224,7 +214,7 @@ class TrajectoryFallbackTests(unittest.TestCase):
             with patch("autodrive_console.run_manager.RobotGateway", Gateway), patch.object(manager, "_write_report"):
                 manager._run(run)
 
-        self.assertEqual(events, ["apply", "runtime_restart", "preflight", "service_wait", "execute", "script_restore", "runtime_restart", "restore_complete:稳定 RUNNING"])
+        self.assertEqual(events, ["apply", "runtime_restart", "preflight", "service_wait", "execute", "script_restore"])
         self.assertEqual(run.status, "completed")
 
     def test_uncertain_scenario_write_forces_finally_recovery(self):

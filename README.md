@@ -21,7 +21,9 @@ http://<小车IP>:8087
 
 已部署旧版本时，优先在“运行配置 → 工具离线升级”上传维护人员发布的 `ry-aletheia_<版本号>.zip`；无需重新安装 DEB。新版本会在替换前校验 Ed25519 发布签名与 SHA-256 完整性，校验失败不会替换当前程序。
 
-实时观测中的“低延迟相机流”默认关闭。页面既可统一启停全部视频，也可逐路任意开关；视频窗口会随当前启用的路数自适应排布。关闭最后一路后，工具会停止并回收自己的 MediaMTX、视频编码与 ROS 订阅进程，不需要使用 Supervisor 或额外的常驻管理命令。
+实时观测中的“低延迟相机流”默认关闭。页面既可统一启停全部视频，也可逐路任意开关；视频窗口会随当前启用的路数自适应排布。关闭最后一路后，工具会停止并回收自己的 MediaMTX 与视频编码进程，不需要使用 Supervisor 或额外的常驻管理命令。
+
+> **2.3.8 ShmSDK 试运行**：本版本仅验证前、后、左、右四路物理相机的旁路读取；目标检测与分割仍读取既有 ROS 图像话题。试运行记录、验收项和已签名回退包的使用方式见 [ShmSDK 视频接入试运行记录](docs/SHMSDK_VIDEO_TRIAL_2.3.8.md)。在完成现场验收前，不应将此接入视为小车相机系统的正式替代。
 
 完整安装、移动端使用、页面操作、人工恢复、升级和常见问题请阅读 [USER_GUIDE.md](USER_GUIDE.md)。
 
@@ -30,7 +32,7 @@ http://<小车IP>:8087
 维护前先明确以下归属，避免工具升级意外影响正在运行的小车：
 
 - **机器人系统拥有**：相机 USB 设备、`/dev/video*`/v4l2loopback 映射、ROS 相机节点、定位、导航、地图、雷达和底盘控制。
-- **Aletheia 只读使用**：地图、TF、点云和既有 `sensor_msgs/Image` 话题。视频旁路的唯一输入绑定是 `config/video.json` 中的 `source_topic`，不会直接打开摄像头设备。
+- **Aletheia 只读使用**：地图、TF、点云，以及检测/分割的既有 `sensor_msgs/Image` 话题。2.3.8 试运行中，前、后、左、右物理相机改为只读访问 ShmSDK 的固定 `Cam*` 最新图像；输入契约仍由 `config/video.json` 描述，旁路不会直接打开摄像头设备，也不会启动、停止或配置 `mempool`。
 - **Aletheia 自己拥有**：8087 控制台、按需运行的专用遥测网关（回环 UDP 与 Binary WebSocket）、点云/位姿预处理进程，以及按需运行的 MediaMTX 和视频编码进程。它们不由 Supervisor 管理。
 - **用户数据不随 ZIP 覆盖**：`tasks/`、`config/`、报告、地图缓存和日志都被保留。升级包只替换程序二进制，并自动留下可回退备份。
 
@@ -58,7 +60,7 @@ http://<小车IP>:8087
 | ROS/遥测/API | 既有实现 | 点云/位姿使用专用 UDP + Binary WebSocket；保持既有控制边界，不新增机器人控制接口 |
 | 开发工具链 | 手工管理 Python、Node 与构建工具 | 根目录 `pixi.toml`/`pixi.lock` 锁定 Python 3.10、Node 20、CMake、编译器、PyInstaller 与 pytest |
 
-`v2.0` 将地图、虚拟墙和点云重构为 PixiJS 分层渲染；相机则采用独立的按需 WebRTC 链路。视频只读取既有 ROS 图像话题并在工具私有运行时内编码、转发，不改变任务下发、Supervisor 编排、ROS2 原有节点或机器人控制边界。详细设计和环境边界见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)。
+`v2.0` 将地图、虚拟墙和点云重构为 PixiJS 分层渲染；相机则采用独立的按需 WebRTC 链路。目标检测和分割视频继续读取既有 ROS 图像话题；前、后、左、右物理相机在 2.3.8 中进行 ShmSDK 只读旁路接入试运行。两者都只在工具私有运行时内编码、转发，不改变任务下发、Supervisor 编排、ROS2 原有节点或机器人控制边界。详细设计和环境边界见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)。
 
 ## 主要能力
 
@@ -82,7 +84,7 @@ RY Aletheia（小车普通账户）
   ├─ Python 控制台与测试编排
   ├─ C++ 实时预处理：/collision_voxel_layer/points（Livox 原始流回退）→ 回环 UDP 最新帧
   ├─ 专用遥测网关：UDP 组装最新帧 → 两条 Binary WebSocket
-  └─ 可选视频运行时：ROS Image → 原生 RGB 输入 → VAAPI H.264 → 本机 MediaMTX
+  └─ 可选视频运行时：ShmSDK 最新图像（四路试运行）或 ROS Image（检测/分割）→ 原生 RGB 输入 → VAAPI H.264 → 本机 MediaMTX
              │
 小车已有 ROS 2 Humble、定位、地图、导航与传感器节点
 ```
@@ -104,6 +106,7 @@ RY Aletheia（小车普通账户）
 | --- | --- | --- |
 | [USER_GUIDE.md](USER_GUIDE.md) | 测试人员、部署人员 | 安装、启动、页面操作、手机端、执行测试、升级、卸载与常见问题。 |
 | [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) | 开发、维护人员 | 架构、数据边界、实时链路、构建、测试与现场排障。 |
+| [docs/SHMSDK_VIDEO_TRIAL_2.3.8.md](docs/SHMSDK_VIDEO_TRIAL_2.3.8.md) | 现场试运行、维护人员 | 四路 ShmSDK 接入边界、已完成验证、观察项、停止条件与安全回退。 |
 | [live_preprocessor/README.md](live_preprocessor/README.md) | C++ 模块维护人员 | 实时点云/位姿预处理节点的构建与运行参数。 |
 | [GitHub Releases](https://github.com/Bobiloveu/ry-aletheia/releases) | 发布与部署人员 | 下载正式 ZIP 与 DEB 发布包。 |
 

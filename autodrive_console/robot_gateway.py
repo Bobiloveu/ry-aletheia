@@ -73,12 +73,11 @@ class RobotGateway:
         return ready and not error, error or detail, states
 
     def restart_configured_dependencies(self) -> tuple[bool, str]:
-        """重启已配置的测试依赖，使恢复后的启动脚本真正重新被读取。
+        """重启已配置的测试依赖，使新应用的场景启动参数被重新读取。
 
         该操作只复用操作者已保存的受控依赖编排，绝不猜测或控制未登记的
         Supervisor 节点。没有完整编排时只重启已配置的定位/导航启动消费者；
-        若消费者也无法识别，必须明确失败，不能把“脚本已恢复”伪装成
-        “车辆已恢复常规参数”。
+        若消费者也无法识别，必须明确失败。恢复常规配置不会调用本方法。
         """
         if self.settings.dependency_plan.get("enabled"):
             _orchestration, error = self._apply_dependency_plan()
@@ -90,7 +89,7 @@ class RobotGateway:
             _states, status_error = self._check_supervisor()
             return (False, status_error) if status_error else (True, "依赖节点已按已保存编排重启并稳定 RUNNING")
         # 未配置完整测试编排时，仍可根据本车已配置的“定位/导航启动”节点
-        # 重启最小消费者集合。这样场景脚本不会只在磁盘恢复、运行中却仍保留旧参数。
+        # 重启最小消费者集合，使刚应用的场景参数不只停留在磁盘中。
         consumers = [
             str(item["supervisor"])
             for item in self.settings.nodes

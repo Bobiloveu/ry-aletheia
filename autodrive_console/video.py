@@ -31,6 +31,18 @@ _RESOLUTION = re.compile(r"[1-9][0-9]{1,4}x[1-9][0-9]{1,4}\Z")
 _ROS_IMAGE_TOPIC = re.compile(r"/(?:[A-Za-z][A-Za-z0-9_]*)(?:/[A-Za-z][A-Za-z0-9_]*)*\Z")
 _VIDEO_OWNER = "ry-aletheia"
 _VIDEO_MAINTENANCE_LAUNCHER = "ry-aletheia-video"
+_SHMSDK_CAMERA_CHANNELS = {
+    "front_camera": "CamFront",
+    "back_camera": "CamBack",
+    "left_camera": "CamLeft",
+    "right_camera": "CamRight",
+}
+_LEGACY_CAMERA_TOPICS = {
+    "front_camera": "/front_camera/image_raw",
+    "back_camera": "/back_camera/image_raw",
+    "left_camera": "/left_camera/image_raw",
+    "right_camera": "/right_camera/image_raw",
+}
 LOGGER = logging.getLogger("ry_aletheia.video")
 
 
@@ -172,7 +184,6 @@ class VideoManager:
             path = item.get("path", name)
             resolution = item.get("resolution")
             fps = item.get("fps")
-            source_topic = item.get("source_topic")
             encoding = item.get("encoding")
             bitrate_kbps = item.get("bitrate_kbps")
             stream_enabled = item.get("enabled", True)
@@ -186,8 +197,7 @@ class VideoManager:
                 raise VideoConfigurationError(f"流 {name} 的 resolution 必须形如 1280x720")
             if not isinstance(fps, int) or not 1 <= fps <= 120:
                 raise VideoConfigurationError(f"流 {name} 的 fps 必须介于 1 和 120")
-            if not isinstance(source_topic, str) or not _ROS_IMAGE_TOPIC.fullmatch(source_topic):
-                raise VideoConfigurationError(f"流 {name} 的 source_topic 不是安全的 ROS 图像话题")
+            source = self._validate_stream_input(name, item)
             if encoding not in {"rgb8", "bgr8"}:
                 raise VideoConfigurationError(f"流 {name} 当前仅支持 rgb8 或 bgr8 原始图像")
             if not isinstance(bitrate_kbps, int) or not 250 <= bitrate_kbps <= 20000:
@@ -201,7 +211,11 @@ class VideoManager:
                 "path": path,
                 "resolution": resolution,
                 "fps": fps,
-                "source_topic": source_topic,
+                "input": source,
+                # Keep the status contract stable for ROS streams while the
+                # four physical cameras move to the ShmSDK transport.
+                "source_topic": source.get("topic"),
+                "source_label": self._source_label(source),
                 "encoding": encoding,
                 "bitrate_kbps": bitrate_kbps,
                 "enabled": stream_enabled,
@@ -221,6 +235,43 @@ class VideoManager:
             "runtime": runtime,
             "streams": clean_streams,
         }
+
+    @staticmethod
+    def _validate_stream_input(name: str, stream: dict[str, Any]) -> dict[str, str]:
+        """Validate the intentionally narrow physical-camera transport.
+
+        ShmSDK is accepted only for the four hardware camera stream names and
+        only with their fixed system channels.  Detection and segmentation
+        retain the existing ROS Image path exactly as before.
+        """
+
+        input_config = stream.get("input")
+        if input_config is None:
+            topic = stream.get("source_topic")
+            if not isinstance(topic, str) or not _ROS_IMAGE_TOPIC.fullmatch(topic):
+                raise VideoConfigurationError(f"流 {name} 的 source_topic 不是安全的 ROS 图像话题")
+            return {"kind": "ros", "topic": topic}
+        if not isinstance(input_config, dict):
+            raise VideoConfigurationError(f"流 {name} 的 input 必须是对象")
+        kind = input_config.get("kind")
+        if kind == "ros":
+            topic = input_config.get("topic")
+            if not isinstance(topic, str) or not _ROS_IMAGE_TOPIC.fullmatch(topic):
+                raise VideoConfigurationError(f"流 {name} 的 input.topic 不是安全的 ROS 图像话题")
+            return {"kind": "ros", "topic": topic}
+        if kind == "shmsdk":
+            channel = input_config.get("channel")
+            expected_channel = _SHMSDK_CAMERA_CHANNELS.get(name)
+            if channel != expected_channel:
+                raise VideoConfigurationError(f"流 {name} 只能使用固定的 ShmSDK 通道 {expected_channel or '（无）'}")
+            return {"kind": "shmsdk", "channel": channel}
+        raise VideoConfigurationError(f"流 {name} 的 input.kind 当前仅支持 ros 或 shmsdk")
+
+    @staticmethod
+    def _source_label(source: dict[str, str]) -> str:
+        if source["kind"] == "shmsdk":
+            return f"ShmSDK/{source['channel']}"
+        return f"ROS:{source['topic']}"
 
     def set_enabled(self, enabled: bool) -> dict[str, Any]:
         """Persist the operator's video switch without changing stream wiring.
@@ -332,11 +383,30 @@ class VideoManager:
             names = {stream.get("name") for stream in current_streams if isinstance(stream, dict)}
             additions = [stream for stream in default_streams if isinstance(stream, dict) and stream.get("name") not in names]
             removed_legacy_metadata = False
+            migrated_physical_camera_transport = False
+            default_by_name = {
+                stream.get("name"): stream
+                for stream in default_streams
+                if isinstance(stream, dict) and isinstance(stream.get("name"), str)
+            }
             for stream in current_streams:
                 if isinstance(stream, dict) and "camera_pair" in stream:
                     stream.pop("camera_pair")
                     removed_legacy_metadata = True
-            if not additions and not removed_legacy_metadata:
+                if not isinstance(stream, dict):
+                    continue
+                name = stream.get("name")
+                default = default_by_name.get(name)
+                expected_topic = _LEGACY_CAMERA_TOPICS.get(name)
+                default_input = default.get("input") if isinstance(default, dict) else None
+                # Upgrade only the shipped, now-dead physical ROS topic.  A
+                # deliberately customised ROS input remains untouched.
+                if (name in _SHMSDK_CAMERA_CHANNELS and "input" not in stream and stream.get("source_topic") == expected_topic and
+                        isinstance(default_input, dict) and default_input.get("kind") == "shmsdk"):
+                    stream.pop("source_topic", None)
+                    stream["input"] = json.loads(json.dumps(default_input))
+                    migrated_physical_camera_transport = True
+            if not additions and not removed_legacy_metadata and not migrated_physical_camera_transport:
                 return False
             # JSON round-trip is a compact deep copy and avoids sharing a
             # caller-owned configuration object with the persisted document.
@@ -416,6 +486,7 @@ class VideoManager:
             "fps": stream["fps"],
             "resolution": stream["resolution"],
             "source_topic": stream["source_topic"],
+            "source_label": stream["source_label"],
             "encoding": stream["encoding"],
             "codec": "h264",
             "latency_ms": None,
@@ -497,7 +568,7 @@ class VideoRuntime:
             LOGGER.info(
                 "启动视频运行时：ROS_DOMAIN_ID=%s streams=%s gateway_api=%s rtsp_port=%s whep_port=%s",
                 config["ros_domain_id"],
-                ", ".join(f"{stream['name']}({stream['source_topic']},{stream['resolution']}@{stream['fps']})" for stream in streams),
+                ", ".join(f"{stream['name']}({stream['source_label']},{stream['resolution']}@{stream['fps']})" for stream in streams),
                 config["gateway"]["api_url"], config["gateway"]["rtsp_port"], config["gateway"]["whep_port"],
             )
             self.media_process = subprocess.Popen([str(media_binary), str(media_config)], cwd=self.workspace)
@@ -634,7 +705,7 @@ class VideoRuntime:
         command = [
             str(ingest_binary),
             "--node-name", f"ry_aletheia_video_{stream['name']}",
-            "--topic", stream["source_topic"],
+            "--input-kind", stream["input"]["kind"],
             "--encoding", stream["encoding"],
             "--gst-launch", str(gst_launch),
             "--vaapi-device", config["runtime"]["vaapi_device"],
@@ -644,6 +715,10 @@ class VideoRuntime:
             "--fps", str(stream["fps"]),
             "--bitrate-kbps", str(stream["bitrate_kbps"]),
         ]
+        if stream["input"]["kind"] == "shmsdk":
+            command.extend(["--shm-channel", stream["input"]["channel"]])
+        else:
+            command.extend(["--topic", stream["input"]["topic"]])
         # The detached user launcher can outlive its terminal.  Pass the
         # configured DDS domain explicitly instead of relying on a login
         # shell's environment.  Only native ROS ingest children need it;
@@ -652,8 +727,8 @@ class VideoRuntime:
         ingest_environment["ROS_DOMAIN_ID"] = str(config["ros_domain_id"])
         self.ingest_processes[stream["name"]] = subprocess.Popen(command, cwd=self.workspace, env=ingest_environment)
         LOGGER.info(
-            "已启动视频输入：stream=%s pid=%s topic=%s expected=%s/%s fps=%s bitrate_kbps=%s ros_domain_id=%s",
-            stream["name"], self.ingest_processes[stream["name"]].pid, stream["source_topic"],
+            "已启动视频输入：stream=%s pid=%s source=%s expected=%s/%s fps=%s bitrate_kbps=%s ros_domain_id=%s",
+            stream["name"], self.ingest_processes[stream["name"]].pid, stream["source_label"],
             stream["encoding"], stream["resolution"], stream["fps"], stream["bitrate_kbps"], config["ros_domain_id"],
         )
         print(f"RY Aletheia 已启用视频流：{stream['name']}", flush=True)

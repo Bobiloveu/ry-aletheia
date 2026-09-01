@@ -282,7 +282,7 @@ class ScenarioSetupStore:
             if not profile_id:
                 _active, transaction = self._transaction_status()
                 if transaction["state"] != "normal":
-                    raise ScenarioSetupError("该用例未绑定场景方案，但当前仍有待恢复事务；请先在场景前置配置页恢复并验证常规运行依赖")
+                    raise ScenarioSetupError("该用例未绑定场景方案，但当前仍有待恢复事务；请先在场景前置配置页恢复常规启动配置")
                 return {"bound": False, "profile_id": "", "profile_name": "", "message": "该用例未绑定场景方案，使用常规启动配置"}
             profile = next((item for item in document["profiles"] if item["id"] == profile_id), None)
             if not profile:
@@ -292,7 +292,8 @@ class ScenarioSetupStore:
         # 运行状态只需展示方案标识；不能把含原文件内容的事务备份暴露给前端。
         return {"bound": True, "profile_id": profile_id, "profile_name": profile_name, "message": result["message"]}
 
-    def restore(self, *, retain_transaction: bool = False) -> dict:
+    def restore(self) -> dict:
+        """回写受控启动参数并清理事务；绝不操作 Supervisor 或 ROS 节点。"""
         with self._lock:
             active, transaction = self._transaction_status()
             if transaction["state"] == "corrupt":
@@ -303,10 +304,6 @@ class ScenarioSetupStore:
             current = self._read_script(script)
             original = self._decode_original(active)
             if _sha256(current) == active["original_sha256"]:
-                if retain_transaction:
-                    active["state"] = "script_restored"
-                    self._write_active(active)
-                    return {"message": f"常规启动脚本已存在，等待重启并验证依赖（原方案：{active['profile_name']}）", "restored": True, "runtime_pending": True}
                 self._clear_active()
                 return {"message": f"常规启动配置已存在，已清理恢复事务（原方案：{active['profile_name']}）", "restored": True}
             if active.get("targets"):
@@ -319,41 +316,8 @@ class ScenarioSetupStore:
                 restored = original
             if restored != current:
                 self._write_script(script, restored)
-            if retain_transaction:
-                active["state"] = "script_restored"
-                self._write_active(active)
-                return {"message": f"常规启动脚本已恢复，等待重启并验证依赖（原方案：{active['profile_name']}）", "restored": True, "runtime_pending": True}
             self._clear_active()
             return {"message": f"已恢复常规启动配置（原方案：{active['profile_name']}）", "restored": True}
-
-    def complete_runtime_restore(self, runtime_message: str = "") -> dict:
-        """仅在常规脚本已存在且相关进程重启确认后关闭恢复事务。"""
-        with self._lock:
-            active, transaction = self._transaction_status()
-            if transaction["state"] == "corrupt":
-                raise ScenarioSetupError(transaction["message"])
-            if not active:
-                return {"message": "当前没有待完成的场景恢复事务", "restored": False}
-            if active.get("state") != "script_restored":
-                raise ScenarioSetupError("常规启动脚本尚未恢复，不能完成运行时恢复")
-            current = self._read_script(Path(active["script"]))
-            if _sha256(current) != active["original_sha256"]:
-                raise ScenarioSetupError("常规启动脚本在等待运行时恢复期间又被修改，已拒绝关闭事务")
-            self._clear_active()
-            suffix = f"；{runtime_message}" if runtime_message else ""
-            return {"message": f"已恢复常规启动配置并完成运行依赖验证（原方案：{active['profile_name']}）{suffix}", "restored": True}
-
-    def note_runtime_recovery_failure(self, detail: str) -> None:
-        """保留事务以供网页重试，不能在脚本已恢复但进程未验证时伪称完成。"""
-        with self._lock:
-            active, transaction = self._transaction_status()
-            if transaction["state"] == "corrupt":
-                raise ScenarioSetupError(transaction["message"])
-            if not active:
-                raise ScenarioSetupError("恢复事务不存在，无法记录运行时恢复失败")
-            active["state"] = "script_restored"
-            active["runtime_message"] = str(detail)[:1000]
-            self._write_active(active)
 
     def note_runtime_activation_failure(self, detail: str) -> None:
         """保留已应用事务并说明运行依赖没有成功读取新参数。"""
@@ -712,7 +676,7 @@ class ScenarioSetupStore:
         state = active.get("state", "applied")
         if state == "script_restored":
             detail = str(active.get("runtime_message", "")).strip()
-            message = "常规启动脚本已恢复，仍须重启并验证相关运行依赖后才能关闭恢复事务。"
+            message = "常规启动脚本已恢复。这是旧版本留下的恢复记录；点击“恢复常规配置”可核对并清理记录，不会重启任何服务。"
             if detail:
                 message = f"{message} 最近失败原因：{detail}"
             return active, {"state": "pending", "phase": state, "message": message, "restore_available": True}

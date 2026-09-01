@@ -29,7 +29,8 @@ class VideoManagerTests(unittest.TestCase):
         self.assertFalse(status["gateway"]["online"])
         self.assertEqual([stream["status"] for stream in status["streams"]], ["disabled"] * 6)
         self.assertEqual(status["streams"][0]["url"], "http://192.168.10.42:8889/front_camera/whep")
-        self.assertEqual(status["streams"][0]["source_topic"], "/front_camera/image_raw")
+        self.assertIsNone(status["streams"][0]["source_topic"])
+        self.assertEqual(status["streams"][0]["source_label"], "ShmSDK/CamFront")
         self.assertEqual(status["streams"][0]["resolution"], "640x480")
         self.assertEqual(status["streams"][0]["fps"], 15)
         self.assertEqual(status["streams"][-2]["name"], "detection_camera")
@@ -65,6 +66,40 @@ class VideoManagerTests(unittest.TestCase):
         self.assertTrue(migrated["enabled"])
         self.assertTrue(migrated["streams"][0]["enabled"])
         self.assertNotIn("camera_pair", migrated["streams"][0])
+
+    def test_upgrade_migrates_only_the_four_shipped_dead_ros_camera_topics_to_shmsdk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            document = json.loads((ROOT / "config" / "video.json").read_text(encoding="utf-8"))
+            for stream, topic in zip(document["streams"][:4], [
+                "/front_camera/image_raw", "/back_camera/image_raw", "/left_camera/image_raw", "/right_camera/image_raw",
+            ]):
+                stream.pop("input")
+                stream["source_topic"] = topic
+            # A deliberately customised ROS source is not auto-rewired.
+            document["streams"][0]["source_topic"] = "/custom/front/image_raw"
+            path = root / "config" / "video.json"
+            path.parent.mkdir()
+            path.write_text(json.dumps(document), encoding="utf-8")
+            manager = VideoManager(path, ROOT / "config" / "video.json")
+            self.assertTrue(manager.migrate_config())
+            migrated = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(migrated["streams"][0]["source_topic"], "/custom/front/image_raw")
+        self.assertNotIn("input", migrated["streams"][0])
+        self.assertEqual(migrated["streams"][1]["input"], {"kind": "shmsdk", "channel": "CamBack"})
+        self.assertEqual(migrated["streams"][2]["input"], {"kind": "shmsdk", "channel": "CamLeft"})
+        self.assertEqual(migrated["streams"][3]["input"], {"kind": "shmsdk", "channel": "CamRight"})
+        self.assertNotIn("source_topic", migrated["streams"][1])
+
+    def test_shmsdk_input_is_limited_to_its_fixed_physical_camera_stream(self):
+        with tempfile.TemporaryDirectory() as directory:
+            invalid_stream = {
+                "name": "detection_camera", "path": "detection_camera", "enabled": True,
+                "input": {"kind": "shmsdk", "channel": "CamFront"}, "encoding": "bgr8", "resolution": "640x480",
+                "fps": 10, "bitrate_kbps": 800,
+            }
+            status = VideoManager(self._config(Path(directory), streams=[invalid_stream])).status()
+        self.assertIn("只能使用固定的 ShmSDK 通道", status["gateway"]["detail"])
 
     def test_web_switch_seeds_all_validated_streams_on_first_enable(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -249,7 +284,22 @@ class VideoManagerTests(unittest.TestCase):
                 runtime._start_ingest(detection, manager.load_config(), root / "aletheia_video_ingest", root / "gst-launch-1.0")
         command = popen.call_args.args[0]
         self.assertEqual(command[command.index("--topic") + 1], "/rfdetr_detect")
+        self.assertEqual(command[command.index("--input-kind") + 1], "ros")
         self.assertEqual(command[command.index("--encoding") + 1], "bgr8")
+
+    def test_native_ingest_receives_a_fixed_shmsdk_channel_for_a_physical_camera(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = VideoManager(self._config(root))
+            runtime = VideoRuntime(manager, root, root / "aletheia_video_ingest")
+            front = manager.load_config()["streams"][0]
+            process = unittest.mock.Mock(pid=4321)
+            with patch("autodrive_console.video.subprocess.Popen", return_value=process) as popen:
+                runtime._start_ingest(front, manager.load_config(), root / "aletheia_video_ingest", root / "gst-launch-1.0")
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("--input-kind") + 1], "shmsdk")
+        self.assertEqual(command[command.index("--shm-channel") + 1], "CamFront")
+        self.assertNotIn("--topic", command)
 
     def test_console_owns_an_enabled_video_runtime_and_stops_it_on_exit(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -336,7 +386,11 @@ class VideoManagerTests(unittest.TestCase):
         build = (ROOT / "build_binary.sh").read_text(encoding="utf-8")
         self.assertIn('rclcpp::SensorDataQoS().keep_last(1)', source)
         self.assertIn('"--node-name"', source)
-        self.assertIn('"--encoding"', source)
+        self.assertIn('"--input-kind"', source)
+        self.assertIn('"--shm-channel"', source)
+        self.assertIn('GetLastCamImage', source)
+        self.assertIn('std::thread shm_reader_', source)
+        self.assertIn('find_package(JPEG REQUIRED)', cmake)
         self.assertIn('Node(options.node_name)', source)
         self.assertIn('std::this_thread::sleep_until(next_frame_at)', source)
         self.assertIn('latest_frame_ = std::move(image);', source)
@@ -346,7 +400,7 @@ class VideoManagerTests(unittest.TestCase):
         self.assertIn('"rtspclientsink"', source)
         self.assertIn("视频输入等待首帧", source)
         self.assertIn("视频输入已中断", source)
-        self.assertIn("视频输入已收到 %llu 个 ROS 图像但没有兼容帧", source)
+        self.assertIn("视频输入已收到 %llu 个%s图像但没有兼容帧", source)
         self.assertIn("视频输入已就绪", source)
         self.assertIn("GStreamer 输入管道已中断：errno=%d", source)
         self.assertNotIn('const std::string device = "device="', source)

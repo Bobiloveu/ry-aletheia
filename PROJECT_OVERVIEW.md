@@ -12,7 +12,7 @@ RY Aletheia 是部署在机器人小车 Ubuntu 主机上的离线自动测试平
 
 - 任务仅通过既有 `/start_execute_tasks` 服务下发，不向底盘或导航发布控制指令。
 - 不修改任务 JSON；别名、依赖编排和场景方案均保存在工具配置目录。
-- 场景前置配置只替换启动脚本中已登记的 FCRP 与 lightning 参数。它以先落盘的可校验恢复事务、定向原子替换和运行依赖重启验证构成完整闭环；不能只因脚本回写就宣称车辆已恢复常规参数。
+- 场景前置配置只替换启动脚本中已登记的 FCRP 与 lightning 参数。应用场景时以先落盘的可校验恢复事务、定向原子替换和运行依赖重启验证构成闭环；恢复常规方案时只回写启动脚本，不操作运行中的节点，常规参数在相关节点下次自行启动时生效。
 - 实时观测采用“时效优先”：点云/位姿过期帧直接丢弃，不追赶历史画面；可选视频走独立的低延迟 WebRTC 链路。
 - 小车运行阶段不依赖互联网、Node.js、npm 或开发源码；主程序必须以普通账户运行。
 
@@ -55,7 +55,7 @@ RY Aletheia（普通账户）
   ├─ C++ 轻量点云进程：/collision_voxel_layer/points（或 /livox/lidar 回退）→ 回环 UDP 点云帧（≤3000 点）
   ├─ Aletheia 专用遥测网关：UDP 最新帧组装 → 两条 Binary WebSocket
   ├─ 可选视频运行时（由控制台拥有）
-       ├─ 原生 `aletheia_video_ingest`：ROS Image → rawvideoparse → VAAPI H.264 → 本机 RTSP
+       ├─ 原生 `aletheia_video_ingest`：ShmSDK 最新图像（四路试运行）或 ROS Image（检测/分割）→ rawvideoparse → VAAPI H.264 → 本机 RTSP
        └─ 私有 MediaMTX：RTSP 输入 → WHEP/WebRTC 输出
   └─ 已有机器人系统的受限集成
        ├─ ROS2：/map、/odom、TF、/amcl_pose、/start_execute_tasks、/collision_voxel_layer/points
@@ -91,9 +91,11 @@ RY Aletheia（普通账户）
 
 ### 4.1 `video.json` 配置契约
 
-`config/video.json` 只描述 Aletheia 视频旁路：总开关、DDS 域、受控网关、私有编码器和每路 `source_topic`、分辨率、帧率、码率。它不是小车相机驱动配置，**不得**记录或修改 USB 路径、`/dev/video*`、v4l2loopback、相机 UVC 控制项或原相机节点参数；这些均属于既有机器人系统。
+`config/video.json` 只描述 Aletheia 视频旁路：总开关、DDS 域、受控网关、私有编码器和每路输入、分辨率、帧率、码率。它不是小车相机驱动配置，**不得**记录或修改 USB 路径、`/dev/video*`、v4l2loopback、相机 UVC 控制项或原相机节点参数；这些均属于既有机器人系统。
 
-每个 `source_topic` 必须是已经存在的 `sensor_msgs/msg/Image`（当前支持 `rgb8` 或 `bgr8`）话题。旁路进程订阅该话题后才创建编码器，因此视频启停不会抢占物理相机，也不会改变自动驾驶、目标检测或原有相机 ROS 节点。升级迁移只能补齐缺失的默认流或移除已废弃且未使用的旁路元数据；不得重置用户的视频开关、话题或码率选择。
+> **当前状态：2.3.8 ShmSDK 接入试运行，尚非永久基线。** 现场记录、验收项、停止条件和回退步骤见 [docs/SHMSDK_VIDEO_TRIAL_2.3.8.md](docs/SHMSDK_VIDEO_TRIAL_2.3.8.md)。
+
+试运行的四路物理相机固定从小车已安装的 ShmSDK 2.0 只读读取：`front_camera → CamFront`、`back_camera → CamBack`、`left_camera → CamLeft`、`right_camera → CamRight`。旁路只调用 `GetLastCamImage` 取得最新帧，再在自身进程内解码 ShmSDK 提供的 JPEG；它不启动、停止或配置 `mempool`，也不接管原相机驱动。`detection_camera` 与 `segmentation_overlay` 仍必须使用已经存在的 `sensor_msgs/msg/Image` `source_topic`（当前支持 `rgb8` 或 `bgr8`）。升级迁移仅把这四个**默认** ROS 相机话题迁移到固定 ShmSDK 通道；自定义 ROS 输入、视频开关、分辨率、帧率和码率均不得被重置。
 
 ## 5. 后端模块职责
 
@@ -139,7 +141,7 @@ queued → preparing → running → completed
 6. 同步任务文件（仅目标目录没有同名文件时复制），确认 ROS2 服务可用。
 7. 下发任务，开始轨迹和轮次记录。
 8. 单轮失败后等待人工恢复；恢复后重新应用方案和依赖编排才允许继续。
-9. 计划完成、取消或不可恢复失败后，先回写原常规启动配置，再重启并确认受控依赖稳定运行；只有两者都完成才关闭恢复事务。
+9. 计划完成、取消或不可恢复失败后，回写原常规启动配置并关闭恢复事务；不启动、不停止、不重启任何 Supervisor 节点，常规参数在相关节点下次自行启动时生效。
 
 节点名称、默认预检集、阶段顺序与等待时间必须由配置驱动，不能在业务代码中写死某一台车的节点名。
 
@@ -153,9 +155,9 @@ queued → preparing → running → completed
 - FCRP 仅可选择 `.launch.py`；lightning 仅可选择 `.yaml`/`.yml`。
 - 应用前可预览完整替换结果；应用时先持久化原文、SHA-256、时间、方案 ID、精确参数位置及命令行上下文，再替换脚本。断电或写入异常时宁可保留待恢复事务，也不能留下无备份的已改脚本。
 - 使用临时文件、`fsync` 与原子替换；存在未恢复方案时锁定保存、添加、删除、重新应用及用例绑定，只保留预览与恢复入口。
-- 恢复只回退本工具登记的两个参数，保留其他脚本改动；若受控命令或参数被外部修改、重复定位不唯一或恢复记录损坏，拒绝覆盖并明确报错。
-- “恢复常规配置”会回写脚本、重启已登记的 FCRP/lightning 相关依赖并等待稳定 `RUNNING`。任一运行时步骤失败，页面保留“待恢复”状态并允许重试；不把文件恢复误报为车辆恢复。
-- 人工应用也会重启同一受控依赖，使页面“已应用”与实际运行参数一致。应用或恢复中的待处理事务会阻止控制台安全退出和离线升级。
+- 恢复只回退本工具登记的两个参数，保留其他脚本改动；若受控命令或参数被外部修改、重复定位不唯一或恢复记录损坏，拒绝覆盖并明确报错。恢复常规方案只回写脚本并清理事务，绝不启动或重启任何 Supervisor 节点。
+- “恢复常规配置”只会回写脚本并清理恢复事务，绝不启动、停止或重启任何 FCRP/lightning 相关依赖。页面明确说明这只影响后续启动参数，不将文件恢复误报为正在运行的节点已切回常规参数。
+- 人工应用会重启同一受控依赖，使页面“已应用”与实际运行参数一致。存在待处理恢复事务时会阻止控制台安全退出和离线升级。
 - 用例仅保存方案 ID 绑定；删除方案前必须解除相关绑定。
 
 任何扩展都必须维持“白名单参数位置、受控根目录、可恢复事务”三项边界。
@@ -224,12 +226,9 @@ PixiJS 最新点云几何       ├─ Pixi 世界容器：缩放、拖动（固
 视频是实时页的独立能力，默认关闭。页面提供全局开关与六路独立开关：全局开关启动/停止当前选中的流；MediaMTX 在至少一路启用期间保持不变，单路开关只增删该路原生编码进程，不会重连其他流的 WebRTC 会话；关闭最后一路才停止整个进程组。配置写入 `config/video.json`，控制台以普通账户拥有其生命周期；因此不占用 ROS 图像订阅、GPU 编码器或网络带宽的时间只发生在用户实际选择的流上。它不交由 Supervisor 管理，也不要求操作员额外执行 `ry-aletheia-video start|stop|status|restart`；后者仅可作为维护诊断入口，不能成为正常使用前置条件。
 
 ```text
-既有相机 ROS 话题（sensor_msgs/Image, rgb8 / bgr8）
-  ├─ /front_camera/image_raw
-  ├─ /back_camera/image_raw
-  ├─ /left_camera/image_raw
-  ├─ /right_camera/image_raw
-  ├─ /rfdetr_detect（`rfdetr_depth_node` 的目标检测结果图，bgr8）
+视频输入（2.3.8 ShmSDK 试运行）
+  ├─ ShmSDK 2.0 最新图像：CamFront / CamBack / CamLeft / CamRight（四路物理相机）
+  ├─ /rfdetr_detect（`rfdetr_depth_node` 的目标检测结果图，ROS Image，bgr8）
   └─ /segmentation/overlay（可通行区域分割叠加图，预设 bgr8）
           │
           ▼
@@ -244,8 +243,8 @@ PixiJS 最新点云几何       ├─ Pixi 世界容器：缩放、拖动（固
 - 运行时固定面向 `amd64` / Ubuntu 22.04 基线，并携带受锁定版本约束的 MediaMTX、最小 GStreamer 插件、VAAPI 用户态库和 Intel `iHD` 驱动；目标车无需为该功能另装 apt 包、Node.js、npm 或开发工具。
 - `rawvideoparse` 是链路必需部分：管道读取可能把一帧 RGB/BGR 数据拆成多段，不能假设一次读取就是一帧图像。
 - Python 不传递视频帧。`GET /api/video/status` 只返回配置、MediaMTX 健康和逐路状态；`POST /api/video/control` 只接受全局布尔开关，或已配置流名加布尔开关。后端拒绝浏览器提交的路径、话题、命令或可执行文件。视频数据只在原生编码器、MediaMTX 和浏览器之间流动。
-- 视频配置允许逐流启用；网页首次整体打开时使用配置中的已启用流。默认包含四路工业相机、一路 `detection_camera` 与一路 `segmentation_overlay`。后两路分别订阅 `/rfdetr_detect` 和 `/segmentation/overlay`（预设 `bgr8`、640×480、10 FPS），只旁路编码视觉结果，不读取或控制深度相机驱动，不修改检测或分割节点，也不向自动驾驶链路发布任何消息。原生旁路编码器支持 `rgb8` 与 `bgr8`，每一路配置都要与实际 ROS 话题、像素格式、分辨率、帧率、码率以及 `/dev/dri/renderD128` 的访问权限相匹配。
-- `video.json` 的相机输入只允许是 ROS `source_topic`；不要为方便排障把物理 USB 路径或虚拟 V4L2 节点重新写入该文件。原相机驱动与其设备映射已经由小车系统维护，视频旁路不应拥有第二份配置真相。
+- 视频配置允许逐流启用；网页首次整体打开时使用配置中的已启用流。当前试运行包含四路 ShmSDK 工业相机、一路 `detection_camera` 与一路 `segmentation_overlay`。四路物理相机预设为 JPEG 640×480、15 FPS，经旁路解码为 `rgb8` 后送入现有 VAAPI 编码器；后两路仍分别订阅 `/rfdetr_detect` 和 `/segmentation/overlay`（预设 `bgr8`、640×480、10 FPS），只旁路编码视觉结果，不读取或控制深度相机驱动，不修改检测或分割节点，也不向自动驾驶链路发布任何消息。原生旁路编码器输出支持 `rgb8` 与 `bgr8`，每一路配置都要与实际输入格式、分辨率、帧率、码率以及 `/dev/dri/renderD128` 的访问权限相匹配。
+- `video.json` 不得为方便排障写入物理 USB 路径或虚拟 V4L2 节点。四路 ShmSDK 通道是受限的试运行契约，不能改作检测/分割输入；检测和分割保持受校验的 ROS `source_topic`。原相机驱动与设备映射仍由小车系统维护，视频旁路不应拥有第二份物理设备配置真相。
 - 升级 ZIP 仍维持既有的单文件升级协议。视频运行时被内嵌到核心二进制；新二进制下一次启用视频时会将 `runtime/video/` 原子刷新到匹配版本，同时保留用户的 `config/video.json`。控制台启动时会以追加方式迁移缺失的默认视频流（例如新增的 `detection_camera`），绝不覆盖既有流的开关或其他用户配置。因此已安装工具的小车可以只上传升级 ZIP，无需仅为视频改走 DEB。
 
 ## 10. 前端维护
@@ -367,7 +366,7 @@ cmake --build build/live_preprocessor --parallel 2
 
 `build_video_runtime.sh` 仅在开发/构建机执行。它根据 `tools/video-runtime-packages.lock` 下载并校验 Ubuntu 22.04 `amd64` 归档，解包为受限的私有运行时；不会在小车或开发机执行 `apt install`，也不会覆盖系统 GStreamer、VAAPI、ROS 或 MediaMTX。构建后的运行时只暴露受控 `RGB → VAAPI H.264 → RTSP` 链路所需的插件，MediaMTX 版本同样由脚本固定并校验。
 
-目标车仍须满足硬件与权限契约：相机节点持续发布配置的 `sensor_msgs/msg/Image`，运行账户可访问相应 ROS 域以及 VAAPI 渲染节点（通常是 `/dev/dri/renderD128`，需要 `render` 权限或等价 ACL）。NVIDIA、纯软件编码或其他 GPU 不会被自动假装成 Intel VAAPI；不满足契约时视频应在页面显示可诊断错误，而不影响地图、点云、任务或报告功能。
+2.3.8 的 ShmSDK 试运行要求：ShmSDK 2.0 的 `mempool` 与四路 `CamFront/CamBack/CamLeft/CamRight` 生产端由小车系统持续维护；检测/分割节点仍持续发布配置的 `sensor_msgs/msg/Image`；运行账户可访问相应 ROS 域以及 VAAPI 渲染节点（通常是 `/dev/dri/renderD128`，需要 `render` 权限或等价 ACL）。NVIDIA、纯软件编码或其他 GPU 不会被自动假装成 Intel VAAPI；不满足契约时视频应在页面显示可诊断错误，而不影响地图、点云、任务或报告功能。试运行未验收前，禁止把 `mempool`、相机驱动或 USB/V4L2 配置的维护责任转交给 Aletheia。
 
 ### 11.6 发布构建
 
@@ -383,7 +382,7 @@ cmake --build build/live_preprocessor --parallel 2
 
 版本号必须为数字点号格式。脚本会拒绝覆盖已有发布目录，并在 `releases/<版本>/` 输出 ZIP、`SHA256SUMS`、说明和可选 DEB。
 
-发布前要在干净工作树或明确记录的变更集上完成：校验 `SHA256SUMS`、`unzip -t` 升级 ZIP、确认 ZIP 中没有车辆配置/日志/私钥，并检查 `postinst` 的 `visudo -cf`。首次安装 DEB 与已安装车的 ZIP 升级分别验证；不要因 ZIP 正常就假设 DEB 的安装脚本也正常。
+发布前要在干净工作树或明确记录的变更集上完成：校验 `SHA256SUMS`、`unzip -t` 升级 ZIP、确认 ZIP 中没有车辆配置/日志/私钥，并检查 `postinst` 的 `visudo -cf`。首次安装 DEB 与已安装车的 ZIP 升级分别验证；不要因 ZIP 正常就假设 DEB 的安装脚本也正常。涉及试运行接入时，发布前必须准备上一稳定版本的**已签名**回退 ZIP，并记录其校验值、适用车端版本和恢复检查项；具体流程见 [ShmSDK 视频接入试运行记录](docs/SHMSDK_VIDEO_TRIAL_2.3.8.md)。
 
 ### 11.7 每次改动后的最小验证集
 
@@ -408,7 +407,8 @@ cmake --build build/live_preprocessor --parallel 2
 | 点云基本正常但车体图标卡顿 | 先比较 `pose_packet_rate_hz`、`pose_applied_rate_hz`、`pose_source_age_ms`、`vehicle_render_rate_hz` 和长帧数；再检查 `live_preprocessor_pose.log` 及 `map→odom→base_*` 的真实值变化。若链路心跳连续但坐标变化稀疏，检查前端是否把重复 Pose 的接收时间误作最后真实测量时间。 |
 | 地图/墙体不对齐 | `/map` origin/resolution、map_server 当前 YAML、缓存 ID、实际墙体文件。 |
 | 轨迹缺段 | map/TF 可用性、切图、坐标变换拒绝原因和报告中的证据提示。 |
-| 视频卡片一直“等待相机” | 先看 `GET /api/video/status` 与 MediaMTX paths；再确认对应 ROS 图像话题有发布者、`ROS_DOMAIN_ID` 与控制台一致、像素格式/分辨率符合 `config/video.json`。 |
+| 视频卡片一直“等待相机” | 先看 `GET /api/video/status` 与 MediaMTX paths；四路物理相机检查 `logs/video-runtime.log` 中 ShmSDK 的 `InitMem/OpenMem/GetLastCamImage` 诊断以及小车 `mempool`/相机生产端；检测、分割再确认 ROS 图像话题有发布者、`ROS_DOMAIN_ID` 与控制台一致、像素格式/分辨率符合 `config/video.json`。 |
+| ShmSDK 试运行需停止或回退 | 先关闭所有视频流，确认没有执行中/恢复中的测试；在“运行配置”上传维护人员提供的已签名 2.3.7 回退 ZIP。不要手工覆盖 `dist/ry-aletheia`、改 `mempool` 或重启原相机驱动；完整判断与验证项见 [试运行记录](docs/SHMSDK_VIDEO_TRIAL_2.3.8.md)。 |
 | 视频启动失败或无硬件编码 | 检查 `runtime/video/` 是否完整、`/dev/dri/renderD128` 的 ACL/`render` 组、Intel `iHD` 驱动、`logs/` 中视频运行时错误；不要为此修改系统 GStreamer 或让工具接管原相机驱动的 Supervisor 组。 |
 | 升级后视频无法启动 | 确认升级 ZIP 已替换核心二进制；打开网页视频开关以触发私有运行时同步，检查 `runtime/video/ry-aletheia-runtime.json`，同时保留并核对既有 `config/video.json`。 |
 | 升级后不能启动 | `updates/` 备份、`logs/ry-aletheia-error.log`、8087 端口占用、二进制权限。 |

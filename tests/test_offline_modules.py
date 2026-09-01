@@ -226,8 +226,8 @@ class OfflineModuleTests(unittest.TestCase):
             with self.assertRaisesRegex(ScenarioSetupError, "恢复事务不可用"):
                 store.save(store.load())
 
-    def test_scenario_setup_keeps_transaction_until_runtime_restore_is_confirmed(self):
-        """脚本回写并不等于运行中节点已切回常规参数。"""
+    def test_scenario_setup_restore_completes_without_restarting_robot_nodes(self):
+        """恢复常规方案只回写受控脚本并关闭事务。"""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             script = root / "handle_modules.sh"
@@ -240,12 +240,8 @@ class OfflineModuleTests(unittest.TestCase):
             store.save({"startup_script": str(script), "profiles": [{"id": "hall", "name": "大厅", "fcrp_launch": "hall.launch.py", "lightning_config": "/opt/ry/config/hall.yaml"}], "case_bindings": {}})
             with patch.object(store, "_validate_targets", return_value={"fcrp": "hall.launch.py", "lightning": "/opt/ry/config/hall.yaml"}):
                 store.apply("hall")
-            result = store.restore(retain_transaction=True)
-            self.assertTrue(result["runtime_pending"])
-            self.assertTrue(store.has_unresolved_transaction())
-            self.assertEqual(store.status()["transaction"]["phase"], "script_restored")
-            completed = store.complete_runtime_restore("定位节点已稳定 RUNNING")
-            self.assertTrue(completed["restored"])
+            result = store.restore()
+            self.assertTrue(result["restored"])
             self.assertFalse(store.has_unresolved_transaction())
             self.assertEqual(script.read_text(encoding="utf-8"), original)
 
@@ -420,7 +416,14 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("occurrence: candidate.occurrence", source)
         self.assertIn("action: 'apply', profile_id: row.dataset.id, document: collect()", source)
         self.assertIn("$('restoreDefault').hidden", source)
+        self.assertIn("工具只会恢复已登记的启动参数，不会重启任何服务。", source)
+        self.assertNotIn("工具会重启相关服务并确认恢复完成。", source)
         self.assertNotIn("render({ document: documentState, inspection: {}, active_backup: null })", source)
+
+        store_source = (Path(__file__).parents[1] / "autodrive_console" / "scenario_setup.py").read_text(encoding="utf-8")
+        self.assertNotIn("retain_transaction", store_source)
+        self.assertNotIn("complete_runtime_restore", store_source)
+        self.assertNotIn("note_runtime_recovery_failure", store_source)
 
     def test_manual_scenario_apply_restarts_runtime_and_leaves_recovery_on_failure(self):
         class Gateway:
@@ -456,11 +459,11 @@ class OfflineModuleTests(unittest.TestCase):
                 web_console.apply_scenario_runtime("hall")
         note_failure.assert_called_once_with("MODULES:209-lightning 未稳定 RUNNING")
 
-    def test_manual_scenario_restore_without_transaction_does_not_restart_robot_nodes(self):
+    def test_manual_scenario_restore_never_constructs_robot_gateway(self):
         with patch.object(web_console.SCENARIO_SETUP, "restore", return_value={"restored": False, "message": "当前没有待恢复的场景前置配置"}) as restore, \
              patch("web_console.RobotGateway") as gateway:
             result = web_console.restore_scenario_runtime()
-        restore.assert_called_once_with(retain_transaction=True)
+        restore.assert_called_once_with()
         gateway.assert_not_called()
         self.assertFalse(result["restored"])
 
