@@ -98,6 +98,18 @@ clean_env=(
   # explicitly, so each invocation is self-contained and reproducible.
   -u ALETHEIA_UNITY_ENABLED
 )
+
+# The normal repository command is still plain `flutter` for backward
+# compatibility. The root module wrapper opts into the project-pinned FVM SDK
+# without duplicating packaging logic or making Unity the default renderer.
+flutter_command=(flutter)
+if [[ "${ALETHEIA_USE_FVM:-0}" == '1' ]]; then
+  command -v fvm >/dev/null 2>&1 || {
+    echo 'ALETHEIA_USE_FVM=1 requires FVM. Install: dart pub global activate fvm 4.3.0' >&2
+    exit 2
+  }
+  flutter_command=(fvm flutter)
+fi
 if [[ "$engine" == 'unity' ]]; then
   clean_env+=(ALETHEIA_UNITY_ENABLED=1)
 fi
@@ -179,7 +191,7 @@ copy_artifact() {
 
 cd "$mobile_dir"
 if ((run_pub_get)); then
-  "${clean_env[@]}" flutter pub get
+  "${clean_env[@]}" "${flutter_command[@]}" pub get
 fi
 
 if [[ "$platform" == 'android' || "$platform" == 'all' ]]; then
@@ -191,9 +203,9 @@ if [[ "$platform" == 'android' || "$platform" == 'all' ]]; then
   # raises "unbound variable". Keep the Flutter-renderer invocation truly
   # argument-free while Unity explicitly adds its renderer define.
   if [[ "$engine" == 'unity' ]]; then
-    "${clean_env[@]}" flutter build apk --release "${dart_defines[@]}"
+    "${clean_env[@]}" "${flutter_command[@]}" build apk --release "${dart_defines[@]}"
   else
-    "${clean_env[@]}" flutter build apk --release
+    "${clean_env[@]}" "${flutter_command[@]}" build apk --release
   fi
   copy_artifact \
     "$mobile_dir/build/app/outputs/flutter-apk/app-release.apk" \
@@ -210,10 +222,10 @@ if [[ "$platform" == 'ios' || "$platform" == 'all' ]]; then
     "${clean_env[@]}" pod install
   )
   if [[ "$engine" == 'unity' ]]; then
-    "${clean_env[@]}" flutter build ipa --release \
+    "${clean_env[@]}" "${flutter_command[@]}" build ipa --release \
       --export-method "$ios_export" "${dart_defines[@]}"
   else
-    "${clean_env[@]}" flutter build ipa --release \
+    "${clean_env[@]}" "${flutter_command[@]}" build ipa --release \
       --export-method "$ios_export"
   fi
   copy_artifact \

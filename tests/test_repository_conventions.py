@@ -48,3 +48,20 @@ def test_contracts_mark_existing_and_document_realtime_lanes() -> None:
     assert "Status: Existing" in observation
     assert "ALTM v1" in observation
     assert all(port in observation for port in ("8768", "8769", "8770"))
+
+
+def test_scripts_delegate_to_existing_tools() -> None:
+    backend = (ROOT / "scripts" / "test-backend.sh").read_text(encoding="utf-8")
+    web = (ROOT / "scripts" / "test-web.sh").read_text(encoding="utf-8")
+    mobile = (ROOT / "scripts" / "test-mobile.sh").read_text(encoding="utf-8")
+    build = (ROOT / "scripts" / "build-mobile.sh").read_text(encoding="utf-8")
+    assert "pixi run test" in backend
+    assert "pixi run frontend-check" in web
+    assert "fvm flutter analyze" in mobile
+    assert "fvm flutter test" in mobile
+    assert "--engine flutter" in build
+    assert "--engine unity" not in build
+    package_script = (ROOT / "mobile" / "tool" / "build_mobile_packages.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "ALETHEIA_USE_FVM" in package_script
