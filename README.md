@@ -4,6 +4,24 @@ RY Aletheia 是部署在机器人小车本机的离线自动测试平台，用�
 
 它不替代小车已有的导航、定位、地图或安全控制系统；实时页面仅用于只读观察地图、车体、虚拟墙、点云和按需低延迟相机视频。
 
+## 开发入口
+
+先运行 `./scripts/doctor.sh`；缺少当前不开发模块的工具只会提示 WARN。
+
+| 开发域 | 实际位置 | 最小命令 |
+| --- | --- | --- |
+| Robot Backend | `web_console.py`、`autodrive_console/`、`live_preprocessor/` | `./scripts/test-backend.sh` |
+| Web Console | `frontend/` | `./scripts/test-web.sh` |
+| Flutter Mobile | `mobile/` | `./scripts/test-mobile.sh`（先安装 FVM） |
+| Unity | `unity/` | 当前暂停，不属于默认构建 |
+
+源码尚未物理迁移到 `apps/`；迁移条件见
+[架构文档](docs/architecture/monorepo-migration.md)。跨端 API、ROS Topic、WebSocket 和
+数据格式的唯一文档入口是 [shared/contracts](shared/contracts/README.md)。更多开发说明见
+[架构](docs/architecture/README.md)、[后端](docs/backend/README.md)、
+[Web](docs/web/README.md)、[Mobile](docs/mobile/README.md) 和
+[部署](docs/deployment/README.md)。
+
 ## 快速开始
 
 目标小车应已具备 ROS 2 Humble 基础运行环境。首次安装完整离线包后，以普通账户启动：

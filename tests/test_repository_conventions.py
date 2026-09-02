@@ -65,3 +65,14 @@ def test_scripts_delegate_to_existing_tools() -> None:
         encoding="utf-8"
     )
     assert "ALETHEIA_USE_FVM" in package_script
+
+
+def test_docs_and_agent_rules_link_real_modules() -> None:
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for path in ("autodrive_console/AGENTS.md", "frontend/AGENTS.md", "mobile/AGENTS.md"):
+        assert (ROOT / path).is_file(), path
+    for section in ("architecture", "backend", "web", "mobile", "protocols", "deployment"):
+        assert (ROOT / "docs" / section / "README.md").is_file(), section
+    assert "shared/contracts" in agents
+    assert "scripts/doctor.sh" in readme
