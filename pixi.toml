@@ -15,6 +15,7 @@ ninja = ">=1.11"
 cxx-compiler = ">=1.7"
 pyinstaller = ">=6,<7"
 pytest = ">=8,<9"
+pyyaml = ">=6,<7"
 
 [tasks]
 frontend-install = { cmd = "npm ci", cwd = "frontend" }
