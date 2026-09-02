@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 
@@ -18,7 +19,8 @@ def test_mobile_docs_use_fvm_and_keep_platform_locks() -> None:
     workflow = (ROOT / "mobile" / "docs" / "DEVELOPMENT_WORKFLOW.md").read_text(
         encoding="utf-8"
     )
-    assert (ROOT / "mobile" / ".fvmrc").read_text(encoding="utf-8").strip() == "3.47.1"
+    fvmrc = json.loads((ROOT / "mobile" / ".fvmrc").read_text(encoding="utf-8"))
+    assert fvmrc["flutter"] == "3.47.1"
     assert "fvm flutter pub get" in readme
     assert "fvm flutter analyze" in workflow
     assert (ROOT / "mobile" / "pubspec.lock").is_file()
@@ -32,6 +34,7 @@ def test_mobile_docs_use_fvm_and_keep_platform_locks() -> None:
         / "swiftpm"
         / "Package.resolved"
     ).is_file()
+    assert ".fvm/" in (ROOT / "mobile" / ".gitignore").read_text(encoding="utf-8")
 
 
 def test_contracts_mark_existing_and_document_realtime_lanes() -> None:
