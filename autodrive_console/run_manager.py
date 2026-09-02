@@ -629,15 +629,158 @@ class RunManager:
             evidence.append(f"<section class=\"attempt\"><h3>T-{item.index:03d} 轨迹证据 <span>{esc(item.status.upper())}</span></h3>{body}</section>")
         evidence_html = "".join(evidence) or "<p class=\"notice\">测试未进入轨迹采集阶段，因此没有运行轨迹。</p>"
         p = run.case.parameters
-        target.write_text(f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>运行验证报告 {esc(run.id)}</title>
-<style>body{{margin:0;background:#edf2f7;color:#142235;font:14px Arial,"Microsoft YaHei",sans-serif}}main{{max-width:1280px;margin:auto;padding:34px}}header{{padding:28px 32px;background:#10263f;color:#f5f9ff;border-radius:12px}}header p{{margin:8px 0 0;color:#adc6dc}}h1{{margin:0;font-size:27px}}h2{{margin:30px 0 12px;font-size:19px}}.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:16px}}.metric{{padding:16px;background:#fff;border:1px solid #d8e1ea;border-radius:8px}}.metric small{{display:block;color:#697c90}}.metric b{{display:block;margin-top:7px;font-size:21px}}.ratio{{display:flex;align-items:center;gap:14px;margin-top:16px;padding:14px;background:#fff;border:1px solid #d8e1ea}}.pie{{display:grid;place-items:center;width:88px;height:88px;border-radius:50%;background:conic-gradient(#13795b 0deg {success_percent * 3.6:.2f}deg,#b42338 {success_percent * 3.6:.2f}deg 360deg);position:relative}}.pie:after{{content:'';position:absolute;inset:17px;border-radius:50%;background:#fff}}.pie b{{z-index:1;font-size:14px}}.ratio small{{display:block;margin-top:5px;color:#697c90}}table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid #d8e1ea}}th,td{{padding:11px;border-bottom:1px solid #e2e8ef;text-align:left;vertical-align:top}}th{{background:#edf3f8;color:#4a647c;font-size:12px}}td.passed{{color:#13795b;font-weight:bold}}td.failed{{color:#b42338;font-weight:bold}}td.cancelled{{color:#8a6b2c;font-weight:bold}}.attempt{{margin-top:20px;padding:20px;background:#fff;border:1px solid #d8e1ea;border-radius:8px}}.attempt h3{{margin:0 0 15px}}.attempt h3 span{{margin-left:8px;font-size:11px;color:#4a647c}}figure{{margin:14px 0;padding:12px;border:1px solid #dce5ed;background:#f8fafc}}figcaption{{margin-bottom:10px;color:#47627c;font-weight:bold}}figure svg{{display:block;max-width:100%;height:auto;border:1px solid #aab9c7}}.notice{{padding:12px;background:#fff7e7;color:#885a16}}footer{{margin-top:32px;color:#667b90;font-size:12px}}</style>
-<main><header><div>RY ALETHEIA / AUTOMATED TEST REPORT</div><h1>自动测试运行报告</h1><p>运行 ID：{esc(run.id)} · 用例：{esc(case_display_name)} · 状态：{esc(status_text)}</p></header>
-<section class="grid"><div class="metric"><small>计划轮次</small><b>{run.requested_count}</b></div><div class="metric"><small>已执行轮次</small><b>{summary['completed']}</b></div><div class="metric"><small>通过 / 失败</small><b>{summary['passed']} / {summary['failed']}</b></div><div class="metric"><small>通过率</small><b>{summary['passRate']}%</b></div></section>
-<section class="ratio"><div class="pie"><b>{summary['passRate']}%</b></div><div><b>已执行轮次成功率构成</b><small>绿色：通过 {summary['passed']} 轮；红色：失败 {summary['failed']} 轮；已取消 {summary['cancelled']} 轮不计入成功率。未执行轮次不计入成功率。</small></div></section>
-<h2>运行信息</h2><p>用例：{esc(case_display_name)} · 任务文件：{esc(run.case.filename)}<br>场景：{esc(run.case.name)} · 社区：{esc(p.community)} · 楼栋：{p.building} · 单元：{p.unit} · 楼层：{p.floor} · 门牌：{p.door}<br>开始：{esc(_format_report_time(run.started_at))} · 结束：{esc(_format_report_time(run.finished_at))} · CSV 伴随文件：{esc(csv_name)}</p>
-<h2>轮次结果</h2><table><thead><tr><th>轮次</th><th>开始时间</th><th>结果</th><th>耗时</th><th>服务反馈</th></tr></thead><tbody>{rows}</tbody></table>
-<h2>人工干预与停滞处置记录</h2><table><thead><tr><th>时间</th><th>关联轮次</th><th>操作</th><th>说明</th></tr></thead><tbody>{intervention_rows}</tbody></table>
-<h2>地图运行轨迹证据</h2>{evidence_html}<footer>由 RY Aletheia 自动生成。蓝线为实际轨迹，黄虚线为理想路线，红线为虚拟墙。</footer></main>''', encoding="utf-8")
+        status_class = run.status if run.status in {"completed", "failed", "cancelled", "blocked"} else "unknown"
+        target.write_text(f'''<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>运行验证报告 {esc(run.id)}</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --canvas: #f5f5f7;
+      --surface: #ffffff;
+      --surface-subtle: #f5f5f7;
+      --line: #d2d2d7;
+      --line-subtle: #e5e5ea;
+      --ink: #1d1d1f;
+      --muted: #6e6e73;
+      --blue: #0071e3;
+      --blue-soft: #e8f2ff;
+      --success: #248a3d;
+      --success-soft: #e9f8ed;
+      --warning: #a86600;
+      --warning-soft: #fff6e0;
+      --danger: #c5221f;
+      --danger-soft: #fff0ef;
+      --shadow: 0 10px 30px rgba(0, 0, 0, .06);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; background: var(--canvas); color: var(--ink); font: 14px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Noto Sans SC", "Microsoft YaHei", sans-serif; }}
+    .report-shell {{ max-width: 1240px; margin: 0 auto; padding: 42px 28px 56px; }}
+    .report-header {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 30px 32px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow); }}
+    .eyebrow {{ margin: 0 0 8px; color: var(--blue); font: 700 11px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .1em; }}
+    h1 {{ margin: 0; font-size: clamp(28px, 4vw, 38px); line-height: 1.15; letter-spacing: -.035em; }}
+    .header-copy {{ max-width: 760px; margin: 12px 0 0; color: var(--muted); }}
+    .status-badge {{ display: inline-flex; flex: none; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid currentColor; border-radius: 999px; font-size: 12px; font-weight: 700; white-space: nowrap; }}
+    .status-badge::before {{ content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }}
+    .status-badge.completed {{ color: var(--success); background: var(--success-soft); }}
+    .status-badge.failed, .status-badge.blocked {{ color: var(--danger); background: var(--danger-soft); }}
+    .status-badge.cancelled {{ color: var(--warning); background: var(--warning-soft); }}
+    .status-badge.unknown {{ color: var(--muted); background: var(--surface-subtle); }}
+    .report-summary {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }}
+    .summary-metric {{ min-height: 116px; padding: 18px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); }}
+    .summary-metric small {{ display: block; color: var(--muted); font-size: 12px; }}
+    .summary-metric strong {{ display: block; margin-top: 8px; font-size: 28px; line-height: 1; letter-spacing: -.035em; font-variant-numeric: tabular-nums; }}
+    .summary-metric .metric-detail {{ display: block; margin-top: 8px; color: var(--muted); font-size: 12px; }}
+    .pass-rate {{ margin-top: 16px; padding: 20px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); }}
+    .pass-rate-head {{ display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }}
+    .pass-rate h2, .section-title h2 {{ margin: 0; font-size: 17px; letter-spacing: -.02em; }}
+    .pass-rate b {{ color: var(--success); font-size: 22px; font-variant-numeric: tabular-nums; }}
+    .progress-track {{ height: 8px; margin-top: 14px; overflow: hidden; border-radius: 999px; background: var(--line-subtle); }}
+    .progress-value {{ width: {success_percent:.2f}%; height: 100%; border-radius: inherit; background: var(--success); }}
+    .pass-rate p {{ margin: 10px 0 0; color: var(--muted); font-size: 12px; }}
+    .section-card {{ margin-top: 16px; padding: 24px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); }}
+    .section-title {{ display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 17px; }}
+    .section-title p {{ margin: 0; color: var(--muted); font-size: 12px; }}
+    .context-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; }}
+    .context-item {{ min-width: 0; padding: 13px 14px; border-radius: 12px; background: var(--surface-subtle); }}
+    .context-item dt {{ color: var(--muted); font-size: 11px; }}
+    .context-item dd {{ margin: 4px 0 0; overflow-wrap: anywhere; color: var(--ink); font-weight: 650; }}
+    .table-scroll {{ overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }}
+    table {{ width: 100%; min-width: 720px; border-collapse: collapse; font-size: 13px; }}
+    th, td {{ padding: 13px 14px; border-bottom: 1px solid var(--line-subtle); text-align: left; vertical-align: top; }}
+    tr:last-child td {{ border-bottom: 0; }}
+    th {{ background: var(--surface-subtle); color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .04em; white-space: nowrap; }}
+    td {{ overflow-wrap: anywhere; }}
+    td.passed {{ color: var(--success); font-weight: 700; }}
+    td.failed {{ color: var(--danger); font-weight: 700; }}
+    td.cancelled {{ color: var(--warning); font-weight: 700; }}
+    .evidence-card {{ break-inside: avoid; margin-top: 16px; padding: 22px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); }}
+    .evidence-card:first-of-type {{ margin-top: 0; }}
+    .evidence-card h3 {{ display: flex; align-items: center; gap: 8px; margin: 0 0 14px; font-size: 16px; letter-spacing: -.015em; }}
+    .evidence-card h3 span {{ padding: 3px 7px; border-radius: 999px; background: var(--surface-subtle); color: var(--muted); font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
+    figure {{ break-inside: avoid; margin: 14px 0 0; padding: 14px; border: 1px solid var(--line-subtle); border-radius: 12px; background: var(--surface-subtle); }}
+    figcaption {{ margin-bottom: 10px; color: var(--muted); font-size: 12px; font-weight: 700; }}
+    figure svg {{ display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; }}
+    .notice {{ margin: 0; padding: 12px 14px; border-left: 3px solid var(--warning); border-radius: 8px; background: var(--warning-soft); color: #684400; }}
+    .report-footer {{ margin: 22px 2px 0; color: var(--muted); font-size: 12px; }}
+    @media (max-width: 760px) {{
+      .report-shell {{ padding: 20px 14px 36px; }}
+      .report-header {{ display: block; padding: 24px 21px; }}
+      .status-badge {{ margin-top: 16px; }}
+      .report-summary {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      .section-card, .evidence-card {{ padding: 18px; }}
+      .context-grid {{ grid-template-columns: 1fr; }}
+    }}
+    @media print {{
+      @page {{ margin: 14mm; }}
+      body {{ background: #fff; font-size: 11pt; print-color-adjust: exact; -webkit-print-color-adjust: exact; }}
+      .report-shell {{ max-width: none; padding: 0; }}
+      .report-header, .summary-metric, .pass-rate, .section-card, .evidence-card {{ box-shadow: none; break-inside: avoid; }}
+      .report-summary {{ grid-template-columns: repeat(4, minmax(0, 1fr)); }}
+      .section-card {{ break-inside: auto; }}
+      thead {{ display: table-header-group; }}
+      tr {{ break-inside: avoid; }}
+      .table-scroll {{ overflow: visible; }}
+    }}
+  </style>
+</head>
+<body>
+  <main class="report-shell">
+    <header class="report-header">
+      <div>
+        <p class="eyebrow">RY ALETHEIA / RUN EVIDENCE</p>
+        <h1>自动测试运行报告</h1>
+        <p class="header-copy">运行 ID：{esc(run.id)} · 用例：{esc(case_display_name)} · 开始：{esc(_format_report_time(run.started_at))}</p>
+      </div>
+      <span class="status-badge {status_class}">{esc(status_text)}</span>
+    </header>
+
+    <section class="report-summary" aria-label="运行摘要">
+      <article class="summary-metric"><small>计划轮次</small><strong>{run.requested_count}</strong><span class="metric-detail">本次计划执行总数</span></article>
+      <article class="summary-metric"><small>已执行轮次</small><strong>{summary['completed']}</strong><span class="metric-detail">已产生结果的轮次</span></article>
+      <article class="summary-metric"><small>通过 / 失败</small><strong>{summary['passed']} / {summary['failed']}</strong><span class="metric-detail">取消 {summary['cancelled']} 轮</span></article>
+      <article class="summary-metric"><small>通过率</small><strong>{summary['passRate']}%</strong><span class="metric-detail">取消与未执行不计入</span></article>
+    </section>
+
+    <section class="pass-rate" aria-label="通过率构成">
+      <div class="pass-rate-head"><h2>已执行轮次通过率</h2><b>{summary['passRate']}%</b></div>
+      <div class="progress-track" role="img" aria-label="通过率 {summary['passRate']}%"><div class="progress-value"></div></div>
+      <p>通过 {summary['passed']} 轮；失败 {summary['failed']} 轮；已取消 {summary['cancelled']} 轮不计入通过率。</p>
+    </section>
+
+    <section class="section-card">
+      <div class="section-title"><h2>运行信息</h2><p>随报告归档 CSV：{esc(csv_name)}</p></div>
+      <dl class="context-grid">
+        <div class="context-item"><dt>用例</dt><dd>用例：{esc(case_display_name)}</dd></div>
+        <div class="context-item"><dt>任务文件</dt><dd>{esc(run.case.filename)}</dd></div>
+        <div class="context-item"><dt>场景</dt><dd>{esc(run.case.name)}</dd></div>
+        <div class="context-item"><dt>配送目标</dt><dd>{esc(p.community)} · {p.building} 栋 {p.unit} 单元 {p.floor} 楼 {p.door}</dd></div>
+        <div class="context-item"><dt>开始时间</dt><dd>{esc(_format_report_time(run.started_at))}</dd></div>
+        <div class="context-item"><dt>结束时间</dt><dd>{esc(_format_report_time(run.finished_at))}</dd></div>
+      </dl>
+    </section>
+
+    <section class="section-card">
+      <div class="section-title"><h2>轮次结果</h2><p>每轮服务反馈与执行耗时</p></div>
+      <div class="table-scroll"><table><thead><tr><th>轮次</th><th>开始时间</th><th>结果</th><th>耗时</th><th>服务反馈</th></tr></thead><tbody>{rows}</tbody></table></div>
+    </section>
+
+    <section class="section-card">
+      <div class="section-title"><h2>人工干预与停滞处置记录</h2><p>本次执行过程的可追溯人工操作</p></div>
+      <div class="table-scroll"><table><thead><tr><th>时间</th><th>关联轮次</th><th>操作</th><th>说明</th></tr></thead><tbody>{intervention_rows}</tbody></table></div>
+    </section>
+
+    <section class="section-card">
+      <div class="section-title"><h2>地图运行轨迹证据</h2><p>蓝线为实际轨迹，黄虚线为理想路线，红线为虚拟墙</p></div>
+      {evidence_html.replace('class="attempt"', 'class="evidence-card"')}
+    </section>
+    <footer class="report-footer">由 RY Aletheia 自动生成。该文件可与 CSV 伴随文件一起离线归档。</footer>
+  </main>
+</body>
+</html>''', encoding="utf-8")
 
     def _case_alias(self, case_id: str) -> str:
         """报告在生成时读取当前别名；配置不可读时仍可可靠回退为任务文件名。"""

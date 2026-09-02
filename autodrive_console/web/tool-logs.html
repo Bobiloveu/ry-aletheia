@@ -1,31 +1,128 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>工具日志 · RY Aletheia</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/refinement.css"><link rel="stylesheet" href="/page_views.css"><link rel="stylesheet" href="/tool_logs.css"></head>
-<body><aside><div class="brand"><div class="mark"><svg viewBox="0 0 32 32"><path d="M5 24 16 4l11 20-11 4z"/><path d="m11 21 5-10 5 10-5 2z"/></svg></div><div><b>RY <span>Aletheia</span></b><small>AUTONOMOUS TEST SYSTEM</small></div></div><nav><a href="/"><span>⌘</span>任务指挥台</a><a href="/live-observation.html"><span>◉</span>实时运行观测</a><a href="/case-library.html"><span>▤</span>用例资产库</a><a href="/reports.html"><span>◫</span>报告中心</a><a href="/runtime-settings.html"><span>⚙</span>运行配置</a></nav><div class="side-status"><span class="pulse"></span> LOCAL DIAGNOSTICS<br><strong>本机日志归档</strong><span class="side-diagnostic-current">诊断日志</span></div></aside>
-<main class="page-main">
-  <header class="page-header">
-    <div>
-      <p class="eyebrow">SYSTEM DIAGNOSTICS / LOCAL ARCHIVE</p>
-      <h1>工具日志</h1>
-      <p class="sub">所有可导出的诊断文件都列在下方。页面只显示结构化控制台事件；地图、点云和视频的原始运行时输出可单独下载或合并下载。</p>
-    </div>
-    <div class="log-header-actions">
-      <button id="refreshLogs" class="page-top-action outline-button" type="button">↻ 刷新</button>
-      <a class="compact-action" href="/api/tool-logs/download?scope=errors">下载错误日志</a>
-      <a class="compact-action primary-log-download" href="/api/tool-logs/download?scope=all">下载完整诊断包</a>
-    </div>
-  </header>
-  <section class="page-grid">
-    <article class="panel span-5"><p class="eyebrow">EVENT LEDGER</p><b id="logCount" class="page-stat">读取中</b><p id="logDetail" class="page-muted">正在读取控制台事件。</p></article>
-    <article class="panel span-7"><p class="eyebrow">SUPPORT BUNDLE</p><p class="page-muted">完整诊断包是当前所有日志文件的 ZIP 快照。单独下载适合只交付特定故障链路，例如 <code>live_preprocessor_cloud.log</code> 或 <code>video-runtime.log</code>。</p></article>
-    <article class="panel log-files-panel">
-      <div class="panel-title"><div><p class="eyebrow">DIAGNOSTIC FILES</p><h2>可下载日志文件</h2></div><span id="logFileCount" class="log-file-count">读取中</span></div>
-      <p class="page-muted log-files-intro">仅显示由 Aletheia 生成的受控诊断文件；文件路径不会通过网页暴露。</p>
-      <div id="diagnosticFileList" class="diagnostic-file-list"><div class="page-empty">正在读取日志文件清单…</div></div>
-    </article>
-    <article class="panel">
-      <div class="panel-title"><div><p class="eyebrow">EVENT LEDGER</p><h2>本机事件记录</h2></div><div class="log-tabs"><button class="compact-action log-tab active" data-scope="all" type="button">全部</button><button class="compact-action log-tab" data-scope="errors" type="button">仅错误</button></div></div>
-      <div id="logList" class="log-list"><div class="page-empty">正在读取日志…</div></div>
-    </article>
-  </section>
-</main>
-<script src="/tool-logs.js"></script></body></html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>工具日志 · RY Aletheia</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/refinement.css" />
+    <link rel="stylesheet" href="/page_views.css" />
+    <link rel="stylesheet" href="/tool_logs.css" />
+    <link rel="stylesheet" href="/app_shell.css" />
+  </head>
+  <body>
+    <aside>
+      <div class="brand">
+        <div class="mark">
+          <svg viewBox="0 0 32 32">
+            <path d="M5 24 16 4l11 20-11 4z" />
+            <path d="m11 21 5-10 5 10-5 2z" />
+          </svg>
+        </div>
+        <div>
+          <b>RY <span>Aletheia</span></b
+          ><small>AUTONOMOUS TEST SYSTEM</small>
+        </div>
+      </div>
+      <nav>
+        <a href="/"><span>⌘</span>任务指挥台</a
+        ><a href="/live-observation.html"><span>◉</span>实时运行观测</a
+        ><a href="/case-library.html"><span>▤</span>用例资产库</a
+        ><a href="/reports.html"><span>◫</span>报告中心</a
+        ><a href="/runtime-settings.html"><span>⚙</span>运行配置</a>
+      </nav>
+      <div class="side-status">
+        <span class="pulse"></span> LOCAL DIAGNOSTICS<br /><strong
+          >本机日志归档</strong
+        ><span class="side-diagnostic-current">诊断日志</span>
+      </div>
+    </aside>
+    <main class="page-main">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">SYSTEM DIAGNOSTICS / LOCAL ARCHIVE</p>
+          <h1>工具日志</h1>
+          <p class="sub">
+            所有可导出的诊断文件都列在下方。页面只显示结构化控制台事件；地图、点云和视频的原始运行时输出可单独下载或合并下载。
+          </p>
+        </div>
+        <div class="log-header-actions">
+          <button
+            id="refreshLogs"
+            class="page-top-action outline-button"
+            type="button"
+          >
+            ↻ 刷新
+          </button>
+          <a class="compact-action" href="/api/tool-logs/download?scope=errors"
+            >下载错误日志</a
+          >
+          <a
+            class="compact-action primary-log-download"
+            href="/api/tool-logs/download?scope=all"
+            >下载完整诊断包</a
+          >
+        </div>
+      </header>
+      <section class="page-grid">
+        <article class="panel span-5">
+          <p class="eyebrow">EVENT LEDGER</p>
+          <b id="logCount" class="page-stat">读取中</b>
+          <p id="logDetail" class="page-muted">正在读取控制台事件。</p>
+        </article>
+        <article class="panel span-7">
+          <p class="eyebrow">SUPPORT BUNDLE</p>
+          <p class="page-muted">
+            完整诊断包是当前所有日志文件的 ZIP
+            快照。单独下载适合只交付特定故障链路，例如
+            <code>live_preprocessor_cloud.log</code> 或
+            <code>video-runtime.log</code>。
+          </p>
+        </article>
+        <article class="panel log-files-panel">
+          <div class="panel-title">
+            <div>
+              <p class="eyebrow">DIAGNOSTIC FILES</p>
+              <h2>可下载日志文件</h2>
+            </div>
+            <span id="logFileCount" class="log-file-count">读取中</span>
+          </div>
+          <p class="page-muted log-files-intro">
+            仅显示由 Aletheia 生成的受控诊断文件；文件路径不会通过网页暴露。
+          </p>
+          <div id="diagnosticFileList" class="diagnostic-file-list">
+            <div class="page-empty">正在读取日志文件清单…</div>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="panel-title">
+            <div>
+              <p class="eyebrow">EVENT LEDGER</p>
+              <h2>本机事件记录</h2>
+            </div>
+            <div class="log-tabs">
+              <button
+                class="compact-action log-tab active"
+                data-scope="all"
+                type="button"
+              >
+                全部</button
+              ><button
+                class="compact-action log-tab"
+                data-scope="errors"
+                type="button"
+              >
+                仅错误
+              </button>
+            </div>
+          </div>
+          <div id="logList" class="log-list">
+            <div class="page-empty">正在读取日志…</div>
+          </div>
+        </article>
+      </section>
+    </main>
+    <script src="/tool-logs.js"></script>
+    <script src="/app_shell.js"></script>
+  </body>
+</html>

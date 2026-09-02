@@ -1,4 +1,58 @@
-.report-row{grid-template-columns:minmax(220px,1fr) 160px auto}
-.report-actions{display:flex;justify-content:flex-end;gap:7px;flex-wrap:wrap}
-.danger-action{border-color:#8e4050!important;color:#ff9bac!important;background:#251521!important}
-@media(max-width:850px){.report-actions{justify-content:flex-start}}
+.report-row {
+  grid-template-columns: minmax(220px, 1fr) 160px auto;
+}
+.report-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.danger-action {
+  border-color: #8e4050 !important;
+  color: #ff9bac !important;
+  background: #251521 !important;
+}
+@media (max-width: 850px) {
+  .report-actions {
+    justify-content: flex-start;
+  }
+}
+
+/* Evidence review gives the report archive a primary reading surface while
+   status context remains visible in a compact rail. */
+@media (min-width: 1100px) {
+  body:has(#reportList) .page-grid {
+    grid-template-columns: minmax(0, 1fr) 320px;
+    grid-template-rows: auto minmax(520px, 1fr);
+    align-items: start;
+  }
+  body:has(#reportList) .page-grid > .panel:has(#reportList) {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    min-height: 420px;
+  }
+  body:has(#reportList):has(#reportList > .page-empty)
+    .page-grid
+    > .panel:has(#reportList) {
+    min-height: 340px;
+  }
+  body:has(#reportList) .page-grid > .panel:has(#latestStatus) {
+    grid-column: 2;
+    grid-row: 1;
+    padding: 20px;
+  }
+  body:has(#reportList) .page-grid > .panel:nth-child(2) {
+    grid-column: 2;
+    grid-row: 2;
+    padding: 20px;
+  }
+  body:has(#reportList) .report-list {
+    gap: 10px;
+  }
+  body:has(#reportList) .report-row {
+    padding: 14px;
+  }
+  body:has(#reportList) .report-actions {
+    justify-content: flex-end;
+  }
+}

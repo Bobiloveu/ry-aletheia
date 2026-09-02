@@ -1,0 +1,648 @@
+/* Shared desktop shell. This is intentionally sober: operators need hierarchy,
+   contrast and predictable controls more than decorative dashboard effects. */
+:root {
+  --bg: #161617;
+  --surface: #1f1f21;
+  --surface-raised: #29292b;
+  --surface-sunken: #151516;
+  --line: #3a3a3c;
+  --line-strong: #56565b;
+  --ink: #f5f5f7;
+  --muted: #a1a1a6;
+  --accent: #0a84ff;
+  --accent-strong: #0071e3;
+  --accent-soft: rgba(10, 132, 255, 0.16);
+  --success: #30d158;
+  --success-soft: rgba(48, 209, 88, 0.16);
+  --danger: #ff453a;
+  --danger-soft: rgba(255, 69, 58, 0.16);
+  --warning: #ff9f0a;
+  --radius: 14px;
+}
+html {
+  min-height: 100%;
+  background: var(--bg);
+  color-scheme: dark;
+}
+body {
+  min-height: 100dvh;
+  background: var(--bg);
+  font-family:
+    "SF Pro Display", "SF Pro Text", "Noto Sans SC", "Microsoft YaHei",
+    system-ui, sans-serif;
+  letter-spacing: 0;
+  color: var(--ink);
+}
+body:before {
+  display: none;
+}
+aside {
+  width: 248px;
+  padding: 24px 14px 18px;
+  background: #1c1c1e;
+  border-right: 1px solid var(--line);
+  box-shadow: none;
+}
+.brand {
+  padding: 8px 12px;
+  gap: 12px;
+}
+.mark {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 10px;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  overflow: hidden;
+}
+.mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.mark:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.brand b {
+  font-size: 17px;
+  letter-spacing: -0.35px;
+}
+.brand b span {
+  color: #d9ecff;
+}
+.brand small {
+  color: #98989d;
+  letter-spacing: 0.8px;
+}
+.brand-version {
+  margin-top: 5px;
+}
+nav {
+  margin-top: 38px;
+  display: grid;
+  gap: 3px;
+}
+nav a {
+  margin: 0;
+  padding: 12px 13px;
+  border-radius: 9px;
+  color: #b0b0b5;
+  transition:
+    background 0.16s ease,
+    color 0.16s ease,
+    transform 0.16s ease;
+}
+nav a span {
+  width: 20px;
+  font-size: 16px;
+  color: #98989d;
+}
+nav a:hover {
+  background: #3a3a3c;
+  color: #fff;
+  transform: translateX(2px);
+}
+nav a.active {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 var(--accent);
+  color: #fff;
+}
+nav a.active span {
+  color: #64a9ff;
+}
+.side-status {
+  padding: 16px 12px 5px;
+  border-top: 1px solid var(--line);
+  color: #98989d;
+}
+.side-status strong {
+  color: #e5e5ea;
+}
+.pulse {
+  background: var(--success);
+  box-shadow: none;
+}
+main,
+.page-main {
+  margin-left: 248px;
+  max-width: 1680px;
+  padding: 38px 46px 64px;
+}
+.page-header,
+header {
+  margin-bottom: 30px;
+}
+.eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+h1 {
+  font-size: 31px;
+  letter-spacing: -0.7px;
+}
+h2 {
+  font-size: 18px;
+  letter-spacing: -0.25px;
+}
+.sub {
+  max-width: 620px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.panel,
+.metrics article {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: none;
+}
+.panel {
+  padding: 22px;
+}
+.metrics article {
+  padding: 18px 20px;
+}
+.panel:hover {
+  border-color: var(--line-strong);
+}
+.panel-title {
+  margin-bottom: 18px;
+}
+.page-grid,
+.grid,
+.metrics {
+  gap: 16px;
+}
+.metrics b {
+  font-size: 27px;
+}
+.metrics span,
+.metrics small {
+  color: var(--muted);
+}
+button,
+.page-top-action {
+  border: 1px solid var(--accent-strong);
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  box-shadow: none;
+  font-family: inherit;
+  font-weight: 750;
+  transition:
+    background 0.16s ease,
+    transform 0.12s ease,
+    border-color 0.16s ease;
+}
+button:hover,
+.page-top-action:hover {
+  filter: none;
+  background: #409cff;
+}
+button:active,
+.page-top-action:active {
+  transform: translateY(1px);
+}
+button:disabled {
+  background: #48484a;
+  border-color: #636366;
+  color: #98989d;
+}
+.compact-action,
+.outline-button,
+.text-button {
+  width: auto;
+  margin: 0;
+  padding: 8px 11px;
+  background: transparent;
+  border-color: var(--line-strong);
+  color: #e5e5ea;
+  box-shadow: none;
+}
+.compact-action:hover,
+.outline-button:hover,
+.text-button:hover {
+  background: #3a3a3c;
+  color: #fff;
+}
+.danger-outline {
+  background: transparent;
+  border-color: #a94a43;
+  color: #ff9b93;
+  box-shadow: none;
+}
+label {
+  color: #e5e5ea;
+  font-size: 12px;
+  letter-spacing: 0;
+  font-weight: 650;
+}
+select,
+input,
+textarea {
+  margin-top: 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-sunken);
+  color: var(--ink);
+  padding: 10px 11px;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+select:focus,
+input:focus,
+textarea:focus {
+  outline: 2px solid rgba(10, 132, 255, 0.35);
+  border-color: var(--accent);
+}
+.badge,
+.sync-status {
+  border-radius: 999px;
+  color: #b8f5c7;
+  background: rgba(48, 209, 88, 0.14);
+  border-color: rgba(48, 209, 88, 0.38);
+  padding: 5px 9px;
+}
+.readiness .panel-title {
+  align-items: flex-start;
+  gap: 12px;
+}
+.readiness .panel-title > div {
+  min-width: 0;
+}
+.readiness .sync-status {
+  flex: 0 0 auto;
+  max-width: 100%;
+  white-space: nowrap;
+}
+.readiness-summary {
+  margin: -5px 0 14px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.badge.muted {
+  background: #3a3a3c;
+  border-color: #48484a;
+  color: #b0b0b5;
+}
+.page-empty,
+.empty,
+.chart-empty,
+.node-empty {
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  background: rgba(28, 28, 30, 0.45);
+  padding: 26px;
+  color: var(--muted);
+}
+table th {
+  color: #a1a1a6;
+  border-bottom-color: var(--line);
+}
+table td {
+  border-bottom-color: #3a3a3c;
+  color: #e5e5ea;
+}
+.case-meta,
+.gate-note {
+  border-color: rgba(10, 132, 255, 0.34);
+  background: rgba(10, 132, 255, 0.09);
+}
+@media (max-width: 1000px) {
+  aside {
+    position: static;
+    width: auto;
+    padding: 12px 16px;
+  }
+  .brand {
+    padding: 3px 0;
+  }
+  nav {
+    display: none;
+  }
+  main,
+  .page-main {
+    margin: 0;
+    padding: 24px 18px 44px;
+  }
+  .panel {
+    padding: 17px;
+  }
+  .metrics,
+  .grid,
+  .node-grid,
+  .page-grid {
+    grid-template-columns: 1fr;
+  }
+  h1 {
+    font-size: 27px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *:before,
+  *:after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+/* Apple-inspired light mode keeps the same semantic hue assignments. The
+   root selector is intentional: body can end before the viewport, but html
+   must never retain a previous dark canvas below a light page. */
+html[data-theme="light"],
+html[data-theme="light"] body.theme-light {
+  --bg: #f5f5f7;
+  --surface: #fff;
+  --surface-raised: #fff;
+  --surface-sunken: #f5f5f7;
+  --line: #d2d2d7;
+  --line-strong: #aeaeb2;
+  --ink: #1d1d1f;
+  --muted: #6e6e73;
+  --accent: #0071e3;
+  --accent-strong: #0066cc;
+  --accent-soft: rgba(0, 113, 227, 0.11);
+  --success: #248a3d;
+  --success-soft: rgba(36, 138, 61, 0.12);
+  --danger: #d70015;
+  --danger-soft: rgba(215, 0, 21, 0.11);
+  --warning: #b25000;
+  background: var(--bg);
+  color-scheme: light;
+}
+html[data-theme="dark"] { color-scheme: dark; }
+body.theme-light {
+  background: var(--bg);
+  color: var(--ink);
+}
+body.theme-light:before {
+  display: none;
+}
+body.theme-light aside {
+  background: #fbfbfd;
+  border-color: #d2d2d7;
+  box-shadow: none;
+}
+body.theme-light .brand b span {
+  color: #0066cc;
+}
+body.theme-light .brand small,
+body.theme-light .brand-version,
+body.theme-light nav a,
+body.theme-light nav a span,
+body.theme-light .side-status {
+  color: #6e6e73;
+}
+body.theme-light nav a:hover {
+  background: #f0f0f2;
+  color: #1d1d1f;
+}
+body.theme-light nav a.active {
+  background: var(--accent-soft);
+  color: #0066cc;
+}
+body.theme-light nav a.active span {
+  color: #0071e3;
+}
+body.theme-light .side-status {
+  border-color: #d2d2d7;
+}
+body.theme-light .side-status strong {
+  color: #1d1d1f;
+}
+body.theme-light .panel,
+body.theme-light .metrics article {
+  background: #fff;
+  border-color: #d2d2d7;
+  box-shadow: none;
+}
+body.theme-light label {
+  color: #424245;
+}
+body.theme-light select,
+body.theme-light input,
+body.theme-light textarea {
+  background: #fff;
+  border-color: #aeaeb2;
+  color: #1d1d1f;
+}
+body.theme-light button,
+body.theme-light .page-top-action {
+  background: #0071e3;
+  border-color: #0066cc;
+  color: #fff;
+}
+body.theme-light button:hover:not(:disabled),
+body.theme-light .page-top-action:hover {
+  background: #0077ed;
+}
+html[data-theme="light"] body.theme-light button:disabled {
+  background: #e5e5ea;
+  border-color: #d2d2d7;
+  color: #8e8e93;
+  box-shadow: none;
+}
+body.theme-light .compact-action,
+body.theme-light .outline-button,
+body.theme-light .text-button {
+  background: #fff;
+  border-color: #aeaeb2;
+  color: #0066cc;
+}
+body.theme-light .compact-action:hover,
+body.theme-light .outline-button:hover,
+body.theme-light .text-button:hover {
+  background: #f5f5f7;
+  color: #004f9e;
+}
+body.theme-light .badge,
+body.theme-light .sync-status {
+  color: #18763b;
+  background: #ebf8ee;
+  border-color: #a7dcb1;
+}
+body.theme-light .badge.muted {
+  color: #6e6e73;
+  background: #f0f0f2;
+  border-color: #d2d2d7;
+}
+body.theme-light .page-empty,
+body.theme-light .empty {
+  background: #fafafa;
+  border-color: #d2d2d7;
+  color: #6e6e73;
+}
+body.theme-light table td {
+  border-color: #e5e5ea;
+  color: #424245;
+}
+/* The execution monitor is a data surface, not a theme-specific dark hero. */
+main:has(#caseSelect) .monitor { background: var(--surface); }
+
+/* Theme authority. Older pages still own their structure, but never their
+   palette: this layer is linked last at every entry point. */
+body:not(.theme-light) .asset-row,
+body:not(.theme-light) .report-row,
+body:not(.theme-light) .node,
+body:not(.theme-light) .vehicle-model-row,
+body:not(.theme-light) .flow-step,
+body:not(.theme-light) .dependency-toolbar,
+body:not(.theme-light) .dependency-builder > section {
+  border-color: var(--line);
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+body:not(.theme-light) .asset-row b,
+body:not(.theme-light) .report-row b,
+body:not(.theme-light) .page-stat,
+body:not(.theme-light) .route-progress-head b,
+body:not(.theme-light) .dialog h2 {
+  color: var(--ink);
+}
+body:not(.theme-light) .asset-row small,
+body:not(.theme-light) .report-row small,
+body:not(.theme-light) .page-muted,
+body:not(.theme-light) .inline-message,
+body:not(.theme-light) .config-note,
+body:not(.theme-light) .upgrade-actions span,
+body:not(.theme-light) .upgrade-meta {
+  color: var(--muted);
+}
+body:not(.theme-light) .config-note,
+body:not(.theme-light) .case-meta,
+body:not(.theme-light) .gate-note {
+  border-color: rgba(10, 132, 255, 0.34);
+  background: var(--accent-soft);
+}
+body:not(.theme-light) .upgrade-panel {
+  border-color: var(--line) !important;
+  background: var(--surface) !important;
+}
+body:not(.theme-light) .upgrade-dropzone {
+  border-color: var(--line-strong);
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+body:not(.theme-light) .upgrade-dropzone:hover,
+body:not(.theme-light) .upgrade-dropzone.dragover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: none;
+}
+body:not(.theme-light) .upgrade-dropzone > span,
+body:not(.theme-light) .file-kind,
+body:not(.theme-light) .route-progress-head strong {
+  color: var(--accent);
+}
+body:not(.theme-light) .route-progress,
+body:not(.theme-light) .trajectory-option {
+  border-color: var(--line);
+  background: var(--surface-sunken);
+}
+body:not(.theme-light) .route-progress-track,
+body:not(.theme-light) .progress {
+  border-color: var(--line);
+  background: var(--surface-sunken);
+}
+body:not(.theme-light) .route-progress-track > div,
+body:not(.theme-light) .progress div {
+  background: var(--accent);
+  box-shadow: none;
+}
+body:not(.theme-light) .trajectory-option > span {
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+body:not(.theme-light) .trajectory-option > input:checked + span {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+body:not(.theme-light) .dependency-button {
+  border-color: var(--line-strong);
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+body:not(.theme-light) .shutdown-button,
+body:not(.theme-light) .danger-action {
+  border-color: #944a4a !important;
+  background: rgba(255, 69, 58, 0.12);
+  color: #ffb4ad !important;
+}
+body:not(.theme-light) .dialog,
+body:not(.theme-light) .dependency-dialog,
+body:not(.theme-light) .trajectory-dialog {
+  border-color: var(--line-strong);
+  background: var(--surface);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.38);
+}
+body.theme-light .asset-row,
+body.theme-light .report-row,
+body.theme-light .node,
+body.theme-light .vehicle-model-row,
+body.theme-light .flow-step,
+body.theme-light .dependency-toolbar,
+body.theme-light .dependency-builder > section {
+  border-color: var(--line);
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+body.theme-light .asset-row b,
+body.theme-light .report-row b,
+body.theme-light .page-stat {
+  color: var(--ink);
+}
+body.theme-light .asset-row small,
+body.theme-light .report-row small,
+body.theme-light .page-muted,
+body.theme-light .inline-message {
+  color: var(--muted);
+}
+body.theme-light .config-note,
+body.theme-light .case-meta,
+body.theme-light .gate-note {
+  border-color: rgba(0, 113, 227, 0.3);
+  background: var(--accent-soft);
+  color: var(--muted);
+}
+body.theme-light .upgrade-panel {
+  border-color: var(--line) !important;
+  background: var(--surface) !important;
+}
+body.theme-light .upgrade-dropzone {
+  border-color: var(--line-strong);
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+
+::selection {
+  background: rgba(10, 132, 255, 0.42);
+  color: var(--ink);
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) var(--bg);
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+::-webkit-scrollbar-thumb {
+  border: 3px solid var(--bg);
+  border-radius: 99px;
+  background: var(--line-strong);
+}
+:focus-visible {
+  outline: 2px solid var(--accent) !important;
+  outline-offset: 2px;
+}

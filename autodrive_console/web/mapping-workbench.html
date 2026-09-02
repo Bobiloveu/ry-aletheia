@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>实时建图工作台 · RY Aletheia</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/refinement.css" />
+    <link rel="stylesheet" href="/app_shell.css" />
+    <link rel="stylesheet" href="/mapping_workbench.css" />
+  </head>
+  <body class="mapping-workbench">
+    <main class="mapping-shell">
+      <header class="mapping-topbar">
+        <a class="workbench-back" href="/deployment.html">返回部署建图</a>
+        <div class="mapping-title">
+          <h1 id="mappingTitle">实时建图</h1>
+          <p id="mappingSubtitle">正在读取车端建图会话…</p>
+        </div>
+        <div class="mapping-state" aria-live="polite">
+          <span id="mappingStateDot" class="mapping-state-dot"></span>
+          <strong id="mappingStateName">检查中</strong>
+        </div>
+      </header>
+
+      <section class="live-mapping-stage" aria-label="实时建图画布">
+        <canvas id="liveMappingCanvas" aria-label="Lightning 实时栅格地图"></canvas>
+        <div id="mappingEmpty" class="mapping-empty" aria-live="polite">
+          <b id="mappingEmptyTitle">空白画布已就绪</b>
+          <span id="mappingEmptyText">开始建图后，车端 Lightning 的实时栅格会逐步呈现在这里。</span>
+        </div>
+        <div id="mappingFrameMeta" class="mapping-frame-meta" hidden></div>
+      </section>
+
+      <section class="mapping-control-deck" aria-label="建图期间车辆控制">
+        <div class="deck-heading">
+          <div>
+            <span class="deck-label">车辆控制</span>
+            <strong id="sourceName">正在读取控制源</strong>
+          </div>
+          <span id="sessionBadge" class="deck-badge">未接管</span>
+        </div>
+        <div class="deck-actions">
+          <button id="startMapping" class="deck-primary" type="button" disabled>开始实时建图</button>
+          <button id="enterManual" class="deck-secondary" type="button" disabled>进入手动控制</button>
+          <button id="exitManual" class="deck-secondary" type="button" hidden>交还自动驾驶</button>
+          <button id="stopMapping" class="deck-stop" type="button" disabled>停止并保存</button>
+        </div>
+        <div class="deck-drive" id="driveArea" aria-disabled="true">
+          <div class="direction-pad" aria-label="按住方向键控制，松开立即停止">
+            <button class="direction-button forward" data-command="forward" type="button" disabled>前进 <kbd>I</kbd></button>
+            <button class="direction-button left" data-command="left" type="button" disabled>左转 <kbd>J</kbd></button>
+            <button id="stopVehicle" class="direction-button stop" type="button" disabled>停止</button>
+            <button class="direction-button right" data-command="right" type="button" disabled>右转 <kbd>L</kbd></button>
+            <button class="direction-button backward" data-command="backward" type="button" disabled>后退 <kbd>K</kbd></button>
+          </div>
+          <div class="deck-speeds" aria-label="控制速度">
+            <label>直线 <output id="linearSpeedValue">0.2 m/s</output><input id="linearSpeed" type="range" min="0.1" max="1" step="0.1" value="0.2" disabled /></label>
+            <label>转向 <output id="angularSpeedValue">0.3 rad/s</output><input id="angularSpeed" type="range" min="0.1" max="1" step="0.1" value="0.3" disabled /></label>
+          </div>
+        </div>
+        <p id="workbenchMessage" class="workbench-message" role="status"></p>
+      </section>
+    </main>
+    <script src="/mapping_workbench.js"></script>
+    <script src="/app_shell.js"></script>
+  </body>
+</html>

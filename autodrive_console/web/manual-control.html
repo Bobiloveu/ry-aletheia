@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>手动控制 · RY Aletheia</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/refinement.css" />
+    <link rel="stylesheet" href="/page_views.css" />
+    <link rel="stylesheet" href="/manual_control.css" />
+    <link rel="stylesheet" href="/app_shell.css" />
+  </head>
+  <body>
+    <aside>
+      <div class="brand">
+        <div class="mark">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 24 16 4l11 20-11 4z" /></svg>
+        </div>
+        <div><b>RY <span>Aletheia</span></b><small>AUTONOMOUS TEST SYSTEM</small></div>
+      </div>
+      <nav>
+        <a href="/"><span>⌘</span>任务指挥台</a>
+        <a href="/deployment.html"><span>◇</span>部署建图</a>
+        <a class="active" href="/manual-control.html"><span>⌁</span>手动控制</a>
+        <a href="/live-observation.html"><span>◉</span>实时运行观测</a>
+        <a href="/case-library.html"><span>▤</span>测试用例管理</a>
+        <a href="/reports.html"><span>◫</span>报告中心</a>
+        <a href="/runtime-settings.html"><span>⚙</span>运行配置</a>
+      </nav>
+      <div class="side-status"><span class="pulse"></span> VEHICLE CONTROL<br /><strong>本机 ROS2 安全会话</strong></div>
+    </aside>
+    <main class="page-main manual-page">
+      <header class="page-header manual-header">
+        <div>
+          <h1>手动控制</h1>
+          <p class="sub">Aletheia 在车端保持控制源确认、20 Hz 速度发布与失联 STOP；浏览器只提交短生命期操作输入。</p>
+        </div>
+        <div class="source-readout" aria-live="polite">
+          <span id="sourceDot" class="source-dot unknown"></span>
+          <div><small>实际控制源</small><strong id="sourceName">正在读取…</strong></div>
+        </div>
+      </header>
+
+      <section class="manual-layout" aria-label="车辆手动控制台">
+        <section class="manual-stage" aria-labelledby="controlTitle">
+          <div class="stage-status">
+            <div>
+              <h2 id="controlTitle">车辆操作</h2>
+              <p id="controlHint">正在订阅车端控制源状态。</p>
+            </div>
+            <span id="sessionBadge" class="session-badge">未接管</span>
+          </div>
+
+          <div class="control-gate" id="controlGate">
+            <div class="gate-copy">
+              <h3 id="gateTitle">等待实际状态</h3>
+              <p id="gateText">页面不会根据点击推测控制权。确认控制源为“自动驾驶”后，才可以请求手动接管。</p>
+            </div>
+            <button id="enterManual" class="manual-primary" type="button" disabled>进入手动控制</button>
+            <button id="exitManual" class="manual-secondary" type="button" hidden>停止并切回自动驾驶</button>
+          </div>
+
+          <section class="motion-settings" aria-labelledby="motionSettingsTitle">
+            <div class="motion-settings-copy">
+              <h3 id="motionSettingsTitle">运动速度</h3>
+              <p>速度由车端限制在 0.1–1.0；调整会立即作用于下一次方向输入。</p>
+            </div>
+            <div class="speed-controls">
+              <label class="speed-control" for="linearSpeed">
+                <span>直线 <output id="linearSpeedValue">0.2 m/s</output></span>
+                <input id="linearSpeed" type="range" min="0.1" max="1" step="0.1" value="0.2" disabled />
+              </label>
+              <label class="speed-control" for="angularSpeed">
+                <span>转向 <output id="angularSpeedValue">0.3 rad/s</output></span>
+                <input id="angularSpeed" type="range" min="0.1" max="1" step="0.1" value="0.3" disabled />
+              </label>
+            </div>
+          </section>
+
+          <div class="drive-area" id="driveArea" aria-disabled="true">
+            <div class="drive-pad" aria-label="方向控制，按住移动，松开立即停止">
+              <button class="drive-button forward" data-command="forward" type="button" disabled aria-label="前进">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 13 6-6 6 6M12 7v11" /></svg><span>前进</span>
+                <kbd>I</kbd></button>
+              <button class="drive-button left" data-command="left" type="button" disabled aria-label="左转">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13 6-6 6 6 6M7 12h11" /></svg><span>左转</span><kbd>J</kbd></button>
+              <button class="drive-button stop" id="stopButton" type="button" disabled aria-label="停止">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1" /></svg><span>停止</span>
+              </button>
+              <button class="drive-button right" data-command="right" type="button" disabled aria-label="右转">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m11 6 6 6-6 6M17 12H6" /></svg><span>右转</span><kbd>L</kbd></button>
+              <button class="drive-button backward" data-command="backward" type="button" disabled aria-label="后退">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 11 6 6 6-6M12 17V6" /></svg><span>后退</span><kbd>K</kbd></button>
+            </div>
+            <p class="hold-note"><span></span>按住 <kbd>I</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd> 或方向按钮移动；车端以约 20 Hz 持续发布。松开、失焦或输入超时都会立即 STOP。</p>
+          </div>
+        </section>
+
+        <section class="manual-facts" aria-labelledby="safetyTitle">
+          <h2 id="safetyTitle">安全状态</h2>
+          <dl>
+            <div><dt>控制发布</dt><dd id="publishRate">—</dd></div>
+            <div><dt>输入看门狗</dt><dd id="inputTimeout">—</dd></div>
+            <div><dt>会话心跳</dt><dd id="heartbeatTimeout">—</dd></div>
+          </dl>
+          <div class="safety-note">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 7v5c0 4.6 3.2 7.6 7.5 9 4.3-1.4 7.5-4.4 7.5-9V7L12 3Zm-3 9 2 2 4-4" /></svg>
+            <p>非零速度只会在车端已确认 <code>miniapp</code> 且会话仍有效时发送。页面关闭会请求 STOP 并交还自动驾驶。</p>
+          </div>
+          <p id="controlMessage" class="control-message" role="status"></p>
+        </section>
+      </section>
+    </main>
+    <script src="/manual_control.js"></script>
+    <script src="/app_shell.js"></script>
+  </body>
+</html>

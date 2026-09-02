@@ -28,6 +28,7 @@ install/
 reports/
 logs/
 maps_cache/
+deployments/
 updates/
 config/console.json
 config/case_workspace.json

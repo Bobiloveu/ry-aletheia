@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>部署建图 · RY Aletheia</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/refinement.css" />
+    <link rel="stylesheet" href="/page_views.css" />
+    <link rel="stylesheet" href="/deployment.css" />
+    <link rel="stylesheet" href="/app_shell.css" />
+  </head>
+  <body>
+    <aside>
+      <div class="brand">
+        <div class="mark">
+          <svg viewBox="0 0 32 32"><path d="M5 24 16 4l11 20-11 4z" /></svg>
+        </div>
+        <div>
+          <b>RY <span>Aletheia</span></b
+          ><small>AUTONOMOUS TEST SYSTEM</small>
+        </div>
+      </div>
+      <nav>
+        <a href="/"><span>⌘</span>任务指挥台</a
+        ><a class="active" href="/deployment.html"><span>◇</span>部署建图</a
+        ><a href="/live-observation.html"><span>◉</span>实时运行观测</a
+        ><a href="/case-library.html"><span>▤</span>测试用例管理</a
+        ><a href="/reports.html"><span>◫</span>报告中心</a
+        ><a href="/runtime-settings.html"><span>⚙</span>运行配置</a>
+      </nav>
+      <div class="side-status">
+        <span class="pulse"></span> DEPLOYMENT WORKSPACE<br /><strong
+          >地图资产与项目模型</strong
+        >
+      </div>
+    </aside>
+    <main class="page-main">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">DEPLOYMENT / MAP FOUNDATION</p>
+          <h1>部署建图</h1>
+          <p class="sub">
+            按场景模型依次完成 1–3 张地图：外部导入或车端建图、2D 标记、衔接预览，最后再生成可回滚的机器人部署包。
+          </p>
+        </div>
+      </header>
+      <section class="page-grid">
+        <article class="panel span-5">
+          <div id="newProjectForm">
+            <div class="panel-title">
+              <div>
+                <p class="eyebrow">SITE PROJECT</p>
+                <h2>新建部署项目</h2>
+              </div>
+            </div>
+            <div class="settings-form">
+              <label
+                >项目名称<input
+                  id="projectName"
+                  maxlength="80"
+                  placeholder="例如：XX花园"
+              /></label>
+            </div>
+            <button id="createProject" class="page-top-action" type="button">
+              创建项目
+            </button>
+          </div>
+          <section id="currentProjectCard" class="current-project-card deployment-hidden" aria-live="polite">
+            <p class="eyebrow">CURRENT PROJECT</p>
+            <h2 id="currentProjectName">—</h2>
+            <p id="currentProjectMeta" class="current-project-meta">—</p>
+            <button id="showNewProjectForm" class="compact-action" type="button">创建其他项目</button>
+            <p class="page-muted">当前项目会持续保留；仅在确认需要新项目时再创建。</p>
+          </section>
+          <p id="projectMessage" class="inline-message"></p>
+        </article>
+        <article class="panel span-7">
+          <h2>部署流程</h2>
+          <ol class="deployment-flow" aria-label="部署建图流程">
+            <li class="current"><b>1</b><span>创建项目并选择场景模型</span></li>
+            <li><b>2</b><span>逐张地图：外部导入或车端建图，再进行 2D 标记</span></li>
+            <li><b>3</b><span>检查 Transition、路线和虚拟墙，生成部署包</span></li>
+          </ol>
+          <div id="sceneModelControls" class="settings-form deployment-hidden">
+            <label>场景模型<select id="sceneModel">
+              <option value="indoor">室内配送（1–2 张地图）</option>
+              <option value="indoor_outdoor">室内外配送（最多 3 张地图）</option>
+              <option value="outdoor">室外配送（1 张地图）</option>
+            </select></label>
+            <button id="saveSceneModel" class="compact-action" type="button">确认场景模型</button>
+          </div>
+          <p id="sceneModelMessage" class="inline-message">先创建或打开一个部署项目。</p>
+        </article>
+        <article class="panel">
+          <div class="panel-title">
+            <div>
+              <p class="eyebrow">PROJECTS</p>
+              <h2>部署项目</h2>
+            </div>
+          </div>
+          <div id="projectList" class="asset-list">
+            <div class="page-empty">正在读取项目…</div>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="panel-title">
+            <div>
+              <p class="eyebrow">MAP IMPORT</p>
+              <h2>导入现有 Lightning 地图</h2>
+            </div>
+          </div>
+          <p class="page-muted">
+            从打开此网页的电脑选择地图文件。请同时选择 <code>map.yaml</code>
+            与对应 PGM；可选虚拟墙与 PCD 会一并上传并复制到项目快照。
+          </p>
+          <div id="importControls" class="settings-form deployment-hidden">
+            <div id="mapStageSummary" class="map-stage-summary"></div>
+            <label class="map-folder-picker"
+              >选择地图文件<input id="mapFolder" type="file" multiple accept=".yaml,.yml,.pgm,.pcd" aria-describedby="mapFolderMessage" /></label
+            ><p id="mapFolderMessage" class="inline-message map-folder-message">尚未选择地图文件。</p>
+            ><label
+              >显示名称<input
+                id="mapLabel"
+                maxlength="80"
+                placeholder="室外地图 / 电梯大厅" /></label
+            ><label
+              >地图类型<select id="mapKind">
+                <option value="outdoor">室外</option>
+                <option value="lobby">大厅 / 首层</option>
+                <option value="typical_floor">标准层</option>
+                <option value="custom">其他</option>
+              </select></label
+            ><button id="importMap" class="page-top-action" type="button">
+              导入地图快照
+            </button>
+          </div>
+          <p id="importMessage" class="inline-message">
+            请先打开一个部署项目。
+          </p>
+        </article>
+        <article class="panel mapping-session-panel">
+          <div class="panel-title"><div><h2>车端实时建图</h2></div><span id="mappingRuntimeBadge" class="badge muted">检查运行时…</span></div>
+          <p class="page-muted">从打开此网页的电脑选择 YAML。Aletheia 仅保存副本到当前项目工作区，绝不读取、修改或覆盖小车原有定位配置。</p>
+          <div id="mappingControls" class="settings-form deployment-hidden">
+            <label class="map-folder-picker">建图模板 YAML<input id="mappingTemplateFile" type="file" accept=".yaml,.yml,application/x-yaml,text/yaml" aria-describedby="mappingTemplateMessage" /></label>
+            <p id="mappingTemplateMessage" class="inline-message map-folder-message">请选择操作者电脑上的 YAML 模板。</p>
+            <label>本张地图名称<input id="mappingLabel" maxlength="80" placeholder="例如：电梯大厅" /></label>
+            <label>地图类型<select id="mappingKind"><option value="outdoor">室外</option><option value="lobby" selected>大厅 / 首层</option><option value="typical_floor">标准层</option><option value="custom">其他</option></select></label>
+            <div class="mapping-actions"><button id="prepareMapping" class="compact-action" type="button">准备建图会话</button><button id="openMappingWorkbench" class="page-top-action" type="button" disabled>进入建图工作台</button><button id="discardMapping" class="compact-action danger-action" type="button" disabled>放弃当前会话</button></div>
+          </div>
+          <p id="mappingMessage" class="inline-message">创建项目后可选择“车端建图”。</p>
+        </article>
+        <article class="panel span-12">
+          <div class="panel-title">
+            <div>
+              <p class="eyebrow">MAPPING WORKSPACE</p>
+              <h2>地图画布</h2>
+            </div>
+            <div>
+              <button
+                id="panTool"
+                class="compact-action active-tool"
+                type="button"
+              >
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="M12 3v18M3 12h18M8 7l4-4 4 4M8 17l4 4 4-4M7 8l-4 4 4 4M17 8l4 4-4 4"
+                  /></svg
+                ><span>平移</span></button
+              ><button
+                data-waypoint-kind="start"
+                class="compact-action waypoint-tool"
+                type="button"
+              >
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 19V5m1 1h9l-2 4 2 4H6" /></svg
+                ><span>起点</span></button
+              ><button
+                data-waypoint-kind="target"
+                class="compact-action waypoint-tool"
+                type="button"
+              >
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="12" cy="12" r="7" />
+                  <circle cx="12" cy="12" r="2" /></svg
+                ><span>目标</span></button
+              ><button
+                data-waypoint-kind="elevator"
+                class="compact-action waypoint-tool"
+                type="button"
+              >
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="5" y="3" width="14" height="18" rx="1" />
+                  <path d="M12 4v16M8 6v12M16 6v12M10 12h4" /></svg
+                ><span>电梯</span></button
+              ><button
+                data-waypoint-kind="gate"
+                class="compact-action waypoint-tool"
+                type="button"
+              >
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="3" y="8" width="18" height="8" rx="1" />
+                  <path d="M7 8v8m5-8v8m5-8v8" /></svg
+                ><span>闸机</span></button
+              ><button
+                data-waypoint-kind="auto_door"
+                class="compact-action waypoint-tool"
+                type="button"
+              >
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="3" y="7" width="18" height="10" rx="1" />
+                  <path d="M12 7v10M5 9l5 6m9-6-5 6" /></svg
+                ><span>自动门</span></button
+              ><button
+                data-waypoint-kind="narrow_passage"
+                class="compact-action waypoint-tool"
+                type="button"
+              >
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M7 3v18M17 3v18M10 7h4M10 12h4M10 17h4" /></svg
+                ><span>窄通道</span></button
+              ><button
+                data-waypoint-kind="ramp"
+                class="compact-action waypoint-tool"
+                type="button"
+              >
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 18h16M6 16l9-9 3 9" /></svg
+                ><span>坡道</span></button
+              ><button
+                data-waypoint-kind="slow_zone"
+                class="compact-action waypoint-tool"
+                type="button"
+              >
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m5 17 5-10m0 10 5-10m0 10 4-8" /></svg
+                ><span>减速区</span></button
+              ><button
+                data-waypoint-kind="map_transition"
+                class="compact-action waypoint-tool"
+                type="button"
+                title="在当前地图放置跨地图交接点"
+              >
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 8h9m0 0-3-3m3 3-3 3M19 16h-9m0 0 3-3m-3 3 3 3" />
+                </svg><span>交接点</span></button
+              ><button
+                data-waypoint-kind="transition_link"
+                class="compact-action waypoint-tool"
+                type="button"
+                title="依次选择相邻地图的两个交接点"
+              >
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M9 7H7a4 4 0 0 0 0 8h2m6-8h2a4 4 0 0 1 0 8h-2M8 12h8" />
+                </svg><span>衔接</span></button
+              ><button
+                data-waypoint-kind="route_link"
+                class="compact-action waypoint-tool"
+                type="button"
+                title="按顺序选择当前地图的路线点"
+              >
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 18c5-1 4-10 9-10h7M16 5l4 3-4 3M4 18h1" />
+                </svg><span>路线</span></button
+              ><span class="toolbar-divider" aria-hidden="true"></span
+              ><span class="eraser-brush-group"
+                ><button
+                  data-waypoint-kind="erase_brush"
+                  class="compact-action waypoint-tool erase-tool"
+                  type="button"
+                  title="拖动擦除地图杂点；滚轮调整直径"
+                  aria-label="启用橡皮擦"
+                >
+                  <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path
+                      d="m7 17 8.7-8.7 3.1 3.1-8.7 8.7H7zM14.5 6.5l1.6-1.6 3.1 3.1-1.6 1.6"
+                    /></svg
+                  ><span
+                    >橡皮擦 <small id="eraserButtonSize">0.8 m</small></span
+                  >
+                </button>
+                <section
+                  id="eraserSizeControl"
+                  class="eraser-size-control deployment-hidden"
+                  aria-label="橡皮擦设置"
+                >
+                  <span
+                    ><b id="eraserDiameterValue">0.8 m</b
+                    ><small>滚轮调节直径</small></span
+                  >
+                  <span class="eraser-shape-toggle" aria-label="橡皮擦形状">
+                    <button
+                      id="eraserCircle"
+                      class="active"
+                      type="button"
+                      title="圆形橡皮擦"
+                      aria-label="圆形橡皮擦"
+                    >
+                      ○
+                    </button>
+                    <button
+                      id="eraserSquare"
+                      type="button"
+                      title="方形橡皮擦"
+                      aria-label="方形橡皮擦"
+                    >
+                      □
+                    </button>
+                  </span>
+                </section></span
+              ><button
+                data-waypoint-kind="erase_polygon"
+                class="compact-action waypoint-tool erase-tool"
+                type="button"
+                title="逐点绘制不规则擦除区域"
+              >
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="M5 6h6l3 4-3 6H5l-2-5zM18 5h1v1h-1zM18 18h1v1h-1z"
+                  /></svg
+                ><span>框选擦除</span></button
+              ><button
+                id="completeErasePolygon"
+                class="compact-action deployment-hidden"
+                type="button"
+              >
+                完成框选</button
+              ><button
+                id="undoMapEdit"
+                class="compact-action erase-history"
+                type="button"
+              >
+                撤销擦除</button
+              ><button
+                id="clearMapEdits"
+                class="compact-action erase-history"
+                type="button"
+              >
+                清空擦除</button
+              ><button id="resetMapView" class="compact-action" type="button">
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg
+                ><span>适配视图</span></button
+              ><span id="mapCursor" class="page-muted">—</span>
+            </div>
+          </div>
+          <div id="mapWorkspace" class="map-workspace">
+            <canvas id="mapCanvas" aria-label="部署地图画布"></canvas>
+            <div id="mapCanvasEmpty" class="map-canvas-empty">
+              <b>等待地图资产</b
+              ><small
+                >导入现有 Lightning 地图后，PGM 底图将显示在此工作区。</small
+              >
+            </div>
+            <section
+              id="componentPopover"
+              class="component-popover deployment-hidden"
+              aria-label="组件快捷编辑"
+            >
+              <header>
+                <span id="componentPopoverTitle">组件快捷编辑</span>
+                <button
+                  id="closeComponentPopover"
+                  class="popover-close"
+                  type="button"
+                  aria-label="关闭组件编辑"
+                >
+                  ×
+                </button>
+              </header>
+              <div class="component-edit-grid">
+                <div class="component-size-readout">
+                  <span>尺寸</span><strong id="componentSizeReadout">—</strong
+                  ><small>拖动右下蓝色控制点调整</small>
+                </div>
+                <label
+                  >朝向（rad）<input
+                    id="componentYaw"
+                    type="number"
+                    min="-6.283"
+                    max="6.283"
+                    step="0.1"
+                /></label>
+              </div>
+              <div
+                id="componentAttributeFields"
+                class="component-attribute-fields"
+              ></div>
+              <div class="component-actions">
+                <button
+                  id="saveComponent"
+                  class="page-top-action"
+                  type="button"
+                >
+                  保存
+                </button>
+                <button
+                  id="deleteComponent"
+                  class="compact-action danger-action"
+                  type="button"
+                >
+                  删除
+                </button>
+              </div>
+            </section>
+          </div>
+          <p id="mapToolHint" class="page-muted">
+            选择语义组件后点击地图，系统会自动派生其任务点。交接点用于连接相邻地图；路线只在当前地图内编辑。
+          </p>
+        </article>
+        <article class="panel span-6 topology-panel">
+          <div class="panel-title">
+            <div>
+              <h2>地图阶段</h2>
+            </div>
+          </div>
+          <p class="page-muted">导入的地图会优先进入下一个阶段；如需调整，可在此将当前地图绑定到正确位置。</p>
+          <div id="stageAssignmentControls" class="settings-form deployment-hidden">
+            <label>当前地图阶段<select id="mapStageAssignment"></select></label>
+            <button id="assignMapStage" class="compact-action" type="button">绑定当前地图</button>
+          </div>
+          <p id="stageAssignmentMessage" class="inline-message">选择地图后可检查其阶段归属。</p>
+        </article>
+        <article class="panel span-6 topology-panel">
+          <div class="panel-title">
+            <div>
+              <h2>部署拓扑预览</h2>
+            </div>
+            <span id="topologyState" class="badge muted">等待项目</span>
+          </div>
+          <div id="topologyPreview" class="topology-preview">
+            <div class="page-empty">阶段、交接点与路线完成后，会在这里显示只读检查结果。</div>
+          </div>
+          <div class="route-draft-actions">
+            <span id="routeDraftMessage" class="page-muted">选择“路线”后，按顺序点击当前地图的 Waypoint。</span>
+            <button id="saveRoute" class="compact-action" type="button" disabled>保存当前路线</button>
+            <button id="clearRouteDraft" class="compact-action" type="button" disabled>清空选择</button>
+          </div>
+        </article>
+        <article class="panel span-6">
+          <div class="panel-title">
+            <div>
+              <p class="eyebrow">MAP INSTANCE</p>
+              <h2>部署拓扑位置</h2>
+            </div>
+          </div>
+          <div id="instanceControls" class="settings-form deployment-hidden">
+            <label
+              >用途<select id="instanceRole">
+                <option value="outdoor">室外</option>
+                <option value="lobby">大厅 / 首层</option>
+                <option value="typical_floor">标准层</option>
+                <option value="floor_override">特殊楼层覆盖</option>
+              </select></label
+            ><label
+              >楼栋<input
+                id="instanceBuilding"
+                maxlength="32"
+                placeholder="例如：2" /></label
+            ><label
+              >单元<input
+                id="instanceUnit"
+                maxlength="32"
+                placeholder="例如：1" /></label
+            ><label
+              >楼层<input
+                id="instanceFloor"
+                type="number"
+                placeholder="例如：5" /></label
+            ><button id="addInstance" class="page-top-action" type="button">
+              加入部署拓扑
+            </button>
+          </div>
+          <p id="instanceMessage" class="inline-message">请先选择一个地图。</p>
+          <div id="instanceList" class="asset-list"></div>
+        </article>
+        <article class="panel span-6 component-template-panel">
+          <section
+            id="componentTemplateConfig"
+            class="component-template-config deployment-hidden"
+          >
+            <h2>通信协议模板</h2>
+            <p class="page-muted">
+              项目级配置；新增或移除后，右键组件中的协议选项会同步更新。
+            </p>
+            <div id="protocolTemplateList" class="protocol-template-list"></div>
+            <div class="protocol-add-form">
+              <label
+                >适用组件<select id="protocolCategory">
+                  <option value="access_protocols">门禁 / 闸机 / 自动门</option>
+                  <option value="elevator_protocols">梯控</option>
+                </select></label
+              ><label
+                >新增协议<input
+                  id="protocolLabel"
+                  maxlength="40"
+                  placeholder="例如：厂商专线" /></label
+              ><button id="addProtocol" class="compact-action" type="button">
+                添加协议
+              </button>
+            </div>
+            <p id="protocolMessage" class="inline-message"></p>
+          </section>
+        </article>
+        <article class="panel span-12 map-assets-panel">
+          <div class="panel-title">
+            <div>
+              <h2 id="selectedProjectTitle">项目地图</h2>
+            </div>
+          </div>
+          <div id="mapList" class="deployment-map-list">
+            <div class="page-empty">项目地图将在这里显示。</div>
+          </div>
+        </article>
+      </section>
+    </main>
+    <script src="/deployment.js"></script>
+    <script src="/app_shell.js"></script>
+  </body>
+</html>

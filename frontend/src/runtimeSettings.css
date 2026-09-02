@@ -1,29 +1,253 @@
-.vehicle-library-panel { display: grid; gap: 12px; }
-.vehicle-library-panel .panel-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.settings-form .checkbox-setting { display: inline-flex; align-items: center; align-self: end; gap: 10px; min-height: 44px; margin: 0; padding: 10px 12px; border: 1px solid #2b536f; border-radius: 5px; background: #0b1c2c; color: #d7e9f6; font-size: 12px; cursor: pointer; user-select: none; }
-.settings-form .checkbox-setting input[type="checkbox"] { appearance: none; -webkit-appearance: none; display: grid; place-content: center; flex: 0 0 18px; width: 18px; height: 18px; min-width: 18px; min-height: 18px; margin: 0; padding: 0; border: 1px solid #557895; border-radius: 4px; background: #071420; cursor: pointer; }
-.settings-form .checkbox-setting input[type="checkbox"]::after { content: ''; width: 8px; height: 4px; border: solid #fff; border-width: 0 0 2px 2px; transform: rotate(-45deg) scale(0); transform-origin: center; transition: transform .14s ease; }
-.settings-form .checkbox-setting input[type="checkbox"]:checked { border-color: #32cbbd; background: #168f86; box-shadow: 0 0 0 3px #29d7d022; }
-.settings-form .checkbox-setting input[type="checkbox"]:checked::after { transform: rotate(-45deg) scale(1); }
-.settings-form .checkbox-setting input[type="checkbox"]:focus-visible { outline: 2px solid #5ca0ff; outline-offset: 2px; }
-.vehicle-model-grid { display: grid; grid-template-columns: minmax(220px, 360px) 1fr; gap: 18px; align-items: end; }
-.vehicle-model-grid .config-note { margin: 0; }
-.vehicle-model-row { display: grid; grid-template-columns: minmax(110px, .9fr) minmax(170px, 1.6fr) minmax(110px, .8fr) minmax(110px, .8fr) auto; gap: 10px; align-items: end; padding: 12px; border: 1px solid #254862; border-radius: 6px; background: #091827; }
-.vehicle-model-row label, .vehicle-model-grid label { display: grid; gap: 6px; color: #b9d5e6; font-size: 11px; }
-.vehicle-model-row input, .vehicle-model-grid select { min-width: 0; }
-.danger-outline { min-height: 35px; padding: 7px 11px; border: 1px solid #8f5261; border-radius: 4px; background: #281721; color: #f2bac4; cursor: pointer; }
-.danger-outline:disabled { cursor: not-allowed; opacity: .45; }
-.theme-light .vehicle-model-row { border-color: #b9d0e0; background: #f5f9fc; }
-.theme-light .vehicle-model-row label, .theme-light .vehicle-model-grid label { color: #36536a; }
-.theme-light .danger-outline { border-color: #d29ba5; background: #fff5f6; color: #9f3e50; }
-.theme-light .settings-form .checkbox-setting { border-color: #aac5d9; background: #f4f9fc; color: #274761; }
-.theme-light .settings-form .checkbox-setting input[type="checkbox"] { border-color: #8eafc8; background: #fff; }
-.theme-light .settings-form .checkbox-setting input[type="checkbox"]:checked { border-color: #168b81; background: #168b81; box-shadow: 0 0 0 3px #1c9e9430; }
+.vehicle-library-panel {
+  display: grid;
+  gap: 12px;
+}
+.vehicle-library-panel .panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.settings-form .checkbox-setting {
+  display: inline-flex;
+  align-items: center;
+  align-self: end;
+  gap: 10px;
+  min-height: 44px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #2b536f;
+  border-radius: 5px;
+  background: #0b1c2c;
+  color: #d7e9f6;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.settings-form .checkbox-setting input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  display: grid;
+  place-content: center;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  min-height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #557895;
+  border-radius: 4px;
+  background: #071420;
+  cursor: pointer;
+}
+.settings-form .checkbox-setting input[type="checkbox"]::after {
+  content: "";
+  width: 8px;
+  height: 4px;
+  border: solid #fff;
+  border-width: 0 0 2px 2px;
+  transform: rotate(-45deg) scale(0);
+  transform-origin: center;
+  transition: transform 0.14s ease;
+}
+.settings-form .checkbox-setting input[type="checkbox"]:checked {
+  border-color: #32cbbd;
+  background: #168f86;
+  box-shadow: 0 0 0 3px #29d7d022;
+}
+.settings-form .checkbox-setting input[type="checkbox"]:checked::after {
+  transform: rotate(-45deg) scale(1);
+}
+.settings-form .checkbox-setting input[type="checkbox"]:focus-visible {
+  outline: 2px solid #5ca0ff;
+  outline-offset: 2px;
+}
+.vehicle-model-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 360px) 1fr;
+  gap: 18px;
+  align-items: end;
+}
+.vehicle-model-grid .config-note {
+  margin: 0;
+}
+.vehicle-model-row {
+  display: grid;
+  grid-template-columns:
+    minmax(110px, 0.9fr) minmax(170px, 1.6fr) minmax(110px, 0.8fr)
+    minmax(110px, 0.8fr) auto;
+  gap: 10px;
+  align-items: end;
+  padding: 12px;
+  border: 1px solid #254862;
+  border-radius: 6px;
+  background: #091827;
+}
+.vehicle-model-row label,
+.vehicle-model-grid label {
+  display: grid;
+  gap: 6px;
+  color: #b9d5e6;
+  font-size: 11px;
+}
+.vehicle-model-row input,
+.vehicle-model-grid select {
+  min-width: 0;
+}
+.danger-outline {
+  min-height: 35px;
+  padding: 7px 11px;
+  border: 1px solid #8f5261;
+  border-radius: 4px;
+  background: #281721;
+  color: #f2bac4;
+  cursor: pointer;
+}
+.danger-outline:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.theme-light .vehicle-model-row {
+  border-color: #b9d0e0;
+  background: #f5f9fc;
+}
+.theme-light .vehicle-model-row label,
+.theme-light .vehicle-model-grid label {
+  color: #36536a;
+}
+.theme-light .danger-outline {
+  border-color: #d29ba5;
+  background: #fff5f6;
+  color: #9f3e50;
+}
+.theme-light .settings-form .checkbox-setting {
+  border-color: #aac5d9;
+  background: #f4f9fc;
+  color: #274761;
+}
+.theme-light .settings-form .checkbox-setting input[type="checkbox"] {
+  border-color: #8eafc8;
+  background: #fff;
+}
+.theme-light .settings-form .checkbox-setting input[type="checkbox"]:checked {
+  border-color: #168b81;
+  background: #168b81;
+  box-shadow: 0 0 0 3px #1c9e9430;
+}
 /* Vue 运行配置页单独兜底白天主题，避免旧页面样式的浅色文字残留。 */
 /* index.html 的启动占位样式会直接给 #app 写入深色背景，必须同时覆盖。 */
-body.theme-light #app { min-height: 100vh; background: radial-gradient(ellipse at 52% -20%, #d5e8fb 0, #eef4fb 48%); }
-body.theme-light .page-main { color: #172d42; }
-body.theme-light .page-main h1, body.theme-light .page-main h2 { color: #172d42; }
-body.theme-light .page-main label { color: #456176; }
-body.theme-light .page-main .eyebrow { color: #078c91; }
-@media (max-width: 850px) { .vehicle-model-grid, .vehicle-model-row { grid-template-columns: 1fr; } .vehicle-model-row .danger-outline { width: 100%; } }
+body.theme-light #app {
+  min-height: 100vh;
+  background: radial-gradient(ellipse at 52% -20%, #d5e8fb 0, #eef4fb 48%);
+}
+body.theme-light .page-main {
+  color: #172d42;
+}
+body.theme-light .page-main h1,
+body.theme-light .page-main h2 {
+  color: #172d42;
+}
+body.theme-light .page-main label {
+  color: #456176;
+}
+body.theme-light .page-main .eyebrow {
+  color: #078c91;
+}
+@media (max-width: 850px) {
+  .vehicle-model-grid,
+  .vehicle-model-row {
+    grid-template-columns: 1fr;
+  }
+  .vehicle-model-row .danger-outline {
+    width: 100%;
+  }
+}
+
+/* Configuration is an operations surface, not a marketing form. The frequently
+   edited runtime and vehicle model controls stay in the primary lane; policy
+   explanations and upgrade safety live in a quieter verification rail. */
+@media (min-width: 1100px) {
+  .page-main:has(.vehicle-library-panel) .page-grid {
+    grid-template-columns: minmax(0, 1fr) 350px;
+    grid-template-rows: auto auto auto minmax(400px, 1fr);
+  }
+  .page-main:has(.vehicle-library-panel) .page-grid > .panel:nth-child(1) {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .page-main:has(.vehicle-library-panel) .page-grid > .panel:nth-child(2) {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .page-main:has(.vehicle-library-panel) .page-grid > .panel:nth-child(3) {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  .page-main:has(.vehicle-library-panel) .page-grid > .panel:nth-child(4) {
+    grid-column: 2;
+    grid-row: 2;
+  }
+  .page-main:has(.vehicle-library-panel) .page-grid > .vehicle-library-panel {
+    grid-column: 1;
+    grid-row: 3 / span 2;
+  }
+  .page-main:has(.vehicle-library-panel) .page-grid > .upgrade-panel {
+    grid-column: 2;
+    grid-row: 3;
+    padding: 19px;
+  }
+  .page-main:has(.vehicle-library-panel) .page-grid > .panel:last-child {
+    grid-column: 2;
+    grid-row: 4;
+    padding: 19px;
+  }
+  .page-main:has(.vehicle-library-panel) .settings-form {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .page-main:has(.vehicle-library-panel) .vehicle-model-row {
+    border-color: var(--line);
+    border-radius: 10px;
+    background: var(--surface-sunken);
+  }
+  .page-main:has(.vehicle-library-panel) .settings-form .checkbox-setting {
+    border-color: var(--line-strong);
+    border-radius: 9px;
+    background: var(--surface-sunken);
+    color: var(--ink);
+  }
+  .page-main:has(.vehicle-library-panel)
+    .settings-form
+    .checkbox-setting
+    input[type="checkbox"]:checked {
+    border-color: var(--accent);
+    background: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .page-main:has(.vehicle-library-panel) .upgrade-panel {
+    border-color: var(--line) !important;
+    background: var(--surface) !important;
+  }
+  .page-main:has(.vehicle-library-panel) .upgrade-dropzone {
+    border-color: var(--line-strong);
+    border-radius: 10px;
+    background: var(--surface-sunken);
+  }
+  .page-main:has(.vehicle-library-panel) .upgrade-dropzone > span {
+    color: var(--accent);
+  }
+  .page-main:has(.vehicle-library-panel) .vehicle-library-panel .panel-title {
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .page-main:has(.vehicle-library-panel) .vehicle-library-panel .panel-actions {
+    margin-left: auto;
+    justify-content: flex-end;
+  }
+  .page-main:has(.vehicle-library-panel)
+    .vehicle-library-panel
+    .panel-actions
+    button {
+    flex: 0 1 auto;
+    white-space: nowrap;
+  }
+}

@@ -8,7 +8,9 @@ import tempfile
 import threading
 import unittest
 import zipfile
+import re
 from http import HTTPStatus
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -28,6 +30,15 @@ from autodrive_console.supervisor import SupervisorClient
 from autodrive_console.tool_logging import ToolLogStore
 from autodrive_console.upgrade_manager import UpgradeError, UpgradeManager
 from autodrive_console import upgrade_signature
+
+
+def _assert_source_contains(source: str, expected: str) -> None:
+    """Keep static semantic checks stable across formatter-only changes."""
+    normalize = lambda value: re.sub(
+        r",(?=[)\]}])", "", re.sub(r"\s+", "", value).replace('"', "'")
+    )
+    if normalize(expected) not in normalize(source):
+        raise AssertionError(f"Expected semantic source fragment is missing: {expected}")
 
 
 def _signed_upgrade_manifest(binary: bytes) -> tuple[dict, str]:
@@ -82,6 +93,93 @@ class _SupervisorClient(SupervisorClient):
 
 
 class OfflineModuleTests(unittest.TestCase):
+    def test_map_upload_picker_allows_multiple_files_not_directory_only(self):
+        """Prevents the desktop chooser from locking operators into folder-only mode."""
+        class Inputs(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.attributes = {}
+
+            def handle_starttag(self, tag, attrs):
+                values = dict(attrs)
+                if tag == "input" and values.get("id") == "mapFolder":
+                    self.attributes = values
+
+        parser = Inputs()
+        parser.feed((web_console.WEB_ROOT / "deployment.html").read_text(encoding="utf-8"))
+        self.assertEqual(parser.attributes.get("type"), "file")
+        self.assertIn("multiple", parser.attributes)
+        self.assertNotIn("webkitdirectory", parser.attributes)
+
+    def test_mapping_workbench_is_a_dedicated_live_canvas_with_safe_controls(self):
+        """建图时不应把表单、画布与遥控混在部署页；工作台要有独立安全控制入口。"""
+        workbench = web_console.WEB_ROOT / "mapping-workbench.html"
+        self.assertTrue(workbench.is_file())
+        page = workbench.read_text(encoding="utf-8")
+        self.assertIn('id="liveMappingCanvas"', page)
+        self.assertIn('id="enterManual"', page)
+        self.assertIn('id="stopMapping"', page)
+        self.assertIn('src="/mapping_workbench.js"', page)
+
+    def test_mapping_template_is_selected_from_browser_files_not_robot_paths(self):
+        """部署页不得让操作者输入或读取机器人原有 YAML 绝对路径。"""
+        page = (web_console.WEB_ROOT / "deployment.html").read_text(encoding="utf-8")
+        self.assertIn('id="mappingTemplateFile"', page)
+        self.assertIn('type="file"', page)
+        self.assertNotIn('id="mappingTemplate" value="/opt/ry/', page)
+
+    def test_theme_shell_uses_document_root_tokens(self):
+        """浅色主题必须同步到根节点，避免内容不足一屏时露出深色 html 背景。"""
+        shell = (web_console.WEB_ROOT / "app_shell.js").read_text(encoding="utf-8")
+        css = (web_console.WEB_ROOT / "app_shell.css").read_text(encoding="utf-8")
+        self.assertIn("document.documentElement.dataset.theme", shell)
+        self.assertIn('html[data-theme="light"]', css)
+        self.assertIn('html[data-theme="light"] body.theme-light', css)
+        self.assertIn("min-height: 100dvh", css)
+        self.assertIn("main:has(#caseSelect) .monitor { background: var(--surface); }", css)
+
+    def test_desktop_pages_load_the_shared_theme_shell(self):
+        """共享样式必须随共享脚本加载，否则根主题变量不会实际同步。"""
+        pages = (
+            "index.html", "deployment.html", "manual-control.html", "case-library.html",
+            "reports.html", "runtime-settings.html", "tool-logs.html",
+            "scenario-setup.html",
+        )
+        for page_name in pages:
+            page = (web_console.WEB_ROOT / page_name).read_text(encoding="utf-8")
+            self.assertIn('<script src="/app_shell.js"></script>', page, page_name)
+
+    def test_deployment_page_has_a_dedicated_current_project_status_card(self):
+        """Prevents an open project from being visually indistinguishable from a blank new-project form."""
+        page = (web_console.WEB_ROOT / "deployment.html").read_text(encoding="utf-8")
+        self.assertIn('id="currentProjectCard"', page)
+        self.assertIn('id="currentProjectName"', page)
+        self.assertIn('id="currentProjectMeta"', page)
+        self.assertIn('id="showNewProjectForm"', page)
+
+    def test_mapping_ui_distinguishes_waiting_for_the_first_grid_from_live_mapping(self):
+        """A blank canvas needs an actionable state instead of a false progress claim."""
+        script = (web_console.WEB_ROOT / "deployment.js").read_text(encoding="utf-8")
+        self.assertIn('preview?.state === "waiting"', script)
+        self.assertIn("正在等待 Lightning 的第一帧栅格", script)
+
+    def test_preflight_summary_keeps_long_diagnostics_out_of_the_status_badge(self):
+        """运行状态卡的长诊断信息必须留在可换行的摘要区，不能撑破标题徽标。"""
+        page = (web_console.WEB_ROOT / "index.html").read_text(encoding="utf-8")
+        script = (web_console.WEB_ROOT / "app.js").read_text(encoding="utf-8")
+        shell = (web_console.WEB_ROOT / "app_shell.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="preflightSummary"', page)
+        self.assertIn("$('preflightSummary').textContent", script)
+        self.assertIn(".readiness-summary", shell)
+        self.assertIn(".readiness .sync-status", shell)
+
+    def test_desktop_shell_serves_the_provided_aletheia_logo_asset(self):
+        """Fails when the shared desktop shell cannot load the operator-provided logo."""
+        asset = web_console.WEB_ROOT / "aletheia.svg"
+        self.assertTrue(asset.is_file())
+        self.assertIn(b"viewBox=\"0 0 1254 1254\"", asset.read_bytes())
+
     def test_expected_client_disconnect_does_not_escape_http_request_thread(self):
         handler = object.__new__(web_console.ConsoleHandler)
         handler.client_address = ("192.168.1.140", 40166)
@@ -690,8 +788,8 @@ class OfflineModuleTests(unittest.TestCase):
         """地图缓存和实时遥测独立，浏览器不再发现或订阅 ROS 图。"""
         source = Path("frontend/src/liveObservation.js").read_text(encoding="utf-8")
         self.assertIn("function connectTelemetry(payload)", source)
-        self.assertIn("openLane('cloud', '/cloud'", source)
-        self.assertIn("openLane('pose', '/pose'", source)
+        _assert_source_contains(source, "openLane('cloud', '/cloud'")
+        _assert_source_contains(source, "openLane('pose', '/pose'")
         self.assertIn("function updateTelemetryCloud(data)", source)
         self.assertIn("function updateTelemetryPose(data)", source)
         self.assertNotIn("FoxgloveClient", source)
@@ -713,10 +811,10 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("const TELEMETRY_HEADER_BYTES = 20;", source)
         self.assertIn("const POSE_PACKET_MAX_AGE_MS = 250;", source)
         # 点云历史只保留极短窗口，避免与地图交互争用浏览器主线程。
-        self.assertIn("import { Application, BufferImageSource, Container, Graphics, Sprite, Texture } from 'pixi.js';", source)
+        _assert_source_contains(source, "import { Application, BufferImageSource, Container, Graphics, Sprite, Texture } from 'pixi.js';")
         self.assertIn("async function initializePixiRenderer()", source)
         self.assertIn("new ResizeObserver(resizeMapViewport).observe(interaction.parentElement);", source)
-        self.assertIn("lastMapDrawAt = performance.now(); drawMap();", source)
+        _assert_source_contains(source, "lastMapDrawAt = performance.now(); drawMap();")
         self.assertIn("function rebuildCloudRaster()", source)
         self.assertIn("function renderCloudPoints(packedPoints)", source)
         self.assertIn("function renderStaticWorld()", source)
@@ -726,9 +824,9 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertNotIn("async function initializeCameraRenderer(slot)", source)
         self.assertNotIn("function presentCameraTexture(slot, texture, width, height, imageBitmap)", source)
         self.assertNotIn("getContext('2d')", source)
-        self.assertIn("points.fill((mobileConsoleEnabled() ? MAP_PALETTE : DESKTOP_MAP_PALETTE).cloud);", source)
+        _assert_source_contains(source, "points.fill((mobileConsoleEnabled() ? MAP_PALETTE : DESKTOP_MAP_PALETTE).cloud);")
         self.assertIn("const DESKTOP_MAP_PALETTE", source)
-        self.assertIn("pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiWallLayer, pixiCloudLayer);", source)
+        _assert_source_contains(source, "pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiWallLayer, pixiCloudLayer);")
         self.assertNotIn("liveCloudWorker", source)
         self.assertIn("function followVehicleCenter(vehicle)", source)
         self.assertIn("function hasPendingFollowAdjustment()", source)
@@ -739,7 +837,7 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("!hasPendingFollowAdjustment()", source)
         self.assertIn("PixiJS 仅更新世界容器矩阵", source)
         self.assertIn("function stopRenderScheduling()", source)
-        self.assertIn("document.addEventListener('visibilitychange'", source)
+        _assert_source_contains(source, "document.addEventListener('visibilitychange'")
         self.assertIn("function vehiclePoseInMap()", source)
         self.assertIn("function flushCloudRenderer()", source)
         self.assertIn("pendingCloudFrame = frame;", source)
@@ -824,7 +922,7 @@ class OfflineModuleTests(unittest.TestCase):
         """旧服务 shutdown 排队期间仍能返回 200，不能据此误判新版本已启动。"""
         source = Path("frontend/src/main.js").read_text(encoding="utf-8")
         self.assertIn("function waitForUpgradeRestart(expectedVersion)", source)
-        self.assertIn("body.current_version || '') === String(expectedVersion || '')", source)
+        _assert_source_contains(source, "body.current_version || '') === String(expectedVersion || '')")
         self.assertIn("waitForUpgradeRestart(data.version)", source)
 
     def test_case_library_accepts_valid_case_and_reports_invalid_assets(self):
@@ -988,6 +1086,12 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("用例：电梯往返验证", contents)
         self.assertIn("2026-08-13 09:00:00", contents)
         self.assertNotIn("2026-08-13T09:00:00+08:00", contents)
+        self.assertIn('class="report-shell"', contents)
+        self.assertIn('class="report-summary"', contents)
+        self.assertIn('class="status-badge completed"', contents)
+        self.assertIn("@media print", contents)
+        self.assertIn("print-color-adjust: exact", contents)
+        self.assertNotIn("https://", contents)
 
     def test_report_filename_prefers_alias_and_keeps_run_id(self):
         with tempfile.TemporaryDirectory() as directory:

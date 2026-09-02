@@ -10,15 +10,19 @@ import shutil
 import subprocess
 import sys
 import threading
+import tempfile
 import zipfile
+import cgi
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from autodrive_console.case_store import CaseStore
 from autodrive_console.case_workspace import CasePackageError, CaseWorkspace
+from autodrive_console.deployment import DeploymentError, DeploymentStore
+from autodrive_console.mapping import MappingError, MappingSessionController, MappingUnavailable
 from autodrive_console.observation import ObservationError, ObservationManager
 from autodrive_console.robot_gateway import RobotGateway
 from autodrive_console.ros_executor import RosTaskExecutor
@@ -30,6 +34,13 @@ from autodrive_console.supervisor import SupervisorClient
 from autodrive_console.tool_logging import ToolLogStore
 from autodrive_console.upgrade_manager import UpgradeError, UpgradeManager
 from autodrive_console.video import ConsoleVideoRuntime, VideoConfigurationError, VideoManager, VideoRuntime
+from autodrive_console.trajectory_render import _png_gray, _read_pgm
+from autodrive_console.vehicle_control import (
+    VehicleControlConflict,
+    VehicleControlController,
+    VehicleControlError,
+    VehicleControlUnavailable,
+)
 
 
 def ensure_ros_environment() -> None:
@@ -62,12 +73,21 @@ if not getattr(__import__("sys"), "frozen", False):
 TASK_DIR = WORKSPACE / "tasks"
 CONFIG_DIR = WORKSPACE / "config"
 MAX_CASE_UPLOAD_BYTES = 8 * 1024 * 1024
+MAX_MAP_UPLOAD_BYTES = DeploymentStore.MAX_MAP_BYTES + 64 * 1024 * 1024
+MAX_MAPPING_TEMPLATE_BYTES = 2 * 1024 * 1024
 REPORT_FILENAME = re.compile(r"(?:run_[0-9a-f]{12}_[^/]+|报告_\d{8}_\d{6}_[^/]+_[0-9a-f]{12})\.html")
 STORE = CaseStore(TASK_DIR)
 CASE_WORKSPACE = CaseWorkspace(CONFIG_DIR, TASK_DIR)
+DEPLOYMENTS = DeploymentStore(WORKSPACE / "deployments")
 SETTINGS = SettingsStore(CONFIG_DIR / "console.json")
 SCENARIO_SETUP = ScenarioSetupStore(CONFIG_DIR)
 RUNS = RunManager(WORKSPACE / "reports", RosTaskExecutor(), SETTINGS, SCENARIO_SETUP)
+# 不复用运行测试的 ROS service client：手动控制有自己的 node/executor/timer，
+# 但与现有模块共用同一进程内 rclpy runtime，避免创建任何转发层。
+VEHICLE_CONTROL = VehicleControlController(active_run_guard=RUNS.has_active_run)
+# 建图会话不复用测试执行器或手动控制 node。它只管理 Lightning 进程与本机
+# 栅格预览订阅，所有临时 YAML/预览都写入部署工作区，绝不覆盖机器人配置。
+MAPPING = MappingSessionController(WORKSPACE / "deployments" / ".mapping-sessions", active_run_guard=RUNS.has_active_run)
 WEB_ROOT = ROOT / "autodrive_console" / "web"
 VUE_WEB_ROOT = ROOT / "autodrive_console" / "web-vue"
 UPGRADES = UpgradeManager(WORKSPACE, Path(sys.executable), getattr(sys, "frozen", False))
@@ -197,6 +217,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._static_from(VUE_WEB_ROOT, "index.html")
         elif path == "/live-observation.html":
             self._static_from(VUE_WEB_ROOT, "live-observation.html")
+        elif path == "/deployment.html":
+            self._static_from(WEB_ROOT, "deployment.html")
+        elif path == "/mapping-workbench.html":
+            self._static_from(WEB_ROOT, "mapping-workbench.html")
+        elif path == "/manual-control.html":
+            self._static_from(WEB_ROOT, "manual-control.html")
         elif path == "/vue/dashboard.html":
             self._static_from(VUE_WEB_ROOT, "dashboard.html")
         elif path.startswith("/vue/"):
@@ -204,6 +230,33 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         elif path == "/api/cases":
             cases, issues = STORE.list_cases()
             self._json({"cases": [self._case(case) for case in cases], "validationIssues": issues})
+        elif path == "/api/vehicle-control":
+            # 返回的是订阅 /control_source_state 得到的实际源状态，不由前端点击推断。
+            self._json(VEHICLE_CONTROL.status())
+        elif path == "/api/mapping":
+            self._json(MAPPING.status())
+        elif path.startswith("/api/mapping/sessions/") and path.endswith("/preview.png"):
+            session_id = unquote(path.removeprefix("/api/mapping/sessions/").removesuffix("/preview.png").strip("/"))
+            self._mapping_preview(session_id)
+        elif path == "/api/deployments":
+            self._json({"projects": DEPLOYMENTS.list_projects(), "mapping": MAPPING.status()})
+        elif path.startswith("/api/deployments/") and path.endswith("/preview.png"):
+            parts = path.split("/")
+            if len(parts) != 7 or parts[4] != "maps":
+                self.send_error(HTTPStatus.NOT_FOUND)
+            else:
+                self._deployment_map_preview(parts[3], parts[5])
+        elif path.startswith("/api/deployments/") and path.endswith("/topology"):
+            try:
+                project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/topology").strip("/"))
+                self._json({"topology": DEPLOYMENTS.validate_topology(project_id)})
+            except DeploymentError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+        elif path.startswith("/api/deployments/"):
+            try:
+                self._json({"project": DEPLOYMENTS.get(unquote(path.removeprefix("/api/deployments/").strip("/")))})
+            except DeploymentError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
         elif path.startswith("/api/cases/") and path.endswith("/export"):
             self._export_case_package(unquote(path.removeprefix("/api/cases/").removesuffix("/export").rstrip("/")))
         elif path == "/api/settings":
@@ -283,6 +336,62 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if path.startswith("/api/vehicle-control/"):
+            self._vehicle_control_action(path)
+            return
+        if path == "/api/mapping/sessions":
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = str(data.get("project_id", ""))
+                # Validate the project before allocating any mapping session directory.
+                DEPLOYMENTS.get(project_id)
+                session = MAPPING.prepare(
+                    project_id,
+                    template_id=data.get("template_id"), label=data.get("label"), kind=data.get("kind"),
+                )
+                self._json({"session": session}, HTTPStatus.CREATED)
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError, MappingError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/mapping/sessions/") and path.endswith("/start"):
+            try:
+                session_id = unquote(path.removeprefix("/api/mapping/sessions/").removesuffix("/start").strip("/"))
+                self._json({"session": MAPPING.start(session_id)}, HTTPStatus.ACCEPTED)
+            except MappingUnavailable as exc:
+                self._json({"error": str(exc), "mapping": MAPPING.status()}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except MappingError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
+            return
+        if path.startswith("/api/mapping/sessions/") and path.endswith("/stop"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                session_id = unquote(path.removeprefix("/api/mapping/sessions/").removesuffix("/stop").strip("/"))
+                session = MAPPING.stop(session_id, save=bool(data.get("save", True)))
+                payload = {"session": session}
+                if session["state"] == "saved":
+                    try:
+                        asset = DEPLOYMENTS.import_captured_map(
+                            session["project_id"], Path(session["output_dir"]) / "map.yaml",
+                            session["label"], session["kind"], MAPPING.root,
+                        )
+                        payload["map"] = asset
+                        payload["project"] = DEPLOYMENTS.get(session["project_id"])
+                    except DeploymentError as exc:
+                        # The session record and generated files remain for
+                        # diagnosis; never pretend a failed capture is ready
+                        # to edit or deploy.
+                        payload["capture_error"] = str(exc)
+                self._json(payload)
+            except (TypeError, ValueError, json.JSONDecodeError, MappingError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
+            return
+        if path.startswith("/api/mapping/sessions/") and path.endswith("/discard"):
+            try:
+                session_id = unquote(path.removeprefix("/api/mapping/sessions/").removesuffix("/discard").strip("/"))
+                self._json({"session": MAPPING.discard(session_id)})
+            except MappingError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
+            return
         if path == "/api/system/shutdown":
             if RUNS.has_active_run():
                 self._json({"error": "当前存在执行中、取消中或等待人工恢复的测试计划。请先终止并等待场景方案恢复后再退出控制台。"}, HTTPStatus.CONFLICT)
@@ -294,6 +403,133 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             LOGGER.info("操作者请求安全退出控制台")
             self._json({"message": "控制台正在安全退出"})
             threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
+        if path == "/api/deployments":
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                self._json({"project": DEPLOYMENTS.create(data.get("name"))}, HTTPStatus.CREATED)
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/maps/import"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/maps/import").strip("/"))
+                asset = DEPLOYMENTS.import_map(project_id, data.get("source_yaml"), data.get("label"), data.get("kind"))
+                self._json({"map": asset, "project": DEPLOYMENTS.get(project_id)}, HTTPStatus.CREATED)
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/maps/upload"):
+            project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/maps/upload").strip("/"))
+            self._upload_deployment_map(project_id)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/mapping-template"):
+            project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/mapping-template").strip("/"))
+            self._upload_mapping_template(project_id)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/map-stages"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/map-stages").strip("/"))
+                plan = DEPLOYMENTS.assign_map_stage(project_id, data.get("map_asset_id"), data.get("stage"))
+                self._json({"stage_plan": plan, "project": DEPLOYMENTS.get(project_id)})
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/transitions"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/transitions").strip("/"))
+                transition = DEPLOYMENTS.add_map_transition(project_id, data)
+                self._json({"transition": transition, "project": DEPLOYMENTS.get(project_id)}, HTTPStatus.CREATED)
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/routes"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/routes").strip("/"))
+                route = DEPLOYMENTS.save_route(project_id, data)
+                self._json({"route": route, "project": DEPLOYMENTS.get(project_id)}, HTTPStatus.CREATED)
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/scene-model"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/scene-model").strip("/"))
+                self._json({"project": DEPLOYMENTS.set_scene_model(project_id, data.get("scene_model"))})
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/map-instances"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/map-instances").strip("/"))
+                instance = DEPLOYMENTS.add_map_instance(project_id, data)
+                self._json({"map_instance": instance, "project": DEPLOYMENTS.get(project_id)}, HTTPStatus.CREATED)
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/waypoints"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/waypoints").strip("/"))
+                waypoint = DEPLOYMENTS.add_waypoint(project_id, data)
+                self._json({"waypoint": waypoint, "project": DEPLOYMENTS.get(project_id)}, HTTPStatus.CREATED)
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/component-templates"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/component-templates").strip("/"))
+                if data.get("action") == "add":
+                    project = DEPLOYMENTS.add_component_protocol(project_id, data.get("category"), data.get("label"))
+                elif data.get("action") == "remove":
+                    project = DEPLOYMENTS.remove_component_protocol(project_id, data.get("category"), data.get("protocol_id"))
+                else:
+                    raise DeploymentError("协议模板操作无效")
+                self._json({"project": project})
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/map-edits"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/map-edits").strip("/"))
+                self._json({"project": DEPLOYMENTS.update_map_edits(project_id, data)})
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/components"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/components").strip("/"))
+                component = DEPLOYMENTS.add_component(project_id, data)
+                self._json({"component": component, "project": DEPLOYMENTS.get(project_id)}, HTTPStatus.CREATED)
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/components/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "components": raise DeploymentError("组件路径无效")
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(parts[3]); component = DEPLOYMENTS.update_component(project_id, unquote(parts[5]), data)
+                self._json({"component": component, "project": DEPLOYMENTS.get(project_id)})
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/virtual-walls"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/virtual-walls").strip("/"))
+                wall = DEPLOYMENTS.add_virtual_wall(project_id, data)
+                self._json({"virtual_wall": wall, "project": DEPLOYMENTS.get(project_id)}, HTTPStatus.CREATED)
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
         if path == "/api/system/upgrade":
             self._apply_upgrade()
@@ -356,6 +592,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         try:
             if getattr(self.server, "upgrade_pending", False):
                 raise RuntimeError("控制台正在应用升级，暂时不能创建测试计划")
+            if VEHICLE_CONTROL.has_control_session():
+                raise RuntimeError("Aletheia 手动控制会话仍存在或正在切换，不能同时启动自动化测试")
             data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
             case = STORE.get_case(str(data["caseId"]))
             if not case:
@@ -500,6 +738,51 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             LOGGER.warning("实时观测操作被拒绝：%s", exc)
             self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
 
+    def _vehicle_control_action(self, path: str) -> None:
+        """HTTP 层只验证请求并调用控制器；不直接接触 ROS publisher 或定时器。"""
+        try:
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except ValueError as exc:
+                raise ValueError("请求长度无效") from exc
+            if not 0 <= content_length <= 16 * 1024:
+                raise ValueError("手动控制请求大小无效")
+            raw = self.rfile.read(content_length) if content_length else b"{}"
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError("手动控制请求必须是 JSON 对象")
+            if path == "/api/vehicle-control/enter":
+                payload = VEHICLE_CONTROL.begin_manual_session()
+            elif path == "/api/vehicle-control/heartbeat":
+                payload = VEHICLE_CONTROL.heartbeat(str(data.get("session_id", "")))
+            elif path == "/api/vehicle-control/command":
+                session_id = str(data.get("session_id", ""))
+                command = str(data.get("command", ""))
+                payload = VEHICLE_CONTROL.stop(session_id) if command == "stop" else VEHICLE_CONTROL.set_command(session_id, command)
+            elif path == "/api/vehicle-control/speed":
+                payload = VEHICLE_CONTROL.set_speed(
+                    str(data.get("session_id", "")),
+                    data.get("linear_speed"),
+                    data.get("angular_speed"),
+                )
+            elif path == "/api/vehicle-control/stop":
+                payload = VEHICLE_CONTROL.stop(str(data.get("session_id", "")))
+            elif path == "/api/vehicle-control/exit":
+                payload = VEHICLE_CONTROL.end_manual_session(str(data.get("session_id", "")))
+            else:
+                self._json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+                return
+            status = HTTPStatus.ACCEPTED if payload.get("transition") else HTTPStatus.OK
+            self._json(payload, status)
+        except VehicleControlUnavailable as exc:
+            LOGGER.warning("车辆控制 ROS2 模块不可用：%s", exc)
+            self._json({"error": str(exc), "status": VEHICLE_CONTROL.status()}, HTTPStatus.SERVICE_UNAVAILABLE)
+        except VehicleControlConflict as exc:
+            LOGGER.warning("手动控制请求被安全策略拒绝：%s", exc)
+            self._json({"error": str(exc), "status": VEHICLE_CONTROL.status()}, HTTPStatus.CONFLICT)
+        except (VehicleControlError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
     def _observation_map_preview(self, asset_id: str, kind: str) -> None:
         try:
             body = OBSERVATION.preview_png(asset_id) if kind == "png" else OBSERVATION.preview(asset_id)
@@ -516,11 +799,137 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _deployment_map_preview(self, project_id: str, map_id: str) -> None:
+        try:
+            width, height, pixels = _read_pgm(DEPLOYMENTS.map_image(project_id, map_id))
+            body = _png_gray(width, height, pixels)
+        except (DeploymentError, OSError, ValueError) as exc:
+            self.send_error(HTTPStatus.NOT_FOUND, str(exc))
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _mapping_preview(self, session_id: str) -> None:
+        try:
+            width, height, pixels = _read_pgm(MAPPING.preview_pgm(session_id))
+            body = _png_gray(width, height, pixels)
+        except (MappingError, OSError, ValueError) as exc:
+            self.send_error(HTTPStatus.NOT_FOUND, str(exc))
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(body)))
+        # Revisions are appended by the client; never cache a running map.
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _observation_map_layers(self, asset_id: str) -> None:
         try:
             self._json(OBSERVATION.layers(asset_id))
         except ObservationError as exc:
             self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+
+    @staticmethod
+    def _uploaded_relative_path(value: str) -> Path:
+        """Validate a browser-supplied directory upload path before staging it."""
+        candidate = PurePosixPath(value.replace("\\", "/"))
+        if not value or candidate.is_absolute() or not candidate.parts or any(part in {"", ".", ".."} for part in candidate.parts):
+            raise DeploymentError("上传文件路径不安全")
+        return Path(*candidate.parts)
+
+    def _upload_deployment_map(self, project_id: str) -> None:
+        """Receive a browser-selected map directory and snapshot it into a project."""
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+        content_type = self.headers.get("Content-Type", "")
+        if not 1 <= content_length <= MAX_MAP_UPLOAD_BYTES:
+            self._json({"error": "地图上传大小无效或超过 2 GiB 限制"}, HTTPStatus.BAD_REQUEST)
+            return
+        if not content_type.startswith("multipart/form-data"):
+            self._json({"error": "地图导入必须使用浏览器文件夹上传"}, HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            form = cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": content_type, "CONTENT_LENGTH": str(content_length)},
+            )
+            raw_files = form["files"] if "files" in form else []
+            files = raw_files if isinstance(raw_files, list) else [raw_files]
+            source_relative = self._uploaded_relative_path(str(form.getfirst("map_yaml", "")))
+            label = form.getfirst("label", "")
+            kind = form.getfirst("kind", "custom")
+            if not files:
+                raise DeploymentError("请选择包含 map.yaml 与 PGM 的地图文件夹")
+            staging_parent = DEPLOYMENTS.root / ".map-uploads"
+            staging_parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="browser-map-", dir=staging_parent) as directory:
+                root = Path(directory)
+                written = 0
+                seen: set[Path] = set()
+                for item in files:
+                    if not getattr(item, "filename", None) or not getattr(item, "file", None):
+                        continue
+                    relative = self._uploaded_relative_path(str(item.filename))
+                    if relative in seen:
+                        raise DeploymentError("地图文件夹中存在重名文件")
+                    seen.add(relative)
+                    target = root / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with target.open("xb") as output:
+                        while chunk := item.file.read(1024 * 1024):
+                            written += len(chunk)
+                            if written > DeploymentStore.MAX_MAP_BYTES:
+                                raise DeploymentError("地图资产超过 2 GiB 导入上限")
+                            output.write(chunk)
+                source = root / source_relative
+                asset = DEPLOYMENTS.import_uploaded_map(project_id, source, label, kind, root)
+                self._json({"map": asset, "project": DEPLOYMENTS.get(project_id)}, HTTPStatus.CREATED)
+        except (DeploymentError, OSError, ValueError, KeyError) as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
+    def _upload_mapping_template(self, project_id: str) -> None:
+        """Stage exactly one browser-selected mapping YAML inside its project.
+
+        Unlike an old path-input workflow this never reads from /opt/ry or any
+        other robot configuration directory.  The following mapping session
+        receives only the stored tool-owned copy.
+        """
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+        content_type = self.headers.get("Content-Type", "")
+        if not 1 <= content_length <= MAX_MAPPING_TEMPLATE_BYTES:
+            self._json({"error": "建图模板大小无效或超过 2 MiB 限制"}, HTTPStatus.BAD_REQUEST)
+            return
+        if not content_type.startswith("multipart/form-data"):
+            self._json({"error": "建图模板必须从浏览器本机文件选择器上传"}, HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            DEPLOYMENTS.get(project_id)
+            form = cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": content_type, "CONTENT_LENGTH": str(content_length)},
+            )
+            item = form["template"] if "template" in form else None
+            if item is None or isinstance(item, list) or not getattr(item, "filename", None) or not getattr(item, "file", None):
+                raise MappingError("请选择一个 YAML 建图模板文件")
+            contents = item.file.read(MAX_MAPPING_TEMPLATE_BYTES + 1)
+            template = MAPPING.store_template(project_id, str(item.filename), contents)
+            self._json({"template": template}, HTTPStatus.CREATED)
+        except (DeploymentError, MappingError, OSError, ValueError, KeyError) as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
     def _upload_case(self) -> None:
         """接收资产库拖入的单个 JSON；只允许新文件，绝不覆盖已有任务。"""
@@ -614,6 +1023,45 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
+        if path.startswith("/api/deployments/") and "/transitions/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "transitions":
+                    raise DeploymentError("Transition 路径无效")
+                DEPLOYMENTS.delete_map_transition(unquote(parts[3]), unquote(parts[5]))
+                self._json({"deleted": True})
+            except DeploymentError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/routes/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "routes":
+                    raise DeploymentError("路线路径无效")
+                DEPLOYMENTS.delete_route(unquote(parts[3]), unquote(parts[5]))
+                self._json({"deleted": True})
+            except DeploymentError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/components/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "components": raise DeploymentError("组件路径无效")
+                DEPLOYMENTS.delete_component(unquote(parts[3]), unquote(parts[5]))
+                self._json({"deleted": True})
+            except DeploymentError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/waypoints/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "waypoints":
+                    raise DeploymentError("部署 Waypoint 路径无效")
+                DEPLOYMENTS.delete_waypoint(unquote(parts[3]), unquote(parts[5]))
+                self._json({"deleted": True})
+            except DeploymentError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         if not path.startswith("/api/reports/"):
             self._json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
             return
@@ -783,7 +1231,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         if target.suffix == ".html":
             # 所有控制台页面共享品牌版本提示，避免四个独立页面重复维护同一段标记。
-            body = body.replace(b"</body>", b'<script src="/brand_version.js"></script></body>')
+            body = body.replace(b"</body>", b'<script src="/brand_version.js"></script><script src="/app_shell.js"></script></body>')
             content_type = "text/html; charset=utf-8"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
@@ -908,6 +1356,8 @@ def run_console() -> None:
         pass
     finally:
         video_runtime.stop()
+        MAPPING.close()
+        VEHICLE_CONTROL.close()
         OBSERVATION.stop()
         server.server_close()
     if server.restart_command:

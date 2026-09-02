@@ -61,7 +61,11 @@ function renderNodes(preflight) {
   const serviceStatus = preflight?.ros_service ? ` · ${preflight.ros_service.message}` : '';
   const finalGateStatus = preflight?.final_dependency_gate ? ` · 服务后总闸 ${preflight.final_dependency_gate.ok ? '通过' : '未通过'}` : '';
   const checkedAt = preflight?.node_states_checked_at ? ` · 最近检查 ${new Date(preflight.node_states_checked_at).toLocaleTimeString('zh-CN', { hour12: false })}` : '';
-  $('syncStatus').textContent = preflight ? `${scenarioStatus ? `${scenarioStatus} · ` : ''}${preflight.task_sync}${orchestrationStatus}${serviceStatus}${finalGateStatus}${mapStatus ? ` · ${mapStatus.message}` : ''}${checkedAt}` : '等待预检';
+  const summary = preflight ? `${scenarioStatus ? `${scenarioStatus} · ` : ''}${preflight.task_sync}${orchestrationStatus}${serviceStatus}${finalGateStatus}${mapStatus ? ` · ${mapStatus.message}` : ''}${checkedAt}` : '开始测试后将按编排重启并检查本机 Supervisor 节点。';
+  const ready = Boolean(preflight?.final_dependency_gate?.ok || (orchestration?.enabled && orchestration.all_ready));
+  const blocked = Boolean(preflight && !ready && (preflight.final_dependency_gate || orchestration?.enabled));
+  $('syncStatus').textContent = !preflight ? '等待预检' : ready ? '预检通过' : blocked ? '预检未通过' : '预检已更新';
+  $('preflightSummary').textContent = summary;
   $('nodeGrid').innerHTML = nodes.length ? nodes.map(node => `<div class="node"><div class="node-top"><b>${escapeHtml(node.label)}</b><span class="node-state ${node.status === 'RUNNING' ? 'running' : 'bad'}">${escapeHtml(node.status)}</span></div><small>${escapeHtml(node.supervisor)}${node.required ? ' · REQUIRED' : ' · OPTIONAL'}</small></div>`).join('') : '<div class="node-empty">开始测试后自动读取本机 Supervisor 节点状态</div>';
 }
 function renderLiveProgress(run) {

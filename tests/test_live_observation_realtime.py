@@ -5,9 +5,18 @@ latest-wins 策略：页面恢复后只消费最新数据，绝不补绘旧数�
 """
 
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).parents[1]
+
+
+def _assert_source_contains(source: str, expected: str) -> None:
+    """Assert source semantics without treating formatter output as a regression."""
+    normalize = lambda value: re.sub(
+        r",(?=[)\]}])", "", re.sub(r"\s+", "", value).replace('"', "'")
+    )
+    assert normalize(expected) in normalize(source)
 
 
 def _simulate_latest_wins(rate_hz: int, max_age_ms: int, blocked_windows: list[tuple[int, int]]) -> tuple[int, int, int]:
@@ -35,13 +44,13 @@ def _simulate_latest_wins(rate_hz: int, max_age_ms: int, blocked_windows: list[t
 def test_realtime_source_declares_single_slot_freshness_boundaries():
     source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
     assert "const CLOUD_PACKET_MAX_AGE_MS = 100;" in source
-    assert "import { Application, BufferImageSource, Container, Graphics, Sprite, Texture } from 'pixi.js';" in source
+    _assert_source_contains(source, "import { Application, BufferImageSource, Container, Graphics, Sprite, Texture } from 'pixi.js';")
     assert "cameraSlots" not in source
     assert "function initializeCameraRenderer(slot)" not in source
     assert "getContext('2d')" not in source
     assert "function renderCloudPoints(packedPoints)" in source
     assert "const DESKTOP_MAP_PALETTE" in source
-    assert "points.fill((mobileConsoleEnabled() ? MAP_PALETTE : DESKTOP_MAP_PALETTE).cloud);" in source
+    _assert_source_contains(source, "points.fill((mobileConsoleEnabled() ? MAP_PALETTE : DESKTOP_MAP_PALETTE).cloud);")
     assert "points.fill(0x8058ff);" not in source
     assert "const POSE_PACKET_MAX_AGE_MS = 250;" in source
     assert "const LIVE_POSE_FALLBACK_MS = 450;" in source
@@ -57,18 +66,18 @@ def test_realtime_source_declares_single_slot_freshness_boundaries():
     # 高频轻量 Pose 会重复发布同一位置以维持链路；外推必须以最后一次实际测量
     # 为起点，不能被每个心跳包的 receivedAt 反复归零。
     assert "motionMeasuredAt: latestLiveMotion.measuredAt" in source
-    assert "const motionMeasuredAt = target.source === 'live' ? target.motionMeasuredAt : target.receivedAt;" in source
+    _assert_source_contains(source, "const motionMeasuredAt = target.source === 'live' ? target.motionMeasuredAt : target.receivedAt;")
     assert "function reportClientMetrics()" in source
     assert "/api/observation/client-metrics" in source
     assert "视频输入等待超时" in source
-    assert "window.addEventListener('unhandledrejection'" in source
+    _assert_source_contains(source, "window.addEventListener('unhandledrejection'")
     assert "translate3d(${x}px, ${y}px, 0)" in source
     assert "element.style.left" not in source
     assert "pendingCloudPacket = { data, receivedAt: performance.now() };" in source
     assert "pendingPosePacket = { data, receivedAt: performance.now() };" in source
     assert "function connectTelemetry(payload)" in source
-    assert "openLane('cloud', '/cloud'" in source
-    assert "openLane('pose', '/pose'" in source
+    _assert_source_contains(source, "openLane('cloud', '/cloud'")
+    _assert_source_contains(source, "openLane('pose', '/pose'")
     assert "telemetryReconnectTimers" in source
     assert "closeTelemetryConnections()" in source
     assert "@foxglove/" not in source
@@ -105,7 +114,7 @@ def test_mobile_console_supports_both_orientations_and_scopes_zoom_to_the_map():
     assert "screen.orientation.lock('landscape')" not in source
     assert "window.visualViewport" in source
     assert "function setupMobileZoomPolicy()" in source
-    assert "['gesturestart', 'gesturechange', 'gestureend']" in source
+    _assert_source_contains(source, "['gesturestart', 'gesturechange', 'gestureend']")
     assert "event.touches.length > 1 && !insideMap(event.target)" in source
     assert "function setMobileConsoleView(view" in source
     assert "mobileWebRtcPlaybackAllowed()" in source
@@ -126,7 +135,7 @@ def test_map_removes_legacy_settings_entry_without_a_duplicate_status_header():
     assert '<article class="workspace-widget map-widget" data-widget="map">\n            <header class="widget-header">' not in html
     assert "$('toggleWorkspaceControls')" not in source
     # 地图标题条已移除，移动端顶部状态仍须独立镜像更新。
-    assert "const target = $(id); if (target) target.textContent = value;" in source
+    _assert_source_contains(source, "const target = $(id); if (target) target.textContent = value;")
     assert "mirrorMobileConnection(id, value);" in source
 
 
@@ -138,7 +147,7 @@ def test_map_uses_an_adaptive_metric_grid_and_restrained_industrial_palette():
     assert 'id="mapScale"' in html
     assert 'id="mapGridLabel"' in html
     assert "let pixiGridLayer;" in source
-    assert "pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiWallLayer, pixiCloudLayer);" in source
+    _assert_source_contains(source, "pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiWallLayer, pixiCloudLayer);")
     assert "function metricGridStep(pixelsPerMeter)" in source
     assert "function renderMetricGrid(layout)" in source
     assert "renderMetricGrid(layout);" in source
@@ -160,7 +169,7 @@ def test_vehicle_marker_has_a_minimal_rotating_front_line_without_an_arrow():
     stylesheet = (ROOT / "frontend" / "src" / "liveObservation.css").read_text(encoding="utf-8")
     html = (ROOT / "frontend" / "live-observation.html").read_text(encoding="utf-8")
     assert "#vehicleLayer i" in stylesheet
-    assert "top:9%; left:20%; right:20%; height:4px" in stylesheet
+    _assert_source_contains(stylesheet, "top:9%; left:20%; right:20%; height:4px")
     assert "#vehicleLayer::before" not in stylesheet
     assert "clip-path:polygon" not in stylesheet
     assert "map-legend" not in html
@@ -169,17 +178,18 @@ def test_vehicle_marker_has_a_minimal_rotating_front_line_without_an_arrow():
 def test_industrial_video_uses_whep_html_video_and_pixi_texture_without_a_frame_relay():
     source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
     html = (ROOT / "frontend" / "live-observation.html").read_text(encoding="utf-8")
-    assert "request('/api/video/status')" in source
-    assert "request('/api/video/control'" in source
+    _assert_source_contains(source, "request('/api/video/status')")
+    _assert_source_contains(source, "request('/api/video/control'")
     assert "function toggleWebRtcVideo()" in source
     assert "function toggleWebRtcStream(stream)" in source
     assert "function renderWebRtcStreamControls(streams)" in source
     assert "webrtcStreamTogglesInFlight" in source
     assert 'id="webrtcVideoToggle"' in html
     assert 'id="webrtcStreamControls"' in html
-    assert "document.createElement('video')" in source
-    assert "peer.addTransceiver('video', { direction: 'recvonly' })" in source
-    assert "method: 'POST'" in source and "application/sdp" in source
+    _assert_source_contains(source, "document.createElement('video')")
+    _assert_source_contains(source, "peer.addTransceiver('video', { direction: 'recvonly' })")
+    _assert_source_contains(source, "method: 'POST'")
+    assert "application/sdp" in source
     assert "Texture.from(state.video)" in source
     assert "new Sprite(state.texture)" in source
     assert "WebSocket(stream.url" not in source
@@ -195,20 +205,20 @@ def test_industrial_video_uses_whep_html_video_and_pixi_texture_without_a_frame_
     # 已配置的六路入口；不能让顶部开关条挤压任何一张画面。
     assert "const streams = mobileConsoleEnabled() ? configuredStreams : activeStreams;" in source
     assert "state.card.dataset.active = String(active);" in source
-    assert "toggle.addEventListener('click', () => toggleWebRtcStream(state.stream));" in source
-    assert "html.mobile-console .webrtc-stream-controls { display: none !important; }" in stylesheet
+    _assert_source_contains(source, "toggle.addEventListener('click', () => toggleWebRtcStream(state.stream));")
+    _assert_source_contains(stylesheet, "html.mobile-console .webrtc-stream-controls { display: none !important; }")
     assert 'html.mobile-console .webrtc-video-card[data-active="false"]' in stylesheet
-    assert 'html.mobile-console .webrtc-video-grid[data-count="5"] > .webrtc-video-card[data-primary="true"]' in stylesheet
-    assert 'html.mobile-console .webrtc-video-grid[data-count="6"] > .webrtc-video-card[data-primary="true"]' in stylesheet
+    _assert_source_contains(stylesheet, 'html.mobile-console .webrtc-video-grid[data-count="5"] > .webrtc-video-card[data-primary="true"]')
+    _assert_source_contains(stylesheet, 'html.mobile-console .webrtc-video-grid[data-count="6"] > .webrtc-video-card[data-primary="true"]')
     assert 'object-fit: contain;' in stylesheet
     assert 'html.mobile-console #mobileConnectionSignal::before' in stylesheet
     # 顶部旧开关条在手机端必须从布局树移除；多路栅格要显式复位历史 span 规则，
     # 防止在横竖屏切换后把视频卡压成细条。
     assert "root.hidden = mobile;" in source
-    assert 'html.mobile-console .webrtc-stream-controls[hidden] { display: none !important; }' in stylesheet
+    _assert_source_contains(stylesheet, 'html.mobile-console .webrtc-stream-controls[hidden] { display: none !important; }')
     assert 'html.mobile-console .webrtc-video-grid[data-count] > .webrtc-video-card {' in stylesheet
     assert 'grid-column: auto;' in stylesheet
-    assert 'grid-template: minmax(0, 1fr) repeat(2, minmax(68px, .36fr)) / repeat(2, minmax(0, 1fr)) !important;' in stylesheet
+    _assert_source_contains(stylesheet, 'grid-template: minmax(0, 1fr) repeat(2, minmax(68px, 0.36fr)) / repeat(2, minmax(0, 1fr)) !important;')
     assert "const pointRadius = mobile ? 0.82 : 0.52;" in source
 
 
@@ -221,7 +231,7 @@ def test_desktop_map_has_no_redundant_foxglove_image_splitter_or_image_subscript
     assert 'id="verticalSplitter"' not in html
     assert 'id="horizontalSplitter"' not in html
     assert 'aria-label="实时二维地图工作区"' in html
-    assert ".local-viewer-workspace { position: relative; display: grid;" in stylesheet
+    _assert_source_contains(stylesheet, ".local-viewer-workspace { position: relative; display: grid;")
     assert "grid-template: minmax(0, 1fr) / minmax(0, 1fr);" in stylesheet
     assert "cameraChannels" not in source
     assert "cameraSlots" not in source
@@ -307,7 +317,7 @@ def test_virtual_wall_matching_stays_in_the_existing_map_cache_backend():
 def test_map_transition_invalidates_async_cloud_frames():
     source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
     assert "function invalidateMapScopedCloud()" in source
-    assert "pendingCloudPacket = undefined; pendingCloudFrame = undefined;" in source
+    _assert_source_contains(source, "pendingCloudPacket = undefined; pendingCloudFrame = undefined;")
     assert "generation: mapGeneration" in source
     assert "if (frame.generation === mapGeneration) renderCloudPoints(frame.points);" in source
 
@@ -323,7 +333,7 @@ def test_cloud_composition_is_latest_wins_and_paced_below_vehicle_rendering():
     source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
     assert "const CLOUD_COMPOSITE_MIN_INTERVAL_MS = 125;" in source
     assert "pendingCloudFrame = frame;" in source
-    assert "const delay = CLOUD_COMPOSITE_MIN_INTERVAL_MS" in source
+    _assert_source_contains(source, "const delay = CLOUD_COMPOSITE_MIN_INTERVAL_MS")
     assert "lastCloudRenderAt = performance.now();" in source
 
 

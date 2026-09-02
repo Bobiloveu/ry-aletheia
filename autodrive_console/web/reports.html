@@ -1,4 +1,88 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>报告中心 · RY Aletheia</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/refinement.css"><link rel="stylesheet" href="/page_views.css"><link rel="stylesheet" href="/reports.css"></head>
-<body><aside><div class="brand"><div class="mark"><svg viewBox="0 0 32 32"><path d="M5 24 16 4l11 20-11 4z"/><path d="m11 21 5-10 5 10-5 2z"/></svg></div><div><b>RY <span>Aletheia</span></b><small>AUTONOMOUS TEST SYSTEM</small></div></div><nav><a href="/"><span>⌘</span>任务指挥台</a><a href="/live-observation.html"><span>◉</span>实时运行观测</a><a href="/case-library.html"><span>▤</span>测试用例管理</a><a class="active" href="/reports.html"><span>◫</span>报告中心</a><a href="/runtime-settings.html"><span>⚙</span>运行配置</a></nav><div class="side-status"><span class="pulse"></span> TEST EVIDENCE<br><strong>本机报告归档</strong><a class="side-diagnostic-link" href="/tool-logs.html">诊断日志</a></div></aside>
-<main class="page-main"><header class="page-header"><div><p class="eyebrow">TEST EVIDENCE / RUN ARCHIVE</p><h1>报告中心</h1><p class="sub">每次测试生成一份可浏览的验证报告，内含轮次结果、地图运行轨迹、理想路线与虚拟墙证据。</p></div><button id="refreshReports" class="page-top-action outline-button" type="button">↻ 刷新报告索引</button></header><section class="page-grid"><article class="panel span-5"><p class="eyebrow">LATEST RUN</p><b id="latestStatus" class="page-stat">暂无运行</b><p id="latestDetail" class="page-muted">尚未创建自动化测试计划。</p></article><article class="panel span-7"><p class="eyebrow">PORTABLE EVIDENCE</p><p class="page-muted">下载的 HTML 报告已内嵌地图轨迹图，可直接复制到其他电脑离线查看。删除会同时移除该报告的 CSV 与轨迹证据文件，且不可恢复。</p></article><article class="panel"><div class="panel-title"><div><p class="eyebrow">RUN VALIDATION REPORTS</p><h2>运行验证报告</h2></div><span id="reportCount" class="badge muted">读取中</span></div><div id="reportList" class="report-list"><div class="page-empty">正在读取 reports/ 目录…</div></div></article></section></main><script src="/reports.js"></script></body></html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>报告中心 · RY Aletheia</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/refinement.css" />
+    <link rel="stylesheet" href="/page_views.css" />
+    <link rel="stylesheet" href="/reports.css" />
+    <link rel="stylesheet" href="/app_shell.css" />
+  </head>
+  <body>
+    <aside>
+      <div class="brand">
+        <div class="mark">
+          <svg viewBox="0 0 32 32">
+            <path d="M5 24 16 4l11 20-11 4z" />
+            <path d="m11 21 5-10 5 10-5 2z" />
+          </svg>
+        </div>
+        <div>
+          <b>RY <span>Aletheia</span></b
+          ><small>AUTONOMOUS TEST SYSTEM</small>
+        </div>
+      </div>
+      <nav>
+        <a href="/"><span>⌘</span>任务指挥台</a
+        ><a href="/live-observation.html"><span>◉</span>实时运行观测</a
+        ><a href="/case-library.html"><span>▤</span>测试用例管理</a
+        ><a class="active" href="/reports.html"><span>◫</span>报告中心</a
+        ><a href="/runtime-settings.html"><span>⚙</span>运行配置</a>
+      </nav>
+      <div class="side-status">
+        <span class="pulse"></span> TEST EVIDENCE<br /><strong
+          >本机报告归档</strong
+        ><a class="side-diagnostic-link" href="/tool-logs.html">诊断日志</a>
+      </div>
+    </aside>
+    <main class="page-main">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">TEST EVIDENCE / RUN ARCHIVE</p>
+          <h1>报告中心</h1>
+          <p class="sub">
+            每次测试生成一份可浏览的验证报告，内含轮次结果、地图运行轨迹、理想路线与虚拟墙证据。
+          </p>
+        </div>
+        <button
+          id="refreshReports"
+          class="page-top-action outline-button"
+          type="button"
+        >
+          ↻ 刷新报告索引
+        </button>
+      </header>
+      <section class="page-grid">
+        <article class="panel span-5">
+          <p class="eyebrow">LATEST RUN</p>
+          <b id="latestStatus" class="page-stat">暂无运行</b>
+          <p id="latestDetail" class="page-muted">尚未创建自动化测试计划。</p>
+        </article>
+        <article class="panel span-7">
+          <p class="eyebrow">PORTABLE EVIDENCE</p>
+          <p class="page-muted">
+            下载的 HTML
+            报告已内嵌地图轨迹图，可直接复制到其他电脑离线查看。删除会同时移除该报告的
+            CSV 与轨迹证据文件，且不可恢复。
+          </p>
+        </article>
+        <article class="panel">
+          <div class="panel-title">
+            <div>
+              <p class="eyebrow">RUN VALIDATION REPORTS</p>
+              <h2>运行验证报告</h2>
+            </div>
+            <span id="reportCount" class="badge muted">读取中</span>
+          </div>
+          <div id="reportList" class="report-list">
+            <div class="page-empty">正在读取 reports/ 目录…</div>
+          </div>
+        </article>
+      </section>
+    </main>
+    <script src="/reports.js"></script>
+    <script src="/app_shell.js"></script>
+  </body>
+</html>
