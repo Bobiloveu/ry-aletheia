@@ -37,6 +37,12 @@ def test_mobile_docs_use_fvm_and_keep_platform_locks() -> None:
     assert ".fvm/" in (ROOT / "mobile" / ".gitignore").read_text(encoding="utf-8")
 
 
+def test_doctor_detects_dart_global_fvm_outside_interactive_shells() -> None:
+    doctor = (ROOT / "scripts" / "doctor.sh").read_text(encoding="utf-8")
+
+    assert '"$HOME/.pub-cache/bin/fvm"' in doctor
+
+
 def test_contracts_mark_existing_and_document_realtime_lanes() -> None:
     control = (ROOT / "shared" / "contracts" / "robot_control.md").read_text(
         encoding="utf-8"

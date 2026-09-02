@@ -12,7 +12,18 @@ if has pixi; then ok "Pixi $(pixi --version)"; else fail "Pixi missing"; fi
 if has python3; then ok "Python $(python3 --version)"; else warn "Python missing"; fi
 if has node; then ok "Node $(node --version)"; else warn "Node missing"; fi
 if has npm; then ok "npm $(npm --version)"; else warn "npm missing"; fi
-if has fvm; then ok "FVM $(fvm --version)"; else warn "FVM missing (mobile only): dart pub global activate fvm 4.3.0"; fi
+fvm_bin=""
+if has fvm; then
+  fvm_bin="$(command -v fvm)"
+elif [[ -x "$HOME/.pub-cache/bin/fvm" ]]; then
+  # Dart global executables are commonly absent from non-interactive PATH.
+  fvm_bin="$HOME/.pub-cache/bin/fvm"
+fi
+if [[ -n "$fvm_bin" ]]; then
+  ok "FVM $($fvm_bin --version)"
+else
+  warn "FVM missing (mobile only): dart pub global activate fvm 4.3.0"
+fi
 if has flutter; then ok "Flutter $(flutter --version | head -n 1)"; else warn "Flutter missing (mobile only)"; fi
 if has dart; then ok "Dart $(dart --version 2>&1 | head -n 1)"; else warn "Dart missing (mobile only)"; fi
 
@@ -35,4 +46,3 @@ else
 fi
 
 if [[ "$failures" -ne 0 ]]; then exit 2; fi
-
