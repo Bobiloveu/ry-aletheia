@@ -179,3 +179,23 @@ def test_ci_is_split_by_module_and_platform_and_excludes_unity_builds() -> None:
     assert "ubuntu-latest" in workflow
     assert "macos-latest" in workflow
     assert "unity" not in workflow.lower()
+
+
+def test_ci_and_local_mobile_tests_use_serial_runner_for_shared_rendering_resources() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "module-checks.yml").read_text(
+        encoding="utf-8"
+    )
+    mobile_test_script = (ROOT / "scripts" / "test-mobile.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "fvm flutter test --concurrency=1 -r compact" in workflow
+    assert "fvm flutter test --concurrency=1 -r compact" in mobile_test_script
+
+
+def test_legacy_foxglove_release_entrypoint_is_absent() -> None:
+    legacy_entrypoint = ROOT / "build_offline_foxglove_bundle.sh"
+    overview = (ROOT / "PROJECT_OVERVIEW.md").read_text(encoding="utf-8")
+
+    assert not legacy_entrypoint.exists()
+    assert legacy_entrypoint.name not in overview

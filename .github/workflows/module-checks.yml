@@ -88,7 +88,7 @@ jobs:
           fvm install
           fvm flutter pub get
           fvm flutter analyze
-          fvm flutter test
+          fvm flutter test --concurrency=1 -r compact
 
   android:
     needs: changes

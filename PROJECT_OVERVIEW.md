@@ -381,7 +381,7 @@ cmake --build build/live_preprocessor --parallel 2
 ./make_upgrade.sh <版本号> --shm --deb
 ```
 
-完整包输出到 `releases/<版本>-ros/` 或 `releases/<版本>-shm/`，文件名也带 `_ros` 或 `_shm` 后缀；发布人员必须把相应文件交给相应车辆。其 `DEB` 不依赖系统通用 ROS-Web Bridge，且包内包含 MediaMTX 和最小视频运行时。`build_offline_foxglove_bundle.sh` 仅作为兼容旧发布入口的脚本名保留，实际只生成当前完整 DEB，输出到 `releases/<版本>-offline/`。网页升级 ZIP 会替换新的控制台核心，其中包含专用遥测网关；视频运行时则在下一次启用视频时自动、安全地同步。ZIP 始终仅含 `manifest.json` 和 `ry-aletheia` 两项：清单同时保留 MD5（供旧升级器过渡读取）、SHA-256 和 Ed25519 发布签名；新控制台必须验证内置公钥对应的签名。发布私钥通过 `RY_ALETHEIA_UPGRADE_SIGNING_KEY` 指定，默认位于被 Git 忽略且仅发布人员可读的位置，绝不可随源码或发布包分发。
+完整包输出到 `releases/<版本>-ros/` 或 `releases/<版本>-shm/`，文件名也带 `_ros` 或 `_shm` 后缀；发布人员必须把相应文件交给相应车辆。其 `DEB` 不依赖系统通用 ROS-Web Bridge，且包内包含 MediaMTX 和最小视频运行时。网页升级 ZIP 会替换新的控制台核心，其中包含专用遥测网关；视频运行时则在下一次启用视频时自动、安全地同步。ZIP 始终仅含 `manifest.json` 和 `ry-aletheia` 两项：清单同时保留 MD5（供旧升级器过渡读取）、SHA-256 和 Ed25519 发布签名；新控制台必须验证内置公钥对应的签名。发布私钥通过 `RY_ALETHEIA_UPGRADE_SIGNING_KEY` 指定，默认位于被 Git 忽略且仅发布人员可读的位置，绝不可随源码或发布包分发。
 
 版本号必须为数字点号格式。脚本会拒绝覆盖已有发布目录，并在 `releases/<版本>/` 输出 ZIP、`SHA256SUMS`、说明和可选 DEB。
 

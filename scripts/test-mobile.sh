@@ -17,4 +17,4 @@ export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
 export no_proxy="$NO_PROXY"
 cd "$ROOT/mobile"
 fvm flutter analyze
-fvm flutter test
+fvm flutter test --concurrency=1 -r compact
