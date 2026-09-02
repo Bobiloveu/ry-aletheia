@@ -29,8 +29,8 @@ class VideoManagerTests(unittest.TestCase):
         self.assertFalse(status["gateway"]["online"])
         self.assertEqual([stream["status"] for stream in status["streams"]], ["disabled"] * 6)
         self.assertEqual(status["streams"][0]["url"], "http://192.168.10.42:8889/front_camera/whep")
-        self.assertIsNone(status["streams"][0]["source_topic"])
-        self.assertEqual(status["streams"][0]["source_label"], "ShmSDK/CamFront")
+        self.assertEqual(status["streams"][0]["source_topic"], "/front_camera/image_raw")
+        self.assertEqual(status["streams"][0]["source_label"], "ROS:/front_camera/image_raw")
         self.assertEqual(status["streams"][0]["resolution"], "640x480")
         self.assertEqual(status["streams"][0]["fps"], 15)
         self.assertEqual(status["streams"][-2]["name"], "detection_camera")
@@ -67,21 +67,20 @@ class VideoManagerTests(unittest.TestCase):
         self.assertTrue(migrated["streams"][0]["enabled"])
         self.assertNotIn("camera_pair", migrated["streams"][0])
 
-    def test_upgrade_migrates_only_the_four_shipped_dead_ros_camera_topics_to_shmsdk(self):
+    def test_shm_upgrade_migrates_only_the_four_shipped_default_ros_camera_topics(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            document = json.loads((ROOT / "config" / "video.json").read_text(encoding="utf-8"))
+            document = json.loads((ROOT / "config" / "video.ros.json").read_text(encoding="utf-8"))
             for stream, topic in zip(document["streams"][:4], [
                 "/front_camera/image_raw", "/back_camera/image_raw", "/left_camera/image_raw", "/right_camera/image_raw",
             ]):
-                stream.pop("input")
                 stream["source_topic"] = topic
             # A deliberately customised ROS source is not auto-rewired.
             document["streams"][0]["source_topic"] = "/custom/front/image_raw"
             path = root / "config" / "video.json"
             path.parent.mkdir()
             path.write_text(json.dumps(document), encoding="utf-8")
-            manager = VideoManager(path, ROOT / "config" / "video.json")
+            manager = VideoManager(path, ROOT / "config" / "video.shm.json")
             self.assertTrue(manager.migrate_config())
             migrated = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(migrated["streams"][0]["source_topic"], "/custom/front/image_raw")
@@ -90,6 +89,48 @@ class VideoManagerTests(unittest.TestCase):
         self.assertEqual(migrated["streams"][2]["input"], {"kind": "shmsdk", "channel": "CamLeft"})
         self.assertEqual(migrated["streams"][3]["input"], {"kind": "shmsdk", "channel": "CamRight"})
         self.assertNotIn("source_topic", migrated["streams"][1])
+
+    def test_ros_upgrade_keeps_existing_legacy_physical_camera_topics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "config" / "video.json"
+            path.parent.mkdir()
+            path.write_text((ROOT / "config" / "video.ros.json").read_text(encoding="utf-8"), encoding="utf-8")
+            manager = VideoManager(path, ROOT / "config" / "video.ros.json")
+            self.assertFalse(manager.migrate_config())
+            migrated = manager.load_config()
+        self.assertEqual(migrated["streams"][0]["input"], {"kind": "ros", "topic": "/front_camera/image_raw"})
+        self.assertEqual(migrated["streams"][3]["input"], {"kind": "ros", "topic": "/right_camera/image_raw"})
+
+    def test_video_build_profiles_have_explicit_physical_camera_inputs(self):
+        ros = json.loads((ROOT / "config" / "video.ros.json").read_text(encoding="utf-8"))
+        shm = json.loads((ROOT / "config" / "video.shm.json").read_text(encoding="utf-8"))
+        expected_topics = [
+            "/front_camera/image_raw", "/back_camera/image_raw", "/left_camera/image_raw", "/right_camera/image_raw",
+        ]
+        expected_channels = ["CamFront", "CamBack", "CamLeft", "CamRight"]
+        for stream, topic, channel in zip(ros["streams"][:4], expected_topics, expected_channels):
+            self.assertEqual(stream["source_topic"], topic)
+            self.assertNotIn("input", stream)
+        for stream, channel in zip(shm["streams"][:4], expected_channels):
+            self.assertEqual(stream["input"], {"kind": "shmsdk", "channel": channel})
+            self.assertNotIn("source_topic", stream)
+        self.assertEqual(ros["streams"][-2]["source_topic"], "/rfdetr_detect")
+        self.assertEqual(shm["streams"][-2]["source_topic"], "/rfdetr_detect")
+        self.assertEqual(ros["streams"][-1]["source_topic"], "/segmentation/overlay")
+        self.assertEqual(shm["streams"][-1]["source_topic"], "/segmentation/overlay")
+
+    def test_release_builder_selects_and_embeds_the_requested_video_profile(self):
+        release = (ROOT / "make_upgrade.sh").read_text(encoding="utf-8")
+        binary = (ROOT / "build_binary.sh").read_text(encoding="utf-8")
+        deb = (ROOT / "build_deb_package.sh").read_text(encoding="utf-8")
+        self.assertIn('VIDEO_PROFILE="ros"', release)
+        self.assertIn('VIDEO_PROFILE="shm"', release)
+        self.assertIn('RY_ALETHEIA_VIDEO_CONFIG="$VIDEO_TEMPLATE"', release)
+        self.assertIn('releases/$VERSION-$VIDEO_PROFILE', release)
+        self.assertIn('VIDEO_CONFIG_DEFAULT="${RY_ALETHEIA_VIDEO_CONFIG:-$BUILD_ROOT/config/video.ros.json}"', binary)
+        self.assertIn('--add-data "$VIDEO_CONFIG_DEFAULT:config/video.json"', binary)
+        self.assertIn('VIDEO_CONFIG_DEFAULT="${RY_ALETHEIA_VIDEO_CONFIG:-$ROOT/config/video.ros.json}"', deb)
 
     def test_shmsdk_input_is_limited_to_its_fixed_physical_camera_stream(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -290,7 +331,7 @@ class VideoManagerTests(unittest.TestCase):
     def test_native_ingest_receives_a_fixed_shmsdk_channel_for_a_physical_camera(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            manager = VideoManager(self._config(root))
+            manager = VideoManager(ROOT / "config" / "video.shm.json")
             runtime = VideoRuntime(manager, root, root / "aletheia_video_ingest")
             front = manager.load_config()["streams"][0]
             process = unittest.mock.Mock(pid=4321)
@@ -374,7 +415,7 @@ class VideoManagerTests(unittest.TestCase):
         binary_script = (ROOT / "build_binary.sh").read_text(encoding="utf-8")
         deb_script = (ROOT / "build_deb_package.sh").read_text(encoding="utf-8")
         postinst = (ROOT / "packaging" / "debian" / "postinst").read_text(encoding="utf-8")
-        self.assertIn('--add-data "config/video.json:config"', binary_script)
+        self.assertIn('--add-data "$VIDEO_CONFIG_DEFAULT:config/video.json"', binary_script)
         self.assertIn('--add-data "$VIDEO_RUNTIME:runtime/video"', binary_script)
         self.assertIn('build_video_runtime.sh" --output-dir "$VIDEO_RUNTIME"', binary_script)
         self.assertIn('defaults/config/video.json', deb_script)

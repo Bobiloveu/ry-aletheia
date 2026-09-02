@@ -55,7 +55,7 @@ RY Aletheia（普通账户）
   ├─ C++ 轻量点云进程：/collision_voxel_layer/points（或 /livox/lidar 回退）→ 回环 UDP 点云帧（≤3000 点）
   ├─ Aletheia 专用遥测网关：UDP 最新帧组装 → 两条 Binary WebSocket
   ├─ 可选视频运行时（由控制台拥有）
-       ├─ 原生 `aletheia_video_ingest`：ShmSDK 最新图像（四路试运行）或 ROS Image（检测/分割）→ rawvideoparse → VAAPI H.264 → 本机 RTSP
+       ├─ 原生 `aletheia_video_ingest`：按发布配置读取四路 ROS Image 或 ShmSDK 最新图像；检测/分割始终读取 ROS Image → rawvideoparse → VAAPI H.264 → 本机 RTSP
        └─ 私有 MediaMTX：RTSP 输入 → WHEP/WebRTC 输出
   └─ 已有机器人系统的受限集成
        ├─ ROS2：/map、/odom、TF、/amcl_pose、/start_execute_tasks、/collision_voxel_layer/points
@@ -93,9 +93,7 @@ RY Aletheia（普通账户）
 
 `config/video.json` 只描述 Aletheia 视频旁路：总开关、DDS 域、受控网关、私有编码器和每路输入、分辨率、帧率、码率。它不是小车相机驱动配置，**不得**记录或修改 USB 路径、`/dev/video*`、v4l2loopback、相机 UVC 控制项或原相机节点参数；这些均属于既有机器人系统。
 
-> **当前状态：2.3.8 ShmSDK 接入试运行，尚非永久基线。** 现场记录、验收项、停止条件和回退步骤见 [docs/SHMSDK_VIDEO_TRIAL_2.3.8.md](docs/SHMSDK_VIDEO_TRIAL_2.3.8.md)。
-
-试运行的四路物理相机固定从小车已安装的 ShmSDK 2.0 只读读取：`front_camera → CamFront`、`back_camera → CamBack`、`left_camera → CamLeft`、`right_camera → CamRight`。旁路只调用 `GetLastCamImage` 取得最新帧，再在自身进程内解码 ShmSDK 提供的 JPEG；它不启动、停止或配置 `mempool`，也不接管原相机驱动。`detection_camera` 与 `segmentation_overlay` 仍必须使用已经存在的 `sensor_msgs/msg/Image` `source_topic`（当前支持 `rgb8` 或 `bgr8`）。升级迁移仅把这四个**默认** ROS 相机话题迁移到固定 ShmSDK 通道；自定义 ROS 输入、视频开关、分辨率、帧率和码率均不得被重置。
+发布时只能选择一种四路物理相机默认输入：`./make_upgrade.sh <版本号>` 嵌入 ROS 模板，`./make_upgrade.sh <版本号> --shm` 嵌入 ShmSDK 模板。ShmSDK 模板固定 `front_camera → CamFront`、`back_camera → CamBack`、`left_camera → CamLeft`、`right_camera → CamRight`，旁路只调用 `GetLastCamImage` 取得最新帧，再在自身进程内解码 ShmSDK 提供的 JPEG；它不启动、停止或配置 `mempool`，也不接管原相机驱动。ROS 模板固定使用四路既有 `source_topic`。`detection_camera` 与 `segmentation_overlay` 始终使用既有 `sensor_msgs/msg/Image` `source_topic`（当前支持 `rgb8` 或 `bgr8`）。ZIP 升级保留车端 `config/video.json`；ShmSDK 包只会迁移未自定义的旧四路默认 ROS 输入，绝不覆盖自定义输入、视频开关、分辨率、帧率或码率。现场 ShmSDK 边界与观察项见 [docs/SHMSDK_VIDEO_TRIAL_2.3.8.md](docs/SHMSDK_VIDEO_TRIAL_2.3.8.md)。
 
 ## 5. 后端模块职责
 
@@ -226,8 +224,9 @@ PixiJS 最新点云几何       ├─ Pixi 世界容器：缩放、拖动（固
 视频是实时页的独立能力，默认关闭。页面提供全局开关与六路独立开关：全局开关启动/停止当前选中的流；MediaMTX 在至少一路启用期间保持不变，单路开关只增删该路原生编码进程，不会重连其他流的 WebRTC 会话；关闭最后一路才停止整个进程组。配置写入 `config/video.json`，控制台以普通账户拥有其生命周期；因此不占用 ROS 图像订阅、GPU 编码器或网络带宽的时间只发生在用户实际选择的流上。它不交由 Supervisor 管理，也不要求操作员额外执行 `ry-aletheia-video start|stop|status|restart`；后者仅可作为维护诊断入口，不能成为正常使用前置条件。
 
 ```text
-视频输入（2.3.8 ShmSDK 试运行）
-  ├─ ShmSDK 2.0 最新图像：CamFront / CamBack / CamLeft / CamRight（四路物理相机）
+视频输入（发布配置固定，禁止运行时自动猜测）
+  ├─ ROS 包：/front_camera/image_raw /back_camera/image_raw /left_camera/image_raw /right_camera/image_raw
+  ├─ ShmSDK 包：CamFront / CamBack / CamLeft / CamRight（四路物理相机）
   ├─ /rfdetr_detect（`rfdetr_depth_node` 的目标检测结果图，ROS Image，bgr8）
   └─ /segmentation/overlay（可通行区域分割叠加图，预设 bgr8）
           │
@@ -243,8 +242,8 @@ PixiJS 最新点云几何       ├─ Pixi 世界容器：缩放、拖动（固
 - 运行时固定面向 `amd64` / Ubuntu 22.04 基线，并携带受锁定版本约束的 MediaMTX、最小 GStreamer 插件、VAAPI 用户态库和 Intel `iHD` 驱动；目标车无需为该功能另装 apt 包、Node.js、npm 或开发工具。
 - `rawvideoparse` 是链路必需部分：管道读取可能把一帧 RGB/BGR 数据拆成多段，不能假设一次读取就是一帧图像。
 - Python 不传递视频帧。`GET /api/video/status` 只返回配置、MediaMTX 健康和逐路状态；`POST /api/video/control` 只接受全局布尔开关，或已配置流名加布尔开关。后端拒绝浏览器提交的路径、话题、命令或可执行文件。视频数据只在原生编码器、MediaMTX 和浏览器之间流动。
-- 视频配置允许逐流启用；网页首次整体打开时使用配置中的已启用流。当前试运行包含四路 ShmSDK 工业相机、一路 `detection_camera` 与一路 `segmentation_overlay`。四路物理相机预设为 JPEG 640×480、15 FPS，经旁路解码为 `rgb8` 后送入现有 VAAPI 编码器；后两路仍分别订阅 `/rfdetr_detect` 和 `/segmentation/overlay`（预设 `bgr8`、640×480、10 FPS），只旁路编码视觉结果，不读取或控制深度相机驱动，不修改检测或分割节点，也不向自动驾驶链路发布任何消息。原生旁路编码器输出支持 `rgb8` 与 `bgr8`，每一路配置都要与实际输入格式、分辨率、帧率、码率以及 `/dev/dri/renderD128` 的访问权限相匹配。
-- `video.json` 不得为方便排障写入物理 USB 路径或虚拟 V4L2 节点。四路 ShmSDK 通道是受限的试运行契约，不能改作检测/分割输入；检测和分割保持受校验的 ROS `source_topic`。原相机驱动与设备映射仍由小车系统维护，视频旁路不应拥有第二份物理设备配置真相。
+- 视频配置允许逐流启用；网页首次整体打开时使用配置中的已启用流。ROS 包的四路物理相机预设订阅原始 ROS 图像话题；ShmSDK 包的四路物理相机预设为 JPEG 640×480、15 FPS，经旁路解码为 `rgb8` 后送入现有 VAAPI 编码器。后两路仍分别订阅 `/rfdetr_detect` 和 `/segmentation/overlay`（预设 `bgr8`、640×480、10 FPS），只旁路编码视觉结果，不读取或控制深度相机驱动，不修改检测或分割节点，也不向自动驾驶链路发布任何消息。原生旁路编码器输出支持 `rgb8` 与 `bgr8`，每一路配置都要与实际输入格式、分辨率、帧率、码率以及 `/dev/dri/renderD128` 的访问权限相匹配。
+- `video.json` 不得为方便排障写入物理 USB 路径或虚拟 V4L2 节点。四路 ShmSDK 通道是受限输入契约，不能改作检测/分割输入；检测和分割保持受校验的 ROS `source_topic`。原相机驱动与设备映射仍由小车系统维护，视频旁路不应拥有第二份物理设备配置真相。
 - 升级 ZIP 仍维持既有的单文件升级协议。视频运行时被内嵌到核心二进制；新二进制下一次启用视频时会将 `runtime/video/` 原子刷新到匹配版本，同时保留用户的 `config/video.json`。控制台启动时会以追加方式迁移缺失的默认视频流（例如新增的 `detection_camera`），绝不覆盖既有流的开关或其他用户配置。因此已安装工具的小车可以只上传升级 ZIP，无需仅为视频改走 DEB。
 
 ## 10. 前端维护
@@ -371,14 +370,18 @@ cmake --build build/live_preprocessor --parallel 2
 ### 11.6 发布构建
 
 ```bash
-# 生成升级 ZIP
+# 生成默认 ROS 相机版升级 ZIP
 ./make_upgrade.sh <版本号>
 
-# 同时生成完整首次安装 DEB。
+# 生成 ShmSDK 相机版升级 ZIP。
+./make_upgrade.sh <版本号> --shm
+
+# 任一版本可同时生成完整首次安装 DEB。
 ./make_upgrade.sh <版本号> --deb
+./make_upgrade.sh <版本号> --shm --deb
 ```
 
-完整包输出到 `releases/<版本>/`，其 `DEB` 不依赖系统通用 ROS-Web Bridge，且包内包含 MediaMTX 和最小视频运行时。`build_offline_foxglove_bundle.sh` 仅作为兼容旧发布入口的脚本名保留，实际只生成当前完整 DEB，输出到 `releases/<版本>-offline/`。网页升级 ZIP 会替换新的控制台核心，其中包含专用遥测网关；视频运行时则在下一次启用视频时自动、安全地同步。ZIP 始终仅含 `manifest.json` 和 `ry-aletheia` 两项：清单同时保留 MD5（供旧升级器过渡读取）、SHA-256 和 Ed25519 发布签名；新控制台必须验证内置公钥对应的签名。发布私钥通过 `RY_ALETHEIA_UPGRADE_SIGNING_KEY` 指定，默认位于被 Git 忽略且仅发布人员可读的位置，绝不可随源码或发布包分发。
+完整包输出到 `releases/<版本>-ros/` 或 `releases/<版本>-shm/`，文件名也带 `_ros` 或 `_shm` 后缀；发布人员必须把相应文件交给相应车辆。其 `DEB` 不依赖系统通用 ROS-Web Bridge，且包内包含 MediaMTX 和最小视频运行时。`build_offline_foxglove_bundle.sh` 仅作为兼容旧发布入口的脚本名保留，实际只生成当前完整 DEB，输出到 `releases/<版本>-offline/`。网页升级 ZIP 会替换新的控制台核心，其中包含专用遥测网关；视频运行时则在下一次启用视频时自动、安全地同步。ZIP 始终仅含 `manifest.json` 和 `ry-aletheia` 两项：清单同时保留 MD5（供旧升级器过渡读取）、SHA-256 和 Ed25519 发布签名；新控制台必须验证内置公钥对应的签名。发布私钥通过 `RY_ALETHEIA_UPGRADE_SIGNING_KEY` 指定，默认位于被 Git 忽略且仅发布人员可读的位置，绝不可随源码或发布包分发。
 
 版本号必须为数字点号格式。脚本会拒绝覆盖已有发布目录，并在 `releases/<版本>/` 输出 ZIP、`SHA256SUMS`、说明和可选 DEB。
 
@@ -434,7 +437,7 @@ cmake --build build/live_preprocessor --parallel 2
 | --- | --- | --- |
 | 测试流程、恢复、报告 | `autodrive_console/run_manager.py` 及相关后端模块 | 不扩大 Supervisor 白名单；场景配置必须可恢复。 |
 | 实时地图、位姿、点云 | `frontend/src/liveObservation.js`、`live_preprocessor/`、`observation.py` | ROS 原话题只读；容量 1、latest-wins、过期丢弃。 |
-| 视频按钮、流布局与播放 | `frontend/src/liveObservation.*`、`autodrive_console/video.py` | 只订阅 ROS Image；Python 不承载视频帧；不管理物理相机。 |
+| 视频按钮、流布局与播放 | `frontend/src/liveObservation.*`、`autodrive_console/video.py` | ROS 发布包读取 ROS Image；ShmSDK 发布包仅读取固定四路 `Cam*` 最新帧；Python 不承载视频帧，不管理物理相机。 |
 | 通用移动端壳层 | `autodrive_console/web/mobile_console.*` | 仅 `/m/` 或明确限定选择器生效，不能污染 PC。 |
 | 离线包、安装/卸载 | `make_upgrade.sh`、`build_*`、`packaging/debian/` | 保留用户数据；ZIP 与 DEB 都必须可校验、可回退。 |
 

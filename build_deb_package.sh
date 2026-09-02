@@ -4,6 +4,11 @@ set -euo pipefail
 # 生成首次离线部署用的 Debian 安装包。包内不包含源码、ROS install 或构建工具。
 # 用法：./build_deb_package.sh <版本号> [--output-dir <目录>]
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VIDEO_CONFIG_DEFAULT="${RY_ALETHEIA_VIDEO_CONFIG:-$ROOT/config/video.ros.json}"
+if [[ ! -f "$VIDEO_CONFIG_DEFAULT" ]]; then
+  echo "未找到要安装的视频默认配置：$VIDEO_CONFIG_DEFAULT" >&2
+  exit 1
+fi
 if [[ $# -lt 1 ]]; then
   echo "用法：./build_deb_package.sh <版本号> [--output-dir <目录>]" >&2
   exit 2
@@ -75,7 +80,7 @@ install -m 0755 "$ROOT/packaging/debian/ry-aletheia-status" "$PKG/usr/bin/ry-ale
 install -m 0644 "$ROOT/USER_GUIDE.md" "$PKG/usr/lib/ry-aletheia/README.md"
 install -m 0644 "$ROOT/USER_GUIDE.md" "$PKG/usr/share/doc/ry-aletheia/USER_GUIDE.md"
 install -m 0644 "$ROOT/PROJECT_OVERVIEW.md" "$PKG/usr/share/doc/ry-aletheia/PROJECT_OVERVIEW.md"
-install -m 0644 "$ROOT/config/video.json" "$PKG/usr/lib/ry-aletheia/defaults/config/video.json"
+install -m 0644 "$VIDEO_CONFIG_DEFAULT" "$PKG/usr/lib/ry-aletheia/defaults/config/video.json"
 cp -a "$VIDEO_RUNTIME" "$PKG/usr/lib/ry-aletheia/video_runtime"
 if [[ -d "$ROOT/docs/images" ]]; then
   while IFS= read -r -d '' guide_image; do

@@ -23,7 +23,7 @@ http://<小车IP>:8087
 
 实时观测中的“低延迟相机流”默认关闭。页面既可统一启停全部视频，也可逐路任意开关；视频窗口会随当前启用的路数自适应排布。关闭最后一路后，工具会停止并回收自己的 MediaMTX 与视频编码进程，不需要使用 Supervisor 或额外的常驻管理命令。
 
-> **2.3.8 ShmSDK 试运行**：本版本仅验证前、后、左、右四路物理相机的旁路读取；目标检测与分割仍读取既有 ROS 图像话题。试运行记录、验收项和已签名回退包的使用方式见 [ShmSDK 视频接入试运行记录](docs/SHMSDK_VIDEO_TRIAL_2.3.8.md)。在完成现场验收前，不应将此接入视为小车相机系统的正式替代。
+> **视频发布配置**：`./make_upgrade.sh <版本号>` 默认生成 ROS 相机版；`./make_upgrade.sh <版本号> --shm` 生成 ShmSDK 相机版。前、后、左、右四路仅随发布配置切换；目标检测与分割始终读取既有 ROS 图像话题。ShmSDK 现场边界与观察项见 [ShmSDK 视频接入试运行记录](docs/SHMSDK_VIDEO_TRIAL_2.3.8.md)。
 
 完整安装、移动端使用、页面操作、人工恢复、升级和常见问题请阅读 [USER_GUIDE.md](USER_GUIDE.md)。
 
@@ -32,7 +32,7 @@ http://<小车IP>:8087
 维护前先明确以下归属，避免工具升级意外影响正在运行的小车：
 
 - **机器人系统拥有**：相机 USB 设备、`/dev/video*`/v4l2loopback 映射、ROS 相机节点、定位、导航、地图、雷达和底盘控制。
-- **Aletheia 只读使用**：地图、TF、点云，以及检测/分割的既有 `sensor_msgs/Image` 话题。2.3.8 试运行中，前、后、左、右物理相机改为只读访问 ShmSDK 的固定 `Cam*` 最新图像；输入契约仍由 `config/video.json` 描述，旁路不会直接打开摄像头设备，也不会启动、停止或配置 `mempool`。
+- **Aletheia 只读使用**：地图、TF、点云，以及检测/分割的既有 `sensor_msgs/Image` 话题。ROS 发布包的前、后、左、右相机读取原始 ROS 话题；仅 ShmSDK 发布包只读访问固定 `Cam*` 最新图像。两种配置都不会直接打开摄像头设备，也不会启动、停止或配置 `mempool`。
 - **Aletheia 自己拥有**：8087 控制台、按需运行的专用遥测网关（回环 UDP 与 Binary WebSocket）、点云/位姿预处理进程，以及按需运行的 MediaMTX 和视频编码进程。它们不由 Supervisor 管理。
 - **用户数据不随 ZIP 覆盖**：`tasks/`、`config/`、报告、地图缓存和日志都被保留。升级包只替换程序二进制，并自动留下可回退备份。
 
@@ -60,7 +60,7 @@ http://<小车IP>:8087
 | ROS/遥测/API | 既有实现 | 点云/位姿使用专用 UDP + Binary WebSocket；保持既有控制边界，不新增机器人控制接口 |
 | 开发工具链 | 手工管理 Python、Node 与构建工具 | 根目录 `pixi.toml`/`pixi.lock` 锁定 Python 3.10、Node 20、CMake、编译器、PyInstaller 与 pytest |
 
-`v2.0` 将地图、虚拟墙和点云重构为 PixiJS 分层渲染；相机则采用独立的按需 WebRTC 链路。目标检测和分割视频继续读取既有 ROS 图像话题；前、后、左、右物理相机在 2.3.8 中进行 ShmSDK 只读旁路接入试运行。两者都只在工具私有运行时内编码、转发，不改变任务下发、Supervisor 编排、ROS2 原有节点或机器人控制边界。详细设计和环境边界见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)。
+`v2.0` 将地图、虚拟墙和点云重构为 PixiJS 分层渲染；相机则采用独立的按需 WebRTC 链路。目标检测和分割视频继续读取既有 ROS 图像话题；前、后、左、右物理相机由发布配置选择 ROS 或 ShmSDK 只读旁路。两者都只在工具私有运行时内编码、转发，不改变任务下发、Supervisor 编排、ROS2 原有节点或机器人控制边界。详细设计和环境边界见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)。
 
 ## 主要能力
 

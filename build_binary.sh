@@ -7,6 +7,11 @@ set -euo pipefail
 # 必须加载包含 master_interfaces 的机器人工作空间；否则生成的程序无法调用任务服务。
 BUILD_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 FRONTEND_ROOT="$BUILD_ROOT/frontend"
+VIDEO_CONFIG_DEFAULT="${RY_ALETHEIA_VIDEO_CONFIG:-$BUILD_ROOT/config/video.ros.json}"
+if [[ ! -f "$VIDEO_CONFIG_DEFAULT" ]]; then
+  echo "未找到要嵌入的视频默认配置：$VIDEO_CONFIG_DEFAULT" >&2
+  exit 1
+fi
 if [[ ! -d "$FRONTEND_ROOT/node_modules" ]]; then
   echo "未找到前端依赖。请在开发机执行：cd frontend && npm install" >&2
   exit 1
@@ -117,7 +122,7 @@ python3 -m PyInstaller \
   --name ry-aletheia \
   --add-data "autodrive_console/web:autodrive_console/web" \
   --add-data "autodrive_console/web-vue:autodrive_console/web-vue" \
-  --add-data "config/video.json:config" \
+  --add-data "$VIDEO_CONFIG_DEFAULT:config/video.json" \
   --add-data "$VIDEO_RUNTIME:runtime/video" \
   --add-binary "$LIVE_PREPROCESSOR:." \
   --add-binary "$VIDEO_INGEST:." \

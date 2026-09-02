@@ -20,7 +20,10 @@
       "name": "front_camera",
       "path": "front_camera",
       "enabled": false,
-      "source_topic": "/front_camera/image_raw",
+      "input": {
+        "kind": "shmsdk",
+        "channel": "CamFront"
+      },
       "encoding": "rgb8",
       "resolution": "640x480",
       "fps": 15,
@@ -30,7 +33,10 @@
       "name": "back_camera",
       "path": "back_camera",
       "enabled": false,
-      "source_topic": "/back_camera/image_raw",
+      "input": {
+        "kind": "shmsdk",
+        "channel": "CamBack"
+      },
       "encoding": "rgb8",
       "resolution": "640x480",
       "fps": 15,
@@ -40,7 +46,10 @@
       "name": "left_camera",
       "path": "left_camera",
       "enabled": false,
-      "source_topic": "/left_camera/image_raw",
+      "input": {
+        "kind": "shmsdk",
+        "channel": "CamLeft"
+      },
       "encoding": "rgb8",
       "resolution": "640x480",
       "fps": 15,
@@ -50,7 +59,10 @@
       "name": "right_camera",
       "path": "right_camera",
       "enabled": false,
-      "source_topic": "/right_camera/image_raw",
+      "input": {
+        "kind": "shmsdk",
+        "channel": "CamRight"
+      },
       "encoding": "rgb8",
       "resolution": "640x480",
       "fps": 15,
