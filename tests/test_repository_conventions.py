@@ -32,3 +32,19 @@ def test_mobile_docs_use_fvm_and_keep_platform_locks() -> None:
         / "swiftpm"
         / "Package.resolved"
     ).is_file()
+
+
+def test_contracts_mark_existing_and_document_realtime_lanes() -> None:
+    control = (ROOT / "shared" / "contracts" / "robot_control.md").read_text(
+        encoding="utf-8"
+    )
+    observation = (ROOT / "shared" / "contracts" / "realtime_observation.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Status: Existing" in control
+    assert "/control_source_cmd" in control
+    assert "/control_source_state" in control
+    assert "/cmd_vel_miniapp" in control
+    assert "Status: Existing" in observation
+    assert "ALTM v1" in observation
+    assert all(port in observation for port in ("8768", "8769", "8770"))
