@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@id/unitySurfaceView,@string/game_view_content_description">
+    <!--
+      UnityPlayer resolves these two names dynamically from the host Activity's
+      resources.  A Unity-as-a-Library host therefore owns the resources even
+      though no Java/XML reference exists in Flutter's generated Android app.
+      Keep them through release resource shrinking as well.
+    -->
+    <item type="id" name="unitySurfaceView" />
+    <string name="game_view_content_description">Aletheia 3D map</string>
+</resources>

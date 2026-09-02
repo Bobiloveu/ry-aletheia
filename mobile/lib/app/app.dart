@@ -62,14 +62,20 @@ class _AletheiaAppState extends ConsumerState<AletheiaApp>
         GlobalCupertinoLocalizations.delegate,
         GlobalWidgetsLocalizations.delegate,
       ],
+      // The palette transition is deliberately short and non-bouncy: a
+      // display preference should feel continuous without making HMI content
+      // appear to move or become temporarily unreadable.
+      themeAnimationDuration: const Duration(milliseconds: 180),
+      themeAnimationCurve: Curves.easeOutCubic,
       theme: switch (preferences.theme) {
         AppThemePreference.hmiDark => AletheiaTheme.dark(),
         AppThemePreference.daylight => AletheiaTheme.light(),
-        AppThemePreference.highContrastDark => AletheiaTheme.dark(
-          highContrast: true,
-        ),
       },
       routerConfig: ref.watch(appRouterProvider),
+      // The production application starts directly in Flutter. The former
+      // Unity hand-off splash is intentionally not in the main route while
+      // embedded-renderer work is paused.
+      builder: (context, child) => child ?? const SizedBox.shrink(),
     );
   }
 }

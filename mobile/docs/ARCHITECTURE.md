@@ -186,7 +186,7 @@ Pose 与 PointCloud 从车端独立二进制 WebSocket 获取（当前端口 `87
 
 ## 9. 主题、文案与品牌
 
-主题由 App settings 的本机偏好驱动：默认 HMI 深色，并提供日间模式和高对比深色；主题切换不改变任何机器人数据与安全边界。颜色、字体、间距、横竖屏 breakpoints 以 `docs/DESIGN_SYSTEM.md` 为准。
+主题由 App settings 的本机偏好驱动：只保留默认 HMI 深色与日间模式；主题切换不改变任何机器人数据与安全边界。App shell 必须从 inherited `Theme` 读取顶部栏与导航的颜色，避免内容已变成日间而壳层保留上一主题。颜色、字体、间距、横竖屏 breakpoints 以 `docs/DESIGN_SYSTEM.md` 为准。
 
 运行时 Logo 使用 `assets/branding/aletheia_icon_vector.svg` 和 `flutter_svg`。iOS/Android 系统 Launcher Icon 不能直接引用 SVG，所以由同一个 SVG 设计源经 `tool/regenerate_launcher_icons.sh` 生成平台 PNG/Adaptive Icon；不要手工编辑生成的 AppIcon 或 icon mipmap 文件。
 

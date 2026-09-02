@@ -1,4 +1,5 @@
 import 'package:aletheia_mobile/app/theme/aletheia_theme.dart';
+import 'package:aletheia_mobile/features/app_settings/domain/app_preferences.dart';
 import 'package:aletheia_mobile/features/app_settings/presentation/app_settings_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -33,28 +34,7 @@ void main() {
     expect(find.text('Report a problem'), findsOneWidget);
   });
 
-  testWidgets('applies the selected high-contrast HMI preference', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      ProviderScope(
-        child: MaterialApp(
-          theme: AletheiaTheme.dark(),
-          home: const AppSettingsScreen(),
-        ),
-      ),
-    );
-    await tester.pump();
-
-    await tester.tap(find.text('主题'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('高对比深色').first);
-    await tester.pumpAndSettle();
-
-    expect(find.text('高对比深色'), findsOneWidget);
-  });
-
-  testWidgets('offers the daylight appearance without changing the default', (
+  testWidgets('offers exactly the default and daylight appearances', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -70,7 +50,8 @@ void main() {
     expect(find.text('HMI 深色'), findsOneWidget);
     await tester.tap(find.text('主题'));
     await tester.pumpAndSettle();
-    expect(find.text('日间模式'), findsOneWidget);
+    expect(find.byType(RadioListTile<AppThemePreference>), findsNWidgets(2));
+    expect(find.text('高对比深色'), findsNothing);
     await tester.tap(find.text('日间模式'));
     await tester.pumpAndSettle();
 

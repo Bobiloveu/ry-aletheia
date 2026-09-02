@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -713,6 +714,28 @@ Stream<PoseTelemetrySample> _poseStreamFor(GalleryScreenSpec spec) {
   if (spec.id == 'observe_telemetry_interrupted') {
     return const Stream<PoseTelemetrySample>.empty();
   }
+  if (spec.id == 'observe_stress') {
+    // This is intentionally the same bounded, latest-frame shape as the
+    // production stream: pose updates at 60 Hz and never stores history.
+    return Stream<PoseTelemetrySample>.periodic(
+      const Duration(milliseconds: 16),
+      (tick) {
+        final phase = tick * .016;
+        return PoseTelemetrySample(
+          receivedPackets: tick + 1,
+          frame: PoseFrame(
+            sequence: tick,
+            sourceTimestampNanoseconds:
+                DateTime.now().microsecondsSinceEpoch * 1000,
+            // A smooth 24 m loop safely inside the supplied map bounds.
+            x: -24 + math.cos(phase * .32) * 12,
+            y: 6 + math.sin(phase * .32) * 12,
+            yaw: phase * .32 + math.pi / 2,
+          ),
+        );
+      },
+    );
+  }
   return Stream<PoseTelemetrySample>.value(
     PoseTelemetrySample(
       receivedPackets: 2,
@@ -731,6 +754,23 @@ Stream<PoseTelemetrySample> _poseStreamFor(GalleryScreenSpec spec) {
 Stream<CloudTelemetrySample> _cloudStreamFor(GalleryScreenSpec spec) {
   if (spec.id == 'observe_telemetry_interrupted') {
     return const Stream<CloudTelemetrySample>.empty();
+  }
+  if (spec.id == 'observe_stress') {
+    // Mirrors the documented live budget (8 Hz, 3,000 XY samples). Every
+    // frame owns one compact Float32List and the consumers retain only the
+    // newest frame; it cannot accumulate a queue while the renderer is busy.
+    return Stream<CloudTelemetrySample>.periodic(
+      const Duration(milliseconds: 125),
+      (tick) => CloudTelemetrySample(
+        receivedPackets: tick + 1,
+        frame: CloudFrame(
+          sequence: tick,
+          sourceTimestampNanoseconds:
+              DateTime.now().microsecondsSinceEpoch * 1000,
+          packedMapPoints: _stressCloudFrame(tick),
+        ),
+      ),
+    );
   }
   return Stream<CloudTelemetrySample>.value(
     CloudTelemetrySample(
@@ -754,6 +794,24 @@ Stream<CloudTelemetrySample> _cloudStreamFor(GalleryScreenSpec spec) {
       ),
     ),
   );
+}
+
+Float32List _stressCloudFrame(int tick) {
+  const pointCount = 3000;
+  final points = Float32List(pointCount * 2);
+  final phase = tick * .125;
+  final robotX = -24 + math.cos(phase * .32) * 12;
+  final robotY = 6 + math.sin(phase * .32) * 12;
+  for (var index = 0; index < pointCount; index++) {
+    // Two deterministic scan bands approximate a forward lidar sweep without
+    // inventing an additional backend protocol or retaining stale frames.
+    final band = index.isEven ? 1.0 : .62;
+    final angle = (index / pointCount) * math.pi * 2 + phase * .18;
+    final radius = band * (2.8 + (index % 37) * .024);
+    points[index * 2] = robotX + math.cos(angle) * radius;
+    points[index * 2 + 1] = robotY + math.sin(angle) * radius;
+  }
+  return points;
 }
 
 TestRunsScreenState _testRunsStateFor(GalleryScreenSpec spec) {

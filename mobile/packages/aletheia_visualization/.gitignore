@@ -1,0 +1,3 @@
+# Native build cache and exported Unity runtime are regenerated locally.
+android/.cxx/
+ios/Frameworks/

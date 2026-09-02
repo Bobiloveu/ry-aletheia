@@ -1,0 +1,22 @@
+PODS:
+  - aletheia_visualization (0.1.0):
+    - Flutter
+  - Flutter (1.0.0)
+
+DEPENDENCIES:
+  - aletheia_visualization (from `.symlinks/plugins/aletheia_visualization/ios`)
+  - Flutter (from `Flutter`)
+
+EXTERNAL SOURCES:
+  aletheia_visualization:
+    :path: ".symlinks/plugins/aletheia_visualization/ios"
+  Flutter:
+    :path: Flutter
+
+SPEC CHECKSUMS:
+  aletheia_visualization: 07062e41b7eb8f82eac272894c2226a2920e7583
+  Flutter: 71a624a5bc0c04062bf19101d501e466baf2fb47
+
+PODFILE CHECKSUM: ce2a4dd764e1c7aeed6a7cdc5e61d092b6dc6d32
+
+COCOAPODS: 1.17.0

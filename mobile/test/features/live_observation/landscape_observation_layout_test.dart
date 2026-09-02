@@ -57,12 +57,21 @@ void main() {
       await tester.tap(find.byTooltip('全屏查看地图'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 120));
-      expect(find.byTooltip('退出全屏地图'), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey('map-operational-readout')),
-        findsNWidgets(2),
+      final exitFullscreen = find.byKey(
+        const ValueKey('map-fullscreen-exit-action'),
+        skipOffstage: false,
       );
-      await tester.tap(find.byTooltip('退出全屏地图'));
+      expect(exitFullscreen, findsOneWidget);
+      expect(tester.getRect(exitFullscreen).size, isNot(Size.zero));
+      expect(tester.widget<IconButton>(exitFullscreen).onPressed, isNotNull);
+      expect(
+        find.byKey(
+          const ValueKey('map-operational-readout'),
+          skipOffstage: false,
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(exitFullscreen, warnIfMissed: false);
       await tester.pumpAndSettle();
 
       await pumpPreview('video_ready');
@@ -77,6 +86,21 @@ void main() {
       );
       expect(
         find.byKey(const ValueKey('video-auxiliary-tile-back_camera')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byTooltip('配置显示画面'));
+      await tester.pumpAndSettle();
+      expect(find.text('配置显示画面'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('video-display-slot-主画面')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('video-display-slot-辅助画面 1')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('video-display-slot-辅助画面 2')),
         findsOneWidget,
       );
     },

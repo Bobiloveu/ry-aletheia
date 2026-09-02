@@ -260,6 +260,19 @@ const galleryScreenManifest = <GalleryScreenSpec>[
     screenshotPath: 'observe/live-map.png',
   ),
   GalleryScreenSpec(
+    id: 'observe_stress',
+    module: GalleryModule.observe,
+    title: '实时观测压力场景',
+    route: '/observation',
+    state: '原始全尺寸地图；60 Hz 位姿、8 Hz / 3,000 点云',
+    trigger: '仅 Debug Gallery：验证地图渲染与持续遥测压力',
+    surface: GallerySurface.observationMap,
+    // This is an interactive endurance scenario rather than a visual design
+    // state, so it deliberately does not join the deterministic golden set.
+    screenshotPath: 'observe/stress-map.png',
+    hasScreenshot: false,
+  ),
+  GalleryScreenSpec(
     id: 'observe_live_daylight',
     module: GalleryModule.observe,
     title: '实时观测',

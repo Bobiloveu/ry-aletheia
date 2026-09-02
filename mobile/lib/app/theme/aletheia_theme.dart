@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 /// Shared visual language for the mobile operations console.
 ///
@@ -32,33 +33,6 @@ abstract final class AletheiaTheme {
     secondaryContainer: Color(0xFF213027),
     errorContainer: Color(0xFF3A211E),
     onError: Color(0xFF32110F),
-  );
-
-  static const _highContrastDark = _AletheiaPalette(
-    canvas: Color(0xFF0B0E0F),
-    surface: Color(0xFF12191A),
-    surfaceRaised: Color(0xFF1B2526),
-    surfaceSunken: Color(0xFF070A0B),
-    surfaceMuted: Color(0xFF101718),
-    textPrimary: Color(0xFFF5FBF9),
-    textSecondary: Color(0xFFD2DEDB),
-    textTertiary: Color(0xFFA7B6B2),
-    border: Color(0xFF62706D),
-    divider: Color(0xFF3F4C4A),
-    cyan: Color(0xFFC5ECE4),
-    mint: Color(0xFF9BD4A8),
-    warning: Color(0xFFF0C87F),
-    danger: Color(0xFFF09B92),
-    mapPointCloud: Color(0xFF39B7CA),
-    mapVirtualWall: Color(0xFFF1877D),
-    mapRobot: Color(0xFFF0C87F),
-    mapRobotOutline: Color(0xFF0C1313),
-    onPrimary: Color(0xFF0C1A18),
-    onSecondary: Color(0xFF0E2114),
-    primaryContainer: Color(0xFF29423D),
-    secondaryContainer: Color(0xFF2A4230),
-    errorContainer: Color(0xFF482622),
-    onError: Color(0xFF2F110F),
   );
 
   /// Daylight is a cool, low-glare field palette. It avoids pure white and
@@ -116,10 +90,7 @@ abstract final class AletheiaTheme {
   static const double sectionRadius = 14;
   static const double panelRadius = 18;
 
-  static ThemeData dark({bool highContrast = false}) => _build(
-    highContrast ? _highContrastDark : _hmiDark,
-    brightness: Brightness.dark,
-  );
+  static ThemeData dark() => _build(_hmiDark, brightness: Brightness.dark);
 
   static ThemeData light() => _build(_daylight, brightness: Brightness.light);
 
@@ -209,6 +180,17 @@ abstract final class AletheiaTheme {
         elevation: 0,
         centerTitle: false,
         toolbarHeight: 64,
+        systemOverlayStyle: SystemUiOverlayStyle(
+          statusBarColor: canvas,
+          statusBarIconBrightness: brightness == Brightness.dark
+              ? Brightness.light
+              : Brightness.dark,
+          statusBarBrightness: brightness,
+          systemNavigationBarColor: surfaceSunken,
+          systemNavigationBarIconBrightness: brightness == Brightness.dark
+              ? Brightness.light
+              : Brightness.dark,
+        ),
         titleTextStyle: TextStyle(
           color: text,
           fontSize: 17,

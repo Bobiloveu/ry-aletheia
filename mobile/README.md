@@ -22,7 +22,7 @@ Console），面向与机器人处于同一可信局域网的机器人运行、�
 - **首页**：连接、状态确认与车端健康概览。它是进入当前机器人 HMI 的起点，不改变“连接机器人”这一具体操作。
 - **观测**：地图、Pose、PointCloud 与按需相机工作区。
 - **工具**：当前包含自动化测试、用例库、测试报告、诊断日志、运行配置、场景前置配置与控制台服务；它们都属于当前机器人的二级能力。
-- **设置**：手机本地语言、HMI 显示、版本信息、App 更新检查与问题反馈；不依赖机器人连接，也不会改写车端配置。HMI 显示默认是深色，也提供高对比深色与低反光日间模式；三者不改变地图、视频或状态数据语义。问题反馈提供描述、联系方式、截图与 App 诊断摘要/本次会话日志选择；当前开发版本只进行本地校验，未来上传由独立接口实现。App 更新与机器人离线升级目录严格隔离。
+- **设置**：手机本地语言、HMI 显示、版本信息、App 更新检查与问题反馈；不依赖机器人连接，也不会改写车端配置。HMI 显示仅提供默认深色与低反光日间模式；两者都不改变地图、视频或状态数据语义。问题反馈提供描述、联系方式、截图与 App 诊断摘要/本次会话日志选择；当前开发版本只进行本地校验，未来上传由独立接口实现。App 更新与机器人离线升级目录严格隔离。
 
 当前完成 Phase 1：
 
@@ -40,7 +40,7 @@ Console），面向与机器人处于同一可信局域网的机器人运行、�
 - 用例库支持既有的 JSON / `.rycase.zip` 导入、受控导出、别名、版本、生命周期、标签、说明和场景绑定；只发送用户明确选择的文件内容。
 - 运行配置、场景前置配置、报告下载/删除、诊断文件下载和控制台安全停止均复用既有车端 API；场景应用/恢复、删除报告与退出控制台均先要求确认。
 - 场景文件浏览支持读取受控目录内的文本预览、大小和 SHA-256 摘要，再选择文件；App 不提供任意路径读取或写入。
-- 应用设置只保存到当前手机：可选择简体中文或 English 偏好、默认 HMI 深色 / 日间模式 / 高对比深色显示，查看版本和检查 App 更新，并在 App 内填写问题与建议。它不会修改机器人运行配置；英文页面按迁移逐步扩展。
+- 应用设置只保存到当前手机：可选择简体中文或 English 偏好、默认 HMI 深色或日间模式显示，查看版本和检查 App 更新，并在 App 内填写问题与建议。它不会修改机器人运行配置；英文页面按迁移逐步扩展。
 
 当前也完成 Phase 3：
 
@@ -73,6 +73,42 @@ Console），面向与机器人处于同一可信局域网的机器人运行、�
 flutter pub get
 flutter run
 ```
+
+## 通用打包
+
+从 `mobile/` 目录执行以下脚本即可产出带时间戳的 APK / IPA 与对应
+SHA-256 校验文件，统一存放在 `build/artifacts/`：
+
+```sh
+# 当前主线：Flutter CustomPaint 渲染器，Android + iOS，iOS 使用 development 导出。
+./tool/build_mobile_packages.sh
+
+# 显式指定 Flutter 版本，仅 Android。
+./tool/build_mobile_packages.sh --engine flutter --platform android
+
+# Unity 仅保留为暂停中的性能原型；恢复验证时才显式构建。
+./tool/build_mobile_packages.sh --engine unity --platform ios --ios-export ad-hoc
+```
+
+当前正式发布不得使用 Unity 选项。未来恢复前请先阅读
+[`../docs/UNITY_PAUSED_HANDOFF.md`](../docs/UNITY_PAUSED_HANDOFF.md)。Unity 打包会先检查
+Android `unityLibrary` 与 iOS `UnityFramework.framework` 及 `Data` 是否已导出；缺失时脚本会停止并提示，不会产出无法运行的包。
+
+Android 未配置正式 keystore 时，为保持现有内部测试流程，脚本会构建
+`internal-debug-signed` 的 release-mode APK，并在文件名中明确标记。此包
+不能作为正式分发包，也不能替换由正式 key 签名的安装。正式发布时仅在
+构建机环境中设置以下变量（不要写入源码、脚本或终端历史）：
+
+```sh
+export ALETHEIA_ANDROID_KEYSTORE=/absolute/path/aletheia-release.jks
+export ALETHEIA_ANDROID_KEYSTORE_PASSWORD='…'
+export ALETHEIA_ANDROID_KEY_ALIAS='aletheia'
+export ALETHEIA_ANDROID_KEY_PASSWORD='…'
+```
+
+iOS `development` 包仅能安装到对应开发签名已授权、已信任的设备；
+`ad-hoc` / `app-store` 需要 Apple Developer 账户中已经配置好对应的
+Distribution 签名与 provisioning profile。
 
 ## 网络边界
 

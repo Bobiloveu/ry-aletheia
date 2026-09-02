@@ -22,6 +22,7 @@
 | 观测 | 实时观测 | `/observation` | 观测暂不可用 | 观测服务暂不可用 | 可预览 | [已生成](screens/observe/unavailable.png) |
 | 观测 | 实时观测 | `/observation` | 读取失败 | 地图请求失败 | 可预览 | [已生成](screens/observe/error.png) |
 | 观测 | 实时观测 | `/observation` | 地图、位置、点云正常 | 地图与遥测已收到 | 可预览 | [已生成](screens/observe/live-map.png) |
+| 观测 | 实时观测压力场景 | `/observation` | 原始全尺寸地图；60 Hz 位姿、8 Hz / 3,000 点云 | 仅 Debug Gallery：验证地图渲染与持续遥测压力 | 可预览 | 待生成 |
 | 观测 | 实时观测 | `/observation` | 日间模式 | 在设置中切换日间模式后进入观测 | 可预览 | [已生成](screens/observe/live-daylight.png) |
 | 观测 | 实时观测 | `/observation` | 位置或点云断流 | 独立遥测流断开或超过新鲜度阈值 | 可预览 | [已生成](screens/observe/telemetry-interrupted.png) |
 | 观测 | 相机 | `/observation` | 正在读取视频状态 | 进入相机工作区 | 可预览 | [已生成](screens/observe/video-loading.png) |

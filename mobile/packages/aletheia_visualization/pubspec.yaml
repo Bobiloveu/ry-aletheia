@@ -1,0 +1,31 @@
+name: aletheia_visualization
+description: >-
+  Embeds a lightweight Unity renderer as a platform view inside the Aletheia
+  Flutter HMI. Unity is a renderer only: it never touches ROS2, the backend
+  API, task JSON, business logic or video. Point-cloud data crosses via FFI
+  into a native latest-wins buffer; control and pose use platform channels.
+version: 0.1.0
+publish_to: 'none'
+
+environment:
+  sdk: ^3.13.1
+  flutter: '>=3.24.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ffi: ^2.1.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.ryaletheia.aletheia_visualization
+        pluginClass: AletheiaVisualizationPlugin
+      ios:
+        pluginClass: AletheiaVisualizationPlugin

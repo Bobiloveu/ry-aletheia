@@ -7,7 +7,7 @@ void main() {
     expect(AppLanguage.parse('unknown'), AppLanguage.chinese);
     expect(
       AppThemePreference.parse('highContrastDark'),
-      AppThemePreference.highContrastDark,
+      AppThemePreference.hmiDark,
     );
     expect(AppThemePreference.parse('daylight'), AppThemePreference.daylight);
     expect(AppThemePreference.parse('unexpected'), AppThemePreference.hmiDark);

@@ -25,16 +25,17 @@ enum AppLanguage {
 /// semantics on the robot HMI.
 enum AppThemePreference {
   hmiDark,
-  daylight,
-  highContrastDark;
+  daylight;
 
   String get storageValue => name;
 
-  static AppThemePreference parse(String? raw) =>
-      AppThemePreference.values.firstWhere(
-        (value) => value.storageValue == raw,
-        orElse: () => AppThemePreference.hmiDark,
-      );
+  /// Older development builds persisted `highContrastDark`. It is no longer
+  /// an available appearance, so safely restore those handsets to the default
+  /// HMI dark treatment rather than exposing a hidden third theme.
+  static AppThemePreference parse(String? raw) => switch (raw) {
+    'daylight' => AppThemePreference.daylight,
+    _ => AppThemePreference.hmiDark,
+  };
 }
 
 class AppPreferences {

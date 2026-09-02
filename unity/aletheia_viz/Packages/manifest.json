@@ -1,0 +1,12 @@
+{
+  "dependencies": {
+    "com.unity.render-pipelines.universal": "14.0.11",
+    "com.unity.modules.jsonserialize": "1.0.0",
+    "com.unity.modules.imageconversion": "1.0.0",
+    "com.unity.modules.androidjni": "1.0.0",
+    "com.unity.modules.unitywebrequest": "1.0.0",
+    "com.unity.modules.unitywebrequesttexture": "1.0.0"
+  },
+  "_comment": "Deliberately minimal. No XR, AR, Audio, Timeline, Cinemachine, Terrain, AI/NavMesh, Analytics, Ads, Purchasing, ParticleSystem, Physics, Physics2D, Animation, Video, TextMeshPro. Add nothing without a rendering reason. See unity/README.md.",
+  "testables": []
+}

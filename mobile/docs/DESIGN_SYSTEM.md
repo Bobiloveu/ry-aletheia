@@ -81,9 +81,13 @@ meaning across all screens.
   is truly destructive.
 - Material press feedback is retained. There are no automatic or looping
   animations in this high-frequency operational flow.
-- Switching appearance is an explicit user preference. The HMI keeps its
-  content and geometry stable while only the palette changes, so map evidence
-  never appears to move or reflow because of a visual preference.
+- Switching appearance is an explicit user preference with exactly two
+  choices: the default HMI dark palette and the daylight palette. The HMI
+  keeps its content and geometry stable while only the palette changes, so
+  map evidence never appears to move or reflow because of a visual
+  preference. App chrome, system status/navigation bars and page content must
+  all receive the same inherited Theme update; no region may retain the prior
+  palette after the transition settles.
 - A map may contain only lightweight map-specific controls. Persistent pose
   and point-cloud readouts sit directly below it or in a dedicated side area,
   never as opaque cards over map evidence.

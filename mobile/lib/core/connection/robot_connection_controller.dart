@@ -56,6 +56,7 @@ class RobotConnectionController extends Notifier<RobotConnectionState> {
     state = RobotConnectionState(
       phase: ConnectionPhase.checking,
       endpoint: endpoint,
+      addressDraft: endpoint.displayAddress,
       message: '正在检查 ${endpoint.displayAddress}…',
     );
     try {
@@ -71,6 +72,7 @@ class RobotConnectionController extends Notifier<RobotConnectionState> {
         endpoint: endpoint,
         observation: observation,
         lastChecked: DateTime.now(),
+        addressDraft: endpoint.displayAddress,
       );
       if (observation.telemetryOnline) {
         _startHeartbeat();
@@ -82,6 +84,7 @@ class RobotConnectionController extends Notifier<RobotConnectionState> {
       state = RobotConnectionState(
         phase: ConnectionPhase.failure,
         endpoint: endpoint,
+        addressDraft: endpoint.displayAddress,
         message: error.message,
       );
     }
@@ -93,6 +96,14 @@ class RobotConnectionController extends Notifier<RobotConnectionState> {
       return;
     }
     await connect(endpoint.toString());
+  }
+
+  /// Retains the current local text-field value while the operator moves
+  /// between top-level HMI sections. It is intentionally not persisted until
+  /// a connect attempt validates it as a robot endpoint.
+  void updateAddressDraft(String value) {
+    if (value == state.addressDraft) return;
+    state = state.copyWith(addressDraft: value);
   }
 
   Future<void> startObservation() async {
@@ -141,6 +152,7 @@ class RobotConnectionController extends Notifier<RobotConnectionState> {
       state = RobotConnectionState(
         phase: ConnectionPhase.idle,
         endpoint: endpoint,
+        addressDraft: endpoint?.displayAddress ?? '',
       );
     } catch (_) {
       if (operation != _operation) {
@@ -168,7 +180,7 @@ class RobotConnectionController extends Notifier<RobotConnectionState> {
 
   Future<void> _heartbeat() async {
     final endpoint = state.endpoint;
-    if (endpoint == null || state.observation?.telemetryOnline != true) {
+    if (endpoint == null) {
       return;
     }
     try {
@@ -180,9 +192,6 @@ class RobotConnectionController extends Notifier<RobotConnectionState> {
         lastChecked: DateTime.now(),
         message: '',
       );
-      if (!observation.telemetryOnline) {
-        _pauseHeartbeat();
-      }
     } on ApiException catch (error) {
       state = state.copyWith(message: '观测心跳失败：${error.message}');
     }

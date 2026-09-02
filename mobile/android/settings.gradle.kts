@@ -24,3 +24,16 @@ plugins {
 }
 
 include(":app")
+
+// Unity as a Library is deliberately opt-in. The generated module is ignored
+// from Git and only exists after the Unity export documented in unity/README.
+// Keeping this conditional preserves the normal Flutter renderer build (and
+// its emulator compatibility) when no Unity artefact is present.
+if (System.getenv("ALETHEIA_UNITY_ENABLED") == "1") {
+    val unityLibraryDir = file("../../unity/builds/android/unityLibrary")
+    check(unityLibraryDir.isDirectory) {
+        "Unity Android library is missing. Export it from unity/aletheia_viz first."
+    }
+    include(":unityLibrary")
+    project(":unityLibrary").projectDir = unityLibraryDir
+}

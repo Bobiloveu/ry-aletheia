@@ -29,6 +29,14 @@ class _RobotConnectionScreenState extends ConsumerState<RobotConnectionScreen> {
   void initState() {
     super.initState();
     _addressController = TextEditingController();
+    // `ref.listen` only observes subsequent state transitions in the current
+    // Riverpod version. A tab return constructs this field after restoration,
+    // so synchronise the already-available snapshot once as well.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _syncAddress(ref.read(robotConnectionControllerProvider));
+      }
+    });
   }
 
   @override
@@ -44,12 +52,7 @@ class _RobotConnectionScreenState extends ConsumerState<RobotConnectionScreen> {
       previous,
       next,
     ) {
-      final restored = next.endpoint?.toString();
-      if (restored != null &&
-          next.endpoint != previous?.endpoint &&
-          _addressController.text.isEmpty) {
-        _addressController.text = restored;
-      }
+      _syncAddress(next);
     });
 
     final body = SafeArea(
@@ -119,6 +122,21 @@ class _RobotConnectionScreenState extends ConsumerState<RobotConnectionScreen> {
         ],
       ),
       body: body,
+    );
+  }
+
+  void _syncAddress(RobotConnectionState state) {
+    // A tab switch creates a fresh TextEditingController after the connection
+    // provider has already restored its endpoint. The provider-owned draft
+    // prevents the visible address from being blank on return, and also
+    // preserves an unsubmitted draft.
+    final draft = state.addressDraft.isNotEmpty
+        ? state.addressDraft
+        : state.endpoint?.displayAddress ?? '';
+    if (draft.isEmpty || draft == _addressController.text) return;
+    _addressController.value = TextEditingValue(
+      text: draft,
+      selection: TextSelection.collapsed(offset: draft.length),
     );
   }
 }
@@ -195,6 +213,7 @@ class _ConnectionPanel extends ConsumerWidget {
           SizedBox(height: compactLandscape ? 16 : 28),
           TextField(
             controller: addressController,
+            onChanged: controller.updateAddressDraft,
             enabled: !state.isBusy,
             keyboardType: TextInputType.url,
             autocorrect: false,

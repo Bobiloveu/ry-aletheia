@@ -32,14 +32,13 @@
 <td><a href="screens/observe/unavailable.png"><img src="screens/observe/unavailable.png" width="180" alt="实时观测 · 观测暂不可用"><br><strong>实时观测</strong><br>观测暂不可用</a></td><td><a href="screens/observe/error.png"><img src="screens/observe/error.png" width="180" alt="实时观测 · 读取失败"><br><strong>实时观测</strong><br>读取失败</a></td><td><a href="screens/observe/live-map.png"><img src="screens/observe/live-map.png" width="180" alt="实时观测 · 地图、位置、点云正常"><br><strong>实时观测</strong><br>地图、位置、点云正常</a></td>
 </tr>
 <tr>
-<td><a href="screens/observe/live-daylight.png"><img src="screens/observe/live-daylight.png" width="180" alt="实时观测 · 日间模式"><br><strong>实时观测</strong><br>日间模式</a></td><td><a href="screens/observe/telemetry-interrupted.png"><img src="screens/observe/telemetry-interrupted.png" width="180" alt="实时观测 · 位置或点云断流"><br><strong>实时观测</strong><br>位置或点云断流</a></td><td><a href="screens/observe/video-loading.png"><img src="screens/observe/video-loading.png" width="180" alt="相机 · 正在读取视频状态"><br><strong>相机</strong><br>正在读取视频状态</a></td>
+<td><strong>实时观测压力场景</strong><br>原始全尺寸地图；60 Hz 位姿、8 Hz / 3,000 点云<br><code>截图待生成</code></td><td><a href="screens/observe/live-daylight.png"><img src="screens/observe/live-daylight.png" width="180" alt="实时观测 · 日间模式"><br><strong>实时观测</strong><br>日间模式</a></td><td><a href="screens/observe/telemetry-interrupted.png"><img src="screens/observe/telemetry-interrupted.png" width="180" alt="实时观测 · 位置或点云断流"><br><strong>实时观测</strong><br>位置或点云断流</a></td>
 </tr>
 <tr>
-<td><a href="screens/observe/video-empty.png"><img src="screens/observe/video-empty.png" width="180" alt="相机 · 没有可用视频流"><br><strong>相机</strong><br>没有可用视频流</a></td><td><a href="screens/observe/video-waiting.png"><img src="screens/observe/video-waiting.png" width="180" alt="相机 · 视频流等待可用"><br><strong>相机</strong><br>视频流等待可用</a></td><td><a href="screens/observe/video-offline.png"><img src="screens/observe/video-offline.png" width="180" alt="相机 · 视频流离线"><br><strong>相机</strong><br>视频流离线</a></td>
+<td><a href="screens/observe/video-loading.png"><img src="screens/observe/video-loading.png" width="180" alt="相机 · 正在读取视频状态"><br><strong>相机</strong><br>正在读取视频状态</a></td><td><a href="screens/observe/video-empty.png"><img src="screens/observe/video-empty.png" width="180" alt="相机 · 没有可用视频流"><br><strong>相机</strong><br>没有可用视频流</a></td><td><a href="screens/observe/video-waiting.png"><img src="screens/observe/video-waiting.png" width="180" alt="相机 · 视频流等待可用"><br><strong>相机</strong><br>视频流等待可用</a></td>
 </tr>
 <tr>
-<td><a href="screens/observe/video-ready.png"><img src="screens/observe/video-ready.png" width="180" alt="相机 · 六路视频可选，主画面正常"><br><strong>相机</strong><br>六路视频可选，主画面正常</a></td><td><a href="screens/observe/video-error.png"><img src="screens/observe/video-error.png" width="180" alt="相机 · 视频状态读取失败"><br><strong>相机</strong><br>视频状态读取失败</a></td>
-<td></td>
+<td><a href="screens/observe/video-offline.png"><img src="screens/observe/video-offline.png" width="180" alt="相机 · 视频流离线"><br><strong>相机</strong><br>视频流离线</a></td><td><a href="screens/observe/video-ready.png"><img src="screens/observe/video-ready.png" width="180" alt="相机 · 六路视频可选，主画面正常"><br><strong>相机</strong><br>六路视频可选，主画面正常</a></td><td><a href="screens/observe/video-error.png"><img src="screens/observe/video-error.png" width="180" alt="相机 · 视频状态读取失败"><br><strong>相机</strong><br>视频状态读取失败</a></td>
 </tr>
 </table>
 

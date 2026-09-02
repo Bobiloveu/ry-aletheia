@@ -28,6 +28,8 @@
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Aletheia 需要连接同一局域网中的机器人控制台，以读取测试与观测状态。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Aletheia 的实时视频接收使用系统音频会话以保持 WebRTC 流稳定；App 不会录制或上传麦克风音频。</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<!-- The robot address is entered by the operator and currently serves HTTP. -->

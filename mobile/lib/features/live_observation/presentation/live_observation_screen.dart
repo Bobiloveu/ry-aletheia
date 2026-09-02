@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../app/responsive_layout.dart';
@@ -13,12 +14,14 @@ import '../../../core/connection/robot_connection_controller.dart';
 import '../application/cloud_telemetry_provider.dart';
 import '../application/live_observation_controller.dart';
 import '../application/pose_telemetry_provider.dart';
+import '../application/video_display_layout_controller.dart';
 import '../application/video_status_controller.dart';
 import '../data/cloud_telemetry_client.dart';
 import '../domain/cloud_frame.dart';
 import '../domain/live_map.dart';
 import '../domain/pose_frame.dart';
 import '../domain/video_status.dart';
+import '../visualization/visualization_engine.dart';
 import 'whep_video_view.dart';
 
 /// Optional debug-only replacement for map pixels.
@@ -31,6 +34,35 @@ typedef LiveMapPreviewBuilder = Widget Function({required LiveMapAsset map});
 final liveMapPreviewBuilderProvider = Provider<LiveMapPreviewBuilder?>(
   (ref) => null,
 );
+
+/// The active [VisualizationEngine] for the live observation map surface.
+///
+/// Production renderer selection. The embedded Unity prototype remains in
+/// the repository but is deliberately disconnected while it is paused; all
+/// maps, point clouds and fullscreen transitions use Flutter CustomPaint.
+final visualizationEngineProvider = Provider<VisualizationEngine>(
+  (ref) => const FlutterVisualizationEngine(),
+);
+
+/// The current `CustomPaint` renderer, wrapped behind [VisualizationEngine].
+///
+/// It watches the pose and point-cloud providers internally, so the surface
+/// only needs the map. Gestures and HMI chrome stay in the Flutter widget tree
+/// around it.
+class FlutterVisualizationEngine implements VisualizationEngine {
+  const FlutterVisualizationEngine();
+
+  @override
+  Widget buildMapSurface({
+    required LiveMapAsset map,
+    required MapCameraFollowController cameraFollowController,
+    required MapSurfaceActions actions,
+  }) => _MapViewport(
+    key: ValueKey('${map.id}-viewport'),
+    map: map,
+    cameraFollowController: cameraFollowController,
+  );
+}
 
 class LiveObservationScreen extends ConsumerStatefulWidget {
   const LiveObservationScreen({
@@ -185,11 +217,24 @@ class _ObservationBody extends ConsumerStatefulWidget {
 
 class _ObservationBodyState extends ConsumerState<_ObservationBody> {
   late ObservationWorkspace _workspace;
+  late final MapCameraFollowController _mapCameraFollowController;
+  // Kept as a stable key for the map workspace across normal shell rebuilds.
+  final _mapWorkspaceKey = GlobalKey<_MapWorkspaceState>();
+  final _fullscreenPortalController = OverlayPortalController();
+  var _isMapFullscreen = false;
 
   @override
   void initState() {
     super.initState();
     _workspace = widget.initialWorkspace;
+    _mapCameraFollowController = MapCameraFollowController();
+  }
+
+  @override
+  void dispose() {
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    _mapCameraFollowController.dispose();
+    super.dispose();
   }
 
   @override
@@ -204,18 +249,18 @@ class _ObservationBodyState extends ConsumerState<_ObservationBody> {
           ),
           const SizedBox(height: 12),
         ],
-        AletheiaFadeThrough(
-          child: KeyedSubtree(
-            key: ValueKey('observation-workspace-${_workspace.name}'),
-            child: _workspace == ObservationWorkspace.camera
-                ? _VideoPanel(
-                    isLandscape: widget.isLandscape,
-                    workspaceHeight: widget.workspaceHeight,
-                    onWorkspaceChanged: _changeWorkspace,
-                  )
-                : _buildMapWorkspace(context),
-          ),
-        ),
+        // Do not put live map/video workspaces in an AnimatedSwitcher. It
+        // retains the outgoing child for the fade duration; with a UIKit/
+        // Android platform view or WebRTC renderer that means an old native
+        // frame can stay composited above the next workspace during rapid
+        // taps. An HMI workspace changes atomically instead.
+        _workspace == ObservationWorkspace.camera
+            ? _VideoPanel(
+                isLandscape: widget.isLandscape,
+                workspaceHeight: widget.workspaceHeight,
+                onWorkspaceChanged: _changeWorkspace,
+              )
+            : _buildMapWorkspace(context),
       ],
     );
   }
@@ -263,40 +308,58 @@ class _ObservationBodyState extends ConsumerState<_ObservationBody> {
         onAction: controller.refresh,
       );
     }
-    return _MapPanel(
-      map: map,
-      isRefreshing: state.isRefreshing,
-      message: state.message,
-      onRefresh: controller.refresh,
-      isLandscape: widget.isLandscape,
-      workspaceHeight: widget.workspaceHeight,
-      onWorkspaceChanged: _changeWorkspace,
-      onFullscreen: () => _openMapFullscreen(context, map, controller),
+    return OverlayPortal(
+      controller: _fullscreenPortalController,
+      overlayLocation: OverlayChildLocation.rootOverlay,
+      overlayChildBuilder: (context) => _isMapFullscreen
+          ? _MapFullscreenOverlay(
+              map: map,
+              cameraFollowController: _mapCameraFollowController,
+              onRefresh: controller.refresh,
+              onShowCamera: () {
+                _setMapFullscreen(false);
+                _changeWorkspace(ObservationWorkspace.camera);
+              },
+              onExitFullscreen: () => _setMapFullscreen(false),
+            )
+          : const SizedBox.shrink(),
+      // The production map is Flutter CustomPaint, so it is safe to replace
+      // the card with the fullscreen overlay without a native-surface host
+      // transition or a second compositing layer.
+      child: _isMapFullscreen
+          ? const SizedBox(key: ValueKey('map-fullscreen-placeholder'))
+          : _MapPanel(
+              map: map,
+              mapWorkspaceKey: _mapWorkspaceKey,
+              isRefreshing: state.isRefreshing,
+              message: state.message,
+              onRefresh: controller.refresh,
+              isLandscape: widget.isLandscape,
+              workspaceHeight: widget.workspaceHeight,
+              onWorkspaceChanged: _changeWorkspace,
+              cameraFollowController: _mapCameraFollowController,
+              onFullscreen: () => _setMapFullscreen(true),
+            ),
     );
   }
 
-  Future<void> _openMapFullscreen(
-    BuildContext context,
-    LiveMapAsset map,
-    LiveObservationController controller,
-  ) {
-    final container = ProviderScope.containerOf(context);
-    return Navigator.of(context).push<void>(
-      MaterialPageRoute(
-        fullscreenDialog: true,
-        builder: (_) => UncontrolledProviderScope(
-          container: container,
-          child: _MapFullscreenScreen(
-            map: map,
-            onRefresh: controller.refresh,
-            onShowCamera: () {
-              Navigator.of(context).pop();
-              _changeWorkspace(ObservationWorkspace.camera);
-            },
-          ),
-        ),
-      ),
-    );
+  void _setMapFullscreen(bool fullscreen) {
+    if (_isMapFullscreen == fullscreen) return;
+    setState(() => _isMapFullscreen = fullscreen);
+    if (fullscreen) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      // The portal child captures the fullscreen state while it is inserted
+      // into the Overlay. Show it after this rebuild, otherwise the old
+      // (empty) overlay child is retained for the entire session.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _isMapFullscreen) {
+          _fullscreenPortalController.show();
+        }
+      });
+    } else {
+      _fullscreenPortalController.hide();
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    }
   }
 }
 
@@ -459,10 +522,30 @@ class _VideoCard extends ConsumerWidget {
     final isEnabled = stream.enabled;
     final isReady = status.gateway.online && stream.isReadyForPlayback;
     final color = isReady ? AletheiaTheme.mint : AletheiaTheme.warning;
+    final displayLayout = ref.watch(videoDisplayLayoutProvider);
+    final displayLayoutController = ref.read(
+      videoDisplayLayoutProvider.notifier,
+    );
+    void selectPrimary(String name) {
+      displayLayoutController.assign(slot: 0, streamName: name);
+      onSelect(name);
+    }
+
+    final displayNames = displayLayoutController.resolve(
+      status.streams,
+      primaryStreamName: stream.name,
+    );
+    final displayStreams = displayNames
+        .map(status.streamNamed)
+        .whereType<VideoStream>()
+        .toList(growable: false);
+    // Keep the local layout watched so an explicit slot assignment repaints
+    // immediately without sending a source-switch request to the robot.
+    assert(displayLayout.length <= VideoDisplayLayoutController.maxSlots);
     final selector = _VideoStreamSelector(
       streams: status.streams,
       selectedName: stream.name,
-      onSelected: isChanging ? null : onSelect,
+      onSelected: isChanging ? null : selectPrimary,
       vertical: isLandscape,
     );
     final surface = _VideoSurface(
@@ -471,11 +554,7 @@ class _VideoCard extends ConsumerWidget {
       isForeground: isForeground,
       gatewayOnline: status.gateway.online,
     );
-    final auxiliaryStreams = _auxiliaryStreams(
-      status.streams,
-      selectedName: stream.name,
-      gatewayOnline: status.gateway.online,
-    );
+    final auxiliaryStreams = displayStreams.skip(1).toList(growable: false);
     final readout = _TelemetryRow(
       compact: isLandscape,
       flat: isLandscape,
@@ -545,6 +624,12 @@ class _VideoCard extends ConsumerWidget {
                         onShowMap: () =>
                             onWorkspaceChanged(ObservationWorkspace.map),
                         onRefresh: onRefresh,
+                        onConfigureDisplays: () => _showVideoLayoutSheet(
+                          context,
+                          status: status,
+                          primaryStreamName: stream.name,
+                          onSelectPrimary: selectPrimary,
+                        ),
                       ),
                     ),
                     VerticalDivider(
@@ -577,7 +662,7 @@ class _VideoCard extends ConsumerWidget {
                         streams: auxiliaryStreams,
                         isForeground: isForeground,
                         gatewayOnline: status.gateway.online,
-                        onSelected: isChanging ? null : onSelect,
+                        onSelected: isChanging ? null : selectPrimary,
                       ),
                     ),
                   ],
@@ -636,23 +721,159 @@ class _VideoCard extends ConsumerWidget {
   }
 }
 
-List<VideoStream> _auxiliaryStreams(
-  List<VideoStream> streams, {
-  required String selectedName,
-  required bool gatewayOnline,
+Future<void> _showVideoLayoutSheet(
+  BuildContext context, {
+  required VideoStatus status,
+  required String primaryStreamName,
+  required ValueChanged<String> onSelectPrimary,
 }) {
-  final candidates = streams
-      .where((stream) => stream.name != selectedName)
-      .toList(growable: false);
-  candidates.sort((left, right) {
-    final leftReady = gatewayOnline && left.isReadyForPlayback;
-    final rightReady = gatewayOnline && right.isReadyForPlayback;
-    if (leftReady == rightReady) {
-      return 0;
-    }
-    return leftReady ? -1 : 1;
+  final container = ProviderScope.containerOf(context);
+  return showModalBottomSheet<void>(
+    context: context,
+    useSafeArea: true,
+    isScrollControlled: true,
+    showDragHandle: true,
+    builder: (_) => UncontrolledProviderScope(
+      container: container,
+      child: _VideoDisplayLayoutSheet(
+        status: status,
+        primaryStreamName: primaryStreamName,
+        onSelectPrimary: onSelectPrimary,
+      ),
+    ),
+  );
+}
+
+/// Separates “ask the robot to publish this source” from “place this source in
+/// one of the three local decoder windows”. This avoids silently pinning one
+/// auxiliary window to a stream merely because it sorts earlier in the API.
+class _VideoDisplayLayoutSheet extends ConsumerWidget {
+  const _VideoDisplayLayoutSheet({
+    required this.status,
+    required this.primaryStreamName,
+    required this.onSelectPrimary,
   });
-  return candidates.take(2).toList(growable: false);
+
+  final VideoStatus status;
+  final String primaryStreamName;
+  final ValueChanged<String> onSelectPrimary;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final controller = ref.read(videoDisplayLayoutProvider.notifier);
+    // Watch here, rather than in the video source switch list, so the sheet
+    // updates every slot immediately after an assignment or swap.
+    ref.watch(videoDisplayLayoutProvider);
+    final slots = controller.resolve(
+      status.streams,
+      primaryStreamName: primaryStreamName,
+    );
+    final labels = const ['主画面', '辅助画面 1', '辅助画面 2'];
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * .88,
+      ),
+      child: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(
+          20,
+          0,
+          20,
+          20 + MediaQuery.viewInsetsOf(context).bottom,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('配置显示画面', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 6),
+            Text(
+              '最多同时解码三路。视频开关控制机器人输出；这里仅决定本机显示在哪个窗口。',
+              style: TextStyle(
+                color: AletheiaTheme.textSecondary,
+                fontSize: 13,
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 16),
+            for (var slot = 0; slot < slots.length; slot++) ...[
+              _VideoDisplaySlotPicker(
+                label: labels[slot],
+                value: slots[slot],
+                streams: status.streams,
+                onChanged: (name) {
+                  controller.assign(slot: slot, streamName: name);
+                  if (slot == 0) onSelectPrimary(name);
+                },
+              ),
+              if (slot != slots.length - 1) const SizedBox(height: 10),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _VideoDisplaySlotPicker extends StatelessWidget {
+  const _VideoDisplaySlotPicker({
+    required this.label,
+    required this.value,
+    required this.streams,
+    required this.onChanged,
+  });
+
+  final String label;
+  final String value;
+  final List<VideoStream> streams;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    key: ValueKey('video-display-slot-$label'),
+    decoration: BoxDecoration(
+      color: AletheiaTheme.surfaceMuted,
+      border: Border.all(color: AletheiaTheme.border),
+      borderRadius: BorderRadius.circular(AletheiaTheme.controlRadius),
+    ),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 76,
+            child: Text(
+              label,
+              style: TextStyle(
+                color: AletheiaTheme.textSecondary,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          Expanded(
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                value: value,
+                isExpanded: true,
+                onChanged: (name) {
+                  if (name != null) onChanged(name);
+                },
+                items: [
+                  for (final stream in streams)
+                    DropdownMenuItem(
+                      value: stream.name,
+                      child: Text(
+                        '${_videoStreamLabel(stream.name)}${stream.enabled ? '' : '（未开启）'}',
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 class _VideoControlRail extends StatelessWidget {
@@ -663,6 +884,7 @@ class _VideoControlRail extends StatelessWidget {
     required this.onToggle,
     required this.onShowMap,
     required this.onRefresh,
+    required this.onConfigureDisplays,
   });
 
   final List<VideoStream> streams;
@@ -671,6 +893,7 @@ class _VideoControlRail extends StatelessWidget {
   final Future<void> Function(String streamName, bool enabled) onToggle;
   final VoidCallback onShowMap;
   final VoidCallback onRefresh;
+  final VoidCallback onConfigureDisplays;
 
   @override
   Widget build(BuildContext context) => DecoratedBox(
@@ -718,6 +941,12 @@ class _VideoControlRail extends StatelessWidget {
                     ),
                     const SizedBox(width: 4),
                     _ControlRailAction(
+                      tooltip: '配置显示画面',
+                      onPressed: onConfigureDisplays,
+                      icon: Icons.grid_view_rounded,
+                    ),
+                    const SizedBox(width: 4),
+                    _ControlRailAction(
                       tooltip: '刷新视频状态',
                       onPressed: isChanging ? null : onRefresh,
                       icon: Icons.refresh_rounded,
@@ -759,6 +988,12 @@ class _VideoControlRail extends StatelessWidget {
                       visualDensity: VisualDensity.compact,
                       onPressed: onShowMap,
                       icon: const Icon(Icons.map_outlined, size: 18),
+                    ),
+                    IconButton(
+                      tooltip: '配置显示画面',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: onConfigureDisplays,
+                      icon: const Icon(Icons.grid_view_rounded, size: 18),
                     ),
                     IconButton(
                       tooltip: '刷新视频状态',
@@ -1332,22 +1567,26 @@ class _VideoSurfaceStatus extends StatelessWidget {
 class _MapPanel extends StatelessWidget {
   const _MapPanel({
     required this.map,
+    required this.mapWorkspaceKey,
     required this.isRefreshing,
     required this.message,
     required this.onRefresh,
     required this.isLandscape,
     required this.workspaceHeight,
     required this.onWorkspaceChanged,
+    required this.cameraFollowController,
     required this.onFullscreen,
   });
 
   final LiveMapAsset map;
+  final GlobalKey<_MapWorkspaceState> mapWorkspaceKey;
   final bool isRefreshing;
   final String message;
   final VoidCallback onRefresh;
   final bool isLandscape;
   final double workspaceHeight;
   final ValueChanged<ObservationWorkspace> onWorkspaceChanged;
+  final MapCameraFollowController cameraFollowController;
   final VoidCallback onFullscreen;
 
   @override
@@ -1361,11 +1600,13 @@ class _MapPanel extends StatelessWidget {
             key: const ValueKey('observation-map-workspace'),
             height: workspaceHeight,
             child: _MapWorkspace(
+              key: mapWorkspaceKey,
               map: map,
               isRefreshing: isRefreshing,
               onRefresh: onRefresh,
               onShowCamera: () =>
                   onWorkspaceChanged(ObservationWorkspace.camera),
+              cameraFollowController: cameraFollowController,
               onFullscreen: onFullscreen,
               useSideToolbar: isLandscape,
               toolbarTopInset: isLandscape
@@ -1388,38 +1629,57 @@ class _MapPanel extends StatelessWidget {
   }
 }
 
-class _MapFullscreenScreen extends StatelessWidget {
-  const _MapFullscreenScreen({
+/// A root-overlay presentation of the same [_MapWorkspace] element used in
+/// the card. The GlobalKey is deliberately supplied by [_ObservationBodyState]
+/// so opening this overlay moves one PlatformView instead of creating a second
+/// Android Unity host while the old one is still composited.
+class _MapFullscreenOverlay extends StatelessWidget {
+  const _MapFullscreenOverlay({
     required this.map,
+    required this.cameraFollowController,
     required this.onRefresh,
     required this.onShowCamera,
+    required this.onExitFullscreen,
   });
 
   final LiveMapAsset map;
+  final MapCameraFollowController cameraFollowController;
   final VoidCallback onRefresh;
   final VoidCallback onShowCamera;
+  final VoidCallback onExitFullscreen;
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    backgroundColor: AletheiaTheme.canvas,
-    body: SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.all(6),
-        child: _MapWorkspace(
-          map: map,
-          isRefreshing: false,
-          onRefresh: onRefresh,
-          onShowCamera: onShowCamera,
-          onExitFullscreen: () => Navigator.of(context).pop(),
+  Widget build(BuildContext context) => Positioned.fill(
+    child: Material(
+      key: const ValueKey('unity-map-fullscreen-surface'),
+      color: AletheiaTheme.canvas,
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(6),
+          child: _MapWorkspace(
+            map: map,
+            cameraFollowController: cameraFollowController,
+            isRefreshing: false,
+            onRefresh: onRefresh,
+            onShowCamera: onShowCamera,
+            onExitFullscreen: onExitFullscreen,
+            // Unity's Android SurfaceView cannot be moved into a root overlay
+            // without Android allocating a new native host. The fullscreen
+            // HMI uses the established CustomPaint renderer while the card's
+            // Unity instance remains alive underneath; exiting is therefore a
+            // pure Flutter overlay change, not a Unity surface transition.
+            visualizationEngineOverride: const FlutterVisualizationEngine(),
+          ),
         ),
       ),
     ),
   );
 }
 
-class _MapWorkspace extends StatelessWidget {
+class _MapWorkspace extends ConsumerStatefulWidget {
   const _MapWorkspace({
     required this.map,
+    required this.cameraFollowController,
     required this.isRefreshing,
     required this.onRefresh,
     required this.onShowCamera,
@@ -1427,9 +1687,12 @@ class _MapWorkspace extends StatelessWidget {
     this.useSideToolbar = false,
     this.onFullscreen,
     this.onExitFullscreen,
+    this.visualizationEngineOverride,
+    super.key,
   });
 
   final LiveMapAsset map;
+  final MapCameraFollowController cameraFollowController;
   final bool isRefreshing;
   final VoidCallback onRefresh;
   final VoidCallback onShowCamera;
@@ -1437,53 +1700,80 @@ class _MapWorkspace extends StatelessWidget {
   final bool useSideToolbar;
   final VoidCallback? onFullscreen;
   final VoidCallback? onExitFullscreen;
+  final VisualizationEngine? visualizationEngineOverride;
 
   @override
-  Widget build(BuildContext context) => ClipRRect(
-    borderRadius: BorderRadius.circular(AletheiaTheme.sectionRadius),
-    child: ColoredBox(
-      color: AletheiaTheme.surfaceSunken,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          _MapViewport(key: ValueKey('${map.id}-viewport'), map: map),
-          if (useSideToolbar)
-            Positioned(
-              top: 8 + toolbarTopInset,
-              left: 8,
-              child: _MapToolRail(
-                isRefreshing: isRefreshing,
-                onRefresh: onRefresh,
-                onShowCamera: onShowCamera,
-                onFullscreen: onFullscreen,
-                onExitFullscreen: onExitFullscreen,
-              ),
-            )
-          else
-            Positioned(
-              top: 8 + toolbarTopInset,
-              left: 8,
-              right: 8,
-              child: _MapToolbar(
-                isRefreshing: isRefreshing,
-                onRefresh: onRefresh,
-                onShowCamera: onShowCamera,
-                onFullscreen: onFullscreen,
-                onExitFullscreen: onExitFullscreen,
+  ConsumerState<_MapWorkspace> createState() => _MapWorkspaceState();
+}
+
+class _MapWorkspaceState extends ConsumerState<_MapWorkspace> {
+  @override
+  Widget build(BuildContext context) {
+    final VisualizationEngine engine =
+        widget.visualizationEngineOverride ??
+        ref.watch(visualizationEngineProvider)!;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(AletheiaTheme.sectionRadius),
+      child: ColoredBox(
+        color: AletheiaTheme.surfaceSunken,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            KeyedSubtree(
+              key: ValueKey('map-render-surface-${widget.map.id}'),
+              child: engine.buildMapSurface(
+                map: widget.map,
+                cameraFollowController: widget.cameraFollowController,
+                actions: MapSurfaceActions(
+                  onShowCamera: widget.onShowCamera,
+                  onRecenter: widget.cameraFollowController.recenterOnVehicle,
+                  onToggleFullscreen: () {
+                    (widget.onExitFullscreen ?? widget.onFullscreen)?.call();
+                  },
+                  onRefresh: widget.onRefresh,
+                ),
               ),
             ),
-          Positioned(
-            right: 8,
-            bottom: 8,
-            child: _MapOperationalReadout(metadata: map.metadata),
-          ),
-          const Positioned.fill(
-            child: IgnorePointer(child: _CloudMetricsReporter()),
-          ),
-        ],
+            if (widget.useSideToolbar)
+              Positioned(
+                top: 8 + widget.toolbarTopInset,
+                left: 8,
+                child: _MapToolRail(
+                  isRefreshing: widget.isRefreshing,
+                  onRefresh: widget.onRefresh,
+                  onShowCamera: widget.onShowCamera,
+                  onFullscreen: widget.onFullscreen,
+                  onExitFullscreen: widget.onExitFullscreen,
+                  cameraFollowController: widget.cameraFollowController,
+                ),
+              )
+            else
+              Positioned(
+                top: 8 + widget.toolbarTopInset,
+                left: 8,
+                right: 8,
+                child: _MapToolbar(
+                  isRefreshing: widget.isRefreshing,
+                  onRefresh: widget.onRefresh,
+                  onShowCamera: widget.onShowCamera,
+                  onFullscreen: widget.onFullscreen,
+                  onExitFullscreen: widget.onExitFullscreen,
+                  cameraFollowController: widget.cameraFollowController,
+                ),
+              ),
+            Positioned(
+              right: 8,
+              bottom: 8,
+              child: _MapOperationalReadout(metadata: widget.map.metadata),
+            ),
+            const Positioned.fill(
+              child: IgnorePointer(child: _CloudMetricsReporter()),
+            ),
+          ],
+        ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class _MapToolbar extends StatelessWidget {
@@ -1491,6 +1781,7 @@ class _MapToolbar extends StatelessWidget {
     required this.isRefreshing,
     required this.onRefresh,
     required this.onShowCamera,
+    required this.cameraFollowController,
     this.onFullscreen,
     this.onExitFullscreen,
   });
@@ -1498,6 +1789,7 @@ class _MapToolbar extends StatelessWidget {
   final bool isRefreshing;
   final VoidCallback onRefresh;
   final VoidCallback onShowCamera;
+  final MapCameraFollowController cameraFollowController;
   final VoidCallback? onFullscreen;
   final VoidCallback? onExitFullscreen;
 
@@ -1523,8 +1815,10 @@ class _MapToolbar extends StatelessWidget {
             onPressed: onShowCamera,
             icon: const Icon(Icons.videocam_outlined),
           ),
+          _MapFollowAction(cameraFollowController: cameraFollowController),
           if (onFullscreen != null)
             IconButton(
+              key: const ValueKey('map-fullscreen-enter-action'),
               tooltip: '全屏查看地图',
               visualDensity: VisualDensity.compact,
               onPressed: onFullscreen,
@@ -1532,6 +1826,7 @@ class _MapToolbar extends StatelessWidget {
             ),
           if (onExitFullscreen != null)
             IconButton(
+              key: const ValueKey('map-fullscreen-exit-action'),
               tooltip: '退出全屏地图',
               visualDensity: VisualDensity.compact,
               onPressed: onExitFullscreen,
@@ -1563,6 +1858,7 @@ class _MapToolRail extends StatelessWidget {
     required this.isRefreshing,
     required this.onRefresh,
     required this.onShowCamera,
+    required this.cameraFollowController,
     this.onFullscreen,
     this.onExitFullscreen,
   });
@@ -1570,6 +1866,7 @@ class _MapToolRail extends StatelessWidget {
   final bool isRefreshing;
   final VoidCallback onRefresh;
   final VoidCallback onShowCamera;
+  final MapCameraFollowController cameraFollowController;
   final VoidCallback? onFullscreen;
   final VoidCallback? onExitFullscreen;
 
@@ -1602,8 +1899,10 @@ class _MapToolRail extends StatelessWidget {
           onPressed: onShowCamera,
           icon: const Icon(Icons.videocam_outlined),
         ),
+        _MapFollowAction(cameraFollowController: cameraFollowController),
         if (onFullscreen != null)
           IconButton(
+            key: const ValueKey('map-fullscreen-enter-action'),
             tooltip: '全屏查看地图',
             visualDensity: VisualDensity.compact,
             onPressed: onFullscreen,
@@ -1611,6 +1910,7 @@ class _MapToolRail extends StatelessWidget {
           ),
         if (onExitFullscreen != null)
           IconButton(
+            key: const ValueKey('map-fullscreen-exit-action'),
             tooltip: '退出全屏地图',
             visualDensity: VisualDensity.compact,
             onPressed: onExitFullscreen,
@@ -1630,6 +1930,35 @@ class _MapToolRail extends StatelessWidget {
         ),
       ],
     ),
+  );
+}
+
+/// A map action rather than a permanent camera lock. The active state tells
+/// the operator that incoming poses are keeping the vehicle centred; dragging
+/// the canvas always takes precedence and changes this control to “re-centre”.
+class _MapFollowAction extends StatelessWidget {
+  const _MapFollowAction({required this.cameraFollowController});
+
+  final MapCameraFollowController cameraFollowController;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: cameraFollowController,
+    builder: (context, _) {
+      final following = cameraFollowController.isFollowing;
+      return IconButton(
+        key: const ValueKey('map-follow-vehicle-action'),
+        tooltip: following ? '正在跟随小车' : '定位并跟随小车',
+        visualDensity: VisualDensity.compact,
+        color: following ? AletheiaTheme.cyan : null,
+        onPressed: cameraFollowController.recenterOnVehicle,
+        icon: Icon(
+          following
+              ? Icons.location_searching_rounded
+              : Icons.my_location_rounded,
+        ),
+      );
+    },
   );
 }
 
@@ -1735,9 +2064,14 @@ class _MapOperationalReadout extends ConsumerWidget {
 }
 
 class _MapViewport extends ConsumerStatefulWidget {
-  const _MapViewport({required this.map, super.key});
+  const _MapViewport({
+    required this.map,
+    required this.cameraFollowController,
+    super.key,
+  });
 
   final LiveMapAsset map;
+  final MapCameraFollowController cameraFollowController;
 
   @override
   ConsumerState<_MapViewport> createState() => _MapViewportState();
@@ -1749,7 +2083,8 @@ class _MapViewport extends ConsumerStatefulWidget {
 /// every scale update. This makes pinch and two-finger pan one transform,
 /// avoiding the centre-anchored jump that is especially noticeable on a
 /// vehicle map.
-class _MapViewportState extends ConsumerState<_MapViewport> {
+class _MapViewportState extends ConsumerState<_MapViewport>
+    with SingleTickerProviderStateMixin {
   static const _minimumScale = 1.0;
   static const _maximumScale = 6.0;
 
@@ -1767,9 +2102,57 @@ class _MapViewportState extends ConsumerState<_MapViewport> {
   Offset _worldPointAtGestureStart = Offset.zero;
   double _scaleAtGestureStart = _minimumScale;
   double _pinchSpanAtGestureStart = 1;
+  PoseFrame? _latestPose;
+  late final AnimationController _followAnimation;
+  Offset _followAnimationStart = Offset.zero;
+  Offset _followAnimationTarget = Offset.zero;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.cameraFollowController.addListener(_handleFollowControlChanged);
+    _followAnimation = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 240),
+    )..addListener(_applyFollowAnimationFrame);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final pose = ref
+          .read(poseTelemetryProvider)
+          .maybeWhen(data: (value) => value.frame, orElse: () => null);
+      if (pose != null) _onPose(pose);
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant _MapViewport oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.cameraFollowController != widget.cameraFollowController) {
+      oldWidget.cameraFollowController.removeListener(
+        _handleFollowControlChanged,
+      );
+      widget.cameraFollowController.addListener(_handleFollowControlChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.cameraFollowController.removeListener(_handleFollowControlChanged);
+    _followAnimation
+      ..removeListener(_applyFollowAnimationFrame)
+      ..dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
+    // Keep the telemetry subscription alive while a map renderer is mounted.
+    // The child pose layer paints the vehicle; this listener independently
+    // drives the camera only while the operator has selected follow mode.
+    ref.watch(poseTelemetryProvider);
+    ref.listen(poseTelemetryProvider, (_, next) {
+      next.whenData((sample) => _onPose(sample.frame));
+    });
     final preview = ref.watch(liveMapPreviewBuilderProvider);
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -1980,6 +2363,7 @@ class _MapViewportState extends ConsumerState<_MapViewport> {
       _translation = _translationForMapPointAtViewportCentre(
         mapSize.center(mapOrigin),
       );
+      _requestFollowAfterLayout();
       return;
     }
     // Orientation changes alter local pixel sizes while the map's world
@@ -2002,6 +2386,7 @@ class _MapViewportState extends ConsumerState<_MapViewport> {
       viewport.center(Offset.zero) - nextCanvasPoint * _scale,
       scale: _scale,
     );
+    _requestFollowAfterLayout();
   }
 
   Offset _translationForMapPointAtViewportCentre(Offset mapCanvasPoint) =>
@@ -2019,6 +2404,7 @@ class _MapViewportState extends ConsumerState<_MapViewport> {
       return;
     }
     if (_pointerPositions.length == 2) {
+      _pauseFollowForDirectManipulation();
       _singlePanPointer = null;
       _setGestureAnchor(_pointerCentroid);
       _pinchSpanAtGestureStart = _pointerSpan;
@@ -2028,6 +2414,9 @@ class _MapViewportState extends ConsumerState<_MapViewport> {
   void _recordPointerMove(PointerMoveEvent event) {
     _pointerPositions[event.pointer] = event.localPosition;
     if (_pointerPositions.length == 1 && _singlePanPointer == event.pointer) {
+      if ((event.localPosition - _singlePanStart).distanceSquared > 16) {
+        _pauseFollowForDirectManipulation();
+      }
       final nextTranslation =
           _singlePanTranslationStart + (event.localPosition - _singlePanStart);
       setState(() {
@@ -2080,6 +2469,69 @@ class _MapViewportState extends ConsumerState<_MapViewport> {
     _scaleAtGestureStart = _scale;
     _worldPointAtGestureStart =
         (focalPoint - _translation) / _scaleAtGestureStart;
+  }
+
+  void _pauseFollowForDirectManipulation() {
+    widget.cameraFollowController.pauseForDirectManipulation();
+  }
+
+  void _handleFollowControlChanged() {
+    if (!widget.cameraFollowController.isFollowing) {
+      _followAnimation.stop();
+      return;
+    }
+    _followVehicle();
+  }
+
+  void _onPose(PoseFrame pose) {
+    _latestPose = pose;
+    if (widget.cameraFollowController.isFollowing) _followVehicle();
+  }
+
+  void _requestFollowAfterLayout() {
+    if (!widget.cameraFollowController.isFollowing) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && widget.cameraFollowController.isFollowing) {
+        _followVehicle(immediate: true);
+      }
+    });
+  }
+
+  void _followVehicle({bool immediate = false}) {
+    final pose = _latestPose;
+    final mapSize = _mapSize;
+    if (pose == null || mapSize == null || _viewportSize == null) return;
+    if (!widget.map.metadata.contains(pose.x, pose.y)) return;
+    final metadata = widget.map.metadata;
+    final targetCanvasPoint =
+        _mapOriginInCanvas +
+        Offset(
+          ((pose.x - metadata.originX) / metadata.worldWidth) * mapSize.width,
+          (1 - ((pose.y - metadata.originY) / metadata.worldHeight)) *
+              mapSize.height,
+        );
+    final target = _translationForMapPointAtViewportCentre(targetCanvasPoint);
+    if ((target - _translation).distance < .25) return;
+    _followAnimationStart = _translation;
+    _followAnimationTarget = target;
+    if (immediate) {
+      _followAnimation.stop();
+      setState(() => _translation = target);
+      return;
+    }
+    _followAnimation.forward(from: 0);
+  }
+
+  void _applyFollowAnimationFrame() {
+    if (!mounted || !widget.cameraFollowController.isFollowing) return;
+    final t = Curves.easeOutCubic.transform(_followAnimation.value);
+    setState(() {
+      _translation = Offset.lerp(
+        _followAnimationStart,
+        _followAnimationTarget,
+        t,
+      )!;
+    });
   }
 
   Offset _boundedTranslation(Offset value, {required double scale}) {
@@ -2445,12 +2897,15 @@ class _CloudPainter extends CustomPainter {
     }
     final scaleX = size.width / metadata.worldWidth;
     final scaleY = size.height / metadata.worldHeight;
+    // Match the mobile web HMI exactly: its Pixi layer uses an 0.82 source
+    // map-pixel radius. The Flutter painter operates in metres, so convert
+    // the 1.64 px diameter through this map's real resolution rather than
+    // using a fixed screen-pixel stroke that grows comparatively too heavy.
+    final pointDiameterMetres = metadata.resolution * 1.64;
     final paint = Paint()
       ..color = AletheiaTheme.mapPointCloud
       ..strokeCap = StrokeCap.round
-      // The painter works in world metres so point size remains visually
-      // stable when a differently sized cached map is displayed.
-      ..strokeWidth = 2.4 / math.max(scaleX, scaleY);
+      ..strokeWidth = pointDiameterMetres;
     canvas.save();
     canvas.clipRect(Offset.zero & size);
     canvas.translate(

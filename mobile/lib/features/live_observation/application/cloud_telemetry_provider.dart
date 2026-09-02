@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/connection/robot_connection_controller.dart';
@@ -19,6 +20,13 @@ final cloudTelemetryProvider = StreamProvider.autoDispose<CloudTelemetrySample>(
     );
     final endpoint = connection.$2;
     final port = connection.$4;
+    if (kDebugMode) {
+      debugPrint(
+        '[LiveTelemetry] cloud eligibility '
+        'connected=${connection.$1} online=${connection.$3} '
+        'port=$port endpoint=${endpoint?.displayAddress ?? 'none'}',
+      );
+    }
     if (!connection.$1 ||
         connection.$3 != true ||
         endpoint == null ||

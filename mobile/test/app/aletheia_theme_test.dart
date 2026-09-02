@@ -14,6 +14,10 @@ void main() {
     expect(theme.colorScheme.primary, const Color(0xFF216D65));
     expect(theme.colorScheme.onPrimary, const Color(0xFFF8FCFB));
     expect(AletheiaTheme.mapVirtualWall, const Color(0xFFB6433D));
+    expect(
+      theme.appBarTheme.systemOverlayStyle?.statusBarBrightness,
+      Brightness.light,
+    );
   });
 
   test('the default HMI treatment remains dark', () {
@@ -21,5 +25,9 @@ void main() {
 
     expect(theme.brightness, Brightness.dark);
     expect(theme.scaffoldBackgroundColor, const Color(0xFF101415));
+    expect(
+      theme.appBarTheme.systemOverlayStyle?.statusBarBrightness,
+      Brightness.dark,
+    );
   });
 }

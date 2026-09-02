@@ -1,6 +1,6 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -40,6 +40,8 @@ class CloudTelemetryClient {
   bool _closed = false;
   bool _flushScheduled = false;
   int _packetsSinceLastSample = 0;
+  bool _loggedFirstMessage = false;
+  bool _loggedMalformedPacket = false;
 
   Stream<CloudTelemetrySample> frames(RobotEndpoint endpoint, int port) {
     final output = StreamController<CloudTelemetrySample>();
@@ -62,18 +64,40 @@ class CloudTelemetryClient {
       _channel = channel;
       try {
         await channel.ready.timeout(const Duration(seconds: 5));
+        if (kDebugMode) {
+          debugPrint('[LiveTelemetry] cloud socket connected');
+        }
         reconnectAttempt = 0;
         await for (final message in channel.stream) {
           if (_closed || output.isClosed) {
             return;
           }
           if (message is List<int>) {
+            if (kDebugMode && !_loggedFirstMessage) {
+              _loggedFirstMessage = true;
+              debugPrint(
+                '[LiveTelemetry] cloud first binary frame '
+                'type=${message.runtimeType} bytes=${message.length}',
+              );
+            }
             _queueLatestPacket(
               message is Uint8List ? message : Uint8List.fromList(message),
             );
+          } else if (kDebugMode && !_loggedFirstMessage) {
+            _loggedFirstMessage = true;
+            debugPrint(
+              '[LiveTelemetry] cloud ignored non-binary frame '
+              'type=${message.runtimeType}',
+            );
           }
         }
-      } catch (_) {
+      } catch (error) {
+        if (kDebugMode) {
+          debugPrint(
+            '[LiveTelemetry] cloud socket disconnected '
+            '(${error.runtimeType})',
+          );
+        }
         // A Wi-Fi interruption is isolated to this lane. The bounded retry
         // loop deliberately does not retain data while the socket is down.
       } finally {
@@ -128,7 +152,14 @@ class CloudTelemetryClient {
         ),
       );
       _packetsSinceLastSample = 0;
-    } on FormatException {
+    } on FormatException catch (error) {
+      if (kDebugMode && !_loggedMalformedPacket) {
+        _loggedMalformedPacket = true;
+        debugPrint(
+          '[LiveTelemetry] cloud rejected binary frame '
+          'bytes=${packet.bytes.length} reason=${error.message}',
+        );
+      }
       // One malformed packet must not take down the independent cloud lane.
     }
   }

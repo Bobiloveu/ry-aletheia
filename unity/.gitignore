@@ -1,0 +1,12 @@
+# Generated Unity export artefacts — never committed.
+builds/
+aletheia_viz/[Ll]ibrary/
+aletheia_viz/[Tt]emp/
+aletheia_viz/[Oo]bj/
+aletheia_viz/[Bb]uild/
+aletheia_viz/[Ll]ogs/
+aletheia_viz/[Uu]serSettings/
+aletheia_viz/.vs/
+aletheia_viz/*.csproj
+aletheia_viz/*.sln
+*.log

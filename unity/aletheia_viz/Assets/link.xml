@@ -1,0 +1,14 @@
+<linker>
+  <!--
+    UnitySendMessage resolves VizBridge.OnHostMessage by name at runtime.
+    There is intentionally no managed C# call site for this renderer bridge,
+    so IL2CPP's release linker cannot infer that the callback is live. Keep
+    the small bridge type intact: without this, Development exports work but
+    high-stripping Release exports accept no map/camera/pose messages and the
+    embedded map remains a black surface.
+  -->
+  <assembly fullname="Assembly-CSharp">
+    <type fullname="Aletheia.Viz.VizBridge" preserve="all" />
+    <type fullname="Aletheia.Viz.NativeCloudBridge" preserve="all" />
+  </assembly>
+</linker>

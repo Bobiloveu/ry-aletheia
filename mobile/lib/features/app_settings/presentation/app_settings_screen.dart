@@ -161,11 +161,6 @@ class AppSettingsScreen extends ConsumerWidget {
             copy.daylight,
             copy.daylightDetail,
           ),
-          _ChoiceOption(
-            AppThemePreference.highContrastDark,
-            copy.highContrast,
-            copy.highContrastDetail,
-          ),
         ],
         selected: ref.read(appPreferencesControllerProvider).theme,
       ),
@@ -185,8 +180,6 @@ class AppSettingsScreen extends ConsumerWidget {
       switch (value) {
         AppThemePreference.hmiDark => english ? 'HMI dark' : 'HMI 深色',
         AppThemePreference.daylight => english ? 'Daylight' : '日间模式',
-        AppThemePreference.highContrastDark =>
-          english ? 'High contrast dark' : '高对比深色',
       };
 }
 
@@ -354,10 +347,6 @@ class _SettingsCopy {
   String get daylightDetail => english
       ? 'A low-glare light palette for bright work areas.'
       : '适合明亮现场的低反光浅色配色。';
-  String get highContrast => english ? 'High contrast dark' : '高对比深色';
-  String get highContrastDetail => english
-      ? 'Stronger text and control contrast for bright environments.'
-      : '提升文字与控件对比度，适合明亮现场环境。';
   String get note => english
       ? 'Language coverage is being expanded screen by screen. Live robot data and safety boundaries are unchanged.'
       : '英文文案将逐页完善；实时机器人数据与安全边界不受这些本机偏好影响。';

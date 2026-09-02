@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/widgets.dart';
 import 'package:go_router/go_router.dart';
 
 import 'app_shell.dart';
@@ -19,11 +20,25 @@ import '../features/app_settings/presentation/app_settings_screen.dart';
 import '../features/app_settings/presentation/app_update_screen.dart';
 import '../features/app_settings/presentation/feedback_screen.dart';
 
+/// An explicit, build-time-only test seam for device validation of a
+/// production-mode Unity library. It defaults to false and is never supplied
+/// by the normal packaging scripts, so the gallery remains absent from every
+/// distributable build.
+const _includeDeviceValidationGallery = bool.fromEnvironment(
+  'AV_ENABLE_DEVICE_VALIDATION_GALLERY',
+);
+
 final appRouterProvider = Provider<GoRouter>((ref) {
   final router = GoRouter(
-    initialLocation: RobotConnectionScreen.routePath,
+    // `flutter run --route /__debug/ui-gallery?...` is the repeatable way to
+    // exercise live-map stress states without a robot. GoRouter does not read
+    // Flutter's platform route automatically when an explicit
+    // [initialLocation] is supplied, so honour it in Debug only. A separate
+    // explicit device-validation define exists solely to exercise the final
+    // Release Unity binary against deterministic local map data.
+    initialLocation: _initialLocation(),
     routes: [
-      if (kDebugMode)
+      if (kDebugMode || _includeDeviceValidationGallery)
         GoRoute(
           path: DebugUiGalleryScreen.routePath,
           pageBuilder: (context, state) => AletheiaMotion.rootPage(
@@ -155,3 +170,20 @@ final appRouterProvider = Provider<GoRouter>((ref) {
   ref.onDispose(router.dispose);
   return router;
 });
+
+String _initialLocation() {
+  if (!kDebugMode && !_includeDeviceValidationGallery) {
+    return RobotConnectionScreen.routePath;
+  }
+  // Unlike Android/iOS engine launch arguments, this compile-time debug
+  // define works for `flutter build` + `simctl/devicectl launch` too. It is
+  // intentionally ignored outside Debug unless the explicit local
+  // device-validation build flag is present. Normal release packaging never
+  // supplies that flag, so it cannot become a production entry point.
+  const debugRoute = String.fromEnvironment('AV_DEBUG_ROUTE');
+  if (debugRoute.startsWith('/')) return debugRoute;
+  final route = WidgetsBinding.instance.platformDispatcher.defaultRouteName;
+  return route.startsWith('/') && route != '/'
+      ? route
+      : RobotConnectionScreen.routePath;
+}

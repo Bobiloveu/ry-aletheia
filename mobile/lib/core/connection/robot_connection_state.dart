@@ -11,6 +11,7 @@ class RobotConnectionState {
     this.message = '',
     this.lastChecked,
     this.isStartingObservation = false,
+    this.addressDraft = '',
   });
 
   final ConnectionPhase phase;
@@ -19,6 +20,10 @@ class RobotConnectionState {
   final String message;
   final DateTime? lastChecked;
   final bool isStartingObservation;
+
+  /// Local input state survives a root-tab change. It never changes robot
+  /// configuration; it only avoids discarding an operator's address draft.
+  final String addressDraft;
 
   bool get isBusy =>
       phase == ConnectionPhase.restoring ||
@@ -34,6 +39,7 @@ class RobotConnectionState {
     String? message,
     DateTime? lastChecked,
     bool? isStartingObservation,
+    String? addressDraft,
   }) {
     return RobotConnectionState(
       phase: phase ?? this.phase,
@@ -43,6 +49,7 @@ class RobotConnectionState {
       lastChecked: lastChecked ?? this.lastChecked,
       isStartingObservation:
           isStartingObservation ?? this.isStartingObservation,
+      addressDraft: addressDraft ?? this.addressDraft,
     );
   }
 }

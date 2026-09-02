@@ -19,20 +19,14 @@ abstract final class AletheiaMotion {
       ? const Duration(milliseconds: 100)
       : duration;
 
-  /// Root destinations share a shell, so they cross-fade rather than slide as
-  /// if the operator had navigated through a document stack.
+  /// Root destinations are high-frequency HMI workspaces. They replace
+  /// immediately instead of cross-fading: keeping the old route visible for
+  /// even a short transition leaves a stale map, video, or platform-view frame
+  /// on screen when the operator changes destinations rapidly.
+  ///
+  /// Secondary/detail pages below retain their short, contextual transition.
   static Page<void> rootPage({required LocalKey key, required Widget child}) =>
-      CustomTransitionPage<void>(
-        key: key,
-        child: child,
-        transitionDuration: fast,
-        reverseTransitionDuration: fast,
-        transitionsBuilder: (context, animation, secondaryAnimation, child) =>
-            FadeTransition(
-              opacity: CurvedAnimation(parent: animation, curve: easeOut),
-              child: child,
-            ),
-      );
+      NoTransitionPage<void>(key: key, child: child);
 
   /// Secondary tools preserve a small spatial cue for drill-in and back.
   static Page<void> detailPage({

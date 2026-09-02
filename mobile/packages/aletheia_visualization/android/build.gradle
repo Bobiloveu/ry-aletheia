@@ -1,0 +1,79 @@
+// Aletheia visualization plugin — Android.
+//
+// The embedded Unity module (`:unityLibrary`) is a *generated* Gradle project
+// produced by "Build → Android" in the Unity project at `unity/aletheia_viz`
+// (see unity/README.md). It is not committed. Until it is exported and the
+// host app's `android/settings.gradle` includes it, keep `unityEnabled=false`
+// in `gradle.properties`: the plugin then builds with a stub surface and the
+// app falls back to the Flutter renderer.
+
+// Aletheia's two renderer builds share the same Flutter source. Keep Unity
+// opt-in at build time so regular Flutter APKs do not depend on generated
+// Unity output. The property remains as a local/manual override for Android
+// Studio users; CI and the documented commands use the environment variable.
+def unityEnabled = System.getenv('ALETHEIA_UNITY_ENABLED') == '1' ||
+        (project.findProperty('aletheia.unityEnabled') ?: 'false').toString() == 'true'
+
+group 'com.ryaletheia.aletheia_visualization'
+version '0.1.0'
+
+buildscript {
+    repositories { google(); mavenCentral() }
+    dependencies { classpath 'com.android.tools.build:gradle:8.3.0' }
+}
+
+rootProject.allprojects {
+    repositories { google(); mavenCentral() }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+android {
+    namespace 'com.ryaletheia.aletheia_visualization'
+    // Keep the renderer plugin aligned with the Flutter host. Unity 2022's
+    // generated AAR currently requires compileSdk 35 or newer.
+    compileSdk flutter.compileSdkVersion
+    ndkVersion flutter.ndkVersion
+
+    defaultConfig {
+        minSdk 24
+        externalNativeBuild {
+            cmake { arguments '-DANDROID_STL=c++_shared' }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    sourceSets {
+        main.kotlin.srcDirs += 'src/main/kotlin'
+        if (unityEnabled) {
+            main.kotlin.srcDirs += 'src/unity/kotlin'
+        } else {
+            main.kotlin.srcDirs += 'src/stub/kotlin'
+        }
+    }
+}
+
+dependencies {
+    if (unityEnabled) {
+        // Provided by the host app's settings.gradle after the Unity export.
+        implementation project(':unityLibrary')
+        // Unity's generated module keeps UnityPlayer as an implementation
+        // dependency, so it is not visible while compiling this plugin's
+        // Kotlin source. This is compile-only: the actual class and runtime
+        // are packaged once by :unityLibrary above.
+        compileOnly files(project(':unityLibrary').projectDir.toString() + '/libs/unity-classes.jar')
+    }
+}

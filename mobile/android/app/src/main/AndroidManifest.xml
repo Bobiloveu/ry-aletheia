@@ -1,4 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
@@ -7,6 +8,27 @@
         android:name="${applicationName}"
         android:usesCleartextTraffic="true"
         android:icon="@mipmap/launcher_icon">
+        <!-- Unity is embedded as a renderer.  Override metadata emitted by
+             unityLibrary so it cannot create a game-style splash/fullscreen
+             surface above Flutter's host window. -->
+        <meta-data
+            android:name="unity.splash-enable"
+            android:value="false"
+            tools:replace="android:value" />
+        <meta-data
+            android:name="unity.launch-fullscreen"
+            android:value="false"
+            tools:replace="android:value" />
+        <meta-data
+            android:name="unity.render-outside-safearea"
+            android:value="false"
+            tools:replace="android:value" />
+        <!-- Unity is always embedded by Flutter.  Remove the activity supplied
+             by unityLibrary so Android exposes exactly one launcher target;
+             launching UnityPlayerActivity directly bypasses the HMI shell. -->
+        <activity
+            android:name="com.unity3d.player.UnityPlayerActivity"
+            tools:node="remove" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

@@ -51,6 +51,12 @@ class AletheiaAppShell extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Depend on the inherited Theme instead of reading the static palette
+    // directly. Without this dependency the settings page rebuilt after a
+    // preference change while the shell AppBar retained its old dark color.
+    final theme = Theme.of(context);
+    final canvas =
+        theme.appBarTheme.backgroundColor ?? theme.scaffoldBackgroundColor;
     final viewport = MediaQuery.sizeOf(context);
     final isLandscape = viewport.width > viewport.height;
     final compactLandscape = isCompactLandscape(
@@ -89,8 +95,8 @@ class AletheiaAppShell extends ConsumerWidget {
       appBar: AppBar(
         toolbarHeight: compactLandscape ? 44 : kToolbarHeight,
         backgroundColor: usesObservationOverlay
-            ? AletheiaTheme.canvas.withValues(alpha: .82)
-            : AletheiaTheme.canvas,
+            ? canvas.withValues(alpha: .82)
+            : canvas,
         surfaceTintColor: Colors.transparent,
         scrolledUnderElevation: 0,
         // Do not reserve a phantom leading slot on root destinations. The
@@ -245,7 +251,10 @@ class _ConnectionChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = connected ? AletheiaTheme.mint : AletheiaTheme.textTertiary;
+    final theme = Theme.of(context);
+    final color = connected
+        ? theme.colorScheme.secondary
+        : theme.textTheme.bodySmall?.color ?? theme.colorScheme.onSurface;
     return Semantics(
       label: connected ? '已连接 $address' : '尚未连接机器人',
       button: true,
@@ -330,11 +339,12 @@ class _CompactNavigationStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final canvas = Theme.of(context).scaffoldBackgroundColor;
     return SizedBox(
       key: Key('compact-navigation-strip'),
       width: 56 + leadingSafeInset,
       child: ColoredBox(
-        color: AletheiaTheme.canvas,
+        color: canvas,
         child: Row(
           children: [
             if (leadingSafeInset > 0) SizedBox(width: leadingSafeInset),
@@ -384,9 +394,10 @@ class _CompactNavigationDestination extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     final iconColor = selected
-        ? AletheiaTheme.cyan
-        : AletheiaTheme.textTertiary;
+        ? theme.colorScheme.primary
+        : theme.textTheme.bodySmall?.color ?? theme.colorScheme.onSurface;
     return Semantics(
       button: true,
       selected: selected,
@@ -410,10 +421,10 @@ class _CompactNavigationDestination extends StatelessWidget {
               height: 44,
               decoration: BoxDecoration(
                 color: selected
-                    ? AletheiaTheme.surfaceRaised
+                    ? theme.inputDecorationTheme.fillColor
                     : Colors.transparent,
                 border: selected
-                    ? Border.all(color: AletheiaTheme.border)
+                    ? Border.all(color: theme.colorScheme.outline)
                     : Border.all(color: Colors.transparent),
                 borderRadius: BorderRadius.circular(
                   AletheiaTheme.sectionRadius,

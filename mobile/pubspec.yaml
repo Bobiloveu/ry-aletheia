@@ -47,6 +47,13 @@ dependencies:
   file_picker: ^10.3.8
   flutter_svg: ^2.2.3
 
+  # PoC only: embedded Unity visualization renderer transport. Selected at
+  # runtime by --dart-define=AV_ENGINE=unity; the Flutter renderer stays the
+  # default and the permanent fallback. Renderer-only — see
+  # packages/aletheia_visualization and unity/README.md.
+  aletheia_visualization:
+    path: packages/aletheia_visualization
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
