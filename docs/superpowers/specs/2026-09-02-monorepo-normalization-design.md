@@ -1,6 +1,6 @@
 # RY Aletheia Monorepo 工程结构整理设计
 
-**状态：** 第一阶段已实施，待合并至 `v2.0`  
+**状态：** 第一阶段已实施并合并至 `v2.0`（`0d1f47e`）
 **日期：** 2026-09-02  
 **范围：** 工程边界、开发入口、环境锁定、契约文档、Agent 规则与渐进式 CI；不重构机器人业务逻辑。
 
@@ -10,7 +10,7 @@
 
 本次目标是建立清晰的“逻辑 Monorepo”边界，并固定各端可复现的开发环境。稳定性优先于物理目录美观：第一阶段不移动依赖根目录布局的生产源代码。
 
-**实施记录：** 已建立 `shared/contracts`、`scripts`、模块 README/AGENTS、FVM 4.3.0 + Flutter 3.47.1 锁定和按路径 CI。根 Pixi 后端测试与 Web 构建已通过。Mobile 的 FVM 配置可用，但其现有 `features/reports` 源文件缺失，导致 analyze/test 不能通过；这不是环境或目录迁移导致，需作为独立移动端功能修复处理。
+**实施记录：** 已建立 `shared/contracts`、`scripts`、模块 README/AGENTS、FVM 4.3.0 + Flutter 3.47.1 锁定和按路径 CI。根 Pixi 后端测试、Web 构建、Mobile analyze/test、Android Debug APK 与 iOS Simulator 无签名构建均已通过。
 
 ## 2. 审计结论与不可直接迁移项
 

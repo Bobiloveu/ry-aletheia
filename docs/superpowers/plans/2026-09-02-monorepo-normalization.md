@@ -10,7 +10,7 @@
 
 **Spec:** docs/superpowers/specs/2026-09-02-monorepo-normalization-design.md
 
-**实施状态（2026-09-02）：** 第一阶段已完成并将合并至 `v2.0`。保留后端、Web、Mobile、ROS2/C++ 与 Unity 的真实源码位置；已新增逻辑模块边界、`shared/contracts`、统一脚本、FVM、文档索引、Agent 规则与按路径 CI。验证通过根 Pixi 后端测试与 Web 构建；Mobile 的 FVM 已可用，但工程当前缺失 `lib/features/reports/` 源文件，导致 `fvm flutter analyze/test` 失败，此项作为独立业务缺陷保留，未由本次结构整理伪造实现。
+**实施状态（2026-09-02）：** 第一阶段已完成并合并至 `v2.0`（`0d1f47e`）。保留后端、Web、Mobile、ROS2/C++ 与 Unity 的真实源码位置；已新增逻辑模块边界、`shared/contracts`、统一脚本、FVM、文档索引、Agent 规则与按路径 CI。根 Pixi 后端测试、Web 构建、FVM 静态分析与 152 个 Flutter 测试均通过；Android Debug APK 与 iOS Simulator 无签名构建均已通过。
 
 ## Global Constraints
 

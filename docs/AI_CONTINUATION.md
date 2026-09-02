@@ -1529,6 +1529,7 @@ Flutter 观测页显示 Unity 画面并验证生命周期无泄漏。不扩大 U
 - 根 Pixi 管理 backend/Web 工具链；新增 `backend-test`、`web-check`、`backend-run` alias，旧命令不变。
 - `mobile/.fvmrc` 以 FVM 4 JSON 格式固定 Flutter 3.47.1；本机已安装 FVM 4.3.0，Mobile 文档和 scripts 统一使用 FVM。JDK 26 仍不符合 Android 的 JDK 17 基线，doctor 会 WARN，不会阻断非 Mobile 开发。
 - 有系统 HTTP 代理时，Mobile 统一脚本会将 `127.0.0.1`、`localhost` 和 `::1` 加入 `NO_PROXY`，避免 Flutter tester/本地编译服务被代理截断；手动运行 Flutter 测试也必须保留该例外或临时清除代理。
+- 合并后的验证：根 `pixi run verify` 为 187 个 Python 测试与 Web Vite 构建通过；`./scripts/test-mobile.sh` 为 Flutter analyze 与 152 个测试通过；`fvm flutter build apk --debug` 和 `fvm flutter build ios --simulator --debug --no-codesign` 均通过。Flutter 仍提示部分插件的未来 Kotlin Gradle/SwiftPM 兼容性警告，当前不影响构建。
 - `scripts/` 提供 bootstrap、doctor、按模块测试及 Flutter-only mobile 构建；`.github/workflows/module-checks.yml` 按路径运行基础检查。
 - 物理迁移到 `apps/` 是第二阶段，前置条件位于 `docs/architecture/monorepo-migration.md`；未经单独计划不得移动源码。
 
