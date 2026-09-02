@@ -1,6 +1,6 @@
 # RY Aletheia 工程手册
 
-> 面向维护、开发、构建与现场排障人员。项目入口见 [README.md](README.md)；日常安装、使用和升级请优先阅读 [USER_GUIDE.md](USER_GUIDE.md) 与 [GitHub Releases](https://github.com/Bobiloveu/ry-aletheia/releases)。
+> 面向维护、开发、构建与现场排障人员。项目入口见 [README.md](README.md)；日常安装、使用和升级请优先阅读 [USER_GUIDE.md](USER_GUIDE.md) 与 [GitHub Releases](https://github.com/Bobiloveu/ry-aletheia/releases)。模块边界与迁移状态见 [docs/architecture](docs/architecture/README.md)，跨端接口事实来源见 [shared/contracts](shared/contracts/README.md)。
 
 本文也是交接基线：新增功能、替换依赖或在新车型部署前，先核对本文的接口契约、数据所有权和发布检查表，再开始实现。文中“不得”表示不能为临时排障绕过的运行边界。
 

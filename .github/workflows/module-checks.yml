@@ -1,0 +1,77 @@
+name: Module checks
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      web: ${{ steps.filter.outputs.web }}
+      mobile: ${{ steps.filter.outputs.mobile }}
+      contracts: ${{ steps.filter.outputs.contracts }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - web_console.py
+              - autodrive_console/**
+              - live_preprocessor/**
+              - config/**
+              - tasks/**
+              - packaging/**
+              - build_*.sh
+              - pixi.toml
+              - pixi.lock
+              - tests/**
+            web:
+              - frontend/**
+              - autodrive_console/web/**
+            mobile:
+              - mobile/**
+            contracts:
+              - shared/contracts/**
+
+  backend:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.contracts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.9.0
+      - run: pixi run test
+
+  web:
+    needs: changes
+    if: needs.changes.outputs.web == 'true' || needs.changes.outputs.contracts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.9.0
+      - run: pixi run frontend-install
+      - run: pixi run frontend-check
+
+  mobile:
+    needs: changes
+    if: needs.changes.outputs.mobile == 'true' || needs.changes.outputs.contracts == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.1
+          channel: stable
+      - run: dart pub global activate fvm 4.3.0
+      - run: echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+      - working-directory: mobile
+        run: |
+          fvm install
+          fvm flutter pub get
+          fvm flutter analyze
+          fvm flutter test

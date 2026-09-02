@@ -70,8 +70,11 @@ Console），面向与机器人处于同一可信局域网的机器人运行、�
 ## 本地运行
 
 ```sh
-flutter pub get
-flutter run
+# 一次性安装 FVM（固定版本，避免团队成员各自使用不同 Flutter SDK）。
+dart pub global activate fvm 4.3.0
+fvm install
+fvm flutter pub get
+fvm flutter run
 ```
 
 ## 通用打包
@@ -117,8 +120,14 @@ Distribution 签名与 provisioning profile。
 ## 验证
 
 ```sh
-flutter analyze
-dart test -r expanded
-flutter build ios --simulator --debug --no-codesign
-flutter build apk --debug
+fvm flutter analyze
+fvm flutter test -r expanded
+fvm flutter build ios --simulator --debug --no-codesign
+fvm flutter build apk --debug
 ```
+
+## 环境基线
+
+- Flutter 固定为 [`.fvmrc`](.fvmrc) 中的 `3.47.1`；所有开发、测试和构建命令均使用 `fvm flutter`。`pubspec.lock` 必须提交。
+- Android：AGP `9.1.0`、Gradle Wrapper `9.3.1`、Kotlin `2.4.0`、JDK `17`；`compileSdk`、`targetSdk` 与 `minSdk` 由固定 Flutter SDK 提供的值注入。不要在本机 JDK 不匹配时改写 Gradle 配置。
+- iOS：最低 iOS `15.0`、Swift `5.0`、CocoaPods 和 SwiftPM；`ios/Podfile.lock` 与两个 SwiftPM `Package.resolved` 必须提交。依赖变化才运行 `pod install`，不得为常规构建升级 Pods 或 Swift Packages。

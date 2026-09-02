@@ -27,6 +27,9 @@ test-offline = "bash -c 'if [ \"$(uname -s)\" = Darwin ]; then TMPDIR=/private/t
 test-realtime = "python -m pytest -q tests/test_live_observation_realtime.py"
 verify = { depends-on = ["test", "frontend-check"] }
 vue-preview = "./run_vue_preview.sh"
+backend-test = { depends-on = ["test"] }
+web-check = { depends-on = ["frontend-check"] }
+backend-run = "python web_console.py"
 
 # Windows 没有 Bash 与 POSIX 开发预览脚本。基础测试和前端开发使用等价的
 # 原生命令；完整 ROS2 构建、升级 ZIP/DEB 仍只能在目标 Linux 环境执行。

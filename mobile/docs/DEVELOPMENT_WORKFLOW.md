@@ -6,9 +6,11 @@
 
 ```sh
 cd /Users/bob/Desktop/code/ry-aletheia/mobile
-flutter --version
-flutter devices
-flutter pub get
+dart pub global activate fvm 4.3.0
+fvm install
+fvm flutter --version
+fvm flutter devices
+fvm flutter pub get
 ```
 
 当前 macOS 开发环境如存在系统代理，Flutter / Xcode 的依赖解析可能被代理污染。需临时清除代理时，在命令前使用：
@@ -16,8 +18,10 @@ flutter pub get
 ```sh
 env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
     -u http_proxy -u https_proxy -u all_proxy \
-    flutter <command>
+    fvm flutter <command>
 ```
+
+统一脚本会自动将 `127.0.0.1`、`localhost` 与 `::1` 加入 `NO_PROXY`，确保 Flutter tester 与本地编译服务直连；手动执行 `fvm flutter test` 时若出现本地 `127.0.0.1` 连接提前关闭，也应使用相同的 `NO_PROXY` 设置或上面的临时清除代理命令。
 
 不要把账号、私有 token 或局域网机器人地址写入源码、截图或提交记录。
 
@@ -26,13 +30,13 @@ env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
 ### 常规 App
 
 ```sh
-flutter run -d <device-id>
+fvm flutter run -d <device-id>
 ```
 
 设备 ID 从 `flutter devices` 取得。iOS Simulator 示例：
 
 ```sh
-flutter run --debug -d B77BE4F1-BC75-4837-A759-309D06AA9D20
+fvm flutter run --debug -d B77BE4F1-BC75-4837-A759-309D06AA9D20
 ```
 
 ### Debug UI Gallery
@@ -40,14 +44,14 @@ flutter run --debug -d B77BE4F1-BC75-4837-A759-309D06AA9D20
 Gallery 仅在 Debug build 注册；它不需要机器人也不请求真实 HTTP、WebSocket、ROS 或 WebRTC。
 
 ```sh
-flutter run --debug -d <device-id> \
+fvm flutter run --debug -d <device-id> \
   --route '/__debug/ui-gallery'
 ```
 
 直接打开具体状态（screen key 以 `lib/debug_ui/gallery_manifest.dart` 为准）：
 
 ```sh
-flutter run --debug -d <device-id> \
+fvm flutter run --debug -d <device-id> \
   --route '/__debug/ui-gallery?screen=observe_live'
 ```
 
@@ -59,15 +63,15 @@ flutter run --debug -d <device-id> \
 
 ```sh
 dart format lib/path/to/changed_file.dart test/path/to/test.dart
-flutter test test/path/to/test.dart -r compact
-flutter analyze
+fvm flutter test test/path/to/test.dart -r compact
+fvm flutter analyze
 ```
 
 ### 合并前完整 Dart 验证
 
 ```sh
-flutter test --concurrency=1 -r compact
-flutter analyze
+fvm flutter test --concurrency=1 -r compact
+fvm flutter analyze
 git diff --check
 git status --short
 ```
@@ -77,7 +81,7 @@ git status --short
 ### Gallery Golden 与 UI 文档
 
 ```sh
-flutter test test/debug_ui -r compact
+fvm flutter test test/debug_ui -r compact
 dart run tool/generate_ui_docs.dart
 ```
 
@@ -88,7 +92,7 @@ dart run tool/generate_ui_docs.dart
 ### Android
 
 ```sh
-flutter build apk --debug
+fvm flutter build apk --debug
 ```
 
 输出通常为：
@@ -102,7 +106,7 @@ build/app/outputs/flutter-apk/app-debug.apk
 ### iOS Simulator
 
 ```sh
-flutter build ios --simulator --debug --no-codesign
+fvm flutter build ios --simulator --debug --no-codesign
 ```
 
 输出通常为：
@@ -116,7 +120,7 @@ build/ios/iphonesimulator/Runner.app
 首次实机需要有效的 Xcode signing team、Developer Mode 和设备信任。推荐先在 Xcode 打开 `ios/Runner.xcworkspace`，确认 Signing & Capabilities 后再使用 Flutter 安装：
 
 ```sh
-flutter run --debug -d <physical-ios-device-id>
+fvm flutter run --debug -d <physical-ios-device-id>
 ```
 
 如出现 Swift Package Manager 失败，不要误判为 Flutter/Dart 页面问题。先检查完整 `xcodebuild` 日志、网络/DNS/代理、Xcode 的 Package Dependencies 与本地缓存，再重试。依赖正在显示 “Fetching from … (cached)” 时是 Xcode 在解析 iOS 原生插件依赖，不是 App 已卡死。
@@ -175,9 +179,9 @@ App 内 Logo 使用 `assets/branding/aletheia_icon_vector.svg`。系统桌面图
 
 ```sh
 ./tool/regenerate_launcher_icons.sh
-flutter pub get
-flutter build apk --debug
-flutter build ios --simulator --debug --no-codesign
+fvm flutter pub get
+fvm flutter build apk --debug
+fvm flutter build ios --simulator --debug --no-codesign
 ```
 
 该脚本通过 macOS `sips` 生成临时 PNG 设计输入，再调用 launcher icon 配置生成 iOS/Android 所需尺寸。不要手动编辑 `ios/Runner/Assets.xcassets/AppIcon.appiconset/` 或 Android `mipmap-*` 的生成 PNG。
@@ -232,8 +236,8 @@ git worktree add ../ry-aletheia-mobile-feature -b feature/mobile-feature
 ### 架构 / UI 决策
 - ...
 ### 问题与验证状态
-- `flutter analyze`：...
-- `flutter test ...`：...
+- `fvm flutter analyze`：...
+- `fvm flutter test ...`：...
 - iOS / Android：...
 ### Resume Prompt
 先读取 PROJECT_OVERVIEW.md、mobile/AGENTS.md、AI_CONTINUATION.md、设计文档与当前 diff；确认状态后从“下一步第一件事”继续。
