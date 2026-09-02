@@ -15,6 +15,12 @@
 7. [`../docs/AI_CONTINUATION.md`](../docs/AI_CONTINUATION.md)：上一次工作断点。它是上下文，不会自动授权未说明的范围扩大。
 8. 当前 `git status --short`、`git diff`，以及将要改动文件的完整源码和测试。
 
+Flutter SDK 以 [` .fvmrc`](.fvmrc) 锁定的 `3.47.1` 为准。首次进入模块执行
+`dart pub global activate fvm 4.3.0 && fvm install`；后续统一使用 `fvm flutter`
+而非裸 `flutter`。Android 维持 JDK 17、AGP 9.1.0、Gradle 9.3.1、Kotlin 2.4.0；
+iOS 维持 iOS 15.0、Swift 5.0、CocoaPods 和 SwiftPM。不要为解决本机环境差异升级
+这些锁定版本，也不要删除 `pubspec.lock`、`Podfile.lock` 或 `Package.resolved`。
+
 如果文档与源码不一致：先以 `PROJECT_OVERVIEW.md` 和可运行源码为准，记录差异，再修正文档；不要凭记忆重写协议。
 
 ## 1. 不可跨越的边界
@@ -26,6 +32,7 @@
 - 不用 `try/catch` 吞掉 WebRTC renderer、PeerConnection、MediaStream 生命周期错误。要修复真实的 initialize / dispose / 切流竞态，并测试切流。
 - 不能以 Gallery mock 代替正式页面。Gallery 必须通过真实 Page/Widget/Theme + Mock 状态驱动。
 - 不执行 `git reset --hard`、`git checkout --`、自动提交或覆盖未归属的脏改动。
+- Flutter `CustomPaint` 是当前正式渲染主线；Unity 仅为暂停 PoC。除非任务明确恢复该 PoC，否则不得传入 Unity 构建开关或将其设为默认。
 
 ## 2. 当前代码边界
 
@@ -78,7 +85,7 @@ lib/
 2. 找到所属 feature 的 Page、Controller、Repository 与测试。
 3. 最小化实现；避免同时改变 UI、协议和状态模型。
 4. 对改动 Dart 文件执行 `dart format <files>`。
-5. 运行相关 test；随后运行 `flutter analyze` 与 `git diff --check`。
+5. 运行相关 test；随后运行 `fvm flutter analyze` 与 `git diff --check`。
 6. UI 可见变化时，更新 Gallery state / Golden / Screen Inventory（按实际需要），并在真机或 Simulator 检查横竖屏。
 
 ### 新增屏幕或关键状态
@@ -110,10 +117,10 @@ lib/
 | 改动类型 | 至少执行 |
 | --- | --- |
 | 纯文档 | 链接/事实复核、`git diff --check` |
-| 单 feature Dart | 定向 `flutter test` + `flutter analyze` |
-| UI / Theme / Router / Gallery | 全量 `flutter test --concurrency=1 -r compact` + Gallery Golden + Simulator 横竖屏检查 |
+| 单 feature Dart | 定向 `fvm flutter test` + `fvm flutter analyze` |
+| UI / Theme / Router / Gallery | 全量 `fvm flutter test --concurrency=1 -r compact` + Gallery Golden + Simulator 横竖屏检查 |
 | Map / WS / WHEP | 上述 UI 验证 + 真机/真实车端受控验证；说明未验证项 |
-| iOS / Android / 依赖 / icon | 两平台构建；`flutter pub get`（依赖变更时） |
+| iOS / Android / 依赖 / icon | 两平台构建；`fvm flutter pub get`（依赖变更时） |
 
 命令、输出路径、真机调试与故障排查见 `docs/DEVELOPMENT_WORKFLOW.md`。
 
