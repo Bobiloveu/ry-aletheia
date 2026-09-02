@@ -76,3 +76,16 @@ def test_docs_and_agent_rules_link_real_modules() -> None:
         assert (ROOT / "docs" / section / "README.md").is_file(), section
     assert "shared/contracts" in agents
     assert "scripts/doctor.sh" in readme
+
+
+def test_ci_is_split_by_module_and_excludes_unity_builds() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "module-checks.yml").read_text(
+        encoding="utf-8"
+    )
+    for job in ("backend:", "web:", "mobile:", "contracts:"):
+        assert job in workflow
+    for path in ("autodrive_console/**", "frontend/**", "mobile/**", "shared/contracts/**"):
+        assert path in workflow
+    assert "flutter analyze" in workflow
+    assert "flutter test" in workflow
+    assert "unity" not in workflow.lower()
