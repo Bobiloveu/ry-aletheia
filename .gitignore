@@ -26,7 +26,7 @@ releases/
 
 # Robot/runtime state; never commit test evidence or field logs
 install/
-reports/
+/reports/
 logs/
 maps_cache/
 deployments/
@@ -39,3 +39,7 @@ config/scenario_backups/
 # OS/editor noise
 .DS_Store
 *.swp
+/.vscode/
+.idea/
+.fleet/
+*.code-workspace

@@ -5,11 +5,14 @@ target="${1:-help}"
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/bootstrap.sh [backend|web|mobile|all]
+Usage: ./scripts/bootstrap.sh [backend|web|mobile|mobile-android|mobile-ios|all|full]
   backend  install the Pixi environment
   web      install locked frontend dependencies
-  mobile   install the FVM-pinned Flutter SDK and packages
+  mobile   compatibility alias for mobile-android
+  mobile-android  install the FVM-pinned Flutter SDK and packages for Android/common Dart work
+  mobile-ios      install the FVM-pinned Flutter SDK and packages for iOS/common Dart work (macOS only)
   all      initialize each available domain; missing optional tools are warnings
+  full     alias for all
 EOF
 }
 
@@ -39,8 +42,15 @@ bootstrap_mobile() {
 case "$target" in
   backend) bootstrap_backend ;;
   web) bootstrap_web ;;
-  mobile) bootstrap_mobile ;;
-  all) bootstrap_backend; bootstrap_web; bootstrap_mobile ;;
+  mobile|mobile-android) bootstrap_mobile ;;
+  mobile-ios)
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+      echo "[UNSUPPORTED] mobile-ios bootstrap requires macOS with Xcode" >&2
+      exit 0
+    fi
+    bootstrap_mobile
+    ;;
+  all|full) bootstrap_backend; bootstrap_web; bootstrap_mobile ;;
   help|-h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

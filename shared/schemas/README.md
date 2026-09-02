@@ -1,3 +1,3 @@
-# Shared schemas
+# 共享 Schema
 
-This directory is reserved for versioned JSON Schema and other declarative cross-client data formats. Do not place Python, Dart, JavaScript, ROS, or generated implementation code here. A schema addition requires backend validation and at least one consuming-client test.
+本目录预留给版本化 JSON Schema 及其他声明式跨客户端数据格式。不得在此放置 Python、Dart、JavaScript、ROS 或生成的实现代码。新增 schema 必须经过 Backend 校验，并至少具备一个消费者测试。

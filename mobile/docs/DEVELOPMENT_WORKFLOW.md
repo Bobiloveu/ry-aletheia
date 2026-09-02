@@ -2,6 +2,10 @@
 
 本文命令均在 `mobile/` 目录执行。车端服务使用可信局域网的既有 HTTP/WS/WHEP 接口；不要把调试便利性当作放宽生产安全边界的理由。
 
+开发者先阅读 [`../../docs/development/PROFILES.md`](../../docs/development/PROFILES.md) 选择
+`mobile-android` 或 `mobile-ios`。Windows/Linux 可以完整开发、分析、测试 Flutter 公共 Dart
+代码并构建 Android；iOS 原生编译、Simulator 和签名验证只在 macOS 执行。
+
 ## 1. 环境检查
 
 ```sh
@@ -76,7 +80,7 @@ git diff --check
 git status --short
 ```
 
-当前已建立的全量测试基线为 **136 tests**；该数字会随着真实测试增加而变化，验收以命令退出成功及失败项说明为准。`--concurrency=1` 用于让 Golden 和依赖共享资源的测试在本机可重复。
+全量测试数量会随着真实测试增加而变化；验收以命令成功退出及失败项说明为准，而不是文档中的固定数量。`--concurrency=1` 用于让 Golden 和依赖共享资源的测试在本机可重复。
 
 ### Gallery Golden 与 UI 文档
 

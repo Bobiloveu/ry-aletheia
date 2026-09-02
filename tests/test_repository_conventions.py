@@ -1,5 +1,9 @@
 import json
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,10 +41,51 @@ def test_mobile_docs_use_fvm_and_keep_platform_locks() -> None:
     assert ".fvm/" in (ROOT / "mobile" / ".gitignore").read_text(encoding="utf-8")
 
 
+def test_runtime_reports_ignore_rule_does_not_hide_mobile_reports_source() -> None:
+    root_ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    assert "\n/reports/\n" in root_ignore
+    assert "\nreports/\n" not in root_ignore
+    assert (
+        ROOT
+        / "mobile"
+        / "lib"
+        / "features"
+        / "reports"
+        / "application"
+        / "reports_controller.dart"
+    ).is_file()
+
+
 def test_doctor_detects_dart_global_fvm_outside_interactive_shells() -> None:
     doctor = (ROOT / "scripts" / "doctor.sh").read_text(encoding="utf-8")
 
     assert '"$HOME/.pub-cache/bin/fvm"' in doctor
+
+
+def test_development_doctors_expose_supported_profiles() -> None:
+    doctor = (ROOT / "scripts" / "doctor.sh").read_text(encoding="utf-8")
+
+    assert "mobile-android" in doctor
+    assert "mobile-ios" in doctor
+    assert "UNSUPPORTED" in doctor
+    assert (ROOT / "scripts" / "doctor.ps1").is_file()
+
+
+def test_web_doctor_treats_pixi_as_required_without_optional_duplicate() -> None:
+    if shutil.which("bash") is None:
+        pytest.skip("Bash Doctor runtime check is not available on this host")
+    result = subprocess.run(
+        ["bash", "scripts/doctor.sh", "--profile", "web"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[OK] Pixi" in result.stdout
+    assert "[OPTIONAL] Pixi (not required by profile web)" not in result.stdout
 
 
 def test_mobile_scripts_detect_dart_global_fvm_outside_interactive_shells() -> None:
@@ -66,6 +111,22 @@ def test_contracts_mark_existing_and_document_realtime_lanes() -> None:
     assert "Status: Existing" in observation
     assert "ALTM v1" in observation
     assert all(port in observation for port in ("8768", "8769", "8770"))
+
+
+def test_robot_control_contract_contains_runtime_safety_rules() -> None:
+    control = (ROOT / "shared" / "contracts" / "robot_control.md").read_text(
+        encoding="utf-8"
+    )
+
+    for required in (
+        "navigation",
+        "miniapp",
+        "forward",
+        "1.00",
+        "heartbeat",
+        "/api/vehicle-control/enter",
+    ):
+        assert required in control
 
 
 def test_scripts_delegate_to_existing_tools() -> None:
@@ -96,14 +157,25 @@ def test_docs_and_agent_rules_link_real_modules() -> None:
     assert "scripts/doctor.sh" in readme
 
 
-def test_ci_is_split_by_module_and_excludes_unity_builds() -> None:
+def test_development_profile_document_is_linked_from_root_readme() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert (ROOT / "docs" / "development" / "PROFILES.md").is_file()
+    assert "docs/development/PROFILES.md" in readme
+
+
+def test_ci_is_split_by_module_and_platform_and_excludes_unity_builds() -> None:
     workflow = (ROOT / ".github" / "workflows" / "module-checks.yml").read_text(
         encoding="utf-8"
     )
-    for job in ("backend:", "web:", "mobile:", "contracts:"):
+    for job in ("backend:", "web:", "mobile-common:", "android:", "ios:", "contracts:"):
         assert job in workflow
     for path in ("autodrive_console/**", "frontend/**", "mobile/**", "shared/contracts/**"):
         assert path in workflow
     assert "flutter analyze" in workflow
     assert "flutter test" in workflow
+    assert "flutter build apk --debug" in workflow
+    assert "flutter build ios --simulator --debug --no-codesign" in workflow
+    assert "ubuntu-latest" in workflow
+    assert "macos-latest" in workflow
     assert "unity" not in workflow.lower()

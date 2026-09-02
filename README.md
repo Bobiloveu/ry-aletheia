@@ -6,13 +6,17 @@ RY Aletheia 是部署在机器人小车本机的离线自动测试平台，用�
 
 ## 开发入口
 
-先运行 `./scripts/doctor.sh`；缺少当前不开发模块的工具只会提示 WARN。
+先按职责运行 `./scripts/doctor.sh --profile <profile>`；未选择模块的工具显示
+`OPTIONAL`，当前操作系统不支持的 iOS 工具显示 `UNSUPPORTED`，不会阻断 Backend、Web
+或 Android 开发。完整的角色、操作系统和命令矩阵见
+[docs/development/PROFILES.md](docs/development/PROFILES.md)。
 
 | 开发域 | 实际位置 | 最小命令 |
 | --- | --- | --- |
 | Robot Backend | `web_console.py`、`autodrive_console/`、`live_preprocessor/` | `./scripts/test-backend.sh` |
 | Web Console | `frontend/` | `./scripts/test-web.sh` |
-| Flutter Mobile | `mobile/` | `./scripts/test-mobile.sh`（先安装 FVM） |
+| Flutter Mobile Android | `mobile/` | `./scripts/test-mobile.sh`（先安装 FVM） |
+| Flutter Mobile iOS | `mobile/` | macOS 上使用 `fvm flutter build ios --simulator --debug --no-codesign` |
 | Unity | `unity/` | 当前暂停，不属于默认构建 |
 
 源码尚未物理迁移到 `apps/`；迁移条件见
@@ -21,6 +25,10 @@ RY Aletheia 是部署在机器人小车本机的离线自动测试平台，用�
 [架构](docs/architecture/README.md)、[后端](docs/backend/README.md)、
 [Web](docs/web/README.md)、[Mobile](docs/mobile/README.md) 和
 [部署](docs/deployment/README.md)。
+
+不同模块只准备自身需要的工具链：Backend/Web 使用 Pixi；Mobile 使用 FVM；Android 需要
+JDK 和 Android SDK；iOS 只在 macOS 上额外需要 Xcode 与 CocoaPods。根脚本目录见
+[scripts/README.md](scripts/README.md)。
 
 ## 快速开始
 
@@ -85,7 +93,7 @@ http://<小车IP>:8087
 - 测试用例导入、校验、别名管理及跨车用例包交付。
 - 多轮串行测试、场景前置参数的事务化受控替换、Supervisor 依赖编排与人工恢复；场景应用和恢复均验证受控运行依赖已重新读取脚本。
 - 多地图轨迹、理想路径与虚拟墙证据，以及 HTML/CSV 离线报告。
-- 低延迟实时观测：PC 保持原有高对比地图观测界面；移动端由 PixiJS 渲染深色占据地图、自适应米制格栅、虚拟墙和点云，DOM 覆盖车体。四路工业相机、目标检测结果图和可通行区域分割图经可选 MediaMTX/WebRTC 直出，并可由网页按需启停。
+- 低延迟实时观测：PC Web 保持 PixiJS 高对比地图观测界面；移动端使用 Flutter `CustomPaint` 渲染地图、米制格栅、虚拟墙、点云和车体。四路工业相机、目标检测结果图和可通行区域分割图经可选 MediaMTX/WebRTC 直出，并可由网页按需启停。
 - PC 桌面布局与独立移动端界面；全部 `/m/` 业务页使用统一的品牌栏、五项底部导航和石墨暖灰主题。手机实时观测同时适配横屏、竖屏及带常驻地址栏的低高度视口：浅横屏优先呈现可读的横向地图工作区，可在地图与六路 WebRTC 相机之间单触切换。页面缩放被锁定，双指缩放仅作用于地图世界视图。
 - 完整离线 DEB 不携带通用 ROS-Web Bridge，不改写小车已有 ROS 环境。
 

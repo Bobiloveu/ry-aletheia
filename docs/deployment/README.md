@@ -1,3 +1,3 @@
-# Deployment documentation
+# 部署文档
 
-Robot release, DEB, upgrade, configuration, and video runtime instructions remain in [PROJECT_OVERVIEW](../../PROJECT_OVERVIEW.md) and root build scripts. Review the [deployment contract](../../shared/contracts/deployment.md) before changing client-facing map or deployment behavior.
+机器人发布、DEB、升级、配置和视频运行时说明保留在 [PROJECT_OVERVIEW](../../PROJECT_OVERVIEW.md) 与根目录构建脚本中。修改面向客户端的地图或部署行为前，阅读[部署契约](../../shared/contracts/deployment.md)。

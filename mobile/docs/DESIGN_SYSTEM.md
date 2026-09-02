@@ -1,93 +1,63 @@
-# Aletheia Mobile Design System
+# Aletheia Mobile 设计系统
 
-## Intent
+## 设计目标
 
-Aletheia Mobile is a Mobile Robot HMI / Test & Diagnostic Console for trusted
-local-network robots. It brings robot status, real-time visualisation, testing,
-and diagnostics into one mobile HMI surface.
+Aletheia Mobile 是服务于可信局域网机器人的移动机器人 HMI / 测试与诊断控制台，将机器人状态、实时可视化、测试和诊断汇聚到一个移动端 HMI 界面。
 
-The default visual language is a restrained graphite information surface:
-compact, legible, and calm under operational pressure. A separately reviewed
-daylight palette uses a cool, low-glare field background for bright work areas.
-It is not a marketing interface and does not use decorative gradients, glass
-layers, or autonomous motion. Observation remains visually and architecturally
-separate from any future Operation / Command capability.
+默认视觉语言为克制的石墨色信息界面：紧凑、清晰，并在操作压力下保持冷静。经过独立评审的日光配色在明亮工作场景使用低眩光冷色背景。它不是营销界面，不使用装饰性渐变、玻璃质感层或自主循环动效。观测能力在视觉和架构上始终与未来的 Operation / Command 能力分离。
 
-## Tokens
+## Token
 
-| Role | Token | Value |
+| 角色 | Token | 值 |
 | --- | --- | --- |
-| App background | `canvas` | `#101415` |
-| Standard surface | `surface` | `#181E20` |
-| Raised control surface | `surfaceRaised` | `#20282A` |
-| Recessed navigation and quiet blocks | `surfaceSunken` / `surfaceMuted` | `#0C1011` / `#141A1C` |
-| Primary text | `textPrimary` | `#EAF0EF` |
-| Secondary text | `textSecondary` | `#B5C1BF` |
-| Supporting text | `textTertiary` | `#82918F` |
-| Standard border | `border` | `#354140` |
-| Primary action and neutral signal | `cyan` | `#9BC7C0` |
-| Success | `mint` | `#8CC49A` |
-| Warning | `warning` | `#E2B46E` |
-| Error | `danger` | `#DD837B` |
+| App 背景 | `canvas` | `#101415` |
+| 标准表面 | `surface` | `#181E20` |
+| 抬升控制表面 | `surfaceRaised` | `#20282A` |
+| 下沉导航与安静区块 | `surfaceSunken` / `surfaceMuted` | `#0C1011` / `#141A1C` |
+| 主文本 | `textPrimary` | `#EAF0EF` |
+| 次文本 | `textSecondary` | `#B5C1BF` |
+| 辅助文本 | `textTertiary` | `#82918F` |
+| 标准边框 | `border` | `#354140` |
+| 主操作与中性信号 | `cyan` | `#9BC7C0` |
+| 成功 | `mint` | `#8CC49A` |
+| 警告 | `warning` | `#E2B46E` |
+| 错误 | `danger` | `#DD837B` |
 
-## Daylight palette
+## 日光配色
 
-Daylight is an explicit handset preference, not automatic colour inversion.
-It keeps the same hierarchy, radius, type, controls and semantic meanings as
-the default HMI dark treatment.
+日光模式是明确的设备偏好，并非自动颜色反转。它与默认 HMI 深色模式保持相同的信息层级、圆角、字体、控件和语义。
 
-| Role | Token | Value |
+| 角色 | Token | 值 |
 | --- | --- | --- |
-| App background | `canvas` | `#F2F6F5` |
-| Standard surface | `surface` | `#FCFEFD` |
-| Raised control surface | `surfaceRaised` | `#E8EFED` |
-| Recessed navigation and quiet blocks | `surfaceSunken` / `surfaceMuted` | `#E6EEEC` / `#EDF3F1` |
-| Primary text | `textPrimary` | `#16201F` |
-| Secondary text | `textSecondary` | `#41504E` |
-| Supporting text | `textTertiary` | `#667573` |
-| Standard border | `border` | `#C5D1CE` |
-| Primary action and neutral signal | `cyan` | `#216D65` |
-| Success / warning / error | `mint` / `warning` / `danger` | `#287243` / `#8C5B08` / `#B5423B` |
+| App 背景 | `canvas` | `#F2F6F5` |
+| 标准表面 | `surface` | `#FCFEFD` |
+| 抬升控制表面 | `surfaceRaised` | `#E8EFED` |
+| 下沉导航与安静区块 | `surfaceSunken` / `surfaceMuted` | `#E6EEEC` / `#EDF3F1` |
+| 主文本 | `textPrimary` | `#16201F` |
+| 次文本 | `textSecondary` | `#41504E` |
+| 辅助文本 | `textTertiary` | `#667573` |
+| 标准边框 | `border` | `#C5D1CE` |
+| 主操作与中性信号 | `cyan` | `#216D65` |
+| 成功 / 警告 / 错误 | `mint` / `warning` / `danger` | `#287243` / `#8C5B08` / `#B5423B` |
 
-Pure white and pure black are intentionally avoided. The daylight primary
-action uses an off-white foreground with sufficient contrast; status colours
-remain reserved for real state, never decoration. Map, PointCloud, robot and
-virtual-wall layers keep distinct semantic colours in both palettes.
+有意避免纯白与纯黑。日光模式的主操作使用对比度充足的米白色前景；状态色仅表达真实状态，绝不作装饰。地图、PointCloud、机器人和虚拟墙图层在两套配色中保持可区分的语义色。
 
-Semantic colours communicate a real action or status. They are not decoration.
-The primary signal is used for the selected destination, primary action, focus,
-and neutral in-progress state. Success, warning, and error retain their status
-meaning across all screens.
+语义色必须传达真实动作或状态，而非装饰。主信号用于已选目的地、主操作、焦点与中性进行中状态。成功、警告和错误在所有屏幕中保持相同状态含义。
 
-## Type and spacing
+## 字体与间距
 
-- Use the platform system typeface through Material 3. `headlineSmall` is 25px
-  at 700 weight; section titles are 16px at 700; body copy is 14px with 1.45
-  line height; supporting text is 12px.
-- Keep page titles left aligned. Small icon labels can identify a page or a
-  panel, but must not use all-caps tracking as decoration.
-- Use a 4px rhythm. Common gaps are 8, 12, 16, 20, 24, and 32px.
-- Controls use a 10px radius, grouped status surfaces use 14px, and primary
-  panels use 18px. Pills are reserved for concise status and metadata.
+- 通过 Material 3 使用平台系统字体。`headlineSmall` 为 25px、700 字重；区块标题为 16px、700 字重；正文为 14px、1.45 行高；辅助文字为 12px。
+- 页面标题保持左对齐。小型图标标签可识别页面或面板，但不得以全大写字间距作为装饰。
+- 使用 4px 节奏，常用间距为 8、12、16、20、24 和 32px。
+- 控件圆角为 10px，分组状态表面为 14px，主面板为 18px。Pill 仅用于简短状态和元数据。
 
-## Surfaces and interaction
+## 表面与交互
 
-- Panels use one-pixel `border` outlines and no decorative drop shadows.
-- Inputs use `surfaceRaised`; their focus ring is the primary signal colour.
-- Standard navigation uses `surfaceSunken`, separated structurally from page content. The short-landscape instrument strip is the exception: it shares the `canvas` background with the active HMI workspace, so its boundary is a quiet structural divider rather than a heavy dark slab.
-- Short landscape uses a 56pt icon-only instrument navigation strip with 44pt destinations and a 44pt header. Robot, Observation and Tools are the three HMI workspaces; Settings is a separate phone-local primary destination and never becomes a robot tool. The selected destination uses the neutral raised-control surface and signal-colour icon. The strip does not add a permanent blank safe-area column: the divider stays tight to the left when the Dynamic Island is on the trailing side, and only reserves the leading system inset when necessary to keep controls reachable. Labels remain available through Tooltip and accessibility semantics.
-- Buttons must stay at least 46px high. The primary action uses the signal
-  colour; cancellation remains outlined and uses the error colour only when it
-  is truly destructive.
-- Material press feedback is retained. There are no automatic or looping
-  animations in this high-frequency operational flow.
-- Switching appearance is an explicit user preference with exactly two
-  choices: the default HMI dark palette and the daylight palette. The HMI
-  keeps its content and geometry stable while only the palette changes, so
-  map evidence never appears to move or reflow because of a visual
-  preference. App chrome, system status/navigation bars and page content must
-  all receive the same inherited Theme update; no region may retain the prior
-  palette after the transition settles.
-- A map may contain only lightweight map-specific controls. Persistent pose
-  and point-cloud readouts sit directly below it or in a dedicated side area,
-  never as opaque cards over map evidence.
+- 面板使用一像素 `border` 描边，不使用装饰性投影。
+- 输入框使用 `surfaceRaised`；焦点环为主信号色。
+- 标准导航使用 `surfaceSunken`，在结构上与页面内容分离。短横屏仪表条为例外：它与活动 HMI 工作区共用 `canvas` 背景，因此边界采用安静的结构分隔，而非厚重深色板块。
+- 短横屏使用 56pt 的纯图标仪表导航条，目的地最小 44pt，标题栏为 44pt。机器人、观测和工具是三类 HMI 工作区；设置是独立的手机本地一级入口，绝不成为机器人工具。已选目的地使用中性抬升控制表面和信号色图标。导航条不增加永久空白安全区列：Dynamic Island 位于右侧时分隔线紧贴左侧；仅在必须确保控件可达时预留前导系统 inset。标签通过 Tooltip 和无障碍语义继续可用。
+- 按钮高度至少 46px。主操作使用信号色；取消为描边样式，只有真实破坏性操作才使用错误色。
+- 保留 Material 按压反馈。高频操作流中不使用自动或循环动画。
+- 外观切换是明确用户偏好，只有默认 HMI 深色和日光两种选择。HMI 在切换时仅改变配色，内容和几何保持稳定，避免地图证据因视觉偏好而移动或重排。App chrome、系统状态/导航栏和页面内容必须接收相同继承 Theme 更新；切换完成后不允许任何区域保留旧配色。
+- 地图中只能放置轻量的地图专用控件。持续位姿和点云读数位于地图正下方或专用侧栏，绝不以不透明卡片覆盖地图证据。

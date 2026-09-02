@@ -1,14 +1,14 @@
-# Task execution
+# 任务执行
 
-**Status: Existing**
-**Authoritative implementations:** web_console.py, autodrive_console/case_store.py, autodrive_console/run_manager.py, and Mobile feature repositories
-**Consumers:** robot_backend, web_console, mobile
-**Compatibility:** Additive changes first; breaking changes require all consumers and this document to change together.
+**Status: Existing（已实现）**
+**权威实现：** `web_console.py`、`autodrive_console/case_store.py`、`autodrive_console/run_manager.py` 和 Mobile 功能 Repository
+**消费者：** `robot_backend`、`web_console`、`mobile`
+**兼容性：** 优先增量变更；破坏性变更必须同时更新所有消费者和本文档。
 
-The backend owns task files, validation, execution state, reports, cancellation, recovery, and supervisor coordination. Existing API families are /api/cases, /api/runs, /api/runs/latest, /api/reports, /api/scenario-setup, /api/supervisor/processes, and /api/tool-logs.
+Backend 拥有任务文件、校验、执行状态、报告、取消、恢复和 supervisor 协调能力。现有 API 家族包括 `/api/cases`、`/api/runs`、`/api/runs/latest`、`/api/reports`、`/api/scenario-setup`、`/api/supervisor/processes` 和 `/api/tool-logs`。
 
-Mutating operations are controlled actions: client UI exposes target, confirmation, returned error, and current state. Mobile may consume these APIs but must not directly rewrite robot tasks, run arbitrary commands, or create an offline upgrade package.
+变更性操作属于受控动作：客户端 UI 必须呈现目标、确认、返回错误和当前状态。Mobile 可以消费这些 API，但不得直接改写机器人任务、执行任意命令或创建离线升级包。
 
-## Planned
+## Planned（规划中）
 
-New task schema versions need a JSON schema in shared/schemas, backend validation, a consumer compatibility review, and migration guidance before use.
+新的任务 schema 版本在使用前，需要在 `shared/schemas` 中提供 JSON Schema、经过 Backend 校验、完成消费者兼容性评审并给出迁移说明。

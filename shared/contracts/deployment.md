@@ -1,14 +1,14 @@
-# Deployment and map configuration
+# 部署与地图配置
 
-**Status: Existing**
-**Authoritative implementations:** autodrive_console/deployment.py, autodrive_console/mapping.py, web_console.py, and deployment Web UI
-**Consumers:** robot_backend, web_console, mobile
-**Compatibility:** Additive changes first; breaking changes require all consumers and this document to change together.
+**Status: Existing（已实现）**
+**权威实现：** `autodrive_console/deployment.py`、`autodrive_console/mapping.py`、`web_console.py` 和部署 Web UI
+**消费者：** `robot_backend`、`web_console`、`mobile`
+**兼容性：** 优先增量变更；破坏性变更必须同时更新所有消费者和本文档。
 
-The existing deployment API begins at /api/deployments. Per-project routes cover map import/upload, map stages, transitions, routes, scene model, map instances, waypoints, component templates/components, virtual walls, and topology. Mapping sessions are controlled through /api/mapping and /api/mapping/sessions routes.
+现有部署 API 以 `/api/deployments` 开始。按项目划分的路由覆盖地图导入/上传、地图阶段、转场、路线、场景模型、地图实例、航点、组件模板/组件、虚拟墙和拓扑。建图会话由 `/api/mapping` 与 `/api/mapping/sessions` 路由控制。
 
-Backend validation is authoritative: clients display and submit user intent but do not write deployment files or robot configuration directly. Map image, metadata, virtual wall, and topology edits retain project/map ownership.
+Backend 校验具有权威性：客户端展示并提交用户意图，但不得直接写入部署文件或机器人配置。地图图像、元数据、虚拟墙和拓扑编辑都保留项目/地图所有权。
 
-## Planned
+## Planned（规划中）
 
-New deployment data formats must be described in shared/schemas before they are cross-client inputs. Planned fields remain Planned until the backend exposes and validates them.
+新的部署数据格式在成为跨客户端输入前，必须在 `shared/schemas` 中说明。Planned 字段在 Backend 暴露并完成校验前，始终保持 Planned 状态。

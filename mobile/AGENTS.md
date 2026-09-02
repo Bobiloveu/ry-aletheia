@@ -15,7 +15,9 @@
 7. [`../docs/AI_CONTINUATION.md`](../docs/AI_CONTINUATION.md)：上一次工作断点。它是上下文，不会自动授权未说明的范围扩大。
 8. 当前 `git status --short`、`git diff`，以及将要改动文件的完整源码和测试。
 
-Flutter SDK 以 [` .fvmrc`](.fvmrc) 锁定的 `3.47.1` 为准。首次进入模块执行
+Flutter SDK 以 [` .fvmrc`](.fvmrc) 锁定的 `3.47.1` 为准。先按
+[`../docs/development/PROFILES.md`](../docs/development/PROFILES.md) 选择 Android 或 iOS
+Profile；Windows/Linux 的 iOS 条目为 `UNSUPPORTED` 而不是 Mobile 环境故障。首次进入模块执行
 `dart pub global activate fvm 4.3.0 && fvm install`；后续统一使用 `fvm flutter`
 而非裸 `flutter`。Android 维持 JDK 17、AGP 9.1.0、Gradle 9.3.1、Kotlin 2.4.0；
 iOS 维持 iOS 15.0、Swift 5.0、CocoaPods 和 SwiftPM。不要为解决本机环境差异升级
@@ -28,6 +30,7 @@ iOS 维持 iOS 15.0、Swift 5.0、CocoaPods 和 SwiftPM。不要为解决本机�
 - 不修改 ROS2、后端 HTTP API、二进制 WebSocket、WHEP/WebRTC 协商或测试后端契约，除非任务明确覆盖车端与移动端并有对应协议验证。
 - App 当前是**监控、观测、测试与诊断 HMI**。Observation 必须只读。未来 Operation / Command 必须采用独立路由、独立权限、独立审计和显式确认，不能复用观测链路。
 - 不在 App 中实现离线升级 ZIP、任意文件系统读写、任意命令执行、RViz 开关、底盘/导航直接控制或 ROS topic 输入。
+- 修改 `shared/contracts/` 时，先确认 Mobile 是否为 Existing consumer；当前 Observation 只消费受控 HTTP、WebSocket 与 WHEP 契约，不能把未来控制能力写成已经可用。
 - 设置只影响本机偏好；不能借设置入口修改机器人运行配置。
 - 不用 `try/catch` 吞掉 WebRTC renderer、PeerConnection、MediaStream 生命周期错误。要修复真实的 initialize / dispose / 切流竞态，并测试切流。
 - 不能以 Gallery mock 代替正式页面。Gallery 必须通过真实 Page/Widget/Theme + Mock 状态驱动。

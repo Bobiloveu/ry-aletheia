@@ -1,3 +1,3 @@
-# Web Console documentation
+# Web Console 文档
 
-The Vue/Vite source is [frontend](../../frontend/). Its production output is intentionally served from autodrive_console/web-vue. Read [frontend rules](../../frontend/AGENTS.md), [contracts](../../shared/contracts/README.md), and run scripts/test-web.sh.
+Vue/Vite 源码位于 [frontend](../../frontend/)。其生产输出有意由 `autodrive_console/web-vue` 提供。阅读 [Web 规则](../../frontend/AGENTS.md)、[共享契约](../../shared/contracts/README.md)，并运行 `scripts/test-web.sh`。

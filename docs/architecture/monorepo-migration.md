@@ -1,11 +1,11 @@
-# Phase 2 physical migration prerequisites
+# 第二阶段物理迁移前提
 
-Do not move source into apps/ until all conditions hold:
+满足以下全部条件前，不得将源码移动到 `apps/`：
 
-1. Backend supports explicit package/workspace roots instead of implicit repository-parent paths.
-2. Vite output and backend static lookup support a configured migration-compatible location.
-3. PyInstaller, DEB, upgrade, C++ build scripts, and path-sensitive tests use module-root resolution.
-4. Flutter UI documentation, Golden tests, and paused Unity contract tests do not depend on fixed parent paths.
-5. Linux ROS release validation passes before and after the migration.
+1. Backend 使用显式包/工作区根目录，而非隐式仓库父路径。
+2. Vite 输出和 Backend 静态资源查找支持配置化的迁移兼容位置。
+3. PyInstaller、DEB、升级、C++ 构建脚本和路径敏感测试都使用模块根目录解析。
+4. Flutter UI 文档、Golden 测试和暂停的 Unity 契约测试不依赖固定父路径。
+5. 迁移前后均通过 Linux ROS 发布验证。
 
-Until then, apps/ is documentation only.
+在此之前，`apps/` 仅用于文档说明。

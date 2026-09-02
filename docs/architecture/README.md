@@ -1,5 +1,5 @@
-# Architecture documentation
+# 架构文档
 
-- [Module boundaries](module-boundaries.md)
-- [Physical migration prerequisites](monorepo-migration.md)
-- [Existing engineering handbook](../../PROJECT_OVERVIEW.md)
+- [模块边界](module-boundaries.md)
+- [物理迁移前提](monorepo-migration.md)
+- [现有工程总览](../../PROJECT_OVERVIEW.md)

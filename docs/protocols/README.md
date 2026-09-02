@@ -1,3 +1,3 @@
-# Protocol documentation
+# 协议文档
 
-All cross-client interface facts are in [shared/contracts](../../shared/contracts/README.md). Existing and Planned are deliberately separate. Do not use this index as a duplicate protocol definition.
+所有跨客户端接口事实均以 [shared/contracts](../../shared/contracts/README.md) 为准。Existing 与 Planned 有意严格区分；不得在此索引重复定义协议。

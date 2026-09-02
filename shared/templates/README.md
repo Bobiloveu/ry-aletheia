@@ -1,3 +1,3 @@
-# Shared templates
+# 共享模板
 
-This directory is reserved for reviewed behavior, deployment, and configuration templates. Templates describe allowed inputs; they must not contain device credentials, signatures, field logs, map caches, or generated release assets.
+本目录预留给经过评审的行为、部署和配置模板。模板描述允许的输入；不得包含设备凭据、签名、现场日志、地图缓存或生成的发布资产。

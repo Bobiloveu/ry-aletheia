@@ -1,3 +1,3 @@
-# Shared model notes
+# 共享模型说明
 
-This directory explains domain concepts shared across clients. It is not a source-code package and must not duplicate backend, Web, or Flutter models. Link each concept to its contract and authoritative implementation.
+本目录说明各客户端共享的领域概念。它不是源码包，不得复制 Backend、Web 或 Flutter 的模型实现。每个概念都应链接到对应契约和权威实现。

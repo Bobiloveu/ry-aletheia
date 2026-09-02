@@ -1,5 +1,10 @@
 # Aletheia Mobile
 
+> 跨平台环境选择、Android/iOS 责任边界与根脚本入口以
+> [../docs/development/PROFILES.md](../docs/development/PROFILES.md) 为准。本目录只说明
+> Flutter 客户端自身的运行、调试和打包；不要求 Mobile Android 开发者安装 Xcode，也不要求
+> iOS 开发者安装 Pixi/ROS2，除非其任务同时覆盖这些模块。
+
 Aletheia 的 Flutter 移动端专业 HMI（Mobile Robot HMI / Test & Diagnostic
 Console），面向与机器人处于同一可信局域网的机器人运行、测试与诊断人员。
 它将机器人状态监控、实时可视化、测试诊断和测试任务管理组织为统一入口。
@@ -129,5 +134,5 @@ fvm flutter build apk --debug
 ## 环境基线
 
 - Flutter 固定为 [`.fvmrc`](.fvmrc) 中的 `3.47.1`；所有开发、测试和构建命令均使用 `fvm flutter`。`pubspec.lock` 必须提交。
-- Android：AGP `9.1.0`、Gradle Wrapper `9.3.1`、Kotlin `2.4.0`、JDK `17`；`compileSdk`、`targetSdk` 与 `minSdk` 由固定 Flutter SDK 提供的值注入。不要在本机 JDK 不匹配时改写 Gradle 配置。
+- Android：AGP `9.1.0`、Gradle Wrapper `9.3.1`、Kotlin `2.4.0`、CI 基线 JDK `17`（本机可使用兼容的更高版本）；`compileSdk`、`targetSdk` 与 `minSdk` 由固定 Flutter SDK 提供的值注入。不要在本机 JDK 不匹配时改写 Gradle 配置。
 - iOS：最低 iOS `15.0`、Swift `5.0`、CocoaPods 和 SwiftPM；`ios/Podfile.lock` 与两个 SwiftPM `Package.resolved` 必须提交。依赖变化才运行 `pod install`，不得为常规构建升级 Pods 或 Swift Packages。
