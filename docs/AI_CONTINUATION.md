@@ -1522,6 +1522,15 @@ Flutter 观测页显示 Unity 画面并验证生命周期无泄漏。不扩大 U
 - `apple-design`：本轮完整读取，用于默认竖屏入口、方向不锁定、实际空间自适应、触控选择器、状态反馈和直接工作区操作。
 - `design-taste-frontend`：本轮完整读取。其明确 native mobile / dense product UI 不属于主适用范围，因此只采用审计、信息层级、文案一致性和反装饰化原则，不用它决定 HMI 业务架构或原生组件风格。
 
+## 2026-09-02：Monorepo 第一阶段整理
+
+- 实际模块位置保持不变：robot backend 为 `web_console.py`、`autodrive_console/`、`live_preprocessor/`；Web 为 `frontend/`；Flutter 为 `mobile/`；Unity 为暂停 PoC。
+- `shared/contracts/` 是跨端接口事实来源；接口变化必须更新契约并检查 backend/Web/Mobile 消费端。
+- 根 Pixi 管理 backend/Web 工具链；新增 `backend-test`、`web-check`、`backend-run` alias，旧命令不变。
+- `mobile/.fvmrc` 固定 Flutter 3.47.1；Mobile 文档和 scripts 统一使用 FVM。当前机器未安装 FVM，且 JDK 26 不符合 Android 的 JDK 17 基线，doctor 会 WARN，不会阻断非 Mobile 开发。
+- `scripts/` 提供 bootstrap、doctor、按模块测试及 Flutter-only mobile 构建；`.github/workflows/module-checks.yml` 按路径运行基础检查。
+- 物理迁移到 `apps/` 是第二阶段，前置条件位于 `docs/architecture/monorepo-migration.md`；未经单独计划不得移动源码。
+
 ## Resume Prompt
 
 继续开发前，先读取 `PROJECT_OVERVIEW.md`、`AGENTS.md`（如存在）、本文件、`docs/DESIGN_SYSTEM.md`、`docs/UI_SPEC.md`、当前 Git diff 和相关 Skill。先确认现有代码状态，不重新分析或推翻已完成的三级导航、只读边界、多流选择、虚拟墙/真实车体、统一世界变换、三路有界 decoder 租约和 latest-wins 决策。执行 Flutter 测试时，只对命令临时移除 HTTP(S)/ALL 代理环境变量。第一步是在 iPhone 设置中允许 Aletheia 使用本地网络后附加 Debug 并保存日志；再连接可信机器人，逐一验证六路 WHEP、任意三路真实并发、快速切流、前后台、竖横屏、双指中心地图缩放、边界及地图/虚拟墙/车体对齐。若有异常或崩溃，先保存完整 Flutter/native trace 再修复。不得新增虚假控制能力、实时轨迹、第四路或未确认业务 API；未来 Command 必须保持独立权限与命令边界。
