@@ -241,47 +241,89 @@
       </section>
     </div>
     <div id="dependencyDialog" class="dialog-backdrop" aria-hidden="true">
-      <section class="dependency-dialog" role="dialog" aria-modal="true">
-        <div class="trajectory-head">
+      <section
+        class="dependency-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="dependencyDialogTitle"
+        aria-describedby="dependencyDialogIntro"
+      >
+        <header class="dependency-dialog-header">
           <div>
-            <p class="eyebrow">SUPERVISOR / TEST DEPENDENCY ORCHESTRATION</p>
-            <h2>测试依赖节点编排</h2>
+            <h2 id="dependencyDialogTitle">测试依赖节点编排</h2>
+            <p id="dependencyDialogIntro" class="dependency-intro">
+              识别当前 Supervisor 进程后，分别设置运行依赖监控和测试前、人工恢复后的节点执行顺序。保存后才会用于后续测试计划。
+            </p>
           </div>
-          <button id="dependencyClose" class="outline-button" type="button">
+          <button
+            id="dependencyClose"
+            class="outline-button"
+            type="button"
+            aria-label="关闭测试依赖节点编排"
+          >
             关闭
           </button>
-        </div>
-        <p class="dependency-intro">
-          识别当前 Supervisor
-          进程后，可分别选择“运行依赖就绪状态”的默认监控节点，以及测试前/人工恢复时按阶段控制的依赖节点。两项配置都会保存。
-        </p>
-        <div class="dependency-toolbar">
-          <button id="discoverSupervisor" class="outline-button" type="button">
-            ↻&ensp;识别当前 Supervisor 节点</button
-          ><label class="dependency-switch"
-            ><input id="dependencyEnabled" type="checkbox" /><span></span
-            ><b>测试前应用依赖编排</b></label
-          ><button id="saveDependencyPlan" type="button">保存全部配置</button>
-        </div>
-        <p id="dependencyMessage" class="message"></p>
-        <div class="dependency-builder">
-          <section>
-            <h3>
-              已发现节点
-              <small
-                >勾选“监控”决定运行依赖就绪状态；勾选“编排”后可加入阶段</small
-              >
-            </h3>
-            <div id="discoveredProcesses" class="discovered-processes">
-              <p>点击“识别当前 Supervisor 节点”读取本机状态。</p>
-            </div>
-            <button id="addDependencyStep" class="outline-button" type="button">
-              ＋ 将选中编排节点加入并行阶段
+        </header>
+        <section class="dependency-policy" aria-labelledby="dependencyPolicyTitle">
+          <div>
+            <h3 id="dependencyPolicyTitle">测试前应用依赖编排</h3>
+            <p id="dependencyPolicyDescription">
+              启用后，开始测试及人工恢复后继续时，系统会按下方阶段受控启动或重启节点，并等待每个阶段全部稳定为 RUNNING。
+            </p>
+          </div>
+          <label class="dependency-switch">
+            <input
+              id="dependencyEnabled"
+              type="checkbox"
+              aria-describedby="dependencyPolicyDescription"
+            />
+            <span>启用编排</span>
+          </label>
+        </section>
+        <div class="dependency-actions">
+          <p>先读取当前节点状态，再选择需要监控或加入阶段的节点。</p>
+          <div>
+            <button id="discoverSupervisor" class="outline-button" type="button">
+              重新识别节点
             </button>
+            <button id="saveDependencyPlan" type="button">保存配置</button>
+          </div>
+        </div>
+        <p id="dependencyMessage" class="message" aria-live="polite"></p>
+        <div class="dependency-builder">
+          <section class="dependency-discovery" aria-labelledby="discoveredProcessesTitle">
+            <div class="dependency-section-header">
+              <div>
+                <h3 id="discoveredProcessesTitle">已发现节点</h3>
+                <p>监控决定就绪判定；编排节点可加入一个并行阶段。</p>
+              </div>
+              <button id="addDependencyStep" class="outline-button" type="button">
+                加入并行阶段
+              </button>
+            </div>
+            <div class="dependency-process-columns" role="row" aria-hidden="true">
+              <span>监控</span>
+              <span>编排</span>
+              <span>状态</span>
+              <span>节点与运行详情</span>
+            </div>
+            <div
+              id="discoveredProcesses"
+              class="discovered-processes"
+              role="table"
+              aria-label="已发现的 Supervisor 节点"
+            >
+              <p>点击“重新识别节点”读取本机状态。</p>
+            </div>
           </section>
-          <section>
-            <h3>启动逻辑 <small>由上至下顺序执行</small></h3>
-            <div id="dependencyFlow" class="dependency-flow">
+          <section class="dependency-sequence" aria-labelledby="dependencySequenceTitle">
+            <div class="dependency-section-header">
+              <div>
+                <h3 id="dependencySequenceTitle">启动顺序</h3>
+                <p>由上至下执行；同一阶段的节点并行处理。</p>
+              </div>
+            </div>
+            <div id="dependencyFlow" class="dependency-flow" aria-live="polite">
               <p>尚未配置依赖阶段。</p>
             </div>
           </section>

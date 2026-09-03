@@ -174,6 +174,32 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn(".readiness-summary", shell)
         self.assertIn(".readiness .sync-status", shell)
 
+    def test_dependency_orchestration_exposes_policy_and_stage_controls_to_assistive_technology(self):
+        """依赖策略说明、节点列和阶段操作不能只依赖视觉样式或无名称图标。"""
+        page = (web_console.WEB_ROOT / "index.html").read_text(encoding="utf-8")
+        script = (web_console.WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('class="dependency-policy"', page)
+        self.assertIn('id="dependencyPolicyDescription"', page)
+        self.assertIn('aria-describedby="dependencyPolicyDescription"', page)
+        self.assertIn('class="dependency-process-columns"', page)
+        self.assertIn('aria-live="polite"', page)
+        self.assertIn('aria-label="将阶段上移"', script)
+        self.assertIn('aria-label="将阶段下移"', script)
+        self.assertIn('aria-label="移除阶段"', script)
+
+    def test_dependency_orchestration_keeps_the_node_table_within_a_narrow_dialog(self):
+        """393px 宽度时节点列必须允许名称列收缩，不能产生整窗横向滚动。"""
+        css = (web_console.WEB_ROOT / "refinement.css").read_text(encoding="utf-8")
+        self.assertIn('grid-template-columns: 48px 48px 62px minmax(0, 1fr);', css)
+
+    def test_dependency_orchestration_does_not_present_discovery_failures_as_success(self):
+        """读取 Supervisor 失败时，默认消息颜色必须是错误语义色而不是成功绿。"""
+        css = (web_console.WEB_ROOT / "refinement.css").read_text(encoding="utf-8")
+        script = (web_console.WEB_ROOT / "app.js").read_text(encoding="utf-8")
+        self.assertIn('.dependency-dialog > .message {\n  min-height: 18px;\n  margin: 7px 24px 0;\n  color: #eab0b9;', css)
+        self.assertIn("$('dependencyMessage').style.color = '#35d69c';", script)
+
     def test_desktop_shell_serves_the_provided_aletheia_logo_asset(self):
         """Fails when the shared desktop shell cannot load the operator-provided logo."""
         asset = web_console.WEB_ROOT / "aletheia.svg"

@@ -385,117 +385,8 @@
   background: #b83e58 !important;
   border-color: #e5647d !important;
 }
-.process-choice {
-  grid-template-columns: 16px 28px 16px 28px auto 1fr !important;
-}
-.process-choice .choice-label {
-  font-size: 9px;
-  color: #7f9bb2;
-}
-.process-choice small {
-  grid-column: 5 / 7 !important;
-}
-.process-choice input.monitor-node,
-.process-choice input.orchestration-node {
-  margin: 0;
-}
 .status.cancelled {
   color: var(--amber);
-}
-.dependency-toolbar {
-  display: grid !important;
-  grid-template-columns: 1fr auto;
-  gap: 10px;
-  margin: 16px 0 !important;
-  padding: 0 !important;
-  border: 0 !important;
-  background: transparent !important;
-}
-.dependency-toolbar #discoverSupervisor {
-  grid-column: 1;
-  grid-row: 2;
-  justify-self: start;
-}
-.dependency-toolbar #saveDependencyPlan {
-  grid-column: 2;
-  grid-row: 2;
-  margin-left: 0 !important;
-}
-.dependency-toolbar .dependency-switch {
-  grid-column: 1 / -1;
-  grid-row: 1;
-  display: grid;
-  grid-template-columns: 20px 1fr;
-  gap: 0 10px;
-  align-items: center;
-  min-height: 74px;
-  padding: 14px 16px;
-  border: 1px solid #277b82;
-  border-radius: 7px;
-  background: linear-gradient(108deg, #0b3035 0%, #0d2636 55%, #112039 100%);
-  box-shadow: inset 3px 0 #35d6c2;
-  color: #e4f6f6;
-  cursor: pointer;
-}
-.dependency-toolbar .dependency-switch input {
-  grid-column: 1;
-  grid-row: 1 / 3;
-  width: 17px;
-  height: 17px;
-  margin: 0;
-  accent-color: #3bdac4;
-}
-.dependency-toolbar .dependency-switch b {
-  grid-column: 2;
-  grid-row: 1;
-  color: #e9fffb;
-  font-size: 13px;
-  letter-spacing: 0.1px;
-}
-.dependency-toolbar .dependency-switch b:before {
-  content: "EXECUTION RECOVERY POLICY";
-  display: block;
-  margin-bottom: 5px;
-  color: #59e0d0;
-  font:
-    9px ui-monospace,
-    monospace;
-  letter-spacing: 0.9px;
-}
-.dependency-toolbar .dependency-switch b:after {
-  content: "启用后，开始测试及人工恢复后继续都会按下方阶段控制节点，并等待全部稳定 RUNNING。";
-  display: block;
-  margin-top: 5px;
-  color: #9fc4cc;
-  font-size: 10px;
-  font-weight: 400;
-  line-height: 1.45;
-}
-.dependency-toolbar .dependency-switch:has(input:checked) {
-  border-color: #4be4cf;
-  background: linear-gradient(108deg, #0d3b3d 0%, #123143 100%);
-  box-shadow:
-    inset 3px 0 #71f4df,
-    0 0 0 1px #34c8b133;
-}
-@media (max-width: 850px) {
-  .dependency-toolbar {
-    grid-template-columns: 1fr;
-  }
-  .dependency-toolbar #discoverSupervisor,
-  .dependency-toolbar #saveDependencyPlan {
-    grid-column: 1;
-    justify-self: stretch;
-  }
-  .dependency-toolbar #saveDependencyPlan {
-    grid-row: 3;
-  }
-  .dependency-toolbar .dependency-switch {
-    min-height: 88px;
-  }
-  .dependency-toolbar .dependency-switch b:after {
-    font-size: 9px;
-  }
 }
 .trajectory-view {
   width: auto;
@@ -786,6 +677,484 @@
   }
   .dependency-toolbar > button:last-child {
     margin-left: 0;
+  }
+}
+
+/* Dependency orchestration is a working surface, not a status card. Keep the
+   policy, source selection and execution order visually independent. */
+.dependency-dialog {
+  width: min(1240px, calc(100vw - 32px));
+  max-height: min(calc(100dvh - 32px), 900px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+  border-color: #3a4a5c;
+  border-radius: 10px;
+  background: #111a25;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.34);
+  color: #edf3f8;
+}
+.dependency-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 22px 24px 18px;
+  border-bottom: 1px solid #2d3b4b;
+}
+.dependency-dialog-header h2,
+.dependency-policy h3,
+.dependency-section-header h3 {
+  margin: 0;
+  color: #f5f8fb;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.15px;
+}
+.dependency-dialog-header > button,
+.dependency-actions button,
+.dependency-section-header > button,
+.flow-actions button {
+  width: auto;
+  margin: 0;
+  box-shadow: none;
+}
+.dependency-dialog-header > button {
+  flex: 0 0 auto;
+  padding: 7px 11px;
+}
+.dependency-intro {
+  max-width: 760px;
+  margin: 7px 0 0;
+  color: #aebdca;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.dependency-policy {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin: 16px 24px 0;
+  padding: 14px 16px;
+  border: 1px solid #36536a;
+  border-radius: 8px;
+  background: #122432;
+}
+.dependency-policy h3 {
+  color: #eef7fb;
+  font-size: 14px;
+}
+.dependency-policy p {
+  max-width: 850px;
+  margin: 5px 0 0;
+  color: #b6c9d6;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.dependency-policy:has(input:checked) {
+  border-color: #34769a;
+  background: #132936;
+}
+.dependency-switch {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
+  margin: 0;
+  color: #e5f0f6;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.dependency-switch input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #4e9ed7;
+}
+.dependency-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin: 16px 24px 0;
+}
+.dependency-actions p {
+  margin: 0;
+  color: #95a8b8;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.dependency-actions > div {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+.dependency-actions button {
+  padding: 8px 11px;
+}
+.dependency-dialog > .message {
+  min-height: 18px;
+  margin: 7px 24px 0;
+  color: #eab0b9;
+  font-size: 11px;
+}
+.dependency-builder {
+  grid-template-columns: minmax(350px, 0.9fr) minmax(480px, 1.35fr);
+  min-height: 0;
+  flex: 1 1 auto;
+  gap: 14px;
+  margin: 0 24px 24px;
+  overflow: hidden;
+}
+.dependency-builder > section {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  border-color: #2d3c4c;
+  border-radius: 8px;
+  background: #0d1722;
+}
+.dependency-section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.dependency-section-header h3 {
+  font-size: 14px;
+}
+.dependency-section-header p {
+  margin: 5px 0 0;
+  color: #91a4b5;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.dependency-section-header > button {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  font-size: 11px;
+}
+.dependency-process-columns,
+.process-choice {
+  grid-template-columns: 68px 68px 94px minmax(0, 1fr);
+}
+.dependency-process-columns {
+  display: grid;
+  gap: 10px;
+  padding: 0 10px 8px;
+  border-bottom: 1px solid #2b3a49;
+  color: #899dad;
+  font-size: 10px;
+  font-weight: 650;
+}
+.discovered-processes {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  border-top: 0;
+  scrollbar-color: #526879 transparent;
+  scrollbar-width: thin;
+}
+.process-choice {
+  gap: 10px;
+  min-height: 56px;
+  padding: 8px 10px;
+  border-bottom-color: #243442;
+  color: #d8e3eb;
+  cursor: default;
+}
+.process-choice:hover {
+  background: #13212e;
+}
+.process-selection label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: #b6c5d1;
+  font-size: 10px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.process-selection input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #4e9ed7;
+}
+.process-choice .node-state {
+  justify-self: start;
+  min-width: 0;
+  color: #f0b56d;
+  font: 10px ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+.process-choice .node-state.running {
+  color: #68d4a7;
+}
+.process-identity {
+  min-width: 0;
+}
+.process-identity b {
+  display: block;
+  overflow: hidden;
+  color: #edf4f9;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 650;
+}
+.process-identity small {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: #8095a6;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 9px ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+.process-choice.assigned {
+  opacity: 1;
+  cursor: default;
+  background: #101b27;
+}
+.process-choice.assigned .process-selection:nth-child(2) label {
+  color: #657788;
+  cursor: not-allowed;
+}
+.dependency-flow {
+  min-height: 0;
+  overflow: auto;
+  gap: 8px;
+  padding-right: 2px;
+  scrollbar-color: #526879 transparent;
+  scrollbar-width: thin;
+}
+.flow-step {
+  grid-template-columns: 150px minmax(190px, 1fr) 138px auto;
+  gap: 14px;
+  padding: 14px;
+  border-color: #304253;
+  border-radius: 7px;
+  background: #111d29;
+}
+.flow-index {
+  display: block;
+  color: #e8f0f5;
+  font-size: 12px;
+  font-weight: 650;
+}
+.flow-step-summary small {
+  display: block;
+  margin-top: 4px;
+  color: #8ea3b4;
+  font-size: 9px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+.flow-step-nodes > span,
+.flow-wait {
+  display: block;
+  color: #9eb1c0;
+  font-size: 10px;
+  font-weight: 550;
+}
+.flow-nodes {
+  gap: 4px;
+  margin-top: 6px;
+}
+.flow-nodes span {
+  max-width: 100%;
+  padding: 4px 6px;
+  overflow: hidden;
+  border-color: #3a5266;
+  border-radius: 4px;
+  background: #172a3a;
+  color: #c9e2f1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 9px ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+.flow-wait input {
+  width: 88px;
+  margin: 5px 3px 0 0;
+  padding: 6px 7px;
+  font-size: 11px;
+}
+.flow-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.flow-actions button {
+  min-height: 28px;
+  padding: 5px 7px;
+  border-color: #476176;
+  border-radius: 5px;
+  background: #182b3b;
+  color: #d5e6f1;
+  font-size: 10px;
+}
+.flow-actions .remove-step {
+  border-color: #754a54;
+  background: #2a1b22;
+  color: #f0bdc4;
+}
+.flow-arrow {
+  margin: 0;
+  padding: 2px 0 2px 10px;
+  border-left: 1px solid #416176;
+  color: #92abc0;
+  text-align: left;
+  font: 10px "SF Pro Text", "Noto Sans SC", system-ui, sans-serif;
+}
+.dependency-dialog button:focus-visible,
+.dependency-dialog input:focus-visible {
+  outline: 2px solid #74b8eb;
+  outline-offset: 2px;
+}
+body.theme-light .dependency-dialog {
+  border-color: #c8d2dc;
+  background: #f8fafc;
+  color: #1d2730;
+}
+body.theme-light .dependency-dialog-header,
+body.theme-light .dependency-process-columns,
+body.theme-light .process-choice {
+  border-color: #d6dee6;
+}
+body.theme-light .dependency-dialog-header h2,
+body.theme-light .dependency-policy h3,
+body.theme-light .dependency-section-header h3,
+body.theme-light .process-identity b,
+body.theme-light .flow-index {
+  color: #17212b;
+}
+body.theme-light .dependency-intro,
+body.theme-light .dependency-policy p,
+body.theme-light .dependency-actions p,
+body.theme-light .dependency-section-header p,
+body.theme-light .flow-step-summary small,
+body.theme-light .process-identity small,
+body.theme-light .flow-step-nodes > span,
+body.theme-light .flow-wait {
+  color: #5c6d7d;
+}
+body.theme-light .dependency-policy {
+  border-color: #b7cfdf;
+  background: #eef6fb;
+}
+body.theme-light .dependency-policy:has(input:checked) {
+  background: #e8f3fb;
+}
+body.theme-light .dependency-builder > section {
+  border-color: #d2dbe4;
+  background: #ffffff;
+}
+body.theme-light .process-choice.assigned,
+body.theme-light .flow-step {
+  background: #f6f8fa;
+}
+body.theme-light .process-choice:hover {
+  background: #edf4f8;
+}
+body.theme-light .flow-step {
+  border-color: #c9d5df;
+}
+body.theme-light .flow-nodes span {
+  border-color: #b9ccda;
+  background: #edf5fa;
+  color: #31566f;
+}
+body.theme-light .flow-actions button {
+  border-color: #aebfcb;
+  background: #f4f7f9;
+  color: #324a5d;
+}
+body.theme-light .flow-actions .remove-step {
+  border-color: #cdaeb4;
+  background: #fff7f7;
+  color: #8b3d49;
+}
+@media (max-width: 980px) {
+  .dependency-builder {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+  .dependency-builder > section {
+    min-height: 300px;
+  }
+}
+@media (max-width: 680px) {
+  .dependency-dialog {
+    width: calc(100vw - 20px);
+    max-height: calc(100dvh - 20px);
+  }
+  .dependency-dialog-header,
+  .dependency-policy,
+  .dependency-actions {
+    margin-left: 14px;
+    margin-right: 14px;
+  }
+  .dependency-dialog-header {
+    padding: 16px 0 14px;
+  }
+  .dependency-dialog-header h2 {
+    font-size: 16px;
+  }
+  .dependency-policy,
+  .dependency-actions {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .dependency-actions > div {
+    width: 100%;
+  }
+  .dependency-actions button {
+    flex: 1 1 0;
+  }
+  .dependency-dialog > .message,
+  .dependency-builder {
+    margin-left: 14px;
+    margin-right: 14px;
+  }
+  .dependency-builder {
+    margin-bottom: 14px;
+  }
+  .dependency-builder > section {
+    min-height: 0;
+    padding: 13px;
+  }
+  .dependency-process-columns,
+  .process-choice {
+    grid-template-columns: 48px 48px 62px minmax(0, 1fr);
+    gap: 7px;
+  }
+  .dependency-process-columns {
+    padding-left: 7px;
+    padding-right: 7px;
+    font-size: 9px;
+  }
+  .process-choice {
+    min-height: 60px;
+    padding: 8px 7px;
+  }
+  .process-selection label,
+  .process-choice .node-state {
+    font-size: 9px;
+  }
+  .dependency-section-header {
+    flex-wrap: wrap;
+  }
+  .flow-step {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .flow-actions {
+    justify-content: flex-start;
   }
 }
 .side-diagnostic-link,
