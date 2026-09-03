@@ -189,7 +189,7 @@ def test_ci_and_local_mobile_tests_use_serial_runner_for_shared_rendering_resour
         encoding="utf-8"
     )
 
-    assert "fvm flutter test --concurrency=1 -r compact" in workflow
+    assert "fvm flutter test --exclude-tags golden --concurrency=1 -r compact" in workflow
     assert "fvm flutter test --concurrency=1 -r compact" in mobile_test_script
 
 
@@ -199,3 +199,23 @@ def test_legacy_foxglove_release_entrypoint_is_absent() -> None:
 
     assert not legacy_entrypoint.exists()
     assert legacy_entrypoint.name not in overview
+
+
+def test_ci_runs_macos_gallery_goldens_separately_from_linux_mobile_tests() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "module-checks.yml").read_text(
+        encoding="utf-8"
+    )
+    golden_test = (ROOT / "mobile" / "test" / "debug_ui" / "gallery_golden_test.dart").read_text(
+        encoding="utf-8"
+    )
+
+    assert "@Tags(['golden'])" in golden_test
+    assert "fvm flutter test --exclude-tags golden --concurrency=1 -r compact" in workflow
+    assert "mobile-golden:" in workflow
+    assert "fvm flutter test test/debug_ui/gallery_golden_test.dart --concurrency=1 -r compact" in workflow
+
+
+def test_mobile_declares_the_golden_test_tag() -> None:
+    test_config = (ROOT / "mobile" / "dart_test.yaml").read_text(encoding="utf-8")
+
+    assert "tags:\n  golden:" in test_config

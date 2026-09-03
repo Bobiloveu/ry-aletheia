@@ -1,3 +1,6 @@
+@Tags(['golden'])
+library;
+
 import 'dart:io';
 
 import 'package:aletheia_mobile/app/theme/aletheia_theme.dart';

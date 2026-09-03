@@ -88,7 +88,25 @@ jobs:
           fvm install
           fvm flutter pub get
           fvm flutter analyze
-          fvm flutter test --concurrency=1 -r compact
+          fvm flutter test --exclude-tags golden --concurrency=1 -r compact
+
+  mobile-golden:
+    needs: changes
+    if: needs.changes.outputs.mobile == 'true' || needs.changes.outputs.contracts == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.1
+          channel: stable
+      - run: dart pub global activate fvm 4.3.0
+      - run: echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+      - working-directory: mobile
+        run: |
+          fvm install
+          fvm flutter pub get
+          fvm flutter test test/debug_ui/gallery_golden_test.dart --concurrency=1 -r compact
 
   android:
     needs: changes

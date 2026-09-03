@@ -91,6 +91,8 @@ dart run tool/generate_ui_docs.dart
 
 当特意接受新的视觉基线时，按项目已有 Golden 测试说明更新 Golden；不要无审查地批量接受截图。Gallery manifest 改动后必须生成 `../../docs/ui/SCREEN_INVENTORY.md` 和 `../../docs/ui/SCREEN_MAP.md`，并检查它们只包含真实页面/状态。
 
+CI 中的普通 Dart/Widget 测试运行在 Linux，并通过 `--exclude-tags golden` 排除依赖 macOS 中文系统字体的截图套件；`mobile-golden` 则在 macOS 上单独运行 `gallery_golden_test.dart`。不要删除 `golden` 标签，也不要将该测试重新并入 Linux Job。
+
 ## 4. 构建 Android 与 iOS
 
 ### Android
