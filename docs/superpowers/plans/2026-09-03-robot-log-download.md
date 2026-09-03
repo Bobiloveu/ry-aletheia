@@ -6,7 +6,7 @@
 
 **架构：** 后端拥有本机路径和受控文件读取权限。`RobotLogStore` 从 `SettingsStore` 中已验证的 `robot_logs.sources` 读取目录，以稳定 source/file ID 代替路径暴露给浏览器；HTTP 仅传控制数据和原始文件流。浏览器用 `fetch` 获取清单、用受控下载 URL 逐个触发浏览器保存，浏览器自身处理保存位置。
 
-**技术栈：** Python 3.10 `http.server`、`pathlib`、`zipfile`、`tempfile`、现有 `SettingsStore`、原生静态 HTML/CSS/JS、pytest、Pixi frontend check。
+**技术栈：** Python 3.10 `http.server`、`pathlib`、现有 `SettingsStore`、原生静态 HTML/CSS/JS、pytest、Pixi frontend check。
 
 ---
 
@@ -58,7 +58,7 @@
 1. 在 `settings.py` 定义不可变的三项默认源与 `RobotSettings.robot_logs`，加载旧配置时深度合并默认值；保存时保留该字段，避免升级覆盖操作员配置。
 2. 集中实现 `SettingsStore._validate_robot_logs()`：列表长度、名称长度/空白、稳定 ID 格式及唯一性、绝对且规范的路径、禁止根/系统伪文件目录和常见 SSH 私钥目录；使用 `Path` 成分比较而非字符串前缀。
 3. 新建 `RobotLogStore`，令其只通过 `SettingsStore` 读取和原子保存 source 配置；新增项 ID 仅由后端生成，配置更新全量验证后再写入。
-4. 实现 source 健康探测、非递归普通文件枚举、mtime 降序、文件名大小写不敏感关键词筛选、opaque file ID 映射和每次归档前的 `lstat/resolve/is_relative_to` 复验。
+4. 实现 source 健康探测、非递归普通文件枚举、mtime 降序、文件名大小写不敏感关键词筛选、opaque file ID 映射和每次下载前的 `lstat/resolve/is_relative_to` 复验。
 5. 实现每次下载前的安全复验，并以固定大小块将原始文件直接写入 HTTP 响应；不创建 ZIP、临时归档、批量缓存或服务端下载队列。
 
 **验证命令：** `pixi run python -m pytest -q tests/test_robot_logs.py tests/test_offline_modules.py`。
@@ -93,7 +93,7 @@
 5. “下载选中日志”依次触发每个受控下载 URL，保留原始日志文件名。页面先明确提示浏览器会逐个下载所选文件；按钮 busy 时不可重复提交，错误不清除选择。下载由浏览器保存到当前网页电脑，不请求或显示机器人保存目录。
 6. 遵循 Impeccable 的 UI 约束：信息密度适中、风险操作与普通检索分区、键盘可达、窄桌面宽度不截断关键操作；不对 Mobile 页面和原工具日志作视觉重构。
 
-**验证命令：** `pixi run frontend-check`；静态测试；在本机启动控制台后浏览器验证可读/不可读、配置校验、文件筛选和 ZIP 下载。
+**验证命令：** `pixi run frontend-check`；静态测试；在本机启动控制台后浏览器验证可读/不可读、配置校验、文件筛选和原始日志下载。
 
 ### Task 5：契约、文档、打包与完整回归
 
@@ -107,8 +107,8 @@
 
 1. 将新接口写入 `robot_logs.md`（Status: Existing only after implementation），明确 Backend 为执行方、Desktop Web 为唯一 Existing 消费者、Mobile 非消费者，包含字段、状态、大小限制、路径隐私、浏览器下载和兼容性规则；在 contracts index 链接。
 2. 在 README/PROJECT_OVERVIEW 说明它与工具日志分离、如何管理来源、浏览器下载行为及不会影响机器人运行；不记录真实现场日志或私密路径以外的默认配置事实。
-3. 确认 PyInstaller spec 已通过整个 `autodrive_console/web` 目录收集新静态文件，无需把日志、ZIP、缓存或构建产物写入 spec/仓库。
+3. 确认 PyInstaller spec 已通过整个 `autodrive_console/web` 目录收集新静态文件，无需把日志、下载临时文件、缓存或构建产物写入 spec/仓库。
 4. 运行 `git diff --check`，再执行 `scripts/test-backend.sh`、`scripts/test-web.sh` 与 `./scripts/doctor.sh --profile backend`、`./scripts/doctor.sh --profile web`。若任何检查失败，先定位根因，禁止把失败称为通过。
-5. 手工回归：工具日志仍可查看/下载；报告下载、任务、视频、实时观测与升级 API 不受影响；配置重启后仍存在；页面关闭后不留下 ZIP 或其他下载临时文件。
+5. 手工回归：工具日志仍可查看/下载；报告下载、任务、视频、实时观测与升级 API 不受影响；配置重启后仍存在；页面关闭后不留下任何下载临时文件。
 
 **完成标准：** 每个新 API 与配置安全边界有自动化覆盖，完整 backend/web 检查通过，实际浏览器将每个原始日志下载到浏览器客户端，既有工具日志没有被改写或混入机器人日志。
