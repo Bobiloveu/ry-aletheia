@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -220,6 +222,23 @@ def test_plan_store_preserves_frozen_plan_and_marks_inflight_run_interrupted(tmp
     assert not list((tmp_path / "state").rglob("*.tmp"))
 
 
+def test_schema_one_plan_keeps_legacy_per_case_execution_behavior(tmp_path):
+    """Existing frozen plans must not silently gain a new execution policy."""
+    plan = AcceptancePlanFactory.create(
+        catalog_snapshot_for_plan(tmp_path / "tasks"),
+        scope_type="community", community="园区_A", building=None,
+        mode="full", sample_size=None, random_seed=9, criteria=AcceptanceCriteria.empty(),
+    )
+    legacy = plan.to_storage_dict()
+    legacy["schema"] = 1
+    legacy.pop("execution_preflight")
+
+    restored = AcceptancePlanStore(tmp_path / "state")
+    restored._write_json(restored.plan_path, legacy)
+
+    assert restored.load_current().execution_preflight is None
+
+
 class _NoopRunManager:
     def start_sequence(self, *_args, **_kwargs):
         raise AssertionError("源文件变化时不得开始执行")
@@ -251,6 +270,77 @@ def test_orchestrator_blocks_changed_source_before_start(tmp_path):
     with pytest.raises(AcceptanceConflict, match="正式任务文件已变化"):
         orchestrator.start(plan["plan_id"])
     assert orchestrator.current()["status"] == "blocked"
+
+
+def test_orchestrator_freezes_selected_plan_preflight_and_passes_it_to_sequence(tmp_path):
+    """Deployment acceptance must prepare saved runtime inputs once per whole plan."""
+    task_dir = tmp_path / "origin_tasks"
+    catalog_snapshot_for_plan(task_dir)
+
+    class ScenarioSetup:
+        @staticmethod
+        def load():
+            return {"profiles": [{"id": "hall", "name": "大厅场景"}]}
+
+    class Settings:
+        @staticmethod
+        def load():
+            return SimpleNamespace(dependency_plan={"enabled": True, "steps": [{"nodes": ["MODULES:209-lightning"], "wait_seconds": 3}]})
+
+    class CapturingRunManager:
+        def __init__(self):
+            self.calls = []
+
+        def start_sequence(self, cases, **kwargs):
+            self.calls.append((cases, kwargs))
+            return SimpleNamespace(id="acceptance-run")
+
+    manager = CapturingRunManager()
+    orchestrator = AcceptanceOrchestrator(
+        catalog=AcceptanceTaskCatalog(task_dir),
+        plan_store=AcceptancePlanStore(tmp_path / "state" / "acceptance"),
+        run_manager=manager,
+        report_dir=tmp_path / "state" / "reports",
+        scenario_setup=ScenarioSetup(),
+        settings=Settings(),
+    )
+
+    plan = orchestrator.create_plan({
+        "scope_type": "community", "community": "园区_A", "mode": "full",
+        "scenario_profile_id": "hall", "use_dependency_plan": True,
+    })
+
+    assert plan["execution_preflight"] == {
+        "scenario_profile_id": "hall",
+        "scenario_profile_name": "大厅场景",
+        "dependency_plan_enabled": True,
+        "dependency_stage_count": 1,
+        "dependency_node_count": 1,
+    }
+    orchestrator.start(plan["plan_id"])
+    _cases, kwargs = manager.calls[0]
+    assert kwargs["execution_preflight"]["scenario_profile_id"] == "hall"
+    assert kwargs["execution_preflight"]["dependency_plan"] == {
+        "enabled": True,
+        "steps": [{"nodes": ["MODULES:209-lightning"], "wait_seconds": 3}],
+    }
+
+
+def test_orchestrator_persists_plan_wide_preflight_progress(tmp_path):
+    task_dir = tmp_path / "origin_tasks"
+    catalog_snapshot_for_plan(task_dir)
+    orchestrator = make_orchestrator(task_dir, tmp_path / "state")
+    plan = orchestrator.create_plan({"scope_type": "community", "community": "园区_A", "mode": "full"})
+
+    orchestrator._on_run_event(plan["plan_id"], {
+        "type": "preflight_progress",
+        "preflight": {"state": "restarting_dependencies", "message": "正在恢复已冻结的运行依赖"},
+    })
+
+    status = orchestrator.current()["execution_preflight_status"]
+    assert status["state"] == "restarting_dependencies"
+    assert status["message"] == "正在恢复已冻结的运行依赖"
+    assert status["updated_at"]
 
 
 def test_orchestrator_exposes_physical_buildings_and_rejects_partial_scope(tmp_path):
@@ -316,9 +406,117 @@ def test_acceptance_report_escapes_task_content_and_records_full_pass(tmp_path):
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text
 
 
+def test_acceptance_report_inlines_trajectory_times_and_hides_random_seed(tmp_path):
+    snapshot = catalog_snapshot_for_plan(tmp_path / "tasks")
+    plan = AcceptancePlanFactory.create(
+        snapshot,
+        scope_type="building",
+        community="园区_A",
+        building=1,
+        unit=1,
+        mode="full",
+        sample_size=None,
+        random_seed=7215398267129107707,
+        criteria=AcceptanceCriteria.empty(),
+    )
+    plan.created_at = "2026-09-04T10:00:00+08:00"
+    plan.status = "completed"
+    item = plan.items[0]
+    item.status = "passed"
+    item.message = "任务已完成"
+    item.started_at = "2026-09-04T10:01:00+08:00"
+    item.finished_at = "2026-09-04T10:04:20+08:00"
+    item.duration_s = 200.0
+    report_dir = tmp_path / "reports"
+    trajectory_dir = report_dir / "run_123456789abc_trajectory"
+    trajectory_dir.mkdir(parents=True)
+    svg = trajectory_dir / "T-001_地图.svg"
+    svg.write_text('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>', encoding="utf-8")
+    item.trajectory = {"visualizations": [{"map_id": "map", "label": "首层地图", "file": str(svg)}]}
+
+    reference = AcceptanceReportWriter(report_dir).write(plan)
+    text = (report_dir / reference.html_filename).read_text(encoding="utf-8")
+
+    assert 'class="report-shell"' in text
+    assert '<svg xmlns="http://www.w3.org/2000/svg">' in text
+    assert "2026-09-04 10:01:00" in text
+    assert "2026-09-04 10:04:20" in text
+    assert "3 分 20 秒" in text
+    assert "7215398267129107707" not in text
+    assert "随机种子" not in text
+    assert str(svg) not in text
+    assert reference.asset_manifest_filename
+    assert (report_dir / reference.asset_manifest_filename).is_file()
+
+
+def test_report_archive_classifies_and_deletes_acceptance_evidence_safely(tmp_path):
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    test_report = reports / "报告_20260904_100000_普通测试_123456789abc.html"
+    test_report.write_text("test", encoding="utf-8")
+    acceptance = reports / "acceptance_abcdef123456_20260904_100001.html"
+    acceptance.write_text("acceptance", encoding="utf-8")
+    acceptance.with_suffix(".csv").write_text("csv", encoding="utf-8")
+    owned = reports / "run_123456789abc_trajectory"
+    owned.mkdir()
+    retained = reports / "run_abcdef123456_trajectory"
+    retained.mkdir()
+    manifest = reports / "acceptance_abcdef123456_20260904_100001.assets.json"
+    manifest.write_text('{"schema":1,"trajectory_directories":["run_123456789abc_trajectory","../escape"]}', encoding="utf-8")
+
+    with patch.object(web_console, "WORKSPACE", tmp_path):
+        indexed = web_console.ConsoleHandler._reports()
+        kinds = {item["filename"]: item for item in indexed}
+        assert kinds[test_report.name]["report_type"] == "test"
+        assert kinds[test_report.name]["title"] == "自动测试运行报告"
+        assert kinds[acceptance.name]["report_type"] == "acceptance"
+        assert kinds[acceptance.name]["title"] == "部署验收报告"
+        assert web_console.ConsoleHandler._archive_report_target(acceptance.name) == acceptance
+        web_console.ConsoleHandler._delete_report(acceptance.name)
+
+    assert not acceptance.exists()
+    assert not acceptance.with_suffix(".csv").exists()
+    assert not manifest.exists()
+    assert not owned.exists()
+    assert retained.is_dir()
+
+
 def test_console_registers_desktop_acceptance_route_without_mobile_redirect():
     source = Path("web_console.py").read_text(encoding="utf-8")
 
     assert 'path == "/acceptance-test.html"' in source
     assert 'path.startswith("/api/acceptance/")' in source
     assert "acceptance-test.html" not in web_console.MOBILE_PAGE_NAMES
+
+
+def test_acceptance_page_offers_optional_frozen_plan_preflight_controls():
+    page = (web_console.WEB_ROOT / "acceptance-test.html").read_text(encoding="utf-8")
+    script = (web_console.WEB_ROOT / "acceptance_test.js").read_text(encoding="utf-8")
+
+    assert 'id="acceptanceScenarioProfile"' in page
+    assert 'id="acceptanceDependencyPlan"' in page
+    assert 'id="frozenPreflight"' in page
+    assert "scenario_profile_id" in script
+    assert "use_dependency_plan" in script
+    assert "整份验收计划开始前仅执行一次" in page
+
+
+def test_acceptance_page_clarifies_optional_preparation_and_retains_draft():
+    page = (web_console.WEB_ROOT / "acceptance-test.html").read_text(encoding="utf-8")
+    script = (web_console.WEB_ROOT / "acceptance_test.js").read_text(encoding="utf-8")
+    stylesheet = (web_console.WEB_ROOT / "acceptance_test.css").read_text(encoding="utf-8")
+
+    assert "可选运行准备" in page
+    assert 'id="preflightRuntimeStatus"' in page
+    assert "ry-aletheia-acceptance-draft-v1" in script
+    assert "execution_preflight_status" in script
+    assert "box.hidden = !text" in script
+    assert ".preflight-runtime-status[hidden]" in stylesheet
+
+
+def test_report_center_renders_test_and_acceptance_report_types():
+    source = (web_console.WEB_ROOT / "reports.js").read_text(encoding="utf-8")
+
+    assert "item.report_type" in source
+    assert "自动测试运行报告" in source
+    assert "部署验收报告" in source

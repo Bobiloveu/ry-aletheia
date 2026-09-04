@@ -9,9 +9,36 @@
 .form-grid select, .form-grid input { width: 100%; }
 fieldset { margin: 0; border: 1px solid var(--line); border-radius: 10px; display: flex; gap: 1rem; align-items: center; }
 fieldset label { display: inline-flex; align-items: center; gap: .4rem; font-weight: 500; }
+.optional-preparation { margin-top: 1.25rem; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-subtle); }
+.optional-preparation summary { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .85rem 1rem; cursor: pointer; list-style: none; }
+.optional-preparation summary::-webkit-details-marker { display: none; }
+.optional-preparation summary > span:first-child { display: grid; gap: .18rem; }
+.optional-preparation summary strong { font-size: .95rem; }
+.optional-preparation summary small { color: var(--muted); font-size: .8rem; line-height: 1.4; }
+.optional-preparation-action { flex: none; color: var(--accent, #19c8b5); font-size: .82rem; font-weight: 700; }
+.optional-preparation[open] .optional-preparation-action::after { content: "收起"; }
+.optional-preparation[open] .optional-preparation-action { font-size: 0; }
+.optional-preparation[open] .optional-preparation-action::after { font-size: .82rem; }
+.optional-preparation-body { padding: 0 1rem 1rem; border-top: 1px solid var(--line); }
+.optional-preparation-body > .muted { display: block; margin: .85rem 0; line-height: 1.55; }
+.preflight-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, 1fr); gap: 1rem; align-items: start; }
+.preflight-grid > label { display: grid; gap: .45rem; font-weight: 650; }
+.preflight-dependency { min-height: 2.55rem; align-content: start; }
+.preflight-toggle { display: inline-flex; align-items: center; gap: .45rem; min-height: 2.55rem; font-weight: 600; }
+.preflight-toggle input[type="checkbox"] { width: auto; margin: 0; }
+.preflight-dependency > small { color: var(--muted); font-size: .78rem; line-height: 1.45; }
+.preflight-note { grid-column: 1 / -1; color: var(--muted); font-size: .84rem; line-height: 1.55; }
+.preflight-runtime-status { display: flex; align-items: center; gap: .55rem; margin-top: .8rem; padding: .7rem .85rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-subtle); color: var(--muted); font-size: .86rem; line-height: 1.45; }
+.preflight-runtime-status[hidden] { display: none; }
+.preflight-runtime-status::before { content: ""; width: .5rem; height: .5rem; flex: none; border-radius: 50%; background: var(--muted); }
+.preflight-runtime-status.pending::before, .preflight-runtime-status.applying_scenario::before, .preflight-runtime-status.settling::before, .preflight-runtime-status.restarting_dependencies::before, .preflight-runtime-status.restoring::before { background: var(--warning); }
+.preflight-runtime-status.ready::before, .preflight-runtime-status.restored::before, .preflight-runtime-status.not_selected::before { background: var(--success); }
+.preflight-runtime-status.blocked::before, .preflight-runtime-status.cancelled::before { background: var(--danger); }
+.frozen-preflight { margin-top: 1rem; padding: .8rem .95rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-subtle); color: var(--muted); font-size: .88rem; line-height: 1.5; }
 .plan-fact { padding: .75rem; border-radius: 10px; background: var(--surface-subtle); display: grid; gap: .35rem; }
 .plan-fact span, .muted { color: var(--muted); font-size: .86rem; }
-.acceptance-message { min-height: 1.4rem; color: var(--muted); }
+.acceptance-message { margin: .8rem 0 0; color: var(--muted); }
+.acceptance-message[hidden] { display: none; }
 .acceptance-message.error { color: var(--danger); }
 .acceptance-badge { padding: .45rem .7rem; border: 1px solid var(--line); border-radius: 999px; font-size: .8rem; font-weight: 700; }
 .acceptance-badge.running, .acceptance-badge.awaiting_recovery { color: var(--warning); }
@@ -28,4 +55,4 @@ fieldset label { display: inline-flex; align-items: center; gap: .4rem; font-wei
 .conclusion { margin-top: 1rem; padding: 1rem; border: 1px solid var(--line); border-top-width: 3px; background: var(--surface-subtle); }
 .conclusion.sample_pass, .conclusion.full_pass { border-top-color: var(--success); }
 .conclusion.sample_fail, .conclusion.full_fail { border-top-color: var(--danger); }
-@media (max-width: 900px) { .form-grid, .result-facts { grid-template-columns: 1fr; } .section-heading { align-items: flex-start; flex-direction: column; } fieldset { flex-wrap: wrap; } .acceptance-page { padding-bottom: 2rem; } }
+@media (max-width: 900px) { .form-grid, .result-facts, .preflight-grid { grid-template-columns: 1fr; } .section-heading { align-items: flex-start; flex-direction: column; } fieldset { flex-wrap: wrap; } .acceptance-page { padding-bottom: 2rem; } }

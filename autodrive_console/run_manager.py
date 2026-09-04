@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from copy import deepcopy
 import html
 import logging
 import re
@@ -90,18 +91,22 @@ class RunManager:
         interval_s: float = 0,
         prepare_trajectory_maps: bool = True,
         event_callback: Callable[[dict], None] | None = None,
+        execution_preflight: dict | None = None,
     ) -> RunRecord:
         """Execute frozen acceptance cases through the existing single-run path.
 
         The parent record reserves the same active-run slot as ordinary tests.
-        Each item then calls ``_run`` with a private one-attempt record, which
-        preserves the established scenario, preflight, ROS, trajectory and
-        safety-finally behavior without introducing another executor.
+        Each item then calls ``_run`` with a private one-attempt record. An
+        optional acceptance-only execution context runs one saved scenario
+        application and dependency orchestration before the entire sequence;
+        individual cases retain the existing sync, ROS, trajectory and safety
+        checks without repeating those disruptive operations.
         """
         if not cases:
             raise ValueError("验收计划至少需要一个任务")
         if not 0 <= interval_s <= 3600:
             raise ValueError("执行间隔必须介于 0 和 3600 秒之间")
+        normalized_preflight = self._normalize_sequence_preflight(execution_preflight)
         run = RunRecord(
             id=uuid.uuid4().hex[:12],
             case=cases[0],
@@ -118,7 +123,7 @@ class RunManager:
             self._attempt_interrupt_events[run.id] = threading.Event()
         threading.Thread(
             target=self._run_sequence,
-            args=(run, tuple(cases), event_callback),
+            args=(run, tuple(cases), event_callback, normalized_preflight),
             daemon=True,
             name=f"acceptance-run-{run.id}",
         ).start()
@@ -151,16 +156,50 @@ class RunManager:
             # RunRecord after a callback-side error.
             LOGGER.exception("验收执行事件回调失败：run=%s type=%s", run.id, event_type)
 
+    def _emit_preflight_progress(
+        self,
+        callback: Callable[[dict], None] | None,
+        run: RunRecord,
+        state: str,
+        message: str,
+        *,
+        restoring: bool = False,
+    ) -> None:
+        """Expose a small, human-readable sequence phase without process data."""
+        self._emit_sequence_event(
+            callback,
+            "preflight_restore" if restoring else "preflight_progress",
+            run,
+            0,
+            run.case,
+            preflight={"state": state, "message": message},
+        )
+
     def _run_sequence(
         self,
         run: RunRecord,
         cases: tuple[TestCase, ...],
         event_callback: Callable[[dict], None] | None,
+        execution_preflight: dict | None,
     ) -> None:
         cancel_event = self._cancel_events[run.id]
         resume_event = self._resume_events[run.id]
         run.status, run.started_at = "preparing", now_iso()
+        sequence_context: dict | None = None
         try:
+            if execution_preflight is not None:
+                self._emit_preflight_progress(event_callback, run, "pending", "正在确认验收运行准备")
+                sequence_context = self._prepare_sequence_execution(
+                    run,
+                    execution_preflight,
+                    cancel_event,
+                    progress_callback=lambda state, message: self._emit_preflight_progress(event_callback, run, state, message),
+                )
+                if not sequence_context["ok"]:
+                    run.status, run.error = "blocked", sequence_context["message"]
+                    state = "cancelled" if cancel_event.is_set() else "blocked"
+                    self._emit_preflight_progress(event_callback, run, state, sequence_context["message"])
+                    return
             for item_index, case in enumerate(cases, start=1):
                 if cancel_event.is_set():
                     run.status = "cancelled"
@@ -180,6 +219,8 @@ class RunManager:
                 # overwrite trajectory evidence as attempt 1 each time.
                 child._skip_report = True
                 child._sequence_attempt_index = item_index
+                if sequence_context is not None:
+                    child._sequence_execution_context = sequence_context
                 self._run(child)
                 run.preflight = child.preflight
                 run.live_progress = child.live_progress
@@ -219,7 +260,15 @@ class RunManager:
                         resume_event.clear()
                         run.status = "recovering"
                         self._record_intervention(run, item_index, "recovery_requested", "操作者确认已完成现场恢复，开始恢复预检")
-                        recovered, recovery_message = self._recover_after_manual_intervention(child, cancel_event)
+                        if sequence_context is None:
+                            recovered, recovery_message = self._recover_after_manual_intervention(child, cancel_event)
+                        else:
+                            recovered, recovery_message = self._recover_after_manual_intervention(
+                                child,
+                                cancel_event,
+                                settings_override=sequence_context["settings"],
+                                skip_orchestration=True,
+                            )
                         if cancel_event.is_set():
                             run.status = "cancelled"
                             break
@@ -243,6 +292,18 @@ class RunManager:
             run.status, run.error = "failed", f"验收序列中断：{exc}"
             LOGGER.exception("验收执行序列异常：run=%s", run.id)
         finally:
+            if sequence_context and sequence_context.get("scenario_applied"):
+                self._emit_preflight_progress(event_callback, run, "restoring", "验收结束，正在恢复常规启动配置", restoring=True)
+                self._restore_case_scenario(run)
+                scenario = (run.preflight or {}).get("scenario", {})
+                restored = scenario.get("restore_state") in {"restored", "not_needed"}
+                self._emit_preflight_progress(
+                    event_callback,
+                    run,
+                    "restored" if restored else "blocked",
+                    scenario.get("restore_message") or ("常规启动配置已恢复" if restored else "常规启动配置恢复失败"),
+                    restoring=True,
+                )
             run.live_progress = None
             run.active_attempt = None
             run.finished_at = now_iso()
@@ -256,6 +317,94 @@ class RunManager:
                 status=run.status,
                 message=run.error or "验收序列已结束",
             )
+
+    @staticmethod
+    def _normalize_sequence_preflight(value: dict | None) -> dict | None:
+        """Accept only the narrow, already-frozen acceptance context."""
+        if value is None:
+            return None
+        if not isinstance(value, dict) or set(value) != {"scenario_profile_id", "scenario_profile_name", "dependency_plan"}:
+            raise ValueError("验收计划前置配置格式无效")
+        profile_id, profile_name, dependency_plan = value["scenario_profile_id"], value["scenario_profile_name"], value["dependency_plan"]
+        if profile_id is not None and (not isinstance(profile_id, str) or not profile_id or not isinstance(profile_name, str) or not profile_name):
+            raise ValueError("验收计划场景方案信息无效")
+        if profile_id is None and profile_name is not None:
+            raise ValueError("验收计划场景方案信息不完整")
+        if not isinstance(dependency_plan, dict) or set(dependency_plan) != {"enabled", "steps"} or not isinstance(dependency_plan["enabled"], bool) or not isinstance(dependency_plan["steps"], list):
+            raise ValueError("验收计划依赖编排格式无效")
+        if dependency_plan["enabled"] and not dependency_plan["steps"]:
+            raise ValueError("验收计划依赖编排缺少启动阶段")
+        return deepcopy(value)
+
+    def _prepare_sequence_execution(
+        self,
+        run: RunRecord,
+        execution_preflight: dict | None,
+        cancel_event: threading.Event,
+        *,
+        progress_callback: Callable[[str, str], None] | None = None,
+    ) -> dict:
+        """Apply plan-scoped setup once; no case-specific setup occurs later."""
+        settings = deepcopy(self.settings.load())
+        if execution_preflight is None:
+            return {
+                "ok": True,
+                "message": "未选择验收前置配置",
+                "settings": settings,
+                "scenario": {"ok": True, "applied": False, "state": "not_selected", "message": "未选择场景前置方案"},
+                "scenario_applied": False,
+            }
+        settings.dependency_plan = deepcopy(execution_preflight["dependency_plan"])
+        profile_id = execution_preflight["scenario_profile_id"]
+        scenario = {
+            "ok": True,
+            "applied": False,
+            "state": "not_selected",
+            "profile_id": profile_id,
+            "profile_name": execution_preflight["scenario_profile_name"],
+            "message": "未选择场景前置方案，使用常规启动配置",
+        }
+        if profile_id:
+            if not self.scenario_setup:
+                return {"ok": False, "message": "场景前置模块未配置", "settings": settings, "scenario": scenario, "scenario_applied": False}
+            try:
+                if progress_callback:
+                    progress_callback("applying_scenario", f"正在应用场景方案「{execution_preflight['scenario_profile_name']}」")
+                result = self.scenario_setup.apply(profile_id)
+                scenario.update({"applied": True, "state": "applied", "message": result["message"]})
+                run.preflight = {"node_states": [], "scenario": scenario, "task_sync": f"已应用场景方案，稳定等待 {self._scenario_apply_settle_seconds:g} 秒"}
+                if progress_callback:
+                    progress_callback("settling", f"场景方案已写入，正在等待 {self._scenario_apply_settle_seconds:g} 秒生效")
+                if not self._wait_scenario_settle(cancel_event):
+                    return {"ok": False, "message": "测试已取消", "settings": settings, "scenario": scenario, "scenario_applied": True}
+            except ScenarioSetupError as exc:
+                pending = getattr(self.scenario_setup, "has_unresolved_transaction", None)
+                scenario.update({
+                    "ok": False,
+                    "applied": bool(pending()) if callable(pending) else False,
+                    "state": "apply_failed",
+                    "message": f"场景方案应用失败：{exc}",
+                })
+                return {"ok": False, "message": scenario["message"], "settings": settings, "scenario": scenario, "scenario_applied": scenario["applied"]}
+            except Exception as exc:
+                LOGGER.exception("验收计划场景方案应用异常：run=%s", run.id)
+                scenario.update({"ok": False, "state": "apply_failed", "message": f"场景方案应用异常：{exc}"})
+                return {"ok": False, "message": scenario["message"], "settings": settings, "scenario": scenario, "scenario_applied": False}
+        if cancel_event.is_set():
+            return {"ok": False, "message": "测试已取消", "settings": settings, "scenario": scenario, "scenario_applied": bool(scenario["applied"])}
+        if scenario["applied"] or settings.dependency_plan.get("enabled"):
+            if progress_callback:
+                progress_callback("restarting_dependencies", "正在恢复已冻结的运行依赖")
+            gateway = RobotGateway(settings, lambda states: self._update_preflight_nodes(run, states))
+            ready, detail = gateway.restart_configured_dependencies()
+            scenario["runtime_restart"] = detail
+            if not ready:
+                scenario.update({"ok": False, "state": "activation_restart_failed", "message": f"验收前置依赖未就绪：{detail}"})
+                return {"ok": False, "message": scenario["message"], "settings": settings, "scenario": scenario, "scenario_applied": bool(scenario["applied"])}
+        run.preflight = {"node_states": [], "scenario": scenario, "task_sync": "验收前置条件已完成；将逐项检查并下发冻结任务"}
+        if progress_callback:
+            progress_callback("ready", "运行准备已完成，正在开始第一项验收任务")
+        return {"ok": True, "message": "验收前置条件已完成", "settings": settings, "scenario": scenario, "scenario_applied": bool(scenario["applied"])}
 
     def get(self, run_id: str) -> RunRecord | None:
         with self._lock:
@@ -325,6 +474,7 @@ class RunManager:
             trajectory_assets: list[CachedMapAsset] = []
             route_plan: list[dict] = []
             scenario_applied = False
+            sequence_context = getattr(run, "_sequence_execution_context", None)
             run.status, run.started_at = "preparing", now_iso()
             LOGGER.info("开始执行测试计划：run=%s", run.id)
             try:
@@ -332,9 +482,13 @@ class RunManager:
                     run.status = "cancelled"
                     return
                 run.preflight = {"node_states": [], "task_sync": "正在应用场景方案"}
-                scenario_state = self._apply_case_scenario(run)
+                if sequence_context:
+                    scenario_state = dict(sequence_context["scenario"])
+                    run.preflight["task_sync"] = "验收计划前置条件已完成，正在检查任务与运行依赖"
+                else:
+                    scenario_state = self._apply_case_scenario(run)
                 run.preflight["scenario"] = scenario_state
-                scenario_applied = bool(scenario_state.get("applied"))
+                scenario_applied = bool(scenario_state.get("applied")) and not bool(sequence_context)
                 if not scenario_state["ok"]:
                     run.status, run.error = "blocked", scenario_state["message"]
                     return
@@ -345,8 +499,11 @@ class RunManager:
                         run.status = "cancelled"
                         return
                 run.preflight["task_sync"] = "正在执行运行依赖预检"
-                gateway = RobotGateway(self.settings.load(), lambda states: self._update_preflight_nodes(run, states))
-                preflight = gateway.preflight(run.case, cancel_event=cancel_event)
+                gateway = RobotGateway(sequence_context["settings"] if sequence_context else self.settings.load(), lambda states: self._update_preflight_nodes(run, states))
+                preflight = (
+                    gateway.preflight_without_orchestration(run.case, cancel_event=cancel_event)
+                    if sequence_context else gateway.preflight(run.case, cancel_event=cancel_event)
+                )
                 # 网关返回的是节点/同步状态快照；不得覆盖此前已记录的场景方案应用状态。
                 run.preflight = {**preflight.to_dict(), "scenario": scenario_state}
                 if cancel_event.is_set():
@@ -708,10 +865,13 @@ class RunManager:
     def _record_intervention(run: RunRecord, attempt: int, action: str, detail: str) -> None:
         run.interventions.append({"at": now_iso(), "attempt": attempt, "action": action, "detail": detail})
 
-    def _recover_after_manual_intervention(self, run: RunRecord, cancel_event: threading.Event | None = None) -> tuple[bool, str]:
+    def _recover_after_manual_intervention(self, run: RunRecord, cancel_event: threading.Event | None = None, *, settings_override=None, skip_orchestration: bool = False) -> tuple[bool, str]:
         """继续前完整重做依赖编排、服务发现与最终节点总闸。"""
-        gateway = RobotGateway(self.settings.load(), lambda states: self._update_recovery_nodes(run, states))
-        preflight = gateway.preflight(run.case, cancel_event=cancel_event)
+        gateway = RobotGateway(settings_override if settings_override is not None else self.settings.load(), lambda states: self._update_recovery_nodes(run, states))
+        preflight = (
+            gateway.preflight_without_orchestration(run.case, cancel_event=cancel_event)
+            if skip_orchestration else gateway.preflight(run.case, cancel_event=cancel_event)
+        )
         recovery = preflight.to_dict()
         run.preflight = run.preflight or {}
         run.preflight["recovery"] = recovery

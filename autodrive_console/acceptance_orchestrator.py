@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+from copy import deepcopy
 import threading
 from typing import Any
 
 from .acceptance_catalog import AcceptanceTaskCatalog
-from .acceptance_plan import ACTIVE_PLAN_STATUSES, AcceptanceCriteria, AcceptancePlan, AcceptancePlanFactory, AcceptancePlanStore
+from .acceptance_plan import (
+    ACTIVE_PLAN_STATUSES,
+    AcceptanceCriteria,
+    AcceptancePlan,
+    AcceptancePlanFactory,
+    AcceptancePlanStore,
+    default_execution_preflight,
+    default_execution_preflight_status,
+    normalize_execution_preflight_status,
+)
 from .acceptance_report import AcceptanceReportWriter
 from .models import TestCase, now_iso
 
@@ -21,10 +31,12 @@ class AcceptanceValidationError(ValueError):
 
 
 class AcceptanceOrchestrator:
-    def __init__(self, *, catalog: AcceptanceTaskCatalog, plan_store: AcceptancePlanStore, run_manager, report_dir: Path) -> None:
+    def __init__(self, *, catalog: AcceptanceTaskCatalog, plan_store: AcceptancePlanStore, run_manager, report_dir: Path, scenario_setup=None, settings=None) -> None:
         self.catalog = catalog
         self.plan_store = plan_store
         self.run_manager = run_manager
+        self.scenario_setup = scenario_setup
+        self.settings = settings
         self.report_writer = AcceptanceReportWriter(report_dir)
         self._lock = threading.RLock()
         self.plan_store.mark_interrupted_runs()
@@ -66,7 +78,7 @@ class AcceptanceOrchestrator:
         return self.plan_store.save_criteria(criteria).to_dict()
 
     def create_plan(self, document: dict[str, object]) -> dict[str, Any]:
-        expected = {"scope_type", "community", "building", "unit", "mode", "sample_size"}
+        expected = {"scope_type", "community", "building", "unit", "mode", "sample_size", "scenario_profile_id", "use_dependency_plan"}
         unexpected = set(document) - expected
         if unexpected:
             raise AcceptanceValidationError(f"创建计划包含未知字段：{', '.join(sorted(unexpected))}")
@@ -87,6 +99,7 @@ class AcceptanceOrchestrator:
             sample_size = None
         elif isinstance(sample_size, bool) or not isinstance(sample_size, int):
             raise AcceptanceValidationError("抽样数量必须是整数")
+        execution_preflight = self._freeze_execution_preflight(document)
         with self._lock:
             current = self.plan_store.load_current()
             if current and current.status in ACTIVE_PLAN_STATUSES:
@@ -95,7 +108,9 @@ class AcceptanceOrchestrator:
                 plan = AcceptancePlanFactory.create(
                     self.catalog.scan(), scope_type=scope_type, community=community.strip(), building=building,
                     unit=unit, mode=mode, sample_size=sample_size, random_seed=None, criteria=self.plan_store.load_criteria(),
+                    execution_preflight=execution_preflight,
                 )
+                plan.execution_preflight_status = default_execution_preflight_status(execution_preflight)
             except ValueError as exc:
                 raise AcceptanceValidationError(str(exc)) from exc
             self.plan_store.save(plan)
@@ -116,7 +131,10 @@ class AcceptanceOrchestrator:
             plan.status, plan.current_index = "preparing", 0
             self.plan_store.save(plan)
             try:
-                run = self.run_manager.start_sequence(cases, event_callback=lambda event: self._on_run_event(plan.plan_id, event))
+                arguments = {"event_callback": lambda event: self._on_run_event(plan.plan_id, event)}
+                if plan.execution_preflight is not None:
+                    arguments["execution_preflight"] = deepcopy(plan.execution_preflight)
+                run = self.run_manager.start_sequence(cases, **arguments)
             except Exception as exc:
                 plan.status = "blocked"
                 plan.updated_at = now_iso()
@@ -189,6 +207,37 @@ class AcceptanceOrchestrator:
                 self.plan_store.save(plan)
                 raise AcceptanceConflict("正式任务文件已变化或不可用；为保护冻结验收计划，未开始执行")
 
+    def _freeze_execution_preflight(self, document: dict[str, object]) -> dict[str, Any]:
+        """Freeze only existing, operator-saved runtime options into a plan."""
+        raw_profile_id = document.get("scenario_profile_id")
+        if raw_profile_id is None:
+            profile_id = None
+        elif isinstance(raw_profile_id, str) and raw_profile_id.strip() and len(raw_profile_id.strip()) <= 64 and "\x00" not in raw_profile_id:
+            profile_id = raw_profile_id.strip()
+        else:
+            raise AcceptanceValidationError("场景前置方案选择无效")
+        use_dependencies = document.get("use_dependency_plan", False)
+        if not isinstance(use_dependencies, bool):
+            raise AcceptanceValidationError("是否执行 Supervisor 依赖编排必须为布尔值")
+        frozen = default_execution_preflight()
+        if profile_id:
+            if self.scenario_setup is None:
+                raise AcceptanceValidationError("场景前置模块不可用，不能选择场景方案")
+            profiles = self.scenario_setup.load().get("profiles", [])
+            profile = next((item for item in profiles if isinstance(item, dict) and item.get("id") == profile_id), None)
+            if not profile or not isinstance(profile.get("name"), str):
+                raise AcceptanceValidationError("所选场景前置方案不存在，请刷新后重试")
+            frozen["scenario_profile_id"] = profile_id
+            frozen["scenario_profile_name"] = profile["name"]
+        if use_dependencies:
+            if self.settings is None:
+                raise AcceptanceValidationError("运行配置不可用，不能执行 Supervisor 依赖编排")
+            dependency_plan = deepcopy(getattr(self.settings.load(), "dependency_plan", None))
+            if not isinstance(dependency_plan, dict) or dependency_plan.get("enabled") is not True or not dependency_plan.get("steps"):
+                raise AcceptanceValidationError("当前没有已启用的 Supervisor 依赖编排，请先在任务指挥台保存编排")
+            frozen["dependency_plan"] = dependency_plan
+        return frozen
+
     def _on_run_event(self, plan_id: str, event: dict[str, Any]) -> None:
         with self._lock:
             plan = self.plan_store.load_current()
@@ -198,7 +247,23 @@ class AcceptanceOrchestrator:
             if 0 <= index < len(plan.items):
                 plan.current_index = index
             event_type = event.get("type")
-            if event_type == "item_preparing":
+            if event_type in {"preflight_progress", "preflight_restore"}:
+                progress = event.get("preflight")
+                if not isinstance(progress, dict):
+                    return
+                try:
+                    plan.execution_preflight_status = normalize_execution_preflight_status(
+                        {
+                            "state": progress.get("state"),
+                            "message": progress.get("message"),
+                            "updated_at": now_iso(),
+                        },
+                        preflight=plan.execution_preflight,
+                    )
+                except ValueError:
+                    return
+                plan.status = "preparing" if event_type == "preflight_progress" else plan.status
+            elif event_type == "item_preparing":
                 plan.status = "preparing"
                 if 0 <= index < len(plan.items):
                     plan.items[index].status, plan.items[index].started_at = "running", now_iso()

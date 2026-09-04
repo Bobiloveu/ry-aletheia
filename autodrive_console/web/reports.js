@@ -7,7 +7,10 @@ const status = value => ({queued:'排队中',preparing:'预检中',running:'执�
 
 function reportRow(item) {
   const encoded = encodeURIComponent(item.filename);
-  return `<div class="report-row"><div><b>${esc(item.filename)}</b><small>生成时间：${new Date(item.modified_at).toLocaleString('zh-CN',{hour12:false})}</small></div><div><span class="file-kind">TRAJECTORY REPORT</span><small>${formatBytes(item.size)} · 单文件 HTML</small></div><div class="report-actions"><a class="compact-action" target="_blank" href="/api/report-files/${encoded}">查看</a><a class="compact-action" href="/api/reports/${encoded}/download">下载 HTML</a>${item.csv_filename ? `<a class="compact-action" href="/api/report-files/${encodeURIComponent(item.csv_filename)}">CSV</a>` : ''}<button class="compact-action danger-action report-delete" data-report="${esc(item.filename)}" type="button">删除</button></div></div>`;
+  const acceptance = item.report_type === 'acceptance';
+  const title = item.title || (acceptance ? '部署验收报告' : '自动测试运行报告');
+  const detail = acceptance ? '验收结论与轨迹证据' : '轮次结果与轨迹证据';
+  return `<div class="report-row report-row-${acceptance ? 'acceptance' : 'test'}"><div><b>${esc(title)}</b><small>${esc(item.filename)} · 生成时间：${new Date(item.modified_at).toLocaleString('zh-CN',{hour12:false})}</small></div><div><span class="file-kind ${acceptance ? 'acceptance-kind' : 'test-kind'}">${acceptance ? '部署验收' : '自动测试'}</span><small>${formatBytes(item.size)} · ${detail}</small></div><div class="report-actions"><a class="compact-action" target="_blank" href="/api/report-files/${encoded}">预览</a><a class="compact-action" href="/api/reports/${encoded}/download">下载 HTML</a>${item.csv_filename ? `<a class="compact-action" href="/api/report-files/${encodeURIComponent(item.csv_filename)}">CSV</a>` : ''}<button class="compact-action danger-action report-delete" data-report="${esc(item.filename)}" type="button">删除</button></div></div>`;
 }
 
 async function loadReports() {
@@ -19,7 +22,7 @@ async function loadReports() {
     $('latestStatus').textContent = status(run?.status);
     $('latestDetail').textContent = run ? `${run.case.filename} · ${run.summary.completed}/${run.requestedCount} 次完成 · ${run.summary.passed} 通过 / ${run.summary.failed} 失败` : '尚未创建自动化测试计划。';
     $('reportCount').textContent = `${reports.reports.length} 份报告`;
-    $('reportList').innerHTML = reports.reports.length ? reports.reports.map(reportRow).join('') : '<div class="page-empty">reports/ 中尚未生成带轨迹证据的验证报告。</div>';
+    $('reportList').innerHTML = reports.reports.length ? reports.reports.map(reportRow).join('') : '<div class="page-empty">尚未生成自动测试或部署验收报告。完成一次任务或验收后，证据会归档到这里。</div>';
   } catch (error) {
     $('reportList').innerHTML = `<div class="page-empty">读取失败：${esc(error.message)}</div>`;
   }
@@ -30,7 +33,7 @@ $('reportList').addEventListener('click', async event => {
   const button = event.target.closest('.report-delete');
   if (!button) return;
   const filename = button.dataset.report;
-  if (!window.confirm(`确认删除报告“${filename}”？\n\n将同时删除对应 CSV 和全部轨迹证据文件，此操作不可恢复。`)) return;
+  if (!window.confirm(`确认删除报告“${filename}”？\n\n将同时删除对应 CSV 和该报告专属轨迹证据文件，此操作不可恢复。`)) return;
   button.disabled = true;
   try {
     const response = await fetch(`/api/reports/${encodeURIComponent(filename)}`, {method: 'DELETE'});

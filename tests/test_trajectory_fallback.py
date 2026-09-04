@@ -4,6 +4,7 @@ import unittest
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from autodrive_console.models import RunRecord, TaskParameters, TestCase
@@ -93,6 +94,84 @@ class _CancelledWaitingExecutor:
 
 
 class TrajectoryFallbackTests(unittest.TestCase):
+    def test_acceptance_preflight_runs_once_for_the_whole_sequence(self):
+        """A frozen acceptance setup must not restart nodes once per sampled task."""
+        events = []
+
+        class ScenarioStore:
+            runtime_lock = threading.Lock()
+
+            @staticmethod
+            def apply(profile_id):
+                events.append(("scenario_apply", profile_id))
+                return {"message": "方案已应用"}
+
+            @staticmethod
+            def restore():
+                events.append(("scenario_restore", ""))
+                return {"restored": True, "message": "常规启动脚本已恢复"}
+
+        class Gateway:
+            def __init__(self, *_args):
+                pass
+
+            @staticmethod
+            def restart_configured_dependencies(**_kwargs):
+                events.append(("dependency_restart", ""))
+                return True, "依赖已稳定"
+
+            @staticmethod
+            def preflight_without_orchestration(case, **_kwargs):
+                events.append(("case_preflight", case.id))
+                return _Preflight()
+
+            @staticmethod
+            def confirm_dependencies_ready(**_kwargs):
+                return True, "全部 RUNNING", []
+
+        class Executor:
+            @staticmethod
+            def wait_until_available(**_kwargs):
+                return True, "ROS2 服务已就绪"
+
+            @staticmethod
+            def execute(parameters, *_args, **_kwargs):
+                events.append(("task_execute", parameters.door))
+                return True, "任务服务执行成功", 0.1
+
+        class Settings:
+            @staticmethod
+            def load():
+                return SimpleNamespace(
+                    dependency_plan={"enabled": True, "steps": [{"nodes": ["MODULES:209-lightning"], "wait_seconds": 0}]},
+                    elevator_wait_timeout_s=180,
+                    task_execution_timeout_s=900,
+                )
+
+        cases = [
+            TestCase("case-1", "case-1.json", "任务 1", TaskParameters("园区", 1, 1, 1, 101), "unused-1.json"),
+            TestCase("case-2", "case-2.json", "任务 2", TaskParameters("园区", 1, 1, 2, 201), "unused-2.json"),
+        ]
+        context = {
+            "scenario_profile_id": "hall",
+            "scenario_profile_name": "大厅场景",
+            "dependency_plan": {"enabled": True, "steps": [{"nodes": ["MODULES:209-lightning"], "wait_seconds": 0}]},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            manager = RunManager(Path(directory), Executor(), Settings(), ScenarioStore())
+            manager._scenario_apply_settle_seconds = 0
+            with patch("autodrive_console.run_manager.RobotGateway", Gateway), patch.object(manager, "_write_report"):
+                run = manager.start_sequence(cases, prepare_trajectory_maps=False, execution_preflight=context)
+                deadline = time.monotonic() + 2.0
+                while run.status not in {"completed", "cancelled", "blocked", "failed"} and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(events.count(("scenario_apply", "hall")), 1)
+        self.assertEqual(events.count(("dependency_restart", "")), 1)
+        self.assertEqual([event for event in events if event[0] == "case_preflight"], [("case_preflight", "case-1"), ("case_preflight", "case-2")])
+        self.assertEqual(events.count(("scenario_restore", "")), 1)
+
     def test_sequence_executes_each_case_under_the_existing_run_lock(self):
         """验收序列必须复用 RunManager，不得另起 ROS 调用路径。"""
         cases = [

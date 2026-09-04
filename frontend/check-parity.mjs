@@ -5,6 +5,7 @@ const sharedNavigation = readFileSync('../autodrive_console/web/brand_version.js
 const vue = readFileSync('./src/main.js', 'utf8');
 const originalDashboard = readFileSync('../autodrive_console/web/index.html', 'utf8');
 const vueDashboard = readFileSync('./src/dashboard.js', 'utf8');
+const viteConfig = readFileSync('./vite.config.js', 'utf8');
 const expected = [
   ['品牌、主导航与诊断入口', ['RY <span>Aletheia</span>', '任务指挥台', '测试用例管理', '报告中心', '运行配置', 'side-diagnostic-link', '诊断日志']],
   ['运行配置页面骨架', ['page-main', 'page-header', 'page-grid', 'CONSOLE SETTINGS', '本机运行参数']],
@@ -41,6 +42,12 @@ for (const value of ['index.html?raw', 'styles.css', 'refinement.css', 'app.js',
   if (!vueDashboard.includes(value)) {
     failed = true;
     console.error(`FAIL: Vue 任务指挥台缺少保真迁移基线：${value}`);
+  }
+}
+for (const route of ['/acceptance-test.html', '/acceptance_test.js', '/acceptance_test.css']) {
+  if (!viteConfig.includes(`"${route}"`)) {
+    failed = true;
+    console.error(`FAIL: Vue 预览未代理既有部署验收资源 ${route}`);
   }
 }
 if (failed) process.exit(1);

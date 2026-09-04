@@ -86,7 +86,11 @@ CONFIG_DIR = WORKSPACE / "config"
 MAX_CASE_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_MAP_UPLOAD_BYTES = DeploymentStore.MAX_MAP_BYTES + 64 * 1024 * 1024
 MAX_MAPPING_TEMPLATE_BYTES = 2 * 1024 * 1024
-REPORT_FILENAME = re.compile(r"(?:run_[0-9a-f]{12}_[^/]+|报告_\d{8}_\d{6}_[^/]+_[0-9a-f]{12})\.html")
+TEST_REPORT_FILENAME = re.compile(r"(?:run_[0-9a-f]{12}_[^/]+|报告_\d{8}_\d{6}_[^/]+_[0-9a-f]{12})\.html")
+ACCEPTANCE_REPORT_FILENAME = re.compile(r"acceptance_[0-9a-f]{12}_\d{8}_\d{6}\.html")
+REPORT_FILENAME = re.compile(
+    r"(?:run_[0-9a-f]{12}_[^/]+|报告_\d{8}_\d{6}_[^/]+_[0-9a-f]{12}|acceptance_[0-9a-f]{12}_\d{8}_\d{6})\.html"
+)
 STORE = CaseStore(TASK_DIR)
 CASE_WORKSPACE = CaseWorkspace(CONFIG_DIR, TASK_DIR)
 DEPLOYMENTS = DeploymentStore(WORKSPACE / "deployments")
@@ -100,6 +104,8 @@ ACCEPTANCE = AcceptanceOrchestrator(
     plan_store=AcceptancePlanStore(CONFIG_DIR / "acceptance"),
     run_manager=RUNS,
     report_dir=WORKSPACE / "reports",
+    scenario_setup=SCENARIO_SETUP,
+    settings=SETTINGS,
 )
 # 不复用运行测试的 ROS service client：手动控制有自己的 node/executor/timer，
 # 但与现有模块共用同一进程内 rclpy runtime，避免创建任何转发层。
@@ -1277,11 +1283,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         for target in sorted(report_files, key=lambda item: item.stat().st_mtime, reverse=True):
             stat = target.stat()
             csv_target = target.with_suffix(".csv")
+            is_acceptance = bool(ACCEPTANCE_REPORT_FILENAME.fullmatch(target.name))
             records.append({
                 "filename": target.name,
                 "size": stat.st_size,
                 "modified_at": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds"),
                 "csv_filename": csv_target.name if csv_target.is_file() else None,
+                "report_type": "acceptance" if is_acceptance else "test",
+                "title": "部署验收报告" if is_acceptance else "自动测试运行报告",
             })
         return records[:200]
 
@@ -1484,16 +1493,36 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def _delete_report(requested: str) -> None:
         target = ConsoleHandler._archive_report_target(requested)
         report_root = target.parent
-        match = re.search(r"_([0-9a-f]{12})\.html$", target.name)
-        if not match:
-            raise ValueError("报告文件名不合法")
-        run_id = match.group(1)
         csv_target = target.with_suffix(".csv")
-        trajectory_dir = (report_root / f"run_{run_id}_trajectory").resolve()
+        is_acceptance = bool(ACCEPTANCE_REPORT_FILENAME.fullmatch(target.name))
+        manifest = target.with_suffix(".assets.json") if is_acceptance else None
+        trajectory_dirs: list[Path] = []
+        if manifest and manifest.is_file() and not manifest.is_symlink():
+            try:
+                document = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                document = None
+            raw_directories = document.get("trajectory_directories") if isinstance(document, dict) and document.get("schema") == 1 else []
+            if isinstance(raw_directories, list):
+                for name in raw_directories:
+                    if not isinstance(name, str) or not re.fullmatch(r"run_[0-9a-f]{12}_trajectory", name):
+                        continue
+                    candidate = (report_root / name).resolve()
+                    if candidate.parent == report_root and candidate.is_dir() and not candidate.is_symlink():
+                        trajectory_dirs.append(candidate)
+        elif not is_acceptance:
+            match = re.search(r"_([0-9a-f]{12})\.html$", target.name)
+            if not match:
+                raise ValueError("报告文件名不合法")
+            candidate = (report_root / f"run_{match.group(1)}_trajectory").resolve()
+            if candidate.parent == report_root and candidate.is_dir() and not candidate.is_symlink():
+                trajectory_dirs.append(candidate)
         target.unlink()
         if csv_target.is_file():
             csv_target.unlink()
-        if trajectory_dir.is_dir() and trajectory_dir.parent == report_root:
+        if manifest and manifest.is_file():
+            manifest.unlink()
+        for trajectory_dir in trajectory_dirs:
             shutil.rmtree(trajectory_dir)
 
     def _static_from(self, root: Path, requested: str) -> None:

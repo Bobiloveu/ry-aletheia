@@ -12,6 +12,20 @@
   color: #ff9bac !important;
   background: #251521 !important;
 }
+.file-kind {
+  display: inline-flex;
+  align-items: center;
+  width: max-content;
+  padding: 4px 7px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .02em;
+}
+.test-kind { color: var(--accent, #19c8b5); }
+.acceptance-kind { color: var(--warning, #c88b22); }
+.report-row-acceptance { border-color: color-mix(in srgb, var(--warning, #c88b22) 30%, var(--line)); }
 @media (max-width: 850px) {
   .report-actions {
     justify-content: flex-start;

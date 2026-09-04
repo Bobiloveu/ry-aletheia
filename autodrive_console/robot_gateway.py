@@ -60,6 +60,25 @@ class RobotGateway:
         sync_ok, sync_message = self._sync_if_missing(case)
         return PreflightResult(sync_ok, sync_message if sync_ok else f"任务同步失败：{sync_message}", states, sync_message, orchestration)
 
+    def preflight_without_orchestration(self, case: TestCase, cancel_event: threading.Event | None = None) -> PreflightResult:
+        """Check and synchronize one task without restarting any dependency.
+
+        A deployment acceptance sequence may have already applied its frozen
+        scenario and Supervisor plan once. Every remaining item still needs
+        the normal health check and safe non-overwriting task synchronization,
+        but running the orchestration again would interrupt the previous task.
+        """
+        if cancel_event and cancel_event.is_set():
+            return PreflightResult(False, "测试已取消", [], "未执行")
+        states, error = self._check_supervisor()
+        required_failed = [item for item in states if item["required"] and item["status"] != "RUNNING"]
+        if error:
+            return PreflightResult(False, error, states, "未执行")
+        if required_failed:
+            return PreflightResult(False, "必需 Supervisor 节点未全部处于 RUNNING 状态", states, "未执行")
+        sync_ok, sync_message = self._sync_if_missing(case)
+        return PreflightResult(sync_ok, sync_message if sync_ok else f"任务同步失败：{sync_message}", states, sync_message)
+
     def confirm_dependencies_ready(self, cancel_event: threading.Event | None = None) -> tuple[bool, str, list[dict]]:
         """ROS 服务就绪后再次执行总闸，防止节点在初始化过程中回落到 STARTING。"""
         if cancel_event and cancel_event.is_set():

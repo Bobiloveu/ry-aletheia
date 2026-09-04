@@ -19,6 +19,111 @@ from .models import TaskParameters, now_iso
 
 ACTIVE_PLAN_STATUSES = frozenset({"preparing", "running", "awaiting_recovery", "recovering"})
 TERMINAL_ITEM_STATUSES = frozenset({"passed", "failed", "cancelled"})
+PREFLIGHT_STATUS_STATES = frozenset({
+    "not_selected", "legacy", "pending", "applying_scenario", "settling",
+    "restarting_dependencies", "ready", "restoring", "restored", "cancelled", "blocked",
+})
+
+
+def default_execution_preflight() -> dict[str, Any]:
+    """Return the only safe default: no script change and no node restart."""
+    return {
+        "scenario_profile_id": None,
+        "scenario_profile_name": None,
+        "dependency_plan": {"enabled": False, "steps": []},
+    }
+
+
+def default_execution_preflight_status(value: object = None) -> dict[str, Any]:
+    """Return an operator-readable status without exposing process controls."""
+    if value is None:
+        return {
+            "state": "legacy",
+            "message": "历史验收计划沿用原有逐项运行方式",
+            "updated_at": None,
+        }
+    normalized = normalize_execution_preflight(value)
+    selected = normalized["scenario_profile_id"] or normalized["dependency_plan"]["enabled"]
+    return {
+        "state": "pending" if selected else "not_selected",
+        "message": "已冻结可选运行准备，开始验收时统一执行" if selected else "未启用额外运行准备，按常规验收流程执行",
+        "updated_at": None,
+    }
+
+
+def normalize_execution_preflight_status(value: object, *, preflight: object) -> dict[str, Any]:
+    """Keep persisted progress small, explicit and safe to render in a browser."""
+    if value is None:
+        return default_execution_preflight_status(preflight)
+    if not isinstance(value, dict) or set(value) != {"state", "message", "updated_at"}:
+        raise ValueError("验收计划运行准备状态格式不受支持")
+    state, message, updated_at = value["state"], value["message"], value["updated_at"]
+    if not isinstance(state, str) or state not in PREFLIGHT_STATUS_STATES:
+        raise ValueError("验收计划运行准备状态无效")
+    if not isinstance(message, str) or not message.strip() or len(message) > 240 or "\x00" in message:
+        raise ValueError("验收计划运行准备说明无效")
+    if updated_at is not None and (not isinstance(updated_at, str) or len(updated_at) > 64):
+        raise ValueError("验收计划运行准备时间无效")
+    return {"state": state, "message": message, "updated_at": updated_at}
+
+
+def normalize_execution_preflight(value: object) -> dict[str, Any]:
+    """Validate frozen, console-owned preflight state from plan storage.
+
+    The browser never supplies the plan or process names directly.  This
+    validation still treats persisted state as untrusted so a damaged plan
+    cannot turn into arbitrary Supervisor control after an upgrade.
+    """
+    if value is None:
+        return default_execution_preflight()
+    if not isinstance(value, dict) or set(value) != {"scenario_profile_id", "scenario_profile_name", "dependency_plan"}:
+        raise ValueError("验收计划前置配置格式不受支持")
+    profile_id, profile_name = value["scenario_profile_id"], value["scenario_profile_name"]
+    if profile_id is not None and (not isinstance(profile_id, str) or not profile_id or len(profile_id) > 64 or "\x00" in profile_id):
+        raise ValueError("验收计划场景方案标识无效")
+    if profile_name is not None and (not isinstance(profile_name, str) or not profile_name.strip() or len(profile_name) > 80):
+        raise ValueError("验收计划场景方案名称无效")
+    if (profile_id is None) != (profile_name is None):
+        raise ValueError("验收计划场景方案信息不完整")
+    dependency_plan = value["dependency_plan"]
+    if not isinstance(dependency_plan, dict) or set(dependency_plan) != {"enabled", "steps"} or not isinstance(dependency_plan["enabled"], bool) or not isinstance(dependency_plan["steps"], list):
+        raise ValueError("验收计划依赖编排格式无效")
+    steps: list[dict[str, Any]] = []
+    used_nodes: set[str] = set()
+    for step in dependency_plan["steps"]:
+        if not isinstance(step, dict) or set(step) - {"nodes", "wait_seconds"} or not isinstance(step.get("nodes"), list):
+            raise ValueError("验收计划依赖步骤格式无效")
+        nodes = step["nodes"]
+        if not nodes or not all(isinstance(node, str) and node and len(node) <= 128 for node in nodes) or len(set(nodes)) != len(nodes):
+            raise ValueError("验收计划依赖节点无效")
+        if used_nodes.intersection(nodes):
+            raise ValueError("验收计划依赖节点不能跨阶段重复")
+        used_nodes.update(nodes)
+        wait_seconds = step.get("wait_seconds", 0)
+        if isinstance(wait_seconds, bool) or not isinstance(wait_seconds, int) or not 0 <= wait_seconds <= 300:
+            raise ValueError("验收计划依赖等待时间无效")
+        steps.append({"nodes": list(nodes), "wait_seconds": wait_seconds})
+    if dependency_plan["enabled"] and not steps:
+        raise ValueError("启用验收依赖编排时必须包含启动阶段")
+    if not dependency_plan["enabled"] and steps:
+        raise ValueError("未启用验收依赖编排时不能保存启动阶段")
+    return {
+        "scenario_profile_id": profile_id,
+        "scenario_profile_name": profile_name,
+        "dependency_plan": {"enabled": dependency_plan["enabled"], "steps": steps},
+    }
+
+
+def public_execution_preflight(value: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_execution_preflight(value)
+    plan = normalized["dependency_plan"]
+    return {
+        "scenario_profile_id": normalized["scenario_profile_id"],
+        "scenario_profile_name": normalized["scenario_profile_name"],
+        "dependency_plan_enabled": plan["enabled"],
+        "dependency_stage_count": len(plan["steps"]),
+        "dependency_node_count": sum(len(step["nodes"]) for step in plan["steps"]),
+    }
 
 
 def _number(value: object, name: str, *, minimum: float, maximum: float, integer: bool = False) -> float | int | None:
@@ -213,6 +318,10 @@ class AcceptancePlan:
     task_pool_size: int
     items: list[AcceptancePlanItem]
     criteria_snapshot: dict[str, float | int | None]
+    # ``None`` is reserved for schema-1 plans created before plan-wide
+    # preflight existed. New plans always receive a normalized dictionary.
+    execution_preflight: dict[str, Any] | None = field(default_factory=default_execution_preflight)
+    execution_preflight_status: dict[str, Any] = field(default_factory=default_execution_preflight_status)
     warnings: list[str] = field(default_factory=list)
     status: str = "ready"
     current_index: int | None = None
@@ -222,7 +331,7 @@ class AcceptancePlan:
 
     def to_storage_dict(self) -> dict[str, Any]:
         return {
-            "schema": 1,
+            "schema": 3,
             "plan_id": self.plan_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -235,6 +344,11 @@ class AcceptancePlan:
             "task_pool_size": self.task_pool_size,
             "items": [item.to_storage_dict() for item in self.items],
             "criteria_snapshot": self.criteria_snapshot,
+            "execution_preflight": normalize_execution_preflight(self.execution_preflight) if self.execution_preflight is not None else None,
+            "execution_preflight_status": normalize_execution_preflight_status(
+                self.execution_preflight_status,
+                preflight=self.execution_preflight,
+            ),
             "warnings": self.warnings,
             "status": self.status,
             "current_index": self.current_index,
@@ -245,9 +359,11 @@ class AcceptancePlan:
 
     @classmethod
     def from_storage_dict(cls, document: dict[str, Any]) -> "AcceptancePlan":
-        if document.get("schema") != 1 or not isinstance(document.get("items"), list):
+        if document.get("schema") not in {1, 2, 3} or not isinstance(document.get("items"), list):
             raise ValueError("验收计划文件格式不受支持")
         criteria = AcceptanceCriteria.from_dict(dict(document.get("criteria_snapshot") or {}))
+        stored_preflight = None if document.get("schema") == 1 else document.get("execution_preflight")
+        stored_preflight_status = None if document.get("schema") == 1 else document.get("execution_preflight_status")
         plan = cls(
             plan_id=str(document["plan_id"]),
             created_at=str(document["created_at"]),
@@ -261,6 +377,11 @@ class AcceptancePlan:
             task_pool_size=int(document["task_pool_size"]),
             items=[AcceptancePlanItem.from_storage_dict(item) for item in document["items"] if isinstance(item, dict)],
             criteria_snapshot=criteria.to_dict(),
+            execution_preflight=None if stored_preflight is None else normalize_execution_preflight(stored_preflight),
+            execution_preflight_status=normalize_execution_preflight_status(
+                stored_preflight_status,
+                preflight=stored_preflight,
+            ),
             warnings=[str(value) for value in document.get("warnings", [])],
             status=str(document.get("status", "ready")),
             current_index=int(document["current_index"]) if document.get("current_index") is not None else None,
@@ -285,6 +406,11 @@ class AcceptancePlan:
             "mode": self.mode,
             "task_pool_size": self.task_pool_size,
             "selection_summary": selection_summary(self.items),
+            "execution_preflight": public_execution_preflight(self.execution_preflight) if self.execution_preflight is not None else None,
+            "execution_preflight_status": normalize_execution_preflight_status(
+                self.execution_preflight_status,
+                preflight=self.execution_preflight,
+            ),
             "items": [item.to_public_dict() for item in self.items],
             "warnings": self.warnings,
             "status": self.status,
@@ -313,6 +439,7 @@ class AcceptancePlanFactory:
         random_seed: int | None,
         criteria: AcceptanceCriteria,
         unit: int | None = None,
+        execution_preflight: dict[str, Any] | None = None,
     ) -> AcceptancePlan:
         pool = snapshot.select(scope_type, community, building, unit)
         if mode not in {"full", "sample"}:
@@ -332,6 +459,7 @@ class AcceptancePlanFactory:
         ordered = _coverage_aware_order(pool, community_scope=scope_type == "community", seed=random_seed)
         selected = ordered[:selected_size]
         timestamp = now_iso()
+        normalized_preflight = normalize_execution_preflight(execution_preflight)
         return AcceptancePlan(
             plan_id=uuid.uuid4().hex[:12],
             created_at=timestamp,
@@ -345,6 +473,8 @@ class AcceptancePlanFactory:
             task_pool_size=len(pool),
             items=[AcceptancePlanItem.from_task(task) for task in selected],
             criteria_snapshot=criteria.to_dict(),
+            execution_preflight=normalized_preflight,
+            execution_preflight_status=default_execution_preflight_status(normalized_preflight),
             warnings=_coverage_warnings(pool, selected_size, community_scope=scope_type == "community"),
         )
 
