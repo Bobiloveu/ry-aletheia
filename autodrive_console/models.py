@@ -31,6 +31,8 @@ class AttemptResult:
     duration_s: float
     started_at: str
     trajectory: dict[str, Any] | None = None
+    case_id: str | None = None
+    case_filename: str | None = None
 
 
 @dataclass

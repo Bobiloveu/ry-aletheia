@@ -8,12 +8,14 @@
 
 RY Aletheia 是部署在机器人小车 Ubuntu 主机上的离线自动测试平台。测试人员通过同一 Wi-Fi 下的浏览器访问 `http://<小车IP>:8087`；任务调用、ROS2 通信、Supervisor 操作、地图缓存与报告生成均在小车本机完成。
 
-它负责测试编排、证据记录和只读观测，不替代小车原有的导航、定位、地图服务或安全控制。
+它负责测试编排、证据记录和只读观测；已获批准的 miniapp 手动控制是一个受控例外，但不替代小车原有的导航、定位、地图服务、物理急停或底盘安全控制。
 
 - 任务仅通过既有 `/start_execute_tasks` 服务下发，不向底盘或导航发布控制指令。
 - 不修改任务 JSON；别名、依赖编排和场景方案均保存在工具配置目录。
 - 场景前置配置只替换启动脚本中已登记的 FCRP 与 lightning 参数。应用场景时以先落盘的可校验恢复事务、定向原子替换和运行依赖重启验证构成闭环；恢复常规方案时只回写启动脚本，不操作运行中的节点，常规参数在相关节点下次自行启动时生效。
-- 实时观测采用“时效优先”：点云/位姿过期帧直接丢弃，不追赶历史画面；可选视频走独立的低延迟 WebRTC 链路。
+- 实时观测采用“时效优先”：点云、位姿和仅 PC 使用的局部代价地图过期帧直接丢弃，不追赶历史画面；可选视频走独立的低延迟 WebRTC 链路。
+- 手动控制只能在 `/control_source_state=miniapp` 且急停状态已确认 `false` 时发送非零速度。实时状态由 `/is_emergency_stop` 订阅提供；若启动时锁存样本未送达，仅在 `unknown` 阶段以同一 ROS 节点异步调用 `/get_emergency_stop` 补齐底盘当前状态。服务异常仍保持 `unknown`，不能猜测为安全。软件解除急停只发送经实车验证的固定 `/command` 报文，并且必须收到急停状态恢复 `false` 后才确认成功；它不切换控制权，也不替代物理急停。
+- `config/console.json` 的 `vehicle_control` 仅保存手动驾驶 `press`、`movement_acc` 与 `stop_acc`。零 Twist 统一使用 `stop_acc`，非零 Twist 使用 `movement_acc`；这些参数绝不改变固定解除急停报文。
 - 小车运行阶段不依赖互联网、Node.js、npm 或开发源码；主程序必须以普通账户运行。
 
 ### 1.1 Flutter 移动端产品定位
@@ -34,26 +36,35 @@ Flutter 客户端是 Aletheia 面向可信局域网中移动机器人的专业 H
 | --- | --- |
 | 测试用例管理 | 扫描 `tasks/` 任务 JSON、保存别名、绑定每条用例的场景前置方案，并以可校验用例包跨车交付。 |
 | 测试指挥台 | 多轮串行执行、任务文件同步、依赖预检、Supervisor 编排、人工恢复和终止。 |
+| 部署验收 | 从正式任务目录只读生成冻结计划；`栋号 + 单元` 是物理楼宇单元，抽样显示实际覆盖，不以未覆盖每层/每户作为异常。 |
 | 场景前置配置 | 选择 FCRP `.launch.py` 与 lightning YAML，受控替换 `handle_modules.sh`；应用/恢复均让受控依赖重读脚本并确认稳定运行。 |
 | 多地图轨迹 | 缓存实际地图，叠加实际轨迹、理想路线、虚拟墙并归档。 |
 | 报告中心 | 生成、预览、下载、删除可离线查看的单文件 HTML 报告。 |
-| 实时运行观测 | 地图、虚拟墙、车体轮廓、定位、点云，以及网页按需启停的低延迟相机视频。 |
+| 实时运行观测 | 地图、虚拟墙、车体轮廓、定位、点云、仅 PC 的局部代价地图，以及网页按需启停的低延迟相机视频。 |
 | 运行配置 | 依赖编排、车型、实时观测、升级和持久化设置。 |
 | 工具日志 | 独立记录升级、ROS2、专用遥测、观测和异常诊断。 |
+| 机器人日志下载 | Desktop Web 管理当前小车的可读系统日志目录，按文件名筛选并逐文件下载到打开网页的电脑；显示小车到浏览器的传输进度，默认仅在下载副本中将可识别 ROS 时间转为北京时间，可关闭后保留原始文本。 |
+
+### 2.1 专项自动测试闭环
+
+专项测试不另建一套导航或任务协议，而是以既有任务 JSON 为场景资产、以既有 `/start_execute_tasks` 为唯一任务下发入口。电梯连续进出、门禁多次通行、多任务连续配送、往返运行和窄通道等场景均可绑定为用例并设置轮次、轮间隔与受控场景参数。正常轮次自动串行执行；一旦任务失败、预检失败或发生需人工处置的停滞，工具记录当前轮次和原因并进入 `awaiting_recovery`，由操作员将车辆恢复至安全起点后再继续剩余轮次，禁止在异常位置盲目自动重发。
+
+每轮产生可追溯结果：开始时间、耗时、任务服务反馈、通过/失败、人工干预、地图/轨迹证据及电梯等待或停滞状态。计划摘要自动计算请求轮次、已完成、成功、失败、取消和通过率；HTML/CSV 报告汇总这些信息。失败定位以真实上游信息为准：工具可关联任务返回消息、当前路线/轨迹位置和运行状态，但不会在没有上游节点标识的情况下臆测“某个门禁”或“某一层”失败。门禁设备状态、通道物理宽度等独立判定源尚未接入。
 
 ## 3. 总体架构
 
 ```text
 同网段浏览器
   │ HTTP :8087（控制台、API、报告）
-  │ Binary WebSocket :8768（专用实时遥测：点云/位姿）
+  │ Binary WebSocket :8768（专用实时遥测：点云/位姿/PC 局部代价地图）
   │ WHEP/WebRTC :8889（可选相机直出）
   ▼
 RY Aletheia（普通账户）
   ├─ Python 控制台：计划、任务、Supervisor、轨迹、报告、配置、升级
   ├─ C++ 轻量位姿进程：最新 TF map → base_* → 回环 UDP 位姿帧（60Hz）
   ├─ C++ 轻量点云进程：/collision_voxel_layer/points（或 /livox/lidar 回退）→ 回环 UDP 点云帧（≤3000 点）
-  ├─ Aletheia 专用遥测网关：UDP 最新帧组装 → 两条 Binary WebSocket
+  ├─ C++ 轻量局部代价地图进程：/local_costmap/costmap → 按 stamp 的 map←source 投影 → 回环 UDP 栅格帧（≤65535 cells）
+  ├─ Aletheia 专用遥测网关：UDP 最新帧组装 → 三条 Binary WebSocket
   ├─ 可选视频运行时（由控制台拥有）
        ├─ 原生 `aletheia_video_ingest`：按发布配置读取四路 ROS Image 或 ShmSDK 最新图像；检测/分割始终读取 ROS Image → rawvideoparse → VAAPI H.264 → 本机 RTSP
        └─ 私有 MediaMTX：RTSP 输入 → WHEP/WebRTC 输出
@@ -63,7 +74,7 @@ RY Aletheia（普通账户）
        └─ 运行数据：tasks、config、reports、maps_cache、updates、logs
 ```
 
-测试执行经 HTTP API 进入 `RunManager`。地图仍由既有缓存/API 机制加载。C++ 点云和位姿预处理分别写入独立最新数据槽，并分别经独立的回环 UDP 入口交给 Aletheia 专用遥测网关；网关只组装最新完整帧，并以两条 Binary WebSocket 分离点云与位姿，避免大点云阻塞车体姿态。相机视频不经过遥测网关：浏览器用 WHEP 与本机 MediaMTX 建立 WebRTC 会话，Python 只提供受控的状态与开关 API。
+测试执行经 HTTP API 进入 `RunManager`。地图仍由既有缓存/API 机制加载。C++ 点云、位姿和局部代价地图预处理分别写入独立最新数据槽，并分别经独立的回环 UDP 入口交给 Aletheia 专用遥测网关；网关只组装最新完整帧，并以三条 Binary WebSocket 分离大栅格、点云与位姿。costmap 仅 PC 浏览器连接，避免影响移动端；相机视频不经过遥测网关：浏览器用 WHEP 与本机 MediaMTX 建立 WebRTC 会话，Python 只提供受控的状态与开关 API。
 
 ## 4. 目录与数据所有权
 
@@ -116,6 +127,7 @@ RY Aletheia（普通账户）
 | `observation.py` | 专用遥测/C++ 预处理生命周期、地图缓存和观测诊断。 |
 | `video.py` | 视频配置校验、MediaMTX 健康状态、WHEP 地址生成与控制台拥有的视频进程树生命周期。 |
 | `tool_logging.py` | 工具级日志。 |
+| `robot_logs.py` | 当前小车业务日志源的受控配置、非递归清单与原始文件下载校验。 |
 | `upgrade_manager.py` | 清单/MD5 校验、备份、原子替换与重启交接。 |
 
 ## 6. 测试执行状态机
@@ -181,7 +193,7 @@ PixiJS 最新点云几何       ├─ Pixi 世界容器：缩放、拖动（固
 车体 DOM 覆盖层           ┘
 ```
 
-实时二维地图由 PixiJS 管理：静态占据地图为纹理，虚拟墙和点云为独立图层；首次取得或切图时才更新静态地图纹理。PC 保留原有高对比蓝色观测主题和无格栅画面；仅移动端的 `html.mobile-console` 额外绘制严格对齐 `map` 世界坐标的米制格栅，并按当前缩放在 1m、2m、5m 小格之间自适应，主格恒为小格的 5 倍。移动端比例尺反算当前 `pixelsPerMeter`，线宽也反算到地图像素，因而缩放后仍保持稳定的屏幕可读性。拖动、缩放与位姿跟随只更新 Pixi 世界容器变换，点云只替换最新一帧几何，均不重绘静态底图。缩放以鼠标位置为中心，中键或左键拖动仅改变视图变换。地图必须稳定保持原始 `map` 坐标朝向，不能在进入页面时按车体初始航向旋转；只允许车体 DOM 图标旋转。相机视频先由独立的浏览器原生 `<video>` 元素接收 WHEP/WebRTC，再作为 PixiJS `Video Texture` 合成到相机卡片；视频数据本身不进入 Canvas 2D、WebSocket 或 Python。
+实时二维地图由 PixiJS 管理：静态占据地图为纹理，局部代价地图为单张动态 texture，虚拟墙和点云为独立图层；首次取得或切图时才更新静态地图纹理。PC 默认显示局部代价地图并允许临时隐藏；其图层顺序固定为静态地图、PC 米制格栅（如启用）、costmap、虚拟墙、点云和 DOM 车体。costmap 由 `header.stamp` 时刻的 `map ← header.frame_id` 与 `info.origin` 合成，未知/自由 cell 透明，不能假定 `odom == map`；数据超过 5 秒、切图或 TF 暂不可用时安全隐藏。唯一受限例外是新鲜 `odom` 栅格的精确 TF 查询失败、且最新 `map ← odom` 已验证为完整 3D 单位变换，此时可无损显示；任何非单位或无法验证的变换仍安全隐藏。PC 保留原有高对比蓝色观测主题和无格栅画面；仅移动端的 `html.mobile-console` 额外绘制严格对齐 `map` 世界坐标的米制格栅，并按当前缩放在 1m、2m、5m 小格之间自适应，主格恒为小格的 5 倍。移动端不建立 `/costmap` 连接或渲染其图层。拖动、缩放与位姿跟随只更新 Pixi 世界容器变换，点云只替换最新一帧几何，均不重绘静态底图。缩放以鼠标位置为中心，中键或左键拖动仅改变视图变换。地图必须稳定保持原始 `map` 坐标朝向，不能在进入页面时按车体初始航向旋转；只允许车体 DOM 图标旋转。相机视频先由独立的浏览器原生 `<video>` 元素接收 WHEP/WebRTC，再作为 PixiJS `Video Texture` 合成到相机卡片；视频数据本身不进入 Canvas 2D、WebSocket 或 Python。
 
 ### 9.2 时效优先与背压
 
@@ -203,7 +215,7 @@ PixiJS 最新点云几何       ├─ Pixi 世界容器：缩放、拖动（固
 
 - 数据输入和输出必须明确区分：点云优先读取导航实际使用的 `/collision_voxel_layer/points`（`sensor_msgs/PointCloud2`）；该主流连续 500ms 未到达时，才回退读取 `/livox/lidar`（`livox_ros_driver2/CustomMsg`）。两路不能同时混合，否则网页会在两组近乎同时的扫描之间跳变。位姿不读取单独的定位话题，而是查询小车现有 TF 的 `map → base_footprint`，并兼容 `base_link`、`base_footprint_link`。
 - 网页专用输出为已投影到 `map` 的紧凑二进制点云和最小位姿记录：点云只包含 `float32 x/y`，位姿只包含 `timestamp/seq/x/y/yaw`。它们不会重新发布 ROS topic，也不会暴露 ROS 图发现、订阅、服务或参数能力。
-- 点云与位姿由两个独立进程运行，避免坐标转换或点云限采样阻塞高频位姿。
+- 点云、位姿与局部代价地图由三个独立进程运行；costmap callback 只覆盖一条最新 `OccupancyGrid` 槽，TF/编码/网络发送由其 worker 完成，避免坐标转换或大栅格阻塞高频位姿。
 - 只接受标准 `float32 x/y/z`，限制距离、均匀抽样。节点默认及运行上限均为 3000 点；点云输入为 best-effort、depth=1。ROS 回调不执行网络发送，只写入最新槽；独立发送线程将数据按不超过 1152 byte payload 的 UDP 分片发送到回环网关，无 ACK、重传或历史缓存。
 - 标准点云携带逐点 `timestamp` 时，按 5ms 时间桶查询历史 `map → 输入 frame` TF 后投影；快速原地旋转优先逐点去畸变。若某一时间桶缺少历史覆盖，则降级为扫描 header 时刻的刚体变换，必要时才使用最新 TF；实时页不能因增强去畸变失败而整帧无点云。
 - 点云在节点内最新槽停留超过 140ms 才丢弃；不能把传感器或导航管线固有的旧 header 时间戳误判为网络滞后。header 时间仍用于 TF/逐点去畸变，TF 不可用则跳过当前帧。车体位姿使用最新可用 `map → base_*` 变换，避免低频 `map → odom` 的合成时间戳使显示流断续。
@@ -211,13 +223,13 @@ PixiJS 最新点云几何       ├─ Pixi 世界容器：缩放、拖动（固
 
 ### 9.3.1 协议、生命周期与实现边界
 
-这是私有、固定格式的数据通道，不是通用 ROS-Web Bridge。C++ 到网关的 UDP 分片以 `RALT` 魔数和版本号开头，携带流种类、流 ID、`frame_seq`、时间戳、`chunk_index`、`chunk_count`、总点数和 payload 长度；头部为 30 Byte，payload 上限为 1152 Byte。点云固定使用 `127.0.0.1:8769`，位姿固定使用 `127.0.0.1:8770`，各自有 socket、接收线程和 assembler。网关拒绝错误魔数/版本、截断包、非法分片号、超出分片或点数上限的包。分片可以乱序到达；重复分片不重复计数；新序号会立即淘汰未完成旧帧，残帧在短超时后清理。协议没有 ACK、重传、历史缓存或“补全旧帧”的等待逻辑。
+这是私有、固定格式的数据通道，不是通用 ROS-Web Bridge。C++ 到网关的 UDP 分片以 `RALT` 魔数和版本号开头，携带流种类、流 ID、`frame_seq`、时间戳、`chunk_index`、`chunk_count`、记录数和 payload 长度；头部为 30 Byte，payload 上限为 1152 Byte。点云固定使用 `127.0.0.1:8769`，位姿固定使用 `127.0.0.1:8770`，局部代价地图固定使用 `127.0.0.1:8771`，各自有 socket、接收线程和 assembler。costmap `kind=3` 载荷为 map 原点 x/y/yaw、resolution、width/height 与最多 65,535 个原始 cell；`-1` 按原始 unsigned 值 `255` 传输。网关拒绝错误魔数/版本、截断包、非法分片号、超出分片或记录上限的包。分片可以乱序到达；重复分片不重复计数；新序号会立即淘汰未完成旧帧，残帧在短超时后清理。协议没有 ACK、重传、历史缓存或“补全旧帧”的等待逻辑。
 
 网关到浏览器的 Binary WebSocket 帧以 `ALTM` 魔数和版本号开头，固定携带流种类、序号、时间戳、记录数和紧凑 payload。点云 payload 为网络字节序 `float32 x/y`；位姿 payload 为网络字节序的最小位置/航向记录。`/cloud` 与 `/pose` 是独立 WebSocket 连接：每个客户端每条连接只允许一个待发送帧，内核发送缓冲和写入超时也受到限制。浏览器刷新、断线和慢客户端只会使该客户端丢弃旧数据，不能积压或阻塞其他客户端、网关或 ROS executor。
 
 `ObservationManager` 的启动、心跳、自动空闲回收和停止由同一生命周期锁串行化；遥测网关的 start/stop 也使用独立生命周期锁和代际标记，旧线程不能复用新 socket。网络发送只发生在 C++ 发送线程与网关线程：ROS 回调只转换数据并覆盖最新槽。控制台正常退出或升级前会停止两个预处理进程和网关；页面断开后由心跳空闲策略统一回收，避免一个标签页关闭时误停仍被其他标签页使用的观测。
 
-现场排障优先看 `logs/live_preprocessor_cloud.log`、`logs/live_preprocessor_pose.log` 和工具日志；再检查 `/collision_voxel_layer/points`（主流）、`/livox/lidar`（回退）与 `map → base_*` TF 是否存在且持续更新。页面保持打开约 10 秒后，可从 `GET /api/observation` 的 `telemetry` 和 `client_metrics` 读取网关状态、点云/位姿源年龄、接收频率、渲染帧率和长帧计数，以区分上游、车端预处理、网络和 PixiJS 图层更新问题。实车参考：预处理点云约 10Hz，前端为降低点云几何更新竞争主动消费约 8Hz。
+现场排障优先看 `logs/live_preprocessor_cloud.log`、`logs/live_preprocessor_pose.log`、`logs/live_preprocessor_costmap.log` 和工具日志；再检查 `/collision_voxel_layer/points`（主流）、`/livox/lidar`（回退）、`/local_costmap/costmap` 与 `map → base_*`、`map → costmap.header.frame_id` TF 是否存在且持续更新。页面保持打开约 10 秒后，可从 `GET /api/observation` 的 `telemetry` 和 `client_metrics` 读取网关状态、点云/位姿/costmap 源年龄、接收频率、渲染帧率和长帧计数，以区分上游、车端预处理、网络和 PixiJS 图层更新问题。实车参考：预处理点云约 10Hz，前端为降低点云几何更新竞争主动消费约 8Hz；costmap 按上游发布节奏显示，不主动补发。
 
 ### 9.4 可选低延迟相机链路
 
@@ -248,7 +260,7 @@ PixiJS 最新点云几何       ├─ Pixi 世界容器：缩放、拖动（固
 
 ## 10. 前端维护
 
-前端源位于 `frontend/src/`，构建产物输出到 `autodrive_console/web-vue/`。主要页面为任务指挥台、实时运行观测、测试用例管理、场景前置配置、报告中心、运行配置和工具日志。实时观测页依赖 `pixi.js`：`liveObservation.js` 负责地图纹理、虚拟墙、点云图层、DOM 车体层与页面交互；PC 地图独占工作区，不保留冗余图像订阅选择器。相机卡片以原生 `<video>` 接收 WHEP/WebRTC，并转为 PixiJS `Video Texture`。桌面网格按启用路数自适应列数；移动端五路时保持一主四预览，六路时切换为均衡 3×2（横屏）或 2×3（竖屏）矩阵，确保所有画面完整可见。控制调用 `/api/video/status` 与 `/api/video/control`，不会直接接触 ROS 或 MediaMTX。
+前端源位于 `frontend/src/`，构建产物输出到 `autodrive_console/web-vue/`。主要页面为任务指挥台、实时运行观测、测试用例管理、场景前置配置、报告中心、运行配置和工具日志。实时观测页依赖 `pixi.js`：`liveObservation.js` 负责地图纹理、单张 costmap texture、虚拟墙、点云图层、DOM 车体层与页面交互；PC 地图独占工作区，不保留冗余图像订阅选择器。costmap 仅在 PC 连接 `/costmap`，默认可见且可临时隐藏；移动端不增加此流或控件。相机卡片以原生 `<video>` 接收 WHEP/WebRTC，并转为 PixiJS `Video Texture`。桌面网格按启用路数自适应列数；移动端五路时保持一主四预览，六路时切换为均衡 3×2（横屏）或 2×3（竖屏）矩阵，确保所有画面完整可见。控制调用 `/api/video/status` 与 `/api/video/control`，不会直接接触 ROS 或 MediaMTX。
 
 共享视觉样式集中在 `autodrive_console/web/*.css` 与 `frontend/src/*.css`。PC 与移动端必须有明确样式边界：移动主题仅以 `html.mobile-console` 或 `/m/` 壳层选择器生效，不能用未限定的 `:root`、`body`、`aside`、地图配色或格栅逻辑覆盖 PC。深/浅主题只写浏览器 Local Storage，不写机器人配置。新页面默认避免冗余说明文字，但必须保留必要的安全状态和错误反馈。
 
@@ -355,7 +367,7 @@ cmake --build build/live_preprocessor --parallel 2
 
 ### 11.4 专用实时遥测的边界
 
-完整离线包不包含通用 ROS-Web Bridge，也不会复制整套 ROS Humble。`ObservationManager` 只拥有 Aletheia 创建的两个 C++ 预处理进程和本机遥测网关：点云 UDP 接收端固定绑定 `127.0.0.1:8769`，位姿 UDP 接收端固定绑定 `127.0.0.1:8770`，浏览器 Binary WebSocket 端口为 `8768`。网关没有 ROS client、topic 发现、订阅选择或控制接口；它只接受具有固定二进制协议的本机点云/位姿帧。
+完整离线包不包含通用 ROS-Web Bridge，也不会复制整套 ROS Humble。`ObservationManager` 只拥有 Aletheia 创建的三个 C++ 预处理进程和本机遥测网关：点云 UDP 接收端固定绑定 `127.0.0.1:8769`，位姿 UDP 接收端固定绑定 `127.0.0.1:8770`，局部代价地图 UDP 接收端固定绑定 `127.0.0.1:8771`，浏览器 Binary WebSocket 端口为 `8768`。网关没有 ROS client、topic 发现、订阅选择或控制接口；它只接受具有固定二进制协议的本机点云、位姿和 costmap 帧。costmap lane 仅在 PC Web 页面连接，移动端保持既有两条观测流。
 
 网关健康状态来自自身受控生命周期和有效帧时间，而不是对其他 ROS 服务或 WebSocket 端口做裸 TCP 探测。任何启动、端口占用、无点云、无 TF、浏览器连接失败或源数据过期都会记录到工具日志；网络发送与 ROS 回调隔离，慢浏览器只能丢弃自己的历史帧。
 

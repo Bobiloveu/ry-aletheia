@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -16,6 +17,8 @@ DEFAULT_NODES = [
 ]
 
 SUPERVISOR_PROCESS_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(?::[A-Za-z0-9][A-Za-z0-9_.-]{0,127})?\Z")
+ROBOT_LOG_SOURCE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}\Z")
+ROBOT_LOG_FORBIDDEN_ROOTS = tuple(Path(path) for path in ("/", "/etc", "/proc", "/sys", "/dev", "/run"))
 
 
 DEFAULT_VEHICLE_MODELS = [
@@ -24,6 +27,32 @@ DEFAULT_VEHICLE_MODELS = [
         "name": "RY 标准小车",
         "length_m": 1.00,
         "width_m": 0.68,
+    },
+]
+
+
+DEFAULT_VEHICLE_CONTROL_PARAMETERS = {
+    "press": 1400,
+    "movement_acc": 1000,
+    "stop_acc": 1200,
+}
+
+
+DEFAULT_ROBOT_LOG_SOURCES = [
+    {
+        "id": "drivers",
+        "name": "drivers",
+        "path": "/opt/ry/Log/supervisor-logs/stdout/today/drivers",
+    },
+    {
+        "id": "modules",
+        "name": "modules",
+        "path": "/opt/ry/Log/supervisor-logs/stdout/today/modules",
+    },
+    {
+        "id": "lightning",
+        "name": "lightning",
+        "path": "/opt/ry/workspace/lightning_logs",
     },
 ]
 
@@ -53,6 +82,12 @@ class RobotSettings:
         "vehicle_models": [dict(item) for item in DEFAULT_VEHICLE_MODELS],
         "active_vehicle_model": "ry-standard",
     })
+    # 仅供 Aletheia 已有的 miniapp 手动控制输出 Twist 辅助字段使用；
+    # 与物理急停解除报文隔离，不能改变底盘原有安全边界。
+    vehicle_control: dict = field(default_factory=lambda: dict(DEFAULT_VEHICLE_CONTROL_PARAMETERS))
+    # 当前小车本机业务日志目录；只供 Desktop 日志下载页面消费，不能改动
+    # Aletheia 自身 ToolLogStore 的受控诊断目录。
+    robot_logs: dict = field(default_factory=lambda: {"sources": [dict(item) for item in DEFAULT_ROBOT_LOG_SOURCES]})
 
 
 class SettingsStore:
@@ -92,6 +127,26 @@ class SettingsStore:
                 for key in ("bridge_host", "bridge_port", "map_source", "embed_url"):
                     observation.pop(key, None)
                 defaults["live_observation"] = observation
+            stored_vehicle_control = raw.get("vehicle_control")
+            if isinstance(stored_vehicle_control, dict):
+                vehicle_control = dict(asdict(RobotSettings())["vehicle_control"])
+                vehicle_control.update(stored_vehicle_control)
+                try:
+                    self._validate_vehicle_control(vehicle_control)
+                except ValueError:
+                    # 手工损坏或未来版本遗留的参数不能阻止控制台启动，更不能
+                    # 带着未知 profile 进入手动控制器；安全回退到受控默认值。
+                    vehicle_control = dict(DEFAULT_VEHICLE_CONTROL_PARAMETERS)
+                defaults["vehicle_control"] = vehicle_control
+            stored_robot_logs = raw.get("robot_logs")
+            if isinstance(stored_robot_logs, dict):
+                robot_logs = dict(asdict(RobotSettings())["robot_logs"])
+                robot_logs.update(stored_robot_logs)
+                try:
+                    self._validate_robot_logs(robot_logs)
+                except ValueError:
+                    robot_logs = {"sources": [dict(item) for item in DEFAULT_ROBOT_LOG_SOURCES]}
+                defaults["robot_logs"] = robot_logs
             return RobotSettings(**defaults)
         except (json.JSONDecodeError, TypeError, ValueError):
             return RobotSettings()
@@ -101,6 +156,7 @@ class SettingsStore:
         allowed = set(current)
         updates = {key: value for key, value in data.items() if key in allowed}
         observation_update = updates.pop("live_observation", None)
+        robot_logs_update = updates.pop("robot_logs", None)
         current.update(updates)
         if isinstance(observation_update, dict):
             current["live_observation"].update(observation_update)
@@ -108,6 +164,10 @@ class SettingsStore:
                 current["live_observation"].pop(key, None)
         elif observation_update is not None:
             current["live_observation"] = observation_update
+        if isinstance(robot_logs_update, dict):
+            current["robot_logs"].update(robot_logs_update)
+        elif robot_logs_update is not None:
+            current["robot_logs"] = robot_logs_update
         settings = RobotSettings(**current)
         self._validate(settings)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -163,6 +223,8 @@ class SettingsStore:
                 raise ValueError("车型长宽超出允许范围")
         if active_model not in model_ids:
             raise ValueError("请选择一个有效的当前车型")
+        SettingsStore._validate_vehicle_control(settings.vehicle_control)
+        SettingsStore._validate_robot_logs(settings.robot_logs)
         if not isinstance(settings.nodes, list) or not settings.nodes:
             raise ValueError("至少需要配置一个 Supervisor 节点")
         if not isinstance(settings.monitor_nodes, list) or not all(isinstance(name, str) and SUPERVISOR_PROCESS_NAME.fullmatch(name) for name in settings.monitor_nodes):
@@ -198,3 +260,54 @@ class SettingsStore:
         for node in settings.nodes:
             if not node.get("label") or not isinstance(node.get("supervisor"), str) or not SUPERVISOR_PROCESS_NAME.fullmatch(node["supervisor"]):
                 raise ValueError("每个节点都必须包含 label 和 supervisor")
+
+    @staticmethod
+    def _validate_vehicle_control(vehicle_control: object) -> None:
+        expected_vehicle_control_keys = set(DEFAULT_VEHICLE_CONTROL_PARAMETERS)
+        if not isinstance(vehicle_control, dict) or set(vehicle_control) != expected_vehicle_control_keys:
+            raise ValueError("底盘控制参数配置格式错误")
+        for key, label, minimum, maximum in (
+            ("press", "底盘压力", 20, 2000),
+            ("movement_acc", "运动加速度", 10, 1000),
+            ("stop_acc", "停止加速度", 20, 2000),
+        ):
+            value = vehicle_control[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or int(value) != value:
+                raise ValueError(f"{label}必须是有限整数")
+            if not minimum <= value <= maximum:
+                raise ValueError(f"{label}必须介于 {minimum} 和 {maximum}")
+
+    @staticmethod
+    def _validate_robot_logs(robot_logs: object) -> None:
+        if not isinstance(robot_logs, dict) or set(robot_logs) != {"sources"}:
+            raise ValueError("机器人日志配置格式错误")
+        sources = robot_logs["sources"]
+        if not isinstance(sources, list) or not 1 <= len(sources) <= 30:
+            raise ValueError("机器人日志目录数量必须介于 1 和 30")
+        source_ids = set()
+        for source in sources:
+            if not isinstance(source, dict) or set(source) != {"id", "name", "path"}:
+                raise ValueError("机器人日志目录配置格式错误")
+            source_id = source["id"]
+            name = source["name"]
+            path = source["path"]
+            if not isinstance(source_id, str) or not ROBOT_LOG_SOURCE_ID.fullmatch(source_id):
+                raise ValueError("机器人日志目录标识无效")
+            if source_id in source_ids:
+                raise ValueError("机器人日志目录标识不能重复")
+            source_ids.add(source_id)
+            if not isinstance(name, str) or not name.strip() or len(name.strip()) > 64:
+                raise ValueError("机器人日志目录名称不能为空且不能超过 64 个字符")
+            if not isinstance(path, str) or not path or len(path) > 512:
+                raise ValueError("机器人日志目录路径无效")
+            candidate = Path(path)
+            if not candidate.is_absolute() or ".." in candidate.parts:
+                raise ValueError("机器人日志目录必须是安全的绝对路径")
+            resolved = candidate.resolve(strict=False)
+            if any(
+                resolved == forbidden or (forbidden != Path("/") and forbidden in resolved.parents)
+                for forbidden in ROBOT_LOG_FORBIDDEN_ROOTS
+            ):
+                raise ValueError("机器人日志目录不能是系统敏感目录")
+            if ".ssh" in resolved.parts:
+                raise ValueError("机器人日志目录不能位于 SSH 私钥目录")

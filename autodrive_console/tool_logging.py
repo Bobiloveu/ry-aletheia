@@ -30,6 +30,7 @@ class ToolLogStore:
     SIDECAR_NAMES = (
         "live_preprocessor_cloud.log",
         "live_preprocessor_pose.log",
+        "live_preprocessor_costmap.log",
         "video-runtime.log",
     )
     _DIAGNOSTIC_LABELS = {
@@ -37,6 +38,7 @@ class ToolLogStore:
         ERROR_NAME: ("控制台错误日志", "控制台 ERROR/CRITICAL 事件与异常堆栈（JSONL）"),
         "live_preprocessor_cloud.log": ("点云预处理", "点云输入、TF 投影、过滤、降采样与 UDP 发送的原始输出"),
         "live_preprocessor_pose.log": ("位姿预处理", "map → base TF 获取、位姿编码与 UDP 发送的原始输出"),
+        "live_preprocessor_costmap.log": ("局部代价地图预处理", "局部代价地图输入、时间戳 TF 投影、时效丢弃与 UDP 发送的原始输出"),
         "video-runtime.log": ("视频运行时", "MediaMTX、ROS 图像输入、VAAPI 与 GStreamer 的原始输出"),
     }
     _MAX_BYTES = 2 * 1024 * 1024

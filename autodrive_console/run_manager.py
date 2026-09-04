@@ -12,6 +12,7 @@ from contextlib import nullcontext
 from datetime import datetime
 from math import isfinite
 from pathlib import Path
+from typing import Callable
 
 from .models import AttemptResult, RunRecord, TestCase, now_iso
 from .map_assets import CachedMapAsset, MapAssetCache, MapAssetError
@@ -81,6 +82,180 @@ class RunManager:
         threading.Thread(target=self._run, args=(run,), daemon=True, name=f"test-run-{run.id}").start()
         LOGGER.info("创建测试计划：run=%s case=%s rounds=%s", run.id, case.filename, count)
         return run
+
+    def start_sequence(
+        self,
+        cases: list[TestCase],
+        *,
+        interval_s: float = 0,
+        prepare_trajectory_maps: bool = True,
+        event_callback: Callable[[dict], None] | None = None,
+    ) -> RunRecord:
+        """Execute frozen acceptance cases through the existing single-run path.
+
+        The parent record reserves the same active-run slot as ordinary tests.
+        Each item then calls ``_run`` with a private one-attempt record, which
+        preserves the established scenario, preflight, ROS, trajectory and
+        safety-finally behavior without introducing another executor.
+        """
+        if not cases:
+            raise ValueError("验收计划至少需要一个任务")
+        if not 0 <= interval_s <= 3600:
+            raise ValueError("执行间隔必须介于 0 和 3600 秒之间")
+        run = RunRecord(
+            id=uuid.uuid4().hex[:12],
+            case=cases[0],
+            requested_count=len(cases),
+            interval_s=interval_s,
+            prepare_trajectory_maps=prepare_trajectory_maps,
+        )
+        with self._lock:
+            if any(item.status in {"queued", "preparing", "running", "cancelling", "awaiting_recovery", "recovering"} for item in self._runs.values()):
+                raise RuntimeError("已有任务正在执行，请等待其完成后再发起新任务")
+            self._runs[run.id] = run
+            self._cancel_events[run.id] = threading.Event()
+            self._resume_events[run.id] = threading.Event()
+            self._attempt_interrupt_events[run.id] = threading.Event()
+        threading.Thread(
+            target=self._run_sequence,
+            args=(run, tuple(cases), event_callback),
+            daemon=True,
+            name=f"acceptance-run-{run.id}",
+        ).start()
+        LOGGER.info("创建验收执行序列：run=%s tasks=%s", run.id, len(cases))
+        return run
+
+    def _emit_sequence_event(
+        self,
+        callback: Callable[[dict], None] | None,
+        event_type: str,
+        run: RunRecord,
+        item_index: int,
+        case: TestCase,
+        **extra: object,
+    ) -> None:
+        if callback is None:
+            return
+        payload = {
+            "type": event_type,
+            "run_id": run.id,
+            "item_index": item_index,
+            "case": {"id": case.id, "filename": case.filename, "parameters": case.parameters.__dict__},
+            **extra,
+        }
+        try:
+            callback(payload)
+        except Exception:
+            # Persistence/UI observation must never make the robot execution
+            # thread fail.  The acceptance orchestrator can recover state from
+            # RunRecord after a callback-side error.
+            LOGGER.exception("验收执行事件回调失败：run=%s type=%s", run.id, event_type)
+
+    def _run_sequence(
+        self,
+        run: RunRecord,
+        cases: tuple[TestCase, ...],
+        event_callback: Callable[[dict], None] | None,
+    ) -> None:
+        cancel_event = self._cancel_events[run.id]
+        resume_event = self._resume_events[run.id]
+        run.status, run.started_at = "preparing", now_iso()
+        try:
+            for item_index, case in enumerate(cases, start=1):
+                if cancel_event.is_set():
+                    run.status = "cancelled"
+                    break
+                run.case = case
+                run.active_attempt = item_index
+                self._emit_sequence_event(event_callback, "item_preparing", run, item_index, case)
+                child = RunRecord(
+                    id=run.id,
+                    case=case,
+                    requested_count=1,
+                    interval_s=0,
+                    prepare_trajectory_maps=run.prepare_trajectory_maps,
+                )
+                # The parent owns the public status and dedicated acceptance
+                # report.  Child runs must not create normal run reports or
+                # overwrite trajectory evidence as attempt 1 each time.
+                child._skip_report = True
+                child._sequence_attempt_index = item_index
+                self._run(child)
+                run.preflight = child.preflight
+                run.live_progress = child.live_progress
+                if child.attempts:
+                    attempt = child.attempts[-1]
+                    attempt.case_id = case.id
+                    attempt.case_filename = case.filename
+                    run.attempts.append(attempt)
+                    self._emit_sequence_event(
+                        event_callback,
+                        "item_finished",
+                        run,
+                        item_index,
+                        case,
+                        attempt={
+                            "status": attempt.status,
+                            "message": attempt.message,
+                            "duration_s": attempt.duration_s,
+                            "started_at": attempt.started_at,
+                            "trajectory": attempt.trajectory,
+                        },
+                    )
+                if child.status == "cancelled" or cancel_event.is_set():
+                    run.status = "cancelled"
+                    break
+                if child.status not in {"completed"}:
+                    run.status, run.error = "blocked", child.error or "验收任务前置检查未通过"
+                    self._emit_sequence_event(event_callback, "sequence_finished", run, item_index, case, status=run.status, message=run.error)
+                    break
+                if child.attempts and child.attempts[-1].status == "failed":
+                    failure_message = f"{case.filename} 执行失败，请将车辆人工恢复至安全起点后继续。"
+                    while not cancel_event.is_set():
+                        run.status, run.error, run.live_progress = "awaiting_recovery", failure_message, None
+                        self._emit_sequence_event(event_callback, "awaiting_recovery", run, item_index, case, message=failure_message)
+                        if not resume_event.wait(0.5):
+                            continue
+                        resume_event.clear()
+                        run.status = "recovering"
+                        self._record_intervention(run, item_index, "recovery_requested", "操作者确认已完成现场恢复，开始恢复预检")
+                        recovered, recovery_message = self._recover_after_manual_intervention(child, cancel_event)
+                        if cancel_event.is_set():
+                            run.status = "cancelled"
+                            break
+                        if recovered:
+                            self._record_intervention(run, item_index, "recovery_ready", recovery_message)
+                            run.status, run.error = "running", None
+                            self._emit_sequence_event(event_callback, "recovered", run, item_index, case, message=recovery_message)
+                            break
+                        self._record_intervention(run, item_index, "recovery_blocked", recovery_message)
+                        failure_message = f"恢复预检未通过：{recovery_message}。请处理后再次继续。"
+                    if run.status == "cancelled":
+                        break
+                if item_index < len(cases) and cancel_event.wait(run.interval_s):
+                    run.status = "cancelled"
+                    break
+            else:
+                run.status = "completed"
+            if run.status == "preparing":
+                run.status = "completed"
+        except Exception as exc:
+            run.status, run.error = "failed", f"验收序列中断：{exc}"
+            LOGGER.exception("验收执行序列异常：run=%s", run.id)
+        finally:
+            run.live_progress = None
+            run.active_attempt = None
+            run.finished_at = now_iso()
+            last_case = run.case
+            self._emit_sequence_event(
+                event_callback,
+                "sequence_finished",
+                run,
+                len(run.attempts),
+                last_case,
+                status=run.status,
+                message=run.error or "验收序列已结束",
+            )
 
     def get(self, run_id: str) -> RunRecord | None:
         with self._lock:
@@ -309,7 +484,7 @@ class RunManager:
                         if existing:
                             existing.status, existing.message, existing.duration_s, existing.trajectory = "cancelled", message, duration, trajectory
                         else:
-                            run.attempts.append(AttemptResult(index, "cancelled", message, duration, started, trajectory))
+                            run.attempts.append(AttemptResult(index, "cancelled", message, duration, started, trajectory, run.case.id, run.case.filename))
                         run.active_attempt = None
                         run.forced_attempt_failure = None
                         run.status = "cancelled"
@@ -317,7 +492,7 @@ class RunManager:
                     if existing:
                         existing.status, existing.message, existing.duration_s, existing.trajectory = "failed", message, duration, trajectory
                     else:
-                        run.attempts.append(AttemptResult(index, "passed" if ok else "failed", message, duration, started, trajectory))
+                        run.attempts.append(AttemptResult(index, "passed" if ok else "failed", message, duration, started, trajectory, run.case.id, run.case.filename))
                     run.active_attempt = None
                     run.forced_attempt_failure = None
                     if not ok:
@@ -370,11 +545,12 @@ class RunManager:
                 if scenario_applied:
                     self._restore_case_scenario(run)
                 run.finished_at = now_iso()
-                try:
-                    self._write_report(run)
-                except Exception as exc:
-                    run.error = f"{run.error or ''} 报告写入失败：{exc}".strip()
-                    LOGGER.exception("测试报告写入失败：run=%s", run.id)
+                if not getattr(run, "_skip_report", False):
+                    try:
+                        self._write_report(run)
+                    except Exception as exc:
+                        run.error = f"{run.error or ''} 报告写入失败：{exc}".strip()
+                        LOGGER.exception("测试报告写入失败：run=%s", run.id)
                 LOGGER.info("测试计划结束：run=%s status=%s", run.id, run.status)
 
     def _apply_case_scenario(self, run: RunRecord) -> dict:
@@ -792,6 +968,7 @@ class RunManager:
 
     def _write_trajectory(self, run: RunRecord, index: int, trajectory: dict, assets: list[CachedMapAsset]) -> Path:
         import json
+        index = int(getattr(run, "_sequence_attempt_index", index))
         target_dir = self.report_dir / f"run_{run.id}_trajectory"
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"T-{index:03d}.json"

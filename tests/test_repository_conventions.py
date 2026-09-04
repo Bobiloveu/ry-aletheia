@@ -125,8 +125,34 @@ def test_robot_control_contract_contains_runtime_safety_rules() -> None:
         "1.00",
         "heartbeat",
         "/api/vehicle-control/enter",
+        "/is_emergency_stop",
+        "GetEmergencyStop",
+        "/command",
+        "release-emergency-stop",
+        "movement_acc",
+        "stop_acc",
     ):
         assert required in control
+
+
+def test_emergency_stop_subscription_receives_the_chassis_latched_state() -> None:
+    """迟启动的 Aletheia 必须读取 chassis_node 锁存的当前急停状态。"""
+    controller = (ROOT / "autodrive_console" / "vehicle_control.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "node.create_subscription(Bool, self.EMERGENCY_STOP_TOPIC, "
+        "self._on_emergency_stop, state_reliable_transient)" in controller
+    )
+
+
+def test_vue_runtime_settings_bootstrap_uses_the_shared_dark_canvas() -> None:
+    """Vue root mount must not cover the shared neutral dark page canvas."""
+    for page_name in ("index.html", "runtime-settings.html"):
+        page = (ROOT / "frontend" / page_name).read_text(encoding="utf-8")
+        assert 'name="theme-color" content="#161617"' in page
+        assert "html,body,#app{min-height:100%;margin:0;background:#161617" in page
 
 
 def test_scripts_delegate_to_existing_tools() -> None:

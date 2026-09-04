@@ -1,0 +1,31 @@
+.acceptance-page { max-width: 1440px; }
+.acceptance-header { align-items: flex-start; }
+.eyebrow { margin: 0 0 .45rem; color: var(--accent, #2ee6d6); font: 700 .7rem/1 ui-monospace, monospace; letter-spacing: .12em; }
+.acceptance-card { margin-top: 1.1rem; padding: 1.35rem; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.section-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
+.section-heading h2 { margin: 0; }
+.form-grid, .result-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; margin-top: 1rem; }
+.form-grid label { display: grid; gap: .45rem; font-weight: 650; }
+.form-grid select, .form-grid input { width: 100%; }
+fieldset { margin: 0; border: 1px solid var(--line); border-radius: 10px; display: flex; gap: 1rem; align-items: center; }
+fieldset label { display: inline-flex; align-items: center; gap: .4rem; font-weight: 500; }
+.plan-fact { padding: .75rem; border-radius: 10px; background: var(--surface-subtle); display: grid; gap: .35rem; }
+.plan-fact span, .muted { color: var(--muted); font-size: .86rem; }
+.acceptance-message { min-height: 1.4rem; color: var(--muted); }
+.acceptance-message.error { color: var(--danger); }
+.acceptance-badge { padding: .45rem .7rem; border: 1px solid var(--line); border-radius: 999px; font-size: .8rem; font-weight: 700; }
+.acceptance-badge.running, .acceptance-badge.awaiting_recovery { color: var(--warning); }
+.acceptance-badge.completed, .acceptance-badge.PASS { color: var(--success); }
+.acceptance-badge.blocked, .acceptance-badge.failed, .acceptance-badge.FAIL { color: var(--danger); }
+.acceptance-warnings { margin-top: .8rem; color: var(--warning); }
+.acceptance-warnings p { margin: .35rem 0; }
+.table-wrap { overflow: auto; margin-top: 1rem; border: 1px solid var(--line); border-radius: 10px; }
+.table-wrap table { width: 100%; min-width: 650px; border-collapse: collapse; }
+.table-wrap th, .table-wrap td { padding: .7rem; border-bottom: 1px solid var(--line); text-align: left; }
+.plan-actions { display: flex; flex-wrap: wrap; gap: .7rem; margin-top: 1rem; }
+.primary-action { background: var(--accent, #19c8b5); color: #071a26; border-color: var(--accent, #19c8b5); }
+.danger-action { color: var(--danger); border-color: var(--danger); }
+.conclusion { margin-top: 1rem; padding: 1rem; border: 1px solid var(--line); border-top-width: 3px; background: var(--surface-subtle); }
+.conclusion.sample_pass, .conclusion.full_pass { border-top-color: var(--success); }
+.conclusion.sample_fail, .conclusion.full_fail { border-top-color: var(--danger); }
+@media (max-width: 900px) { .form-grid, .result-facts { grid-template-columns: 1fr; } .section-heading { align-items: flex-start; flex-direction: column; } fieldset { flex-wrap: wrap; } .acceptance-page { padding-bottom: 2rem; } }

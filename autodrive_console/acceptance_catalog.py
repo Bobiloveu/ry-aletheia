@@ -46,25 +46,26 @@ class CatalogSnapshot:
     def communities(self) -> list[str]:
         return sorted({task.parameters.community for task in self.valid_tasks})
 
-    def buildings(self, community: str) -> list[int]:
-        return sorted({task.parameters.building for task in self.valid_tasks if task.parameters.community == community})
+    def physical_buildings(self, community: str) -> list[tuple[int, int]]:
+        """Return physical building units, not only a shared connected-block number."""
+        return sorted({(task.parameters.building, task.parameters.unit) for task in self.valid_tasks if task.parameters.community == community})
 
-    def select(self, scope_type: str, community: str, building: int | None = None) -> list[AcceptanceTask]:
+    def select(self, scope_type: str, community: str, building: int | None = None, unit: int | None = None) -> list[AcceptanceTask]:
         if community not in self.communities():
             raise ValueError("所选小区不存在可用正式任务")
         if scope_type == "community":
             return [task for task in self.valid_tasks if task.parameters.community == community]
         if scope_type != "building":
             raise ValueError("验收范围必须是 community 或 building")
-        if isinstance(building, bool) or not isinstance(building, int):
-            raise ValueError("请选择实际存在的楼栋")
+        if isinstance(building, bool) or not isinstance(building, int) or isinstance(unit, bool) or not isinstance(unit, int):
+            raise ValueError("请选择实际存在的物理楼宇单元")
         selected = [
             task
             for task in self.valid_tasks
-            if task.parameters.community == community and task.parameters.building == building
+            if task.parameters.community == community and task.parameters.building == building and task.parameters.unit == unit
         ]
         if not selected:
-            raise ValueError("所选楼栋不存在可用正式任务")
+            raise ValueError("所选物理楼宇单元不存在可用正式任务")
         return selected
 
 

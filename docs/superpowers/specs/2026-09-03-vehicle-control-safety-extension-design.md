@@ -31,7 +31,7 @@
 
 ### 4.1 急停状态
 
-Backend 只订阅 `/is_emergency_stop`（`std_msgs/msg/Bool`），使用与普通车端状态兼容的 `RELIABLE + VOLATILE` QoS。首次未收到回调、ROS2 控制运行时不可用或无法取得状态时，急停状态是 `unknown`；它绝不能被当作 `false`。
+Backend 只订阅 `/is_emergency_stop`（`std_msgs/msg/Bool`），使用底盘实际发布的 `RELIABLE + TRANSIENT_LOCAL` QoS。底盘将当前状态锁存；这让后启动的 Aletheia 也能立即取得 `false` 或 `true`，而非等待下一次物理急停变化。首次未收到回调、ROS2 控制运行时不可用或无法取得状态时，急停状态是 `unknown`；它绝不能被当作 `false`。
 
 状态映射：
 
@@ -59,12 +59,12 @@ API 调用后的状态为 `waiting_confirmation`，HTTP 仅表示发布已被 Ba
 
 ## 5. 底盘参数与零速度选择
 
-新增持久化 `vehicle_control` 配置，默认值保持当前手动控制行为：
+新增持久化 `vehicle_control` 配置。原手动 `acc=1200` 超出本次确认的 `movement_acc` 上限 1000，因此默认运动值按安全范围收敛为 1000：
 
 ```json
 {
   "press": 1400,
-  "movement_acc": 1200,
+  "movement_acc": 1000,
   "stop_acc": 1200
 }
 ```
@@ -92,7 +92,7 @@ API 调用后的状态为 `waiting_confirmation`，HTTP 仅表示发布已被 Ba
   },
   "chassis_parameters": {
     "press": 1400,
-    "movement_acc": 1200,
+    "movement_acc": 1000,
     "stop_acc": 1200
   }
 }

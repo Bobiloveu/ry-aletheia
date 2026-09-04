@@ -21,6 +21,7 @@ from autodrive_console.models import AttemptResult, RunRecord, TaskParameters, T
 from autodrive_console.map_assets import MapAssetCache
 from autodrive_console.map_snapshot import ObservationMapSnapshot
 from autodrive_console.observation import ObservationError, ObservationManager
+from autodrive_console.telemetry import TelemetryGateway
 from autodrive_console.trajectory import ActiveMap, TrajectorySession
 from autodrive_console.run_manager import RunManager
 from autodrive_console.scenario_setup import ScenarioSetupError, ScenarioSetupStore
@@ -137,6 +138,22 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn('html[data-theme="light"] body.theme-light', css)
         self.assertIn("min-height: 100dvh", css)
         self.assertIn("main:has(#caseSelect) .monitor { background: var(--surface); }", css)
+
+    def test_desktop_sidebar_declares_all_operator_pages_in_stable_groups(self):
+        """防止新增页面重新退化为逐页插入、无层级的长菜单。"""
+        shell = (web_console.WEB_ROOT / "app_shell.js").read_text(encoding="utf-8")
+
+        self.assertIn("NAVIGATION_GROUPS", shell)
+        for label, routes in {
+            "作业": ("/", "/manual-control.html"),
+            "部署与验收": ("/deployment.html", "/acceptance-test.html"),
+            "测试与诊断": ("/live-observation.html", "/case-library.html"),
+            "记录与分析": ("/reports.html", "/robot-logs.html"),
+            "系统": ("/runtime-settings.html",),
+        }.items():
+            self.assertIn(f'label: "{label}"', shell)
+            for route in routes:
+                self.assertIn(f'href: "{route}"', shell)
 
     def test_desktop_pages_load_the_shared_theme_shell(self):
         """共享样式必须随共享脚本加载，否则根主题变量不会实际同步。"""
@@ -636,8 +653,8 @@ class OfflineModuleTests(unittest.TestCase):
             with self.assertRaises(ObservationError):
                 manager.preview("../not-a-map")
 
-    def test_observation_start_is_serialized_and_stop_reaps_both_sidecars(self):
-        """两个页面同时进入不能重复 spawn，停止路径必须 wait 两个受控子进程。"""
+    def test_observation_start_is_serialized_and_stop_reaps_all_three_realtime_sidecars(self):
+        """两个页面同时进入不能重复 spawn，停止路径必须 wait 三个受控子进程。"""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             executable = root / "aletheia_live_cloud"
@@ -696,6 +713,7 @@ class OfflineModuleTests(unittest.TestCase):
             manager._map_snapshot = FakeSnapshot()
             settings = RobotSettings(live_observation={"enabled": True, "idle_stop_seconds": 45, "vehicle_models": [], "active_vehicle_model": ""})
             created: list[FakeProcess] = []
+            commands: list[list[str]] = []
             barrier = threading.Barrier(2)
             failures: list[BaseException] = []
 
@@ -706,9 +724,10 @@ class OfflineModuleTests(unittest.TestCase):
                 except BaseException as exc:  # assertion after both callers return
                     failures.append(exc)
 
-            def spawn(*_args, **_kwargs):
+            def spawn(command, **_kwargs):
                 process = FakeProcess()
                 created.append(process)
+                commands.append(command)
                 return process
 
             with patch("autodrive_console.observation.subprocess.Popen", side_effect=spawn), patch("autodrive_console.observation.os.killpg"):
@@ -721,7 +740,12 @@ class OfflineModuleTests(unittest.TestCase):
                 self.assertFalse(first.is_alive())
                 self.assertFalse(second.is_alive())
                 self.assertEqual(failures, [])
-                self.assertEqual(len(created), 2)
+                self.assertEqual(len(created), 3)
+                costmap_command = next(command for command in commands if "__node:=ry_aletheia_live_costmap" in command)
+                self.assertIn("enable_cloud:=false", costmap_command)
+                self.assertIn("enable_pose:=false", costmap_command)
+                self.assertIn("enable_costmap:=true", costmap_command)
+                self.assertIn(f"telemetry_udp_port:={TelemetryGateway.COSTMAP_UDP_PORT}", costmap_command)
                 manager.stop()
 
             self.assertTrue(all(process.waited for process in created))
@@ -852,7 +876,10 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertNotIn("getContext('2d')", source)
         _assert_source_contains(source, "points.fill((mobileConsoleEnabled() ? MAP_PALETTE : DESKTOP_MAP_PALETTE).cloud);")
         self.assertIn("const DESKTOP_MAP_PALETTE", source)
-        _assert_source_contains(source, "pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiWallLayer, pixiCloudLayer);")
+        _assert_source_contains(source, "pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiCostmapLayer, pixiWallLayer, pixiCloudLayer);")
+        _assert_source_contains(source, "openLane('costmap', '/costmap'")
+        self.assertIn("function updateTelemetryCostmap(data)", source)
+        self.assertIn("if (!mobileConsoleEnabled())", source)
         self.assertNotIn("liveCloudWorker", source)
         self.assertIn("function followVehicleCenter(vehicle)", source)
         self.assertIn("function hasPendingFollowAdjustment()", source)
@@ -909,15 +936,21 @@ class OfflineModuleTests(unittest.TestCase):
             self.assertEqual(store.entries(errors_only=True)[0]["exception"], "Traceback: detail")
             (Path(directory) / "video-runtime.log").write_text("native encoder detail\n", encoding="utf-8")
             (Path(directory) / "live_preprocessor_cloud.log").write_text("cloud udp detail\n", encoding="utf-8")
+            (Path(directory) / "live_preprocessor_costmap.log").write_text("costmap TF detail\n", encoding="utf-8")
             self.assertEqual(
                 [path.name for path in store.diagnostic_files()],
-                ["ry-aletheia.log", "ry-aletheia-error.log", "live_preprocessor_cloud.log", "video-runtime.log"],
+                ["ry-aletheia.log", "ry-aletheia-error.log", "live_preprocessor_cloud.log", "live_preprocessor_costmap.log", "video-runtime.log"],
             )
             records = store.diagnostic_records()
             self.assertEqual(records[-1]["name"], "video-runtime.log")
             self.assertEqual(records[-1]["label"], "视频运行时")
             self.assertEqual(store.diagnostic_file("video-runtime.log"), Path(directory) / "video-runtime.log")
             self.assertIsNone(store.diagnostic_file("../../etc/passwd"))
+        handler = object.__new__(web_console.ConsoleHandler)
+        handler._json = Mock()
+        handler.send_error = Mock()
+        handler._download_diagnostic_file(None)
+        handler._json.assert_called_once_with({"error": "诊断日志不存在"}, HTTPStatus.NOT_FOUND)
         console_source = Path("web_console.py").read_text(encoding="utf-8")
         self.assertIn("LOGS.diagnostic_files()", console_source)
         self.assertIn("ry-aletheia-diagnostics.zip", console_source)
@@ -989,6 +1022,55 @@ class OfflineModuleTests(unittest.TestCase):
             self.assertEqual(store.load().task_execution_timeout_s, 1200)
             with self.assertRaisesRegex(ValueError, "只能出现在一个启动步骤"):
                 store.save({"dependency_plan": {"enabled": True, "steps": [{"nodes": ["NODE:1"]}, {"nodes": ["NODE:1"]}]}})
+
+    def test_vehicle_control_parameters_persist_and_reject_unsafe_values(self):
+        """底盘参数必须跨重启保留，且不能写入超过底盘约束的值。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "console.json")
+            saved = store.save({"vehicle_control": {
+                "press": 20,
+                "movement_acc": 1000,
+                "stop_acc": 2000,
+            }})
+
+            self.assertEqual(saved.vehicle_control["movement_acc"], 1000)
+            self.assertEqual(store.load().vehicle_control["press"], 20)
+            with self.assertRaisesRegex(ValueError, "运动加速度"):
+                store.save({"vehicle_control": {
+                    "press": 1400,
+                    "movement_acc": 1001,
+                    "stop_acc": 1200,
+                }})
+            store.path.write_text(json.dumps({"vehicle_control": {"press": 1400, "movement_acc": 1001, "stop_acc": 1200}}), encoding="utf-8")
+            self.assertEqual(store.load().vehicle_control["movement_acc"], 1000)
+
+    def test_manual_control_exposes_emergency_state_and_bounded_chassis_parameters(self):
+        """正式控制页必须可见急停真值、解除入口及浏览器侧参数边界。"""
+        page = (web_console.WEB_ROOT / "manual-control.html").read_text(encoding="utf-8")
+        script = (web_console.WEB_ROOT / "manual_control.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="emergencyStopState"', page)
+        self.assertIn('id="releaseEmergencyStop"', page)
+        self.assertRegex(page, r'id="movementAcc"[^>]*min="10"[^>]*max="1000"')
+        self.assertRegex(page, r'id="stopAcc"[^>]*min="20"[^>]*max="2000"')
+        self.assertIn("/api/vehicle-control/release-emergency-stop", script)
+        self.assertIn("/api/vehicle-control/chassis-parameters", script)
+
+    def test_manual_control_uses_paired_range_and_numeric_inputs_for_every_tunable_value(self):
+        """现场人员应能拖动粗调，也能直接输入精确值，且五项参数使用同一交互模型。"""
+        page = (web_console.WEB_ROOT / "manual-control.html").read_text(encoding="utf-8")
+        script = (web_console.WEB_ROOT / "manual_control.js").read_text(encoding="utf-8")
+
+        for element_id in (
+            "linearSpeedNumber",
+            "angularSpeedNumber",
+            "chassisPressRange",
+            "movementAccRange",
+            "stopAccRange",
+        ):
+            self.assertIn(f'id="{element_id}"', page)
+        self.assertIn("syncPairedParameter", script)
+        self.assertIn("setChassisParametersDirty", script)
 
     def test_task_sync_never_overwrites_robot_existing_task(self):
         with tempfile.TemporaryDirectory() as directory:

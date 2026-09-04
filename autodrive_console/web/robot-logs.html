@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>机器人日志 · RY Aletheia</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/refinement.css" />
+    <link rel="stylesheet" href="/page_views.css" />
+    <link rel="stylesheet" href="/app_shell.css" />
+    <link rel="stylesheet" href="/robot_logs.css" />
+  </head>
+  <body>
+    <aside>
+      <div class="brand">
+        <div class="mark"><svg viewBox="0 0 32 32"><path d="M5 24 16 4l11 20-11 4z" /><path d="m11 21 5-10 5 10-5 2z" /></svg></div>
+        <div><b>RY <span>Aletheia</span></b><small>AUTONOMOUS TEST SYSTEM</small></div>
+      </div>
+      <nav>
+        <a href="/"><span>⌘</span>任务指挥台</a><a href="/live-observation.html"><span>◉</span>实时运行观测</a><a href="/case-library.html"><span>▤</span>用例资产库</a><a href="/reports.html"><span>◫</span>报告中心</a><a href="/runtime-settings.html"><span>⚙</span>运行配置</a>
+      </nav>
+      <div class="side-status"><span class="pulse"></span> ROBOT SUPPORT<br /><strong>当前小车日志</strong></div>
+    </aside>
+    <main class="page-main robot-logs-page">
+      <header class="page-header">
+        <div>
+          <h1>机器人日志</h1>
+          <p class="sub">从当前小车已配置的日志目录选择文件。默认将可识别的 ROS 时间转为北京时间后保存到本电脑；工具日志仍在独立页面管理。</p>
+        </div>
+        <button id="refreshSources" class="outline-button page-top-action" type="button">刷新状态</button>
+      </header>
+
+      <section class="panel source-manager" aria-labelledby="directoryHeading">
+        <div class="panel-title robot-panel-title">
+          <div>
+            <h2 id="directoryHeading">日志目录</h2>
+            <p class="page-muted">名称和目录由维护人员保存。不能使用系统敏感目录或 SSH 私钥目录。</p>
+          </div>
+          <button id="addSource" class="outline-button" type="button">添加目录</button>
+        </div>
+        <div id="sourceDirectoryList" class="source-directory-list"></div>
+        <div class="source-manager-actions">
+          <button id="saveSources" type="button">保存目录</button>
+          <p id="configMessage" class="inline-message" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+
+      <section class="panel log-browser" aria-labelledby="logFileHeading">
+        <div class="panel-title robot-panel-title">
+          <div>
+            <h2 id="logFileHeading">日志文件</h2>
+            <p id="selectedSourceDetail" class="page-muted">正在读取日志目录状态。</p>
+          </div>
+          <span id="selectedCount" class="selected-count">未选择文件</span>
+        </div>
+
+        <div id="sourceSelector" class="source-selector" role="tablist" aria-label="日志目录"></div>
+        <div class="file-toolbar">
+          <label class="keyword-field" for="fileKeyword">文件名筛选<input id="fileKeyword" type="search" placeholder="例如 chassis、error、.log" autocomplete="off" /></label>
+          <label class="select-all"><input id="selectAllFiles" type="checkbox" />全选当前结果</label>
+          <label class="ros-time-toggle" for="convertRosTime"><input id="convertRosTime" type="checkbox" checked />下载时将 ROS 时间转为北京时间<small>只转换下载副本；关闭后下载原始文件</small></label>
+          <button id="downloadSelected" type="button" disabled>下载选中日志</button>
+        </div>
+        <p id="downloadMessage" class="download-message" role="status" aria-live="polite"></p>
+        <div id="downloadProgress" class="download-progress" role="status" aria-live="polite" hidden>
+          <div class="download-progress-meta"><strong id="downloadProgressTitle">准备下载…</strong><span id="downloadProgressValue">0%</span></div>
+          <progress id="downloadProgressBar" max="100" value="0">0%</progress>
+          <p id="downloadProgressDetail">等待浏览器开始接收文件。</p>
+        </div>
+        <details id="downloadLocationHelp" class="download-location-help">
+          <summary>想自行选择保存位置？</summary>
+          <p>保存位置由浏览器决定，网页不能直接指定电脑目录。请先在 Chrome 或 Edge 的“设置 → 下载内容”中开启“下载前询问每个文件的保存位置”。开启后，浏览器会在每个日志下载前让你选择保存位置。</p>
+        </details>
+        <div class="file-table-wrap">
+          <table>
+            <thead><tr><th scope="col">选择</th><th scope="col">文件名</th><th scope="col">大小</th><th scope="col">修改时间</th></tr></thead>
+            <tbody id="fileList"><tr><td colspan="4" class="table-empty">正在读取日志目录…</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script src="/robot_logs.js"></script>
+    <script src="/app_shell.js"></script>
+  </body>
+</html>

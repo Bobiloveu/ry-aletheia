@@ -2,6 +2,7 @@ import threading
 import tempfile
 import unittest
 import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -92,6 +93,25 @@ class _CancelledWaitingExecutor:
 
 
 class TrajectoryFallbackTests(unittest.TestCase):
+    def test_sequence_executes_each_case_under_the_existing_run_lock(self):
+        """验收序列必须复用 RunManager，不得另起 ROS 调用路径。"""
+        cases = [
+            TestCase("case-1", "园区_1_1_1_101.json", "任务 1", TaskParameters("园区", 1, 1, 1, 101), "unused-1.json"),
+            TestCase("case-2", "园区_2_1_1_201.json", "任务 2", TaskParameters("园区", 2, 1, 1, 201), "unused-2.json"),
+        ]
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            manager = RunManager(Path(directory), _Executor(), _Settings())
+            with patch("autodrive_console.run_manager.RobotGateway", _Gateway), patch.object(manager, "_write_report"):
+                run = manager.start_sequence(cases, prepare_trajectory_maps=False, event_callback=events.append)
+                deadline = time.monotonic() + 2.0
+                while run.status not in {"completed", "cancelled", "blocked", "failed"} and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+        self.assertEqual(run.status, "completed")
+        self.assertEqual([item.case_filename for item in run.attempts], [case.filename for case in cases])
+        self.assertEqual([event["type"] for event in events if event["type"] == "item_finished"], ["item_finished", "item_finished"])
+
     def test_bound_scenario_is_applied_before_orchestration_and_restored_after_run(self):
         """启动脚本必须先切换，Supervisor 重启才会读取到该方案的参数。"""
         events = []

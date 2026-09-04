@@ -147,7 +147,7 @@ def test_map_uses_an_adaptive_metric_grid_and_restrained_industrial_palette():
     assert 'id="mapScale"' in html
     assert 'id="mapGridLabel"' in html
     assert "let pixiGridLayer;" in source
-    _assert_source_contains(source, "pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiWallLayer, pixiCloudLayer);")
+    _assert_source_contains(source, "pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiCostmapLayer, pixiWallLayer, pixiCloudLayer);")
     assert "function metricGridStep(pixelsPerMeter)" in source
     assert "function renderMetricGrid(layout)" in source
     assert "renderMetricGrid(layout);" in source
@@ -247,10 +247,14 @@ def test_runtime_uses_a_dedicated_high_rate_pose_stream():
     assert '"max_pose_age_ms:=250"' in source
     assert '"__node:=ry_aletheia_live_cloud"' in source
     assert '"__node:=ry_aletheia_live_pose"' in source
+    assert '"__node:=ry_aletheia_live_costmap"' in source
     assert '"enable_cloud:=true"' in source
     assert '"enable_pose:=true"' in source
+    assert '"enable_costmap:=true"' in source
+    assert '"enable_costmap:=false"' in source
     assert 'f"telemetry_udp_port:={TelemetryGateway.UDP_PORT}"' in source
     assert 'f"telemetry_udp_port:={TelemetryGateway.POSE_UDP_PORT}"' in source
+    assert 'f"telemetry_udp_port:={TelemetryGateway.COSTMAP_UDP_PORT}"' in source
     assert 'foxglove_bridge' not in source
 
 
@@ -274,6 +278,56 @@ def test_pose_stream_uses_a_separate_latest_wins_udp_sender_without_a_hidden_ros
     assert "publishing latest pose for display" in source
     assert '"/_aletheia/live_points"' not in source
     assert '"/_aletheia/live_pose"' not in source
+
+
+def test_costmap_stream_uses_its_own_latest_slot_and_stamped_map_transform_worker():
+    source = (ROOT / "live_preprocessor" / "src" / "live_cloud_preprocessor.cpp").read_text(encoding="utf-8")
+    assert "#include <nav_msgs/msg/occupancy_grid.hpp>" in source
+    assert "constexpr uint8_t kCostmapFrame = 3;" in source
+    assert 'declare_parameter<bool>("enable_costmap", false)' in source
+    assert 'declare_parameter<std::string>("costmap_input_topic", "/local_costmap/costmap")' in source
+    assert "rclcpp::QoS(1).reliable().transient_local()" in source
+    assert "void on_costmap(" in source
+    assert "CostmapPublishResult publish_costmap()" in source
+    callback = source[source.index("void on_costmap(") : source.index("CostmapPublishResult publish_costmap()")]
+    assert "lookupTransform" not in callback
+    assert "costmap_sender_->publish" not in callback
+    worker = source[source.index("CostmapPublishResult publish_costmap()") : source.index("void maybe_publish_latest()")]
+    assert "is_stale(input->header.stamp, max_costmap_age_ms_)" in worker
+    assert worker.index("is_stale(input->header.stamp, max_costmap_age_ms_)") < worker.index("tf_buffer_.lookupTransform")
+    assert "tf_buffer_.lookupTransform(map_frame_, input->header.frame_id, input->header.stamp" in worker
+    assert "is_identity_costmap_transform" in worker
+    assert "tf2::TimePointZero" in worker
+    assert "costmap_sender_->publish" in worker
+
+
+def test_desktop_costmap_uses_a_separate_binary_lane_and_one_dynamic_pixi_texture():
+    html = (ROOT / "frontend" / "live-observation.html").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "frontend" / "src" / "liveObservation.css").read_text(encoding="utf-8")
+    source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
+    assert "const TELEMETRY_COSTMAP = 3;" in source
+    assert "const COSTMAP_PACKET_MAX_AGE_MS = 5000;" in source
+    assert "let costmapSocket;" in source
+    assert "let pixiCostmapLayer;" in source
+    assert "function updateTelemetryCostmap(data)" in source
+    assert "function renderCostmap()" in source
+    assert "pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiCostmapLayer, pixiWallLayer, pixiCloudLayer);" in source
+    _assert_source_contains(source, "openLane('costmap', '/costmap', scheduleLatestCostmapPacket, '局部代价地图');")
+    assert "if (!mobileConsoleEnabled())" in source
+    assert 'id="costmapVisible"' in html
+    assert "局部代价地图" in html
+    assert "html.mobile-console .map-layer-toggle" in stylesheet
+
+
+def test_desktop_costmap_uses_a_cool_to_warm_navigation_risk_palette():
+    source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
+    color_function = source[source.index("function costmapColor(") : source.index("function renderCostmap()")]
+    assert "冷暖风险分级" in color_function
+    assert "cell <= 126" in color_function
+    assert "cell <= 252" in color_function
+    assert "pixels[offset] = 220" in color_function
+    assert "pixels[offset + 1] = 38" in color_function
+    assert "pixels[offset + 2] = 38" in color_function
 
 
 def test_cloud_stream_is_event_driven_and_tightly_freshness_bounded():

@@ -9,6 +9,19 @@
   let lastStatus = null;
   let adoptingExistingMiniapp = false;
   let speedTimer = null;
+  let chassisSavePending = false;
+  let chassisParametersDirty = false;
+  let previousEmergencyRelease = null;
+
+  const speedParameters = [
+    { range: "linearSpeed", number: "linearSpeedNumber", output: "linearSpeedValue", unit: "m/s", decimals: 1 },
+    { range: "angularSpeed", number: "angularSpeedNumber", output: "angularSpeedValue", unit: "rad/s", decimals: 1 },
+  ];
+  const chassisParameters = [
+    { range: "chassisPressRange", number: "chassisPress", output: "chassisPressValue", minimum: 20, maximum: 2000 },
+    { range: "movementAccRange", number: "movementAcc", output: "movementAccValue", minimum: 10, maximum: 1000 },
+    { range: "stopAccRange", number: "stopAcc", output: "stopAccValue", minimum: 20, maximum: 2000 },
+  ];
 
   async function request(path, payload, keepalive = false) {
     const response = await fetch(path, {
@@ -41,17 +54,150 @@
     return `${Number(value).toFixed(1)} ${unit}`;
   }
 
+  function parameterIsValid(control) {
+    const value = Number($(control.number).value);
+    const minimum = Number($(control.number).min);
+    const maximum = Number($(control.number).max);
+    return Number.isFinite(value) && value >= minimum && value <= maximum && (control.decimals || Number.isInteger(value));
+  }
+
+  function setPairedParameter(control, value, { preserveActive = true } = {}) {
+    const range = $(control.range);
+    const number = $(control.number);
+    if (preserveActive && (document.activeElement === range || document.activeElement === number)) return;
+    const normalized = String(value);
+    range.value = normalized;
+    number.value = normalized;
+    number.removeAttribute("aria-invalid");
+    $(control.output).textContent = control.unit ? formatSpeed(normalized, control.unit) : normalized;
+  }
+
+  function syncPairedParameter(control, source) {
+    const range = $(control.range);
+    const number = $(control.number);
+    const value = Number(source.value);
+    const minimum = Number(number.min);
+    const maximum = Number(number.max);
+    const valid = Number.isFinite(value) && value >= minimum && value <= maximum && (control.decimals || Number.isInteger(value));
+    if (!valid) {
+      number.setAttribute("aria-invalid", "true");
+      return false;
+    }
+    const normalized = String(value);
+    range.value = normalized;
+    number.value = normalized;
+    number.removeAttribute("aria-invalid");
+    $(control.output).textContent = control.unit ? formatSpeed(normalized, control.unit) : normalized;
+    return true;
+  }
+
   function renderSpeed(speed, ready) {
     if (!speed) return;
-    const linear = $("linearSpeed");
-    const angular = $("angularSpeed");
-    if (document.activeElement !== linear) linear.value = String(speed.linear_mps);
-    if (document.activeElement !== angular) angular.value = String(speed.angular_radps);
-    linear.min = angular.min = String(speed.min);
-    linear.max = angular.max = String(speed.max);
-    linear.disabled = angular.disabled = !ready;
-    $("linearSpeedValue").textContent = formatSpeed(linear.value, "m/s");
-    $("angularSpeedValue").textContent = formatSpeed(angular.value, "rad/s");
+    const values = [speed.linear_mps, speed.angular_radps];
+    speedParameters.forEach((control, index) => {
+      const range = $(control.range);
+      const number = $(control.number);
+      range.min = number.min = String(speed.min);
+      range.max = number.max = String(speed.max);
+      range.disabled = number.disabled = !ready;
+      setPairedParameter(control, values[index]);
+    });
+  }
+
+  function setChassisParametersDirty(dirty, { announce = true } = {}) {
+    chassisParametersDirty = dirty;
+    const valid = chassisParameters.every(parameterIsValid);
+    $("saveChassisParameters").disabled = chassisSavePending || !dirty || !valid;
+    if (!announce || chassisSavePending) return;
+    const status = $("chassisParameterMessage");
+    if (!valid) {
+      status.textContent = "请将每项参数修正到标注范围内后再保存。";
+      status.className = "parameter-message error";
+    } else if (dirty) {
+      status.textContent = "参数尚未保存，不会影响当前车辆设置。";
+      status.className = "parameter-message pending";
+    } else if (status.classList.contains("pending")) {
+      status.textContent = "";
+      status.className = "parameter-message";
+    }
+  }
+
+  function resetInvalidPairedParameter(control) {
+    const range = $(control.range);
+    const number = $(control.number);
+    if (!parameterIsValid(control)) {
+      number.value = range.value;
+      number.removeAttribute("aria-invalid");
+      $(control.output).textContent = control.unit ? formatSpeed(range.value, control.unit) : range.value;
+      return false;
+    }
+    return true;
+  }
+
+  function onChassisParameterInput(control, source) {
+    syncPairedParameter(control, source);
+    setChassisParametersDirty(true);
+  }
+
+  function onChassisParameterChange(control) {
+    resetInvalidPairedParameter(control);
+    setChassisParametersDirty(true);
+  }
+
+  function onSpeedParameterInput(control, source) {
+    if (syncPairedParameter(control, source)) scheduleSpeedUpdate();
+  }
+
+  function onSpeedParameterChange(control) {
+    if (!resetInvalidPairedParameter(control)) return;
+    if (speedTimer) window.clearTimeout(speedTimer);
+    speedTimer = null;
+    updateSpeed();
+  }
+
+  function setChassisParametersSaved() {
+    chassisParametersDirty = false;
+    setChassisParametersDirty(false, { announce: false });
+  }
+
+  function renderChassisParameterSaveState() {
+    setChassisParametersDirty(chassisParametersDirty, { announce: false });
+  }
+
+  function renderChassisParameters(parameters) {
+    if (!parameters) return;
+    if (!chassisParametersDirty) {
+      [parameters.press, parameters.movement_acc, parameters.stop_acc].forEach((value, index) => {
+        if (Number.isFinite(Number(value))) setPairedParameter(chassisParameters[index], value);
+      });
+    }
+    renderChassisParameterSaveState();
+  }
+
+  function renderEmergencyStop(emergency) {
+    const state = emergency?.state || "unknown";
+    const release = emergency?.release || "idle";
+    const panel = $("emergencyStopPanel");
+    const label = $("emergencyStopState");
+    const detail = $("emergencyStopDetail");
+    const releaseButton = $("releaseEmergencyStop");
+    panel.dataset.state = state;
+
+    if (state === "normal") {
+      label.textContent = "未触发急停";
+      detail.textContent = release === "confirmed" ? "已收到车端状态确认，急停已解除。" : "车端已确认急停未触发。";
+    } else if (state === "triggered") {
+      label.textContent = "急停已触发";
+      detail.textContent = release === "failed" ? "未在限定时间内收到解除确认，请检查物理急停与底盘状态。" : "手动运动已锁定。解除后仍需等待车端状态恢复。";
+    } else {
+      label.textContent = "状态未知";
+      detail.textContent = release === "unconfirmable" ? "解除结果无法确认，请检查 ROS2 与急停状态 Topic。" : "尚未收到 /is_emergency_stop 的真实状态，手动运动保持锁定。";
+    }
+    releaseButton.disabled = state !== "triggered" || release === "waiting_confirmation";
+    releaseButton.textContent = release === "waiting_confirmation" ? "正在确认解除" : "解除急停";
+    if (state !== "normal") clearHeld();
+    if (release === "confirmed" && previousEmergencyRelease !== "confirmed") message("已由车端急停状态确认解除。", "success");
+    previousEmergencyRelease = release;
   }
 
   function render(state) {
@@ -67,6 +213,8 @@
     $("publishRate").textContent = state.safety ? `${state.safety.publish_hz} Hz` : "—";
     $("inputTimeout").textContent = state.safety ? `${state.safety.input_timeout_ms} ms` : "—";
     $("heartbeatTimeout").textContent = state.safety ? `${state.safety.heartbeat_timeout_ms} ms` : "—";
+    renderEmergencyStop(state.emergency_stop);
+    renderChassisParameters(state.chassis_parameters);
 
     const enter = $("enterManual");
     const exit = $("exitManual");
@@ -81,7 +229,14 @@
     driveButtons.forEach((button) => { button.disabled = !ready; });
     $("stopButton").disabled = !sessionId || state.session?.state === "none";
 
-    if (state.runtime !== "ready") {
+    const emergencyState = state.emergency_stop?.state || "unknown";
+    if (emergencyState === "triggered") {
+      $("gateTitle").textContent = "急停已触发";
+      $("gateText").textContent = "车端已锁定手动运动。可发起软件解除，但必须等待 /is_emergency_stop 返回未触发。";
+    } else if (emergencyState !== "normal") {
+      $("gateTitle").textContent = "急停状态未知";
+      $("gateText").textContent = "未收到可靠急停状态，方向控制会保持锁定。请先检查车端 ROS2 状态。";
+    } else if (state.runtime !== "ready") {
       $("gateTitle").textContent = "本机 ROS2 控制不可用";
       $("gateText").textContent = state.runtime_error || "正在初始化车辆控制节点。";
     } else if (switching) {
@@ -146,9 +301,60 @@
     } catch (error) { if (error.status) render(error.status); message(error.message, "error"); }
   }
 
+  function readChassisParameters() {
+    const values = {
+      press: Number($("chassisPress").value),
+      movement_acc: Number($("movementAcc").value),
+      stop_acc: Number($("stopAcc").value),
+    };
+    const limits = [["press", "底盘压力", 20, 2000], ["movement_acc", "运动加速度", 10, 1000], ["stop_acc", "停止加速度", 20, 2000]];
+    for (const [key, label, minimum, maximum] of limits) {
+      if (!Number.isInteger(values[key]) || values[key] < minimum || values[key] > maximum) {
+        throw new Error(`${label}必须是 ${minimum}-${maximum} 的整数`);
+      }
+    }
+    return values;
+  }
+
+  async function saveChassisParameters() {
+    if (chassisSavePending) return;
+    let parameters;
+    try {
+      parameters = readChassisParameters();
+    } catch (error) {
+      $("chassisParameterMessage").textContent = error.message;
+      $("chassisParameterMessage").className = "parameter-message error";
+      return;
+    }
+    chassisSavePending = true;
+    renderChassisParameters(lastStatus?.chassis_parameters);
+    $("chassisParameterMessage").textContent = "正在保存车端手动控制参数…";
+    $("chassisParameterMessage").className = "parameter-message";
+    try {
+      const state = await request("/api/vehicle-control/chassis-parameters", parameters);
+      setChassisParametersSaved();
+      render(state);
+      $("chassisParameterMessage").textContent = "参数已保存，将用于后续运动和 STOP 指令。";
+      $("chassisParameterMessage").className = "parameter-message success";
+    } catch (error) {
+      if (error.status) render(error.status);
+      $("chassisParameterMessage").textContent = error.message;
+      $("chassisParameterMessage").className = "parameter-message error";
+    } finally {
+      chassisSavePending = false;
+      renderChassisParameters(lastStatus?.chassis_parameters);
+    }
+  }
+
+  async function releaseEmergencyStop() {
+    if (lastStatus?.emergency_stop?.state !== "triggered") return;
+    message("已发送解除急停请求，正在等待车端状态确认。");
+    try {
+      render(await request("/api/vehicle-control/release-emergency-stop", {}));
+    } catch (error) { if (error.status) render(error.status); message(error.message, "error"); }
+  }
+
   function scheduleSpeedUpdate() {
-    $("linearSpeedValue").textContent = formatSpeed($("linearSpeed").value, "m/s");
-    $("angularSpeedValue").textContent = formatSpeed($("angularSpeed").value, "rad/s");
     if (speedTimer) window.clearTimeout(speedTimer);
     speedTimer = window.setTimeout(() => { speedTimer = null; updateSpeed(); }, 100);
   }
@@ -219,6 +425,8 @@
   $("enterManual").addEventListener("click", enterManual);
   $("exitManual").addEventListener("click", exitManual);
   $("stopButton").addEventListener("click", stop);
+  $("releaseEmergencyStop").addEventListener("click", releaseEmergencyStop);
+  $("saveChassisParameters").addEventListener("click", saveChassisParameters);
   driveButtons.forEach((button) => {
     button.addEventListener("pointerdown", (event) => { event.preventDefault(); button.setPointerCapture?.(event.pointerId); beginHold(button.dataset.command, button); });
     ["pointerup", "pointercancel", "lostpointercapture", "pointerleave"].forEach((eventName) => button.addEventListener(eventName, stop));
@@ -233,9 +441,21 @@
   });
   document.addEventListener("keyup", (event) => { if (keyboardCommand[event.key]) stop(); });
   document.addEventListener("visibilitychange", () => { if (document.hidden) stop(); });
-  [$("linearSpeed"), $("angularSpeed")].forEach((input) => {
-    input.addEventListener("input", scheduleSpeedUpdate);
-    input.addEventListener("change", () => { if (speedTimer) window.clearTimeout(speedTimer); speedTimer = null; updateSpeed(); });
+  speedParameters.forEach((control) => {
+    const range = $(control.range);
+    const number = $(control.number);
+    range.addEventListener("input", () => onSpeedParameterInput(control, range));
+    number.addEventListener("input", () => onSpeedParameterInput(control, number));
+    range.addEventListener("change", () => onSpeedParameterChange(control));
+    number.addEventListener("change", () => onSpeedParameterChange(control));
+  });
+  chassisParameters.forEach((control) => {
+    const range = $(control.range);
+    const number = $(control.number);
+    range.addEventListener("input", () => onChassisParameterInput(control, range));
+    number.addEventListener("input", () => onChassisParameterInput(control, number));
+    range.addEventListener("change", () => onChassisParameterChange(control));
+    number.addEventListener("change", () => onChassisParameterChange(control));
   });
   window.addEventListener("pagehide", leavePageSafely);
   window.addEventListener("beforeunload", leavePageSafely);

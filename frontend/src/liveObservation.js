@@ -20,6 +20,7 @@ const TELEMETRY_MAGIC = "ALTM";
 const TELEMETRY_HEADER_BYTES = 20;
 const TELEMETRY_CLOUD = 1;
 const TELEMETRY_POSE = 2;
+const TELEMETRY_COSTMAP = 3;
 // 3000 点足以保留室内墙面和门洞的结构感；仍在前端限频解析，避免以原始全量
 // 点云的频率占用浏览器主线程。
 const POINT_LIMIT = 3000;
@@ -32,6 +33,11 @@ const CLOUD_COMPOSITE_MIN_INTERVAL_MS = 125;
 // 位姿包远小于点云，但在浏览器刚完成一次地图合成时可能恰好错过 120 ms
 // 窗口。保留 250 ms 仍是当前画面，不会形成历史回放，却能避免车体偶发断流。
 const POSE_PACKET_MAX_AGE_MS = 250;
+// 实车局部代价地图源约为低频状态流。五秒内保留最后一张有效图，TF 暂时不可用
+// 或 source 暂无更新时不会闪烁；超时则主动隐藏，不能把旧障碍物误当成当前环境。
+const COSTMAP_PACKET_MAX_AGE_MS = 5000;
+const COSTMAP_META_BYTES = 20;
+const COSTMAP_MAX_CELLS = 65535;
 const LIVE_POSE_FALLBACK_MS = 450;
 // 地图旋转、栅格缩放与高密度点云合成是最重的浏览器操作。数据接收可更快，
 // 但 PixiJS 只按可见效果提交，避免每一帧 TF 都触发整图重绘。
@@ -94,12 +100,17 @@ const $ = (id) => document.getElementById(id);
 // 小车端和浏览器端的位姿链路均不复用该队列。
 let cloudSocket;
 let poseSocket;
+let costmapSocket;
 // 断网或网关短暂重启时，两条车端数据线独立重连；不重连另一条已经健康的线，
 // 也不把任何历史帧保存在浏览器中。
 let telemetryConnectionGeneration = 0;
-const telemetryReconnectTimers = { cloud: undefined, pose: undefined };
-const telemetryLaneOpen = { cloud: false, pose: false };
-const telemetryLaneAttempts = { cloud: 0, pose: 0 };
+const telemetryReconnectTimers = {
+  cloud: undefined,
+  pose: undefined,
+  costmap: undefined,
+};
+const telemetryLaneOpen = { cloud: false, pose: false, costmap: false };
+const telemetryLaneAttempts = { cloud: 0, pose: 0, costmap: 0 };
 let cloudUpdatedAt = 0;
 let livePoseUpdatedAt = 0;
 let vehicleUpdatedAt = 0;
@@ -114,10 +125,14 @@ let pixiApp;
 let pixiWorld;
 let pixiMapLayer;
 let pixiGridLayer;
+let pixiCostmapLayer;
 let pixiWallLayer;
 let pixiCloudLayer;
 let pixiMapSprite;
 let pixiMapTexture;
+let pixiCostmapSprite;
+let pixiCostmapTexture;
+let pixiCostmapPixels;
 let pixiReady = false;
 let pixiInitialization;
 let metricGridSignature;
@@ -126,16 +141,24 @@ let pendingCloudPacket;
 let cloudPacketQueued = false;
 let pendingPosePacket;
 let posePacketQueued = false;
+let pendingCostmapPacket;
+let costmapPacketQueued = false;
+let costmapExpiryTimer;
+let costmapUpdatedAt = 0;
+let costmapVisible = true;
+let costmap;
 let tfVehiclePose;
 let renderedVehiclePose;
 let renderedVehicleAt = 0;
 let livePoseSourceAgeMs = 0;
 let liveCloudSourceAgeMs = 0;
+let liveCostmapSourceAgeMs = 0;
 const clientPerformance = {
   startedAt: performance.now(),
   posePackets: 0,
   poseApplied: 0,
   cloudPackets: 0,
+  costmapPackets: 0,
   vehicleFrames: 0,
   vehicleLongFrames: 0,
   vehicleFrameIntervalMs: 0,
@@ -263,6 +286,8 @@ function reportClientMetrics() {
     vehicle_long_frames: clientPerformance.vehicleLongFrames,
     cloud_packet_rate_hz: clientPerformance.cloudPackets / elapsedSeconds,
     cloud_source_age_ms: liveCloudSourceAgeMs,
+    costmap_packet_rate_hz: clientPerformance.costmapPackets / elapsedSeconds,
+    costmap_source_age_ms: liveCostmapSourceAgeMs,
   });
   fetch("/api/observation/client-metrics", {
     method: "POST",
@@ -273,6 +298,7 @@ function reportClientMetrics() {
   clientPerformance.posePackets = 0;
   clientPerformance.poseApplied = 0;
   clientPerformance.cloudPackets = 0;
+  clientPerformance.costmapPackets = 0;
   clientPerformance.vehicleFrames = 0;
   clientPerformance.vehicleLongFrames = 0;
 }
@@ -396,6 +422,114 @@ function createRgbaTexture(pixels, width, height) {
       format: "rgba8unorm",
     }),
   });
+}
+function clearCostmapRenderer() {
+  pixiCostmapSprite?.destroy();
+  pixiCostmapSprite = undefined;
+  pixiCostmapTexture?.destroy(true);
+  pixiCostmapTexture = undefined;
+  pixiCostmapPixels = undefined;
+  pixiCostmapLayer?.removeChildren();
+}
+function costmapIsCurrent() {
+  return (
+    costmap &&
+    performance.now() - costmapUpdatedAt <= COSTMAP_PACKET_MAX_AGE_MS
+  );
+}
+function costmapColor(cell, pixels, offset) {
+  // 0 表示自由区，255 是 ROS 的 unknown(-1)：两者都不覆盖静态地图。局部代价
+  // 只强调会影响当前导航的区域，不以整块半透明底色抢占虚拟墙/点云的视觉层级。
+  if (cell === 0 || cell === 255) {
+    pixels[offset + 3] = 0;
+    return;
+  }
+  // 冷暖风险分级：低代价从冷蓝起步，经黄色过渡到橙色；致命障碍保持高对比红。
+  // 这样紫色仍专属于点云、红线仍专属于虚拟墙，操作者不会把三种信息混为一层。
+  if (cell >= 254) {
+    pixels[offset] = 220;
+    pixels[offset + 1] = 38;
+    pixels[offset + 2] = 38;
+    pixels[offset + 3] = 192;
+    return;
+  }
+  if (cell === 253) {
+    pixels[offset] = 249;
+    pixels[offset + 1] = 115;
+    pixels[offset + 2] = 22;
+    pixels[offset + 3] = 176;
+    return;
+  }
+  if (cell <= 126) {
+    const intensity = cell / 126;
+    // #38bdf8 → #facc15：低代价冷蓝，中代价黄色。
+    pixels[offset] = Math.round(56 + intensity * 194);
+    pixels[offset + 1] = Math.round(189 + intensity * 15);
+    pixels[offset + 2] = Math.round(248 - intensity * 227);
+    pixels[offset + 3] = Math.round(56 + intensity * 72);
+    return;
+  }
+  if (cell <= 252) {
+    const intensity = (cell - 126) / 126;
+    // #facc15 → #f97316：中代价黄色，高代价橙色。
+    pixels[offset] = Math.round(250 - intensity);
+    pixels[offset + 1] = Math.round(204 - intensity * 89);
+    pixels[offset + 2] = Math.round(21 + intensity);
+    pixels[offset + 3] = Math.round(128 + intensity * 32);
+  }
+}
+function renderCostmap() {
+  if (
+    !pixiReady ||
+    !pixiCostmapLayer ||
+    !mapInfo ||
+    !costmapVisible ||
+    mobileConsoleEnabled() ||
+    !costmapIsCurrent()
+  ) {
+    clearCostmapRenderer();
+    return;
+  }
+  const { width, height, cells, resolution, origin } = costmap;
+  const dimensionsChanged =
+    !pixiCostmapPixels ||
+    pixiCostmapPixels.length !== width * height * 4;
+  if (dimensionsChanged) {
+    clearCostmapRenderer();
+    pixiCostmapPixels = new Uint8Array(width * height * 4);
+    pixiCostmapTexture = createRgbaTexture(pixiCostmapPixels, width, height);
+    pixiCostmapSprite = new Sprite(pixiCostmapTexture);
+    // ROS OccupancyGrid 的 data[0] 是左下角；Pixi texture 的 y=0 是上方。
+    // 逐行反写色彩 buffer 后，将 sprite 的下沿锚定到 grid 原点，即可在 y-down
+    // 的地图像素坐标内正确应用 map 坐标系 yaw。
+    pixiCostmapSprite.anchor.set(0, 1);
+    pixiCostmapLayer.addChild(pixiCostmapSprite);
+  }
+  for (let sourceY = 0; sourceY < height; sourceY += 1) {
+    const textureY = height - sourceY - 1;
+    for (let x = 0; x < width; x += 1) {
+      costmapColor(cells[sourceY * width + x], pixiCostmapPixels, (textureY * width + x) * 4);
+    }
+  }
+  pixiCostmapTexture.source.update();
+  const mapScale = resolution / mapInfo.resolution;
+  pixiCostmapSprite.width = width * mapScale;
+  pixiCostmapSprite.height = height * mapScale;
+  pixiCostmapSprite.position.set(
+    (origin.x - mapInfo.origin.x) / mapInfo.resolution,
+    mapInfo.height - (origin.y - mapInfo.origin.y) / mapInfo.resolution,
+  );
+  pixiCostmapSprite.rotation = -origin.yaw;
+}
+function scheduleCostmapExpiry() {
+  window.clearTimeout(costmapExpiryTimer);
+  costmapExpiryTimer = window.setTimeout(() => {
+    if (!costmapIsCurrent()) {
+      renderCostmap();
+      updateDiagnostics(true);
+      if (!document.hidden) scheduleMapDraw(true);
+    }
+  }, COSTMAP_PACKET_MAX_AGE_MS + 20);
 }
 function setWebRtcGatewayState(online, detail) {
   const badge = $("webrtcGatewayBadge");
@@ -1236,14 +1370,10 @@ async function initializePixiRenderer() {
     pixiWorld = new Container();
     pixiMapLayer = new Container();
     pixiGridLayer = new Container();
+    pixiCostmapLayer = new Container();
     pixiWallLayer = new Container();
     pixiCloudLayer = new Container();
-    pixiWorld.addChild(
-      pixiMapLayer,
-      pixiGridLayer,
-      pixiWallLayer,
-      pixiCloudLayer,
-    );
+    pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiCostmapLayer, pixiWallLayer, pixiCloudLayer);
     app.stage.addChild(pixiWorld);
     pixiReady = true;
     renderStaticWorld();
@@ -1718,6 +1848,7 @@ function renderStaticWorld() {
     join: "round",
   });
   pixiWallLayer.addChild(walls);
+  renderCostmap();
   pixiApp.render();
 }
 function renderCloudPoints(packedPoints) {
@@ -2000,6 +2131,45 @@ function updateTelemetryCloud(data) {
   recordCloudFrame();
   updateDiagnostics();
 }
+function updateTelemetryCostmap(data) {
+  const header = telemetryHeader(data, TELEMETRY_COSTMAP);
+  if (
+    !header ||
+    header.pointCount === 0 ||
+    header.pointCount > COSTMAP_MAX_CELLS ||
+    data.byteLength !==
+      TELEMETRY_HEADER_BYTES + COSTMAP_META_BYTES + header.pointCount
+  )
+    return;
+  const offset = TELEMETRY_HEADER_BYTES;
+  const originX = header.view.getFloat32(offset, false);
+  const originY = header.view.getFloat32(offset + 4, false);
+  const originYaw = header.view.getFloat32(offset + 8, false);
+  const resolution = header.view.getFloat32(offset + 12, false);
+  const width = header.view.getUint16(offset + 16, false);
+  const height = header.view.getUint16(offset + 18, false);
+  if (
+    width === 0 ||
+    height === 0 ||
+    width * height !== header.pointCount ||
+    ![originX, originY, originYaw, resolution].every(Number.isFinite) ||
+    resolution <= 0
+  )
+    return;
+  costmap = {
+    width,
+    height,
+    resolution,
+    origin: { x: originX, y: originY, yaw: originYaw },
+    cells: new Uint8Array(data, offset + COSTMAP_META_BYTES, header.pointCount),
+  };
+  costmapUpdatedAt = performance.now();
+  liveCostmapSourceAgeMs = telemetrySourceAgeMs(header.timestampNs);
+  scheduleCostmapExpiry();
+  renderCostmap();
+  updateDiagnostics();
+  scheduleMapDraw();
+}
 function scheduleLatestCloudPacket(data) {
   clientPerformance.cloudPackets += 1;
   pendingCloudPacket = { data, receivedAt: performance.now() };
@@ -2024,6 +2194,32 @@ function flushLatestCloudPacket() {
   if (pendingCloudPacket && !cloudPacketQueued) {
     cloudPacketQueued = true;
     requestAnimationFrame(flushLatestCloudPacket);
+  }
+}
+function scheduleLatestCostmapPacket(data) {
+  clientPerformance.costmapPackets += 1;
+  pendingCostmapPacket = { data, receivedAt: performance.now() };
+  if (costmapPacketQueued) return;
+  costmapPacketQueued = true;
+  requestAnimationFrame(flushLatestCostmapPacket);
+}
+function flushLatestCostmapPacket() {
+  costmapPacketQueued = false;
+  const packet = pendingCostmapPacket;
+  pendingCostmapPacket = undefined;
+  if (
+    packet &&
+    performance.now() - packet.receivedAt <= COSTMAP_PACKET_MAX_AGE_MS
+  ) {
+    try {
+      updateTelemetryCostmap(packet.data);
+    } catch (_) {
+      /* 不完整或非法的单帧不能影响后续最新栅格。 */
+    }
+  }
+  if (pendingCostmapPacket && !costmapPacketQueued) {
+    costmapPacketQueued = true;
+    requestAnimationFrame(flushLatestCostmapPacket);
   }
 }
 function scheduleLatestPosePacket(data) {
@@ -2086,14 +2282,22 @@ function updateDiagnostics(force = false) {
       ? `图像低延迟优先，点云暂停 · 最近 ${cloudCount} 点`
       : "图像低延迟优先，点云暂停"
     : cloud
-      ? `${cloudCount} 个地图点 · ${cloudAge.toFixed(1)} 秒前`
-      : "等待点云";
+    ? `${cloudCount} 个地图点 · ${cloudAge.toFixed(1)} 秒前`
+    : "等待点云";
+  const costmapAge = costmapIsCurrent()
+    ? Math.max(0, (performance.now() - costmapUpdatedAt) / 1000)
+    : 0;
+  const costmapText = !costmapVisible
+    ? "局部代价地图已隐藏"
+    : costmapIsCurrent()
+      ? `局部代价地图 ${costmap.width} × ${costmap.height} · ${costmapAge.toFixed(1)} 秒前`
+      : "等待局部代价地图";
   const wallText = virtualWalls.length
     ? `${virtualWalls.length} 段虚拟墙`
     : wallStatus;
   setText(
     "mapDiagnostics",
-    `${mapText} · ${poseText} · ${cloudText} · ${wallText}`,
+    `${mapText} · ${poseText} · ${cloudText} · ${costmapText} · ${wallText}`,
   );
 }
 
@@ -2107,11 +2311,16 @@ function invalidateMapScopedCloud() {
   cloud = undefined;
   pendingCloudPacket = undefined;
   pendingCloudFrame = undefined;
+  costmap = undefined;
+  costmapUpdatedAt = 0;
+  pendingCostmapPacket = undefined;
+  window.clearTimeout(costmapExpiryTimer);
   if (cloudRenderTimer) {
     window.clearTimeout(cloudRenderTimer);
     cloudRenderTimer = undefined;
   }
   renderCloudPoints();
+  clearCostmapRenderer();
 }
 function recordCloudFrame() {
   const now = performance.now();
@@ -2237,7 +2446,7 @@ function loadCachedMap(mapId, metadata) {
 
 function closeTelemetryConnections() {
   telemetryConnectionGeneration += 1;
-  for (const lane of ["cloud", "pose"]) {
+  for (const lane of ["cloud", "pose", "costmap"]) {
     window.clearTimeout(telemetryReconnectTimers[lane]);
     telemetryReconnectTimers[lane] = undefined;
     telemetryLaneOpen[lane] = false;
@@ -2245,8 +2454,10 @@ function closeTelemetryConnections() {
   }
   cloudSocket?.close();
   poseSocket?.close();
+  costmapSocket?.close();
   cloudSocket = undefined;
   poseSocket = undefined;
+  costmapSocket = undefined;
 }
 function connectTelemetry(payload) {
   const port = Number(payload?.telemetry?.websocket_port);
@@ -2267,7 +2478,12 @@ function connectTelemetry(payload) {
     if (telemetryLaneOpen.cloud && telemetryLaneOpen.pose) {
       setText("connectionState", "已连接");
       setText("sideState", "本地实时数据");
-      setText("connectionDetail", "专用二进制遥测 · 点云 UDP / 位姿 WebSocket");
+      setText(
+        "connectionDetail",
+        telemetryLaneOpen.costmap || mobileConsoleEnabled()
+          ? "专用二进制遥测 · 点云 / 位姿 / 局部代价地图"
+          : "点云与位姿已连接；局部代价地图重连中",
+      );
     } else if (telemetryLaneOpen.cloud || telemetryLaneOpen.pose) {
       setText("connectionState", "部分连接");
       setText(
@@ -2285,7 +2501,8 @@ function connectTelemetry(payload) {
     const socket = new WebSocket(`${base}${path}`);
     socket.binaryType = "arraybuffer";
     if (lane === "cloud") cloudSocket = socket;
-    else poseSocket = socket;
+    else if (lane === "pose") poseSocket = socket;
+    else costmapSocket = socket;
     socket.addEventListener("open", () => {
       if (generation !== telemetryConnectionGeneration) {
         socket.close();
@@ -2332,12 +2549,22 @@ function connectTelemetry(payload) {
   setText("connectionDetail", "正在连接专用实时遥测…");
   openLane("cloud", "/cloud", scheduleLatestCloudPacket, "点云");
   openLane("pose", "/pose", scheduleLatestPosePacket, "位姿");
+  if (!mobileConsoleEnabled())
+    openLane("costmap", "/costmap", scheduleLatestCostmapPacket, "局部代价地图");
 }
 async function main() {
   initializeTheme();
   window.RYAletheiaShell?.install();
   setupMobileConsole();
   setupMapInteraction();
+  const costmapToggle = $("costmapVisible");
+  costmapVisible = costmapToggle?.checked !== false;
+  costmapToggle?.addEventListener("change", () => {
+    costmapVisible = costmapToggle.checked;
+    renderCostmap();
+    updateDiagnostics(true);
+    scheduleMapDraw(true);
+  });
   $("webrtcVideoToggle")?.addEventListener("click", toggleWebRtcVideo);
   startWebRtcVideoStatus();
   await initializePixiRenderer();

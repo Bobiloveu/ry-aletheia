@@ -1,8 +1,8 @@
 """Aletheia 的专用实时遥测传输。
 
 这里刻意不是 ROS-Web Bridge。C++ 预处理进程只向各自独立的回环 UDP 端口发送
-已经投影/限点后的二维点云或二维位姿。本模块在本机完成 UDP 分片重组，并以两个
-独立 Binary WebSocket 通道送到浏览器：``/cloud`` 与 ``/pose``。
+已经投影/限点后的二维点云、二维位姿或局部代价栅格。本模块在本机完成 UDP 分片重组，
+并以三条独立 Binary WebSocket 通道送到浏览器：``/cloud``、``/pose`` 与 ``/costmap``。
 
 设计边界：
 
@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import math
 import os
 import select
 import socket
@@ -35,11 +36,14 @@ UDP_MAGIC: Final = b"RALT"
 UDP_VERSION: Final = 1
 KIND_CLOUD: Final = 1
 KIND_POSE: Final = 2
+KIND_COSTMAP: Final = 3
 UDP_HEADER: Final = struct.Struct("!4sBBIIQHHHH")
 UDP_HEADER_BYTES: Final = UDP_HEADER.size
 UDP_MAX_PAYLOAD: Final = 1152
 UDP_MAX_CHUNKS: Final = 64
 MAX_CLOUD_POINTS: Final = 3000
+MAX_COSTMAP_CELLS: Final = 65535
+COSTMAP_META: Final = struct.Struct("!ffffHH")
 # 一帧点云在回环 UDP 中通常约 24 KiB。TCP 内核发送队列只允许容纳少量当前帧，
 # 配合每连接单槽与 250 ms send timeout，慢浏览器不会在内核里积累秒级历史。
 WEBSOCKET_SEND_BUFFER_BYTES: Final = 32 * 1024
@@ -75,7 +79,7 @@ class _PartialFrame:
     stream_id: int
     sequence: int
     timestamp_ns: int
-    point_count: int
+    record_count: int
     chunk_count: int
     chunks: list[bytes | None]
     received: int = 0
@@ -105,7 +109,7 @@ class _LatestFrameAssembler:
         if len(datagram) < UDP_HEADER_BYTES:
             return None
         try:
-            magic, version, kind, stream_id, sequence, timestamp_ns, index, count, point_count, payload_size = UDP_HEADER.unpack_from(datagram)
+            magic, version, kind, stream_id, sequence, timestamp_ns, index, count, record_count, payload_size = UDP_HEADER.unpack_from(datagram)
         except struct.error:
             return None
         payload = datagram[UDP_HEADER_BYTES:]
@@ -118,12 +122,14 @@ class _LatestFrameAssembler:
             or index >= count
             or payload_size != len(payload)
             or payload_size > UDP_MAX_PAYLOAD
-            or point_count > MAX_CLOUD_POINTS
+            or self.kind not in (KIND_CLOUD, KIND_POSE, KIND_COSTMAP)
         ):
             return None
-        if self.kind == KIND_POSE and (count != 1 or point_count != 1 or payload_size != 12):
+        if self.kind == KIND_CLOUD and (record_count > MAX_CLOUD_POINTS or payload_size % 8):
             return None
-        if self.kind == KIND_CLOUD and payload_size % 8:
+        if self.kind == KIND_POSE and (count != 1 or record_count != 1 or payload_size != 12):
+            return None
+        if self.kind == KIND_COSTMAP and record_count > MAX_COSTMAP_CELLS:
             return None
 
         # 预处理进程重启会生成新的 stream_id；它不是 sequence 回退，应立即接纳。
@@ -145,7 +151,7 @@ class _LatestFrameAssembler:
                 stream_id=stream_id,
                 sequence=sequence,
                 timestamp_ns=timestamp_ns,
-                point_count=point_count,
+                record_count=record_count,
                 chunk_count=count,
                 chunks=[None] * count,
             )
@@ -154,7 +160,7 @@ class _LatestFrameAssembler:
             pending.stream_id != stream_id
             or pending.chunk_count != count
             or pending.timestamp_ns != timestamp_ns
-            or pending.point_count != point_count
+            or pending.record_count != record_count
         ):
             return None
         if pending.chunks[index] is None:
@@ -164,14 +170,33 @@ class _LatestFrameAssembler:
             return None
 
         raw = b"".join(part for part in pending.chunks if part is not None)
-        expected = pending.point_count * (8 if self.kind == KIND_CLOUD else 12)
+        expected = (
+            pending.record_count * 8
+            if self.kind == KIND_CLOUD
+            else 12
+            if self.kind == KIND_POSE
+            else COSTMAP_META.size + pending.record_count
+        )
         self.pending = None
         if len(raw) != expected:
             return None
+        if self.kind == KIND_COSTMAP:
+            try:
+                origin_x, origin_y, origin_yaw, resolution, width, height = COSTMAP_META.unpack_from(raw)
+            except struct.error:
+                return None
+            if (
+                width == 0
+                or height == 0
+                or width * height != pending.record_count
+                or not all(math.isfinite(value) for value in (origin_x, origin_y, origin_yaw, resolution))
+                or resolution <= 0.0
+            ):
+                return None
         if self.last_complete_sequence is not None and not _sequence_is_newer(sequence, self.last_complete_sequence):
             return None
         self.last_complete_sequence = sequence
-        return WIRE_HEADER.pack(WIRE_MAGIC, WIRE_VERSION, self.kind, sequence, timestamp_ns, point_count) + raw
+        return WIRE_HEADER.pack(WIRE_MAGIC, WIRE_VERSION, self.kind, sequence, timestamp_ns, record_count) + raw
 
 
 class _WebSocketClient:
@@ -255,7 +280,7 @@ class _WebSocketClient:
 
 
 class TelemetryGateway:
-    """Loopback UDP ingress + two purpose-built Binary WebSocket lanes."""
+    """Loopback UDP ingress + purpose-built Binary WebSocket lanes."""
 
     WEBSOCKET_PORT: Final = 8768
     # 点云可在一个 frame 中拆为二十余个 UDP 分片；位姿拥有独立入口、线程和
@@ -263,6 +288,7 @@ class TelemetryGateway:
     # 的兼容别名，供既有维护脚本和测试使用。
     CLOUD_UDP_PORT: Final = 8769
     POSE_UDP_PORT: Final = 8770
+    COSTMAP_UDP_PORT: Final = 8771
     UDP_PORT: Final = CLOUD_UDP_PORT
 
     def __init__(self, log_dir: object | None = None) -> None:
@@ -280,8 +306,12 @@ class TelemetryGateway:
         self._udp_threads: dict[int, threading.Thread] = {}
         self._accept_thread: threading.Thread | None = None
         self._clients: set[_WebSocketClient] = set()
-        self._assemblers = {KIND_CLOUD: _LatestFrameAssembler(KIND_CLOUD), KIND_POSE: _LatestFrameAssembler(KIND_POSE)}
-        self._last_frame_at: dict[int, float] = {KIND_CLOUD: 0.0, KIND_POSE: 0.0}
+        self._assemblers = {
+            KIND_CLOUD: _LatestFrameAssembler(KIND_CLOUD),
+            KIND_POSE: _LatestFrameAssembler(KIND_POSE),
+            KIND_COSTMAP: _LatestFrameAssembler(KIND_COSTMAP),
+        }
+        self._last_frame_at: dict[int, float] = {KIND_CLOUD: 0.0, KIND_POSE: 0.0, KIND_COSTMAP: 0.0}
         self._last_error_at = 0.0
 
     def start(self) -> None:
@@ -292,7 +322,11 @@ class TelemetryGateway:
                 websocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 udp_sockets: dict[int, socket.socket] = {}
                 try:
-                    for kind, port in ((KIND_CLOUD, self.UDP_PORT), (KIND_POSE, self.POSE_UDP_PORT)):
+                    for kind, port in (
+                        (KIND_CLOUD, self.UDP_PORT),
+                        (KIND_POSE, self.POSE_UDP_PORT),
+                        (KIND_COSTMAP, self.COSTMAP_UDP_PORT),
+                    ):
                         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                         udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                         udp.bind(("127.0.0.1", port))
@@ -311,9 +345,13 @@ class TelemetryGateway:
                 generation = self._generation
                 self._udp_sockets = udp_sockets
                 self._websocket_socket = websocket
-                assemblers = {KIND_CLOUD: _LatestFrameAssembler(KIND_CLOUD), KIND_POSE: _LatestFrameAssembler(KIND_POSE)}
+                assemblers = {
+                    KIND_CLOUD: _LatestFrameAssembler(KIND_CLOUD),
+                    KIND_POSE: _LatestFrameAssembler(KIND_POSE),
+                    KIND_COSTMAP: _LatestFrameAssembler(KIND_COSTMAP),
+                }
                 self._assemblers = assemblers
-                self._last_frame_at = {KIND_CLOUD: 0.0, KIND_POSE: 0.0}
+                self._last_frame_at = {KIND_CLOUD: 0.0, KIND_POSE: 0.0, KIND_COSTMAP: 0.0}
                 self._running.set()
                 self._udp_threads = {
                     kind: threading.Thread(target=self._udp_loop, args=(udp, generation, kind, assemblers[kind]), name=f"aletheia-telemetry-udp-{kind}", daemon=True)
@@ -323,7 +361,13 @@ class TelemetryGateway:
                 for worker in self._udp_threads.values():
                     worker.start()
                 self._accept_thread.start()
-        LOGGER.info("Aletheia 专用遥测网关已启动：cloud UDP 127.0.0.1:%s，pose UDP 127.0.0.1:%s，Binary WebSocket 0.0.0.0:%s", self.UDP_PORT, self.POSE_UDP_PORT, self.WEBSOCKET_PORT)
+        LOGGER.info(
+            "Aletheia 专用遥测网关已启动：cloud UDP 127.0.0.1:%s，pose UDP 127.0.0.1:%s，costmap UDP 127.0.0.1:%s，Binary WebSocket 0.0.0.0:%s",
+            self.UDP_PORT,
+            self.POSE_UDP_PORT,
+            self.COSTMAP_UDP_PORT,
+            self.WEBSOCKET_PORT,
+        )
 
     def stop(self) -> None:
         with self._lifecycle_lock:
@@ -357,18 +401,25 @@ class TelemetryGateway:
     def status(self) -> dict[str, object]:
         now = time.monotonic()
         with self._lock:
-            clients = {"cloud": sum(item.lane == KIND_CLOUD for item in self._clients), "pose": sum(item.lane == KIND_POSE for item in self._clients)}
+            clients = {
+                "cloud": sum(item.lane == KIND_CLOUD for item in self._clients),
+                "pose": sum(item.lane == KIND_POSE for item in self._clients),
+                "costmap": sum(item.lane == KIND_COSTMAP for item in self._clients),
+            }
             running = self._running.is_set()
             cloud_age = now - self._last_frame_at[KIND_CLOUD] if self._last_frame_at[KIND_CLOUD] else None
             pose_age = now - self._last_frame_at[KIND_POSE] if self._last_frame_at[KIND_POSE] else None
+            costmap_age = now - self._last_frame_at[KIND_COSTMAP] if self._last_frame_at[KIND_COSTMAP] else None
         return {
             "online": running,
             "websocket_port": self.WEBSOCKET_PORT,
             "udp_port": self.UDP_PORT,
             "pose_udp_port": self.POSE_UDP_PORT,
+            "costmap_udp_port": self.COSTMAP_UDP_PORT,
             "clients": clients,
             "cloud_age_ms": round(cloud_age * 1000) if cloud_age is not None else None,
             "pose_age_ms": round(pose_age * 1000) if pose_age is not None else None,
+            "costmap_age_ms": round(costmap_age * 1000) if costmap_age is not None else None,
         }
 
     def _udp_loop(self, endpoint: socket.socket, generation: int, kind: int, assembler: _LatestFrameAssembler) -> None:
@@ -427,7 +478,15 @@ class TelemetryGateway:
                     return
                 request += block
             first, headers = self._parse_handshake(request)
-            lane = KIND_CLOUD if first.startswith("GET /cloud ") else KIND_POSE if first.startswith("GET /pose ") else 0
+            lane = (
+                KIND_CLOUD
+                if first.startswith("GET /cloud ")
+                else KIND_POSE
+                if first.startswith("GET /pose ")
+                else KIND_COSTMAP
+                if first.startswith("GET /costmap ")
+                else 0
+            )
             key = headers.get("sec-websocket-key")
             upgrade = headers.get("upgrade", "").lower()
             if lane == 0 or not key or upgrade != "websocket":
@@ -446,7 +505,12 @@ class TelemetryGateway:
                     return
                 self._clients.add(client)
             accepted = True
-            LOGGER.info("实时遥测浏览器已连接：lane=%s peer=%s:%s", "cloud" if lane == KIND_CLOUD else "pose", address[0], address[1])
+            LOGGER.info(
+                "实时遥测浏览器已连接：lane=%s peer=%s:%s",
+                {KIND_CLOUD: "cloud", KIND_POSE: "pose", KIND_COSTMAP: "costmap"}[lane],
+                address[0],
+                address[1],
+            )
             client.start()
         except (OSError, ValueError, UnicodeDecodeError):
             pass

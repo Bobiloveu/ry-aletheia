@@ -23,6 +23,7 @@
 #include <builtin_interfaces/msg/time.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <livox_ros_driver2/msg/custom_msg.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/point_field.hpp>
@@ -37,6 +38,7 @@ namespace {
 constexpr uint8_t kTelemetryVersion = 1;
 constexpr uint8_t kCloudFrame = 1;
 constexpr uint8_t kPoseFrame = 2;
+constexpr uint8_t kCostmapFrame = 3;
 // Ethernet/Wi-Fi MTU 之下保留充足余量：UDP header 30 B + payload 1152 B。
 constexpr size_t kUdpPayloadBytes = 1152;
 constexpr size_t kUdpMaxChunks = 64;
@@ -78,7 +80,7 @@ class UdpLatestSender final {
  public:
   struct Frame {
     uint64_t timestamp_ns;
-    uint16_t point_count;
+    uint16_t record_count;
     std::vector<uint8_t> payload;
   };
 
@@ -128,7 +130,7 @@ class UdpLatestSender final {
       std::lock_guard<std::mutex> guard(mutex_);
       QueuedFrame queued;
       queued.timestamp_ns = frame.timestamp_ns;
-      queued.point_count = frame.point_count;
+      queued.record_count = frame.record_count;
       queued.payload = std::move(frame.payload);
       queued.sequence = ++sequence_;
       latest_ = std::move(queued);
@@ -160,7 +162,7 @@ class UdpLatestSender final {
   }
 
   void send_frame(const QueuedFrame& frame) {
-    if (frame.payload.empty() && frame.point_count != 0) return;
+    if (frame.payload.empty() && frame.record_count != 0) return;
     const size_t chunks = std::max<size_t>(1, (frame.payload.size() + kUdpPayloadBytes - 1) / kUdpPayloadBytes);
     // 接收端只允许固定上限的分片数；当前 3000 个二维点最多 21 片。这里显式
     // 保持两端契约，避免未来有人扩大 payload 后让网关静默拒绝整帧。
@@ -182,7 +184,7 @@ class UdpLatestSender final {
       append_u64(datagram, frame.timestamp_ns);
       append_u16(datagram, static_cast<uint16_t>(index));
       append_u16(datagram, static_cast<uint16_t>(chunks));
-      append_u16(datagram, frame.point_count);
+      append_u16(datagram, frame.record_count);
       append_u16(datagram, static_cast<uint16_t>(bytes));
       datagram.insert(datagram.end(), frame.payload.begin() + static_cast<std::ptrdiff_t>(offset),
                       frame.payload.begin() + static_cast<std::ptrdiff_t>(offset + bytes));
@@ -223,6 +225,8 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
         livox_input_topic_(declare_parameter<std::string>("livox_input_topic", "/livox/lidar")),
         cloud_enabled_(declare_parameter<bool>("enable_cloud", true)),
         pose_enabled_(declare_parameter<bool>("enable_pose", true)),
+        costmap_enabled_(declare_parameter<bool>("enable_costmap", false)),
+        costmap_input_topic_(declare_parameter<std::string>("costmap_input_topic", "/local_costmap/costmap")),
         // collision_voxel_layer 已经是导航链路生成的稀疏障碍物点云。保留其
         // 密度，不能再按网页传输上限做第二次均匀抽样；改用其它主输入时可显式
         // 关闭该选项。Livox 回退仍保留 max_points_ 上限，防止原始激光流膨胀。
@@ -244,6 +248,7 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
         // map->odom 的低频边在部分定位栈中会短暂超过一个 120 ms 周期。
         // 250 ms 仍只接受当前位姿，却避免轻量位姿流因一次 TF 抖动断续。
         max_pose_age_ms_(std::clamp(static_cast<int>(declare_parameter<int>("max_pose_age_ms", 250)), 50, 5000)),
+        max_costmap_age_ms_(std::clamp(static_cast<int>(declare_parameter<int>("max_costmap_age_ms", 5000)), 500, 30000)),
         max_range_m_(std::clamp(declare_parameter<double>("max_range_m", 25.0), 1.0, 80.0)),
         tf_buffer_(get_clock()),
         tf_listener_(tf_buffer_) {
@@ -252,10 +257,12 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
     }
     // 传感器点云通常是 best-effort；输入只保留最新一帧，不能在节点内积压。
     auto sensor_input_qos = rclcpp::SensorDataQoS().keep_last(1);
+    auto costmap_input_qos = rclcpp::QoS(1).reliable().transient_local();
     // C++ 预处理只经回环 UDP 向专用遥测网关交付紧凑数据，不再发布 hidden ROS
     // 话题，也不引入通用 ROS-Web 桥。
     if (cloud_enabled_) cloud_sender_ = std::make_unique<UdpLatestSender>(kCloudFrame, udp_host_, udp_port_, get_logger());
     if (pose_enabled_) pose_sender_ = std::make_unique<UdpLatestSender>(kPoseFrame, udp_host_, udp_port_, get_logger());
+    if (costmap_enabled_) costmap_sender_ = std::make_unique<UdpLatestSender>(kCostmapFrame, udp_host_, udp_port_, get_logger());
     if (cloud_enabled_) {
       subscription_ = create_subscription<sensor_msgs::msg::PointCloud2>(
           input_topic_, sensor_input_qos, [this](sensor_msgs::msg::PointCloud2::ConstSharedPtr message) {
@@ -310,8 +317,24 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
     if (pose_enabled_) {
       pose_timer_ = create_wall_timer(std::chrono::duration<double>(1.0 / pose_rate_hz_), [this] { publish_pose(); });
     }
-    RCLCPP_INFO(get_logger(), "RY Aletheia telemetry preprocessors: cloud=%s, pose=%s, udp=%s:%d",
-                cloud_enabled_ ? "enabled" : "disabled", pose_enabled_ ? "enabled" : "disabled", udp_host_.c_str(), udp_port_);
+    if (costmap_enabled_) {
+      costmap_subscription_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+          costmap_input_topic_, costmap_input_qos,
+          [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr message) { on_costmap(std::move(message)); });
+      costmap_worker_ = std::thread([this] { costmap_worker_loop(); });
+    }
+    RCLCPP_INFO(get_logger(), "RY Aletheia telemetry preprocessors: cloud=%s, pose=%s, costmap=%s, udp=%s:%d",
+                cloud_enabled_ ? "enabled" : "disabled", pose_enabled_ ? "enabled" : "disabled",
+                costmap_enabled_ ? "enabled" : "disabled", udp_host_.c_str(), udp_port_);
+  }
+
+  ~LiveCloudPreprocessor() override {
+    {
+      std::lock_guard<std::mutex> guard(costmap_mutex_);
+      costmap_stopping_ = true;
+    }
+    costmap_condition_.notify_one();
+    if (costmap_worker_.joinable()) costmap_worker_.join();
   }
 
  private:
@@ -367,6 +390,185 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
     if (stamp.sec == 0 && stamp.nanosec == 0) return false;
     const auto age = get_clock()->now() - rclcpp::Time(stamp, get_clock()->get_clock_type());
     return age.nanoseconds() > static_cast<int64_t>(maximum_age_ms) * 1000000LL;
+  }
+
+  static bool is_identity_costmap_transform(const geometry_msgs::msg::TransformStamped& transform) {
+    // 这个降级只用于现场已确认 map 与 odom 严格重合、但动态 TF 时间戳短暂
+    // 断续的场景。必须比较完整的 3D 位移和四元数，不能只看平面 yaw，更不能
+    // 因“看起来接近”就把一个实际发生定位漂移的 map<-odom 当作单位变换。
+    constexpr double kTranslationEpsilon = 1e-4;
+    constexpr double kQuaternionEpsilon = 1e-4;
+    const auto& translation = transform.transform.translation;
+    const auto& rotation = transform.transform.rotation;
+    return std::isfinite(translation.x) && std::isfinite(translation.y) && std::isfinite(translation.z) &&
+           std::isfinite(rotation.x) && std::isfinite(rotation.y) && std::isfinite(rotation.z) &&
+           std::isfinite(rotation.w) &&
+           std::abs(translation.x) <= kTranslationEpsilon && std::abs(translation.y) <= kTranslationEpsilon &&
+           std::abs(translation.z) <= kTranslationEpsilon && std::abs(rotation.x) <= kQuaternionEpsilon &&
+           std::abs(rotation.y) <= kQuaternionEpsilon && std::abs(rotation.z) <= kQuaternionEpsilon &&
+           std::abs(std::abs(rotation.w) - 1.0) <= kQuaternionEpsilon;
+  }
+
+  enum class CostmapPublishResult { kPublishedOrDiscarded, kRetryWhenTfChanges };
+
+  void on_costmap(nav_msgs::msg::OccupancyGrid::ConstSharedPtr message) {
+    // 此 callback 是 ROS executor 热路径：它只验证固定边界并覆盖一个最新槽。
+    // TF、字节序编码和 UDP send 都只能在 costmap worker 中执行。
+    if (!message || message->header.frame_id.empty() || !std::isfinite(message->info.resolution) ||
+        message->info.resolution <= 0.0F) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                           "Skip local costmap without a source frame or positive finite resolution");
+      return;
+    }
+    const uint64_t cell_count = static_cast<uint64_t>(message->info.width) * message->info.height;
+    if (message->info.width == 0 || message->info.height == 0 || cell_count > UINT16_MAX ||
+        message->data.size() != cell_count) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                           "Skip local costmap with invalid dimensions/data length: %ux%u cells=%zu",
+                           message->info.width, message->info.height, message->data.size());
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> guard(costmap_mutex_);
+      latest_costmap_ = std::move(message);
+      ++costmap_sequence_;
+      latest_costmap_received_at_ = std::chrono::steady_clock::now();
+    }
+    costmap_condition_.notify_one();
+  }
+
+  void costmap_worker_loop() {
+    uint64_t last_attempted_sequence = 0;
+    bool retry_current = false;
+    while (true) {
+      {
+        std::unique_lock<std::mutex> lock(costmap_mutex_);
+        if (retry_current) {
+          // TF 尚未可用时只以低频重试同一最新输入；新 frame 会立刻唤醒，绝不积压。
+          costmap_condition_.wait_for(lock, std::chrono::milliseconds(200), [this, last_attempted_sequence] {
+            return costmap_stopping_ || costmap_sequence_ != last_attempted_sequence;
+          });
+        } else {
+          costmap_condition_.wait(lock, [this, last_attempted_sequence] {
+            return costmap_stopping_ || costmap_sequence_ != last_attempted_sequence;
+          });
+        }
+        if (costmap_stopping_) return;
+        last_attempted_sequence = costmap_sequence_;
+      }
+      retry_current = publish_costmap() == CostmapPublishResult::kRetryWhenTfChanges;
+    }
+  }
+
+  CostmapPublishResult publish_costmap() {
+    if (!costmap_sender_ || !costmap_sender_->available()) return CostmapPublishResult::kPublishedOrDiscarded;
+    nav_msgs::msg::OccupancyGrid::ConstSharedPtr input;
+    uint64_t sequence = 0;
+    std::chrono::steady_clock::time_point received_at;
+    {
+      std::lock_guard<std::mutex> guard(costmap_mutex_);
+      input = latest_costmap_;
+      sequence = costmap_sequence_;
+      received_at = latest_costmap_received_at_;
+    }
+    if (!input || received_at == std::chrono::steady_clock::time_point{} ||
+        std::chrono::steady_clock::now() - received_at > std::chrono::milliseconds(max_costmap_age_ms_)) {
+      return CostmapPublishResult::kPublishedOrDiscarded;
+    }
+    // TRANSIENT_LOCAL 会在本节点晚启动时立即交付最后一张栅格。该回调接收时间
+    // 虽然是新的，但 header 可能已早于本节点 TF buffer 数分钟；不能以“刚收到”
+    // 为由用无效的历史坐标继续重试，更不能退回到最新 TF 伪造位置。
+    if (is_stale(input->header.stamp, max_costmap_age_ms_)) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                           "Skip stale local costmap source stamp; waiting for a newer /local_costmap/costmap frame");
+      return CostmapPublishResult::kPublishedOrDiscarded;
+    }
+
+    geometry_msgs::msg::TransformStamped map_from_source;
+    try {
+      // local_costmap 当前发布 odom；必须按此栅格消息的 stamp 获取 map<-odom，
+      // 不能把启动阶段偶然出现的 identity TF 当作长期坐标约束。
+      map_from_source = tf_buffer_.lookupTransform(map_frame_, input->header.frame_id, input->header.stamp,
+                                                    tf2::durationFromSec(0.02));
+    } catch (const tf2::TransformException& error) {
+      const bool source_is_odom = input->header.frame_id == "odom" || input->header.frame_id == "/odom";
+      if (source_is_odom) {
+        try {
+          // 只在精确时间查询失败后做一个受限的诊断兼容：若当前最新 map<-odom
+          // 经完整数值检查确为单位变换，fresh odom 栅格的坐标仍可无损映射到 map。
+          // 非单位变换、其它 source frame 或任何查询失败均不能走这条路径。
+          const auto latest_map_from_odom = tf_buffer_.lookupTransform(
+              map_frame_, input->header.frame_id, tf2::TimePointZero, tf2::durationFromSec(0.02));
+          if (is_identity_costmap_transform(latest_map_from_odom)) {
+            map_from_source = latest_map_from_odom;
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 5000,
+                "Stamped %s <- odom TF unavailable; using verified identity fallback for fresh local costmap: %s",
+                map_frame_.c_str(), error.what());
+          } else {
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Stamped %s <- odom TF unavailable and latest transform is not identity; local costmap frame skipped: %s",
+                map_frame_.c_str(), error.what());
+            return CostmapPublishResult::kRetryWhenTfChanges;
+          }
+        } catch (const tf2::TransformException&) {
+          RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                               "Waiting for stamped %s <- %s TF; local costmap frame skipped: %s",
+                               map_frame_.c_str(), input->header.frame_id.c_str(), error.what());
+          return CostmapPublishResult::kRetryWhenTfChanges;
+        }
+      } else {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                             "Waiting for stamped %s <- %s TF; local costmap frame skipped: %s",
+                             map_frame_.c_str(), input->header.frame_id.c_str(), error.what());
+        return CostmapPublishResult::kRetryWhenTfChanges;
+      }
+    }
+
+    const auto& source_rotation = map_from_source.transform.rotation;
+    const auto& grid_rotation = input->info.origin.orientation;
+    const double source_yaw = std::atan2(
+        2.0 * (source_rotation.w * source_rotation.z + source_rotation.x * source_rotation.y),
+        1.0 - 2.0 * (source_rotation.y * source_rotation.y + source_rotation.z * source_rotation.z));
+    const double grid_yaw = std::atan2(
+        2.0 * (grid_rotation.w * grid_rotation.z + grid_rotation.x * grid_rotation.y),
+        1.0 - 2.0 * (grid_rotation.y * grid_rotation.y + grid_rotation.z * grid_rotation.z));
+    const double origin_x = map_from_source.transform.translation.x + std::cos(source_yaw) * input->info.origin.position.x -
+                            std::sin(source_yaw) * input->info.origin.position.y;
+    const double origin_y = map_from_source.transform.translation.y + std::sin(source_yaw) * input->info.origin.position.x +
+                            std::cos(source_yaw) * input->info.origin.position.y;
+    const double origin_yaw = std::atan2(std::sin(source_yaw + grid_yaw), std::cos(source_yaw + grid_yaw));
+    if (!std::isfinite(origin_x) || !std::isfinite(origin_y) || !std::isfinite(origin_yaw)) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "Skip local costmap with non-finite map origin");
+      return CostmapPublishResult::kPublishedOrDiscarded;
+    }
+
+    std::vector<uint8_t> payload;
+    payload.reserve(20 + input->data.size());
+    append_network_float(payload, static_cast<float>(origin_x));
+    append_network_float(payload, static_cast<float>(origin_y));
+    append_network_float(payload, static_cast<float>(origin_yaw));
+    append_network_float(payload, input->info.resolution);
+    append_u16(payload, static_cast<uint16_t>(input->info.width));
+    append_u16(payload, static_cast<uint16_t>(input->info.height));
+    payload.insert(payload.end(), input->data.begin(), input->data.end());
+    {
+      std::lock_guard<std::mutex> guard(costmap_mutex_);
+      // Worker 编码期间有新帧到达时，旧图直接废弃；下一轮只处理更新数据。
+      if (sequence != costmap_sequence_) return CostmapPublishResult::kPublishedOrDiscarded;
+    }
+    const int64_t stamp_ns = static_cast<int64_t>(input->header.stamp.sec) * 1'000'000'000LL +
+                             static_cast<int64_t>(input->header.stamp.nanosec);
+    costmap_sender_->publish({
+        static_cast<uint64_t>(std::max<int64_t>(0, stamp_ns)),
+        static_cast<uint16_t>(input->data.size()),
+        std::move(payload),
+    });
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
+                         "Local costmap telemetry: source=%s %ux%u resolution=%.3fm",
+                         input->header.frame_id.c_str(), input->info.width, input->info.height, input->info.resolution);
+    return CostmapPublishResult::kPublishedOrDiscarded;
   }
 
   void publish_pose() {
@@ -539,17 +741,19 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
     published_sequence_ = sequence;
   }
 
-  std::string input_topic_, livox_input_topic_, map_frame_, base_frame_, udp_host_;
-  bool cloud_enabled_, pose_enabled_, preserve_primary_density_;
+  std::string input_topic_, livox_input_topic_, costmap_input_topic_, map_frame_, base_frame_, udp_host_;
+  bool cloud_enabled_, pose_enabled_, costmap_enabled_, preserve_primary_density_;
   int max_points_;
   int udp_port_;
   double rate_hz_, pose_rate_hz_, max_range_m_;
-  int max_input_age_ms_, max_pose_age_ms_;
+  int max_input_age_ms_, max_pose_age_ms_, max_costmap_age_ms_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr subscription_;
   rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_subscription_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_subscription_;
   rclcpp::TimerBase::SharedPtr pose_timer_;
   std::unique_ptr<UdpLatestSender> cloud_sender_;
   std::unique_ptr<UdpLatestSender> pose_sender_;
+  std::unique_ptr<UdpLatestSender> costmap_sender_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   std::vector<std::string> base_frames_;
@@ -560,6 +764,13 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
   std::chrono::steady_clock::time_point latest_input_received_at_;
   std::chrono::steady_clock::time_point last_cloud_publish_at_;
   uint64_t input_sequence_{0}, published_sequence_{0};
+  std::mutex costmap_mutex_;
+  std::condition_variable costmap_condition_;
+  nav_msgs::msg::OccupancyGrid::ConstSharedPtr latest_costmap_;
+  std::chrono::steady_clock::time_point latest_costmap_received_at_;
+  uint64_t costmap_sequence_{0};
+  bool costmap_stopping_{false};
+  std::thread costmap_worker_;
 };
 
 }  // namespace aletheia_live_preprocessor

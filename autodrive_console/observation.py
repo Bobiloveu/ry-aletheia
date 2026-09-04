@@ -29,7 +29,7 @@ class ObservationError(RuntimeError):
 class ObservationManager:
     """按需管理专用实时遥测，不接入任何通用 ROS-Web Bridge。
 
-    地图、虚拟墙仍沿用既有缓存/API；只有点云和位姿由两个 C++ 预处理进程产生，
+    地图、虚拟墙仍沿用既有缓存/API；点云、位姿和局部代价地图由彼此隔离的 C++ 预处理进程产生，
     经回环 UDP 进入 ``TelemetryGateway`` 后用专用 Binary WebSocket 交给网页。
     """
 
@@ -61,6 +61,7 @@ class ObservationManager:
             telemetry = self._telemetry.status()
             cloud_preprocessor_running = self._preprocessor_running("cloud")
             pose_preprocessor_running = self._preprocessor_running("pose")
+            costmap_preprocessor_running = self._preprocessor_running("costmap")
             return {
                 "enabled": observation["enabled"],
                 "telemetry": {
@@ -72,7 +73,13 @@ class ObservationManager:
                 "active_map_id": self.active_map_id(),
                 "map_snapshot": self._map_snapshot.status(),
                 "idle_stop_seconds": observation["idle_stop_seconds"],
-                "preprocessor": {"available": bool(self._preprocessor_path and self._preprocessor_path.is_file()), "managed": cloud_preprocessor_running or pose_preprocessor_running, "cloud_managed": cloud_preprocessor_running, "pose_managed": pose_preprocessor_running},
+                "preprocessor": {
+                    "available": bool(self._preprocessor_path and self._preprocessor_path.is_file()),
+                    "managed": cloud_preprocessor_running or pose_preprocessor_running or costmap_preprocessor_running,
+                    "cloud_managed": cloud_preprocessor_running,
+                    "pose_managed": pose_preprocessor_running,
+                    "costmap_managed": costmap_preprocessor_running,
+                },
                 "client_metrics": {**self._client_metrics, "age_seconds": round(max(0.0, time.monotonic() - self._client_metrics_at), 2)} if self._client_metrics_at else None,
             }
 
@@ -86,11 +93,12 @@ class ObservationManager:
             self._schedule_idle_stop(settings)
             self.log_dir.mkdir(parents=True, exist_ok=True)
             LOGGER.info(
-                "实时观测启动预检：cache_dir=%s telemetry_ws=%s cloud_udp=%s pose_udp=%s",
+                "实时观测启动预检：cache_dir=%s telemetry_ws=%s cloud_udp=%s pose_udp=%s costmap_udp=%s",
                 self.maps_dir,
                 TelemetryGateway.WEBSOCKET_PORT,
                 TelemetryGateway.UDP_PORT,
                 TelemetryGateway.POSE_UDP_PORT,
+                TelemetryGateway.COSTMAP_UDP_PORT,
             )
             try:
                 self._telemetry.start()
@@ -125,6 +133,7 @@ class ObservationManager:
             "vehicle_render_rate_hz": (0.0, 240.0), "vehicle_frame_interval_ms": (0.0, 1000.0),
             "vehicle_long_frames": (0.0, 10000.0), "cloud_packet_rate_hz": (0.0, 120.0),
             "cloud_source_age_ms": (0.0, 5000.0),
+            "costmap_packet_rate_hz": (0.0, 30.0), "costmap_source_age_ms": (0.0, 15000.0),
         }
         clean: dict[str, float] = {}
         for key, (minimum, maximum) in allowed.items():
@@ -152,6 +161,10 @@ class ObservationManager:
             "cloud-stale": (
                 metrics.get("cloud_source_age_ms", 0.0) > 2000.0,
                 f"实时点云源超过 {metrics.get('cloud_source_age_ms', 0.0):.0f} ms 未更新；请检查点云发布和 live_preprocessor_cloud.log",
+            ),
+            "costmap-stale": (
+                metrics.get("costmap_source_age_ms", 0.0) > 7000.0,
+                f"局部代价地图源超过 {metrics.get('costmap_source_age_ms', 0.0):.0f} ms 未更新；请检查 /local_costmap/costmap、map←odom TF 与 live_preprocessor_costmap.log",
             ),
             "render-slow": (
                 metrics.get("pose_applied_rate_hz", 0.0) >= 15.0 and metrics.get("vehicle_render_rate_hz", 0.0) < 15.0,
@@ -198,7 +211,7 @@ class ObservationManager:
             return process is not None and process.poll() is None
 
     def _start_preprocessor(self) -> None:
-        """以独立进程启动点云与位姿流，避免点云转换阻塞车体位姿。"""
+        """以独立进程启动点云、位姿与 costmap 流，避免大帧互相阻塞。"""
         target = self._preprocessor_path
         if target is None or not target.is_file():
             raise ObservationError(f"实时预处理节点不可用：{target or '未配置'}")
@@ -206,8 +219,9 @@ class ObservationManager:
             # collision_voxel_layer 已在自动驾驶链路完成稀疏化；网页旁路在不超过
             # 3000 点协议上限时不再二次抽稀，超过上限才均匀取样。原生 Livox
             # 回退流始终服从同一预算。
-            "cloud": ["-r", "__node:=ry_aletheia_live_cloud", "-p", "enable_cloud:=true", "-p", "enable_pose:=false", "-p", "preserve_primary_density:=true", "-p", "max_points:=3000", "-p", "rate_hz:=10.0", "-p", "max_input_age_ms:=140", "-p", f"telemetry_udp_port:={TelemetryGateway.UDP_PORT}"],
-            "pose": ["-r", "__node:=ry_aletheia_live_pose", "-p", "enable_cloud:=false", "-p", "enable_pose:=true", "-p", "pose_rate_hz:=60.0", "-p", "max_pose_age_ms:=250", "-p", f"telemetry_udp_port:={TelemetryGateway.POSE_UDP_PORT}"],
+            "cloud": ["-r", "__node:=ry_aletheia_live_cloud", "-p", "enable_cloud:=true", "-p", "enable_pose:=false", "-p", "enable_costmap:=false", "-p", "preserve_primary_density:=true", "-p", "max_points:=3000", "-p", "rate_hz:=10.0", "-p", "max_input_age_ms:=140", "-p", f"telemetry_udp_port:={TelemetryGateway.UDP_PORT}"],
+            "pose": ["-r", "__node:=ry_aletheia_live_pose", "-p", "enable_cloud:=false", "-p", "enable_pose:=true", "-p", "enable_costmap:=false", "-p", "pose_rate_hz:=60.0", "-p", "max_pose_age_ms:=250", "-p", f"telemetry_udp_port:={TelemetryGateway.POSE_UDP_PORT}"],
+            "costmap": ["-r", "__node:=ry_aletheia_live_costmap", "-p", "enable_cloud:=false", "-p", "enable_pose:=false", "-p", "enable_costmap:=true", "-p", "max_costmap_age_ms:=5000", "-p", f"telemetry_udp_port:={TelemetryGateway.COSTMAP_UDP_PORT}"],
         }
         for kind, arguments in definitions.items():
             if self._preprocessor_running(kind):
@@ -218,13 +232,15 @@ class ObservationManager:
                 log.close()
                 with self._lock:
                     self._preprocessor_processes[kind] = process
-                LOGGER.info("已启动 Aletheia 轻量%s流：pid=%s", "点云" if kind == "cloud" else "位姿", process.pid)
+                label = {"cloud": "点云", "pose": "位姿", "costmap": "局部代价地图"}[kind]
+                LOGGER.info("已启动 Aletheia 轻量%s流：pid=%s", label, process.pid)
             except OSError as exc:
                 try:
                     log.close()
                 except (OSError, UnboundLocalError):
                     pass
-                raise ObservationError(f"实时{'点云' if kind == 'cloud' else '位姿'}预处理启动失败：{exc}") from exc
+                label = {"cloud": "点云", "pose": "位姿", "costmap": "局部代价地图"}[kind]
+                raise ObservationError(f"实时{label}预处理启动失败：{exc}") from exc
 
     def maps(self) -> list[dict[str, Any]]:
         """读取已经缓存的地图元数据，不读取 PGM 像素，不触发 ROS2 通信。"""

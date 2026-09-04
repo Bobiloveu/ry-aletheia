@@ -18,5 +18,6 @@
 - [机器人控制](robot_control.md)
 - [实时观测](realtime_observation.md)
 - [视频](video.md)
-- [任务执行](task_execution.md)
+- [任务执行与部署验收](task_execution.md)
 - [部署与地图配置](deployment.md)
+- [机器人日志下载](robot_logs.md)

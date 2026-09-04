@@ -20,6 +20,9 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from autodrive_console.case_store import CaseStore
+from autodrive_console.acceptance_catalog import AcceptanceTaskCatalog
+from autodrive_console.acceptance_orchestrator import AcceptanceConflict, AcceptanceOrchestrator, AcceptanceValidationError
+from autodrive_console.acceptance_plan import AcceptancePlanStore
 from autodrive_console.case_workspace import CasePackageError, CaseWorkspace
 from autodrive_console.deployment import DeploymentError, DeploymentStore
 from autodrive_console.mapping import MappingError, MappingSessionController, MappingUnavailable
@@ -27,6 +30,13 @@ from autodrive_console.observation import ObservationError, ObservationManager
 from autodrive_console.robot_gateway import RobotGateway
 from autodrive_console.ros_executor import RosTaskExecutor
 from autodrive_console.runtime_env import clear_legacy_fastdds_override
+from autodrive_console.robot_logs import (
+    RobotLogError,
+    RobotLogDownloadTracker,
+    RobotLogStore,
+    ensure_utf8_text_stream,
+    iter_ros_time_converted_bytes,
+)
 from autodrive_console.run_manager import RunManager
 from autodrive_console.scenario_setup import ScenarioSetupError, ScenarioSetupStore
 from autodrive_console.settings import SettingsStore
@@ -36,6 +46,7 @@ from autodrive_console.upgrade_manager import UpgradeError, UpgradeManager
 from autodrive_console.video import ConsoleVideoRuntime, VideoConfigurationError, VideoManager, VideoRuntime
 from autodrive_console.trajectory_render import _png_gray, _read_pgm
 from autodrive_console.vehicle_control import (
+    MiniappTwistProfile,
     VehicleControlConflict,
     VehicleControlController,
     VehicleControlError,
@@ -80,11 +91,22 @@ STORE = CaseStore(TASK_DIR)
 CASE_WORKSPACE = CaseWorkspace(CONFIG_DIR, TASK_DIR)
 DEPLOYMENTS = DeploymentStore(WORKSPACE / "deployments")
 SETTINGS = SettingsStore(CONFIG_DIR / "console.json")
+ROBOT_LOGS = RobotLogStore(SETTINGS)
+ROBOT_LOG_DOWNLOADS = RobotLogDownloadTracker()
 SCENARIO_SETUP = ScenarioSetupStore(CONFIG_DIR)
 RUNS = RunManager(WORKSPACE / "reports", RosTaskExecutor(), SETTINGS, SCENARIO_SETUP)
+ACCEPTANCE = AcceptanceOrchestrator(
+    catalog=AcceptanceTaskCatalog(Path(SETTINGS.load().task_directory)),
+    plan_store=AcceptancePlanStore(CONFIG_DIR / "acceptance"),
+    run_manager=RUNS,
+    report_dir=WORKSPACE / "reports",
+)
 # 不复用运行测试的 ROS service client：手动控制有自己的 node/executor/timer，
 # 但与现有模块共用同一进程内 rclpy runtime，避免创建任何转发层。
-VEHICLE_CONTROL = VehicleControlController(active_run_guard=RUNS.has_active_run)
+VEHICLE_CONTROL = VehicleControlController(
+    active_run_guard=RUNS.has_active_run,
+    twist_profile=MiniappTwistProfile(**SETTINGS.load().vehicle_control),
+)
 # 建图会话不复用测试执行器或手动控制 node。它只管理 Lightning 进程与本机
 # 栅格预览订阅，所有临时 YAML/预览都写入部署工作区，绝不覆盖机器人配置。
 MAPPING = MappingSessionController(WORKSPACE / "deployments" / ".mapping-sessions", active_run_guard=RUNS.has_active_run)
@@ -223,6 +245,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._static_from(WEB_ROOT, "mapping-workbench.html")
         elif path == "/manual-control.html":
             self._static_from(WEB_ROOT, "manual-control.html")
+        elif path == "/acceptance-test.html":
+            self._static_from(WEB_ROOT, "acceptance-test.html")
         elif path == "/vue/dashboard.html":
             self._static_from(VUE_WEB_ROOT, "dashboard.html")
         elif path.startswith("/vue/"):
@@ -233,6 +257,19 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         elif path == "/api/vehicle-control":
             # 返回的是订阅 /control_source_state 得到的实际源状态，不由前端点击推断。
             self._json(VEHICLE_CONTROL.status())
+        elif path == "/api/acceptance/catalog":
+            self._json(ACCEPTANCE.catalog_summary())
+        elif path == "/api/acceptance/criteria":
+            self._json(ACCEPTANCE.criteria())
+        elif path == "/api/acceptance/plans/current":
+            plan = ACCEPTANCE.current()
+            self._json({"plan": plan}, HTTPStatus.OK if plan else HTTPStatus.NOT_FOUND)
+        elif path.startswith("/api/acceptance/plans/") and path.endswith("/report"):
+            self._acceptance_report(path.removeprefix("/api/acceptance/plans/").removesuffix("/report").strip("/"))
+        elif path.startswith("/api/acceptance/plans/"):
+            plan_id = path.removeprefix("/api/acceptance/plans/").strip("/")
+            plan = ACCEPTANCE.current()
+            self._json({"plan": plan}, HTTPStatus.OK if plan and plan["plan_id"] == plan_id else HTTPStatus.NOT_FOUND)
         elif path == "/api/mapping":
             self._json(MAPPING.status())
         elif path.startswith("/api/mapping/sessions/") and path.endswith("/preview.png"):
@@ -321,6 +358,23 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/tool-logs/files/") and path.endswith("/download"):
             name = unquote(path.removeprefix("/api/tool-logs/files/").removesuffix("/download").strip("/"))
             self._download_diagnostic_file(LOGS.diagnostic_file(name))
+        elif path == "/api/robot-logs/sources":
+            self._json({"sources": ROBOT_LOGS.sources()})
+        elif match := re.fullmatch(r"/api/robot-logs/downloads/([0-9a-f]{32})", path):
+            try:
+                self._json({"download": ROBOT_LOG_DOWNLOADS.status(match.group(1))})
+            except RobotLogError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+        elif match := re.fullmatch(r"/api/robot-logs/downloads/([0-9a-f]{32})/file", path):
+            self._download_tracked_robot_log_file(match.group(1))
+        elif match := re.fullmatch(r"/api/robot-logs/sources/([a-z0-9_-]{1,32})/files/([0-9a-f]{24})/download", path):
+            self._download_robot_log_file(*match.groups(), convert_ros_time=query.get("ros_time", [""])[0] == "beijing")
+        elif match := re.fullmatch(r"/api/robot-logs/sources/([a-z0-9_-]{1,32})/files", path):
+            try:
+                query = parse_qs(request.query).get("query", [""])[0]
+                self._json({"files": ROBOT_LOGS.list_files(match.group(1), query=query)})
+            except RobotLogError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
         elif path.startswith("/api/reports/") and path.endswith("/download"):
             requested = unquote(path.removeprefix("/api/reports/").removesuffix("/download").rstrip("/"))
             self._download_report(requested)
@@ -336,6 +390,32 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if path == "/api/robot-logs/downloads":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if not 1 <= content_length <= 2048:
+                    raise RobotLogError("下载请求无效")
+                payload = json.loads(self.rfile.read(content_length))
+                if not isinstance(payload, dict) or set(payload) != {"source_id", "file_id", "ros_time"}:
+                    raise RobotLogError("下载请求无效")
+                source_id = payload["source_id"]
+                file_id = payload["file_id"]
+                ros_time = payload["ros_time"]
+                if not isinstance(source_id, str) or not isinstance(file_id, str) or ros_time not in {"beijing", "raw"}:
+                    raise RobotLogError("下载请求无效")
+                record = next((item for item in ROBOT_LOGS.list_files(source_id) if item["id"] == file_id), None)
+                if record is None:
+                    raise RobotLogError("日志文件已变化或不存在")
+                download = ROBOT_LOG_DOWNLOADS.prepare(
+                    source_id, file_id, record["name"], record["size_bytes"], convert_ros_time=ros_time == "beijing",
+                )
+                self._json({"download": download}, HTTPStatus.CREATED)
+            except (TypeError, ValueError, json.JSONDecodeError, RobotLogError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/acceptance/"):
+            self._acceptance_action(path)
+            return
         if path.startswith("/api/vehicle-control/"):
             self._vehicle_control_action(path)
             return
@@ -552,6 +632,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if path == "/api/settings":
             try:
                 data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                if isinstance(data, dict) and "vehicle_control" in data:
+                    raise ValueError("底盘控制参数只能通过手动控制页的受控接口保存")
                 settings = SETTINGS.save(data)
                 self._json(self._settings(settings))
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -738,6 +820,97 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             LOGGER.warning("实时观测操作被拒绝：%s", exc)
             self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
 
+    def do_PUT(self) -> None:
+        path = urlparse(self.path).path
+        if path == "/api/robot-logs/sources":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if not 1 <= content_length <= 16 * 1024:
+                    raise RobotLogError("机器人日志配置请求大小无效")
+                payload = json.loads(self.rfile.read(content_length))
+                if not isinstance(payload, dict) or set(payload) != {"sources"}:
+                    raise RobotLogError("机器人日志配置格式错误")
+                ROBOT_LOGS.save_sources(payload["sources"])
+                self._json({"sources": ROBOT_LOGS.sources()})
+            except (TypeError, ValueError, json.JSONDecodeError, RobotLogError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path != "/api/acceptance/criteria":
+            self._json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+            return
+        try:
+            data = self._acceptance_payload()
+            self._json(ACCEPTANCE.save_criteria(data))
+        except AcceptanceValidationError as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
+    def _acceptance_payload(self) -> dict:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise AcceptanceValidationError("请求长度无效") from exc
+        if not 0 <= content_length <= 16 * 1024:
+            raise AcceptanceValidationError("部署验收请求大小无效")
+        try:
+            payload = json.loads(self.rfile.read(content_length) if content_length else b"{}")
+        except json.JSONDecodeError as exc:
+            raise AcceptanceValidationError("部署验收请求必须是 JSON") from exc
+        if not isinstance(payload, dict):
+            raise AcceptanceValidationError("部署验收请求必须是 JSON 对象")
+        return payload
+
+    def _acceptance_action(self, path: str) -> None:
+        try:
+            data = self._acceptance_payload()
+            if path == "/api/acceptance/plans":
+                self._json({"plan": ACCEPTANCE.create_plan(data)}, HTTPStatus.CREATED)
+                return
+            match = re.fullmatch(r"/api/acceptance/plans/([0-9a-f]{12})/(start|resume|cancel|reroll|resolve-interruption)", path)
+            if not match:
+                self._json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+                return
+            plan_id, action = match.groups()
+            if action == "start":
+                payload, status = ACCEPTANCE.start(plan_id), HTTPStatus.ACCEPTED
+            elif action == "resume":
+                payload, status = ACCEPTANCE.resume(plan_id), HTTPStatus.ACCEPTED
+            elif action == "cancel":
+                payload, status = ACCEPTANCE.cancel(plan_id), HTTPStatus.ACCEPTED
+            elif action == "resolve-interruption":
+                payload, status = ACCEPTANCE.resolve_interruption(plan_id, str(data.get("resolution", ""))), HTTPStatus.OK
+            else:
+                raise AcceptanceValidationError("重新抽样仅允许在生成新计划时进行")
+            self._json({"plan": payload}, status)
+        except AcceptanceConflict as exc:
+            self._json({"error": str(exc), "plan": ACCEPTANCE.current()}, HTTPStatus.CONFLICT)
+        except AcceptanceValidationError as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
+    def _acceptance_report(self, plan_id: str) -> None:
+        if not re.fullmatch(r"[0-9a-f]{12}", plan_id):
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        plan = ACCEPTANCE.current()
+        if not plan or plan["plan_id"] != plan_id or not isinstance(plan.get("report_filename"), str):
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        filename = plan["report_filename"]
+        if not re.fullmatch(r"acceptance_[0-9a-f]{12}_\d{8}_\d{6}\.html", filename):
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        target = (WORKSPACE / "reports" / filename).resolve()
+        if target.parent != (WORKSPACE / "reports").resolve() or not target.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        body = target.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(filename)}")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _vehicle_control_action(self, path: str) -> None:
         """HTTP 层只验证请求并调用控制器；不直接接触 ROS publisher 或定时器。"""
         try:
@@ -769,10 +942,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 payload = VEHICLE_CONTROL.stop(str(data.get("session_id", "")))
             elif path == "/api/vehicle-control/exit":
                 payload = VEHICLE_CONTROL.end_manual_session(str(data.get("session_id", "")))
+            elif path == "/api/vehicle-control/release-emergency-stop":
+                payload = VEHICLE_CONTROL.release_emergency_stop()
+            elif path == "/api/vehicle-control/chassis-parameters":
+                parameters = VEHICLE_CONTROL.normalize_chassis_parameters(data)
+                settings = SETTINGS.save({"vehicle_control": parameters})
+                payload = VEHICLE_CONTROL.update_chassis_parameters(settings.vehicle_control)
             else:
                 self._json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
                 return
-            status = HTTPStatus.ACCEPTED if payload.get("transition") else HTTPStatus.OK
+            waiting_release = payload.get("emergency_stop", {}).get("release") == "waiting_confirmation"
+            status = HTTPStatus.ACCEPTED if payload.get("transition") or waiting_release else HTTPStatus.OK
             self._json(payload, status)
         except VehicleControlUnavailable as exc:
             LOGGER.warning("车辆控制 ROS2 模块不可用：%s", exc)
@@ -1085,7 +1265,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def _settings(self, settings=None):
         item = settings or SETTINGS.load()
         monitor_nodes = item.monitor_nodes or [str(node["supervisor"]) for node in item.nodes if node.get("required", True)]
-        return {"task_directory": item.task_directory, "command_timeout_s": item.command_timeout_s, "elevator_wait_timeout_s": item.elevator_wait_timeout_s, "task_execution_timeout_s": item.task_execution_timeout_s, "case_aliases": item.case_aliases, "ui_preferences": item.ui_preferences, "dependency_plan": item.dependency_plan, "monitor_nodes": monitor_nodes, "live_observation": item.live_observation}
+        return {"task_directory": item.task_directory, "command_timeout_s": item.command_timeout_s, "elevator_wait_timeout_s": item.elevator_wait_timeout_s, "task_execution_timeout_s": item.task_execution_timeout_s, "case_aliases": item.case_aliases, "ui_preferences": item.ui_preferences, "dependency_plan": item.dependency_plan, "monitor_nodes": monitor_nodes, "live_observation": item.live_observation, "vehicle_control": item.vehicle_control}
 
     @staticmethod
     def _reports() -> list[dict]:
@@ -1191,12 +1371,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def _download_diagnostic_file(self, target: Path | None) -> None:
         """Download exactly one whitelisted diagnostic file, never a raw path."""
         if target is None:
-            self.send_error(HTTPStatus.NOT_FOUND, "诊断日志不存在")
+            # BaseHTTPRequestHandler.send_error() 会把中文 reason phrase 写进
+            # Latin-1 HTTP status line，反而抛 UnicodeEncodeError。API 统一用
+            # UTF-8 JSON 返回受控错误，浏览器和日志页都能安全显示。
+            self._json({"error": "诊断日志不存在"}, HTTPStatus.NOT_FOUND)
             return
         try:
             body = target.read_bytes()
         except OSError:
-            self.send_error(HTTPStatus.NOT_FOUND, "诊断日志不可读")
+            self._json({"error": "诊断日志不可读"}, HTTPStatus.NOT_FOUND)
             return
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -1205,6 +1388,97 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
+
+    def _download_tracked_robot_log_file(self, download_id: str) -> None:
+        """Serve one short-lived browser download while exposing metadata-only progress."""
+        try:
+            tracked = ROBOT_LOG_DOWNLOADS.start(download_id)
+        except RobotLogError as exc:
+            self.send_error(HTTPStatus.NOT_FOUND, str(exc))
+            return
+        completed = self._download_robot_log_file(
+            tracked.source_id,
+            tracked.file_id,
+            convert_ros_time=tracked.convert_ros_time,
+            progress=lambda sent_bytes: ROBOT_LOG_DOWNLOADS.advance(download_id, sent_bytes),
+            failed=lambda message: ROBOT_LOG_DOWNLOADS.fail(download_id, message),
+        )
+        if completed:
+            ROBOT_LOG_DOWNLOADS.complete(download_id)
+
+    def _download_robot_log_file(
+        self,
+        source_id: str,
+        file_id: str,
+        *,
+        convert_ros_time: bool = False,
+        progress=None,
+        failed=None,
+    ) -> bool:
+        """Stream one revalidated robot log; never aggregate logs in memory or ZIPs."""
+        try:
+            download = ROBOT_LOGS.open_file(source_id, file_id)
+        except RobotLogError as exc:
+            self.send_error(HTTPStatus.NOT_FOUND, str(exc))
+            if failed:
+                failed(str(exc))
+            return False
+        safe_name = download.name if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,180}", download.name) else "robot-log.txt"
+        disposition = f"attachment; filename={safe_name}"
+        if safe_name != download.name:
+            disposition += f"; filename*=UTF-8''{quote(download.name)}"
+        content_type = mimetypes.guess_type(download.name)[0] or "text/plain"
+        if content_type.startswith("text/"):
+            content_type += "; charset=utf-8"
+        try:
+            # 从 open_file() 返回后就由此处独占 stream；即使浏览器在写响应头时
+            # 断开，也必须关闭 fd，不能让重复下载耗尽小车的文件句柄。
+            with download.stream:
+                if convert_ros_time:
+                    try:
+                        # 先完整验证 UTF-8，保证在 HTTP 响应头尚未写出时就能给出
+                        # 清晰失败，而不是让浏览器拿到中断或半截的转换文件。
+                        ensure_utf8_text_stream(download.stream, maximum_bytes=download.size_bytes)
+                    except UnicodeDecodeError:
+                        message = "日志不是 UTF-8 文本，无法转换 ROS 时间；请关闭转换后下载原始文件"
+                        self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, message)
+                        if failed:
+                            failed(message)
+                        return False
+                    except OSError:
+                        message = "日志在下载开始前已缩小，请刷新文件清单后重试"
+                        self.send_error(HTTPStatus.CONFLICT, message)
+                        if failed:
+                            failed(message)
+                        return False
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Disposition", disposition)
+                if not convert_ros_time:
+                    self.send_header("Content-Length", str(download.size_bytes))
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                if convert_ros_time:
+                    for chunk in iter_ros_time_converted_bytes(download.stream, maximum_bytes=download.size_bytes):
+                        self.wfile.write(chunk)
+                        if progress:
+                            progress(download.stream.tell())
+                else:
+                    remaining = download.size_bytes
+                    while remaining:
+                        chunk = download.stream.read(min(64 * 1024, remaining))
+                        if not chunk:
+                            raise OSError("日志文件在下载开始后缩小")
+                        remaining -= len(chunk)
+                        self.wfile.write(chunk)
+                        if progress:
+                            progress(download.size_bytes - remaining)
+                return True
+        except OSError as exc:
+            LOGGER.warning("机器人日志下载中断：source=%s file=%s error=%s", source_id, file_id, exc)
+            if failed:
+                failed("浏览器连接中断或日志读取失败")
+            return False
 
     @staticmethod
     def _delete_report(requested: str) -> None:

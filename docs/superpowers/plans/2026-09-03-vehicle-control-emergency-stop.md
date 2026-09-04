@@ -16,7 +16,7 @@
 - `/is_emergency_stop` 是唯一的急停真值来源；未收到消息或运行时异常必须是 `unknown`，并 fail-closed。
 - `/is_emergency_stop` 只订阅；绝不向它发布或伪造状态。
 - `/command` 解除报文必须固定为 `{"speed":0.0,"angle":0.0,"acc":2000,"press":1400,"place":-1,"ulock":0}`，不读取用户配置，不新增 `place` UI/API。
-- 非零手动 Twist 使用 `movement_acc`；任何零 Twist 使用 `stop_acc`；默认 `press=1400`、`movement_acc=1200`、`stop_acc=1200`，保持现有行为。
+- 非零手动 Twist 使用 `movement_acc`；任何零 Twist 使用 `stop_acc`；默认 `press=1400`、`movement_acc=1000`、`stop_acc=1200`。原有 `acc=1200` 超出新增 1000 上限，因此按已确认安全范围收敛。
 - `press` 为 20–2000，`movement_acc` 为 10–1000，`stop_acc` 为 20–2000；前端、Controller、SettingsStore 都校验。
 - 急停解除不得发布控制源切换，也不得根据 String publish 成功显示解除成功；只允许 Bool false 回调确认。
 - 只修改 Backend、正式 PC Web 控制页、文档和相应测试；Mobile、地图、任务、视频、MediaMTX、Supervisor 与实时观测不改。
@@ -67,7 +67,7 @@ Expected: FAIL，`RobotSettings` 尚无 `vehicle_control` 或校验尚未生效�
 ```python
 vehicle_control: dict = field(default_factory=lambda: {
     "press": 1400,
-    "movement_acc": 1200,
+    "movement_acc": 1000,
     "stop_acc": 1200,
 })
 ```
@@ -109,7 +109,7 @@ def test_unknown_or_triggered_emergency_stop_blocks_motion_and_uses_stop_acc(sel
     session_id = self.control.begin_manual_session()["session"]["id"]
     self.control.set_command(session_id, "forward")
     self.control._on_publish_tick()
-    self.assertEqual(self.control._velocity_publisher.messages[-1].linear.z, 1200.0)
+    self.assertEqual(self.control._velocity_publisher.messages[-1].linear.z, 1000.0)
     self.control._on_emergency_stop(SimpleNamespace(data=True))
     stop = self.control._velocity_publisher.messages[-1]
     self.assertEqual((stop.linear.x, stop.angular.z, stop.linear.z), (0.0, 0.0, 1200.0))

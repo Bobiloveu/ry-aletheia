@@ -63,18 +63,61 @@
           <section class="motion-settings" aria-labelledby="motionSettingsTitle">
             <div class="motion-settings-copy">
               <h3 id="motionSettingsTitle">运动速度</h3>
-              <p>速度由车端限制在 0.1–1.0；调整会立即作用于下一次方向输入。</p>
+              <p>可拖动粗调或直接输入精确值。修改会立即作用于下一次方向输入。</p>
             </div>
             <div class="speed-controls">
-              <label class="speed-control" for="linearSpeed">
-                <span>直线 <output id="linearSpeedValue">0.2 m/s</output></span>
-                <input id="linearSpeed" type="range" min="0.1" max="1" step="0.1" value="0.2" disabled />
-              </label>
-              <label class="speed-control" for="angularSpeed">
-                <span>转向 <output id="angularSpeedValue">0.3 rad/s</output></span>
-                <input id="angularSpeed" type="range" min="0.1" max="1" step="0.1" value="0.3" disabled />
-              </label>
+              <div class="parameter-control speed-control">
+                <div class="parameter-label"><label for="linearSpeed">直线速度</label><output id="linearSpeedValue">0.2 m/s</output></div>
+                <div class="parameter-inputs">
+                  <input id="linearSpeed" type="range" min="0.1" max="1" step="0.1" value="0.2" disabled />
+                  <input id="linearSpeedNumber" class="parameter-number" type="number" min="0.1" max="1" step="0.1" inputmode="decimal" autocomplete="off" value="0.2" disabled aria-label="直线速度，单位米每秒" />
+                </div>
+                <small>0.1-1.0 m/s</small>
+              </div>
+              <div class="parameter-control speed-control">
+                <div class="parameter-label"><label for="angularSpeed">转向速度</label><output id="angularSpeedValue">0.3 rad/s</output></div>
+                <div class="parameter-inputs">
+                  <input id="angularSpeed" type="range" min="0.1" max="1" step="0.1" value="0.3" disabled />
+                  <input id="angularSpeedNumber" class="parameter-number" type="number" min="0.1" max="1" step="0.1" inputmode="decimal" autocomplete="off" value="0.3" disabled aria-label="转向速度，单位弧度每秒" />
+                </div>
+                <small>0.1-1.0 rad/s</small>
+              </div>
             </div>
+          </section>
+
+          <section class="chassis-settings" aria-labelledby="chassisSettingsTitle">
+            <div class="chassis-settings-copy">
+              <h3 id="chassisSettingsTitle">底盘参数设置</h3>
+              <p>拖动或输入后先检查数值，再点击保存。运动使用运动加速度，所有 STOP 使用停止加速度。</p>
+            </div>
+            <div class="chassis-controls">
+              <div class="parameter-control chassis-control">
+                <div class="parameter-label"><label for="chassisPressRange">底盘压力</label><output id="chassisPressValue">1400</output></div>
+                <div class="parameter-inputs">
+                  <input id="chassisPressRange" type="range" min="20" max="2000" step="1" value="1400" />
+                  <input id="chassisPress" class="parameter-number" min="20" max="2000" type="number" step="1" inputmode="numeric" autocomplete="off" value="1400" aria-label="底盘压力" />
+                </div>
+                <small>20-2000</small>
+              </div>
+              <div class="parameter-control chassis-control">
+                <div class="parameter-label"><label for="movementAccRange">运动加速度</label><output id="movementAccValue">1000</output></div>
+                <div class="parameter-inputs">
+                  <input id="movementAccRange" type="range" min="10" max="1000" step="1" value="1000" />
+                  <input id="movementAcc" class="parameter-number" min="10" max="1000" type="number" step="1" inputmode="numeric" autocomplete="off" value="1000" aria-label="运动加速度" />
+                </div>
+                <small>10-1000</small>
+              </div>
+              <div class="parameter-control chassis-control">
+                <div class="parameter-label"><label for="stopAccRange">停止加速度</label><output id="stopAccValue">1200</output></div>
+                <div class="parameter-inputs">
+                  <input id="stopAccRange" type="range" min="20" max="2000" step="1" value="1200" />
+                  <input id="stopAcc" class="parameter-number" min="20" max="2000" type="number" step="1" inputmode="numeric" autocomplete="off" value="1200" aria-label="停止加速度" />
+                </div>
+                <small>20-2000</small>
+              </div>
+              <button id="saveChassisParameters" class="manual-secondary chassis-save" type="button" disabled>保存参数</button>
+            </div>
+            <p id="chassisParameterMessage" class="parameter-message" role="status"></p>
           </section>
 
           <div class="drive-area" id="driveArea" aria-disabled="true">
@@ -98,6 +141,14 @@
 
         <section class="manual-facts" aria-labelledby="safetyTitle">
           <h2 id="safetyTitle">安全状态</h2>
+          <div id="emergencyStopPanel" class="emergency-stop" data-state="unknown" aria-live="polite">
+            <div>
+              <span>急停状态</span>
+              <strong id="emergencyStopState">状态未知</strong>
+              <p id="emergencyStopDetail">正在等待 /is_emergency_stop 的真实状态。</p>
+            </div>
+            <button id="releaseEmergencyStop" class="manual-secondary emergency-release" type="button" disabled>解除急停</button>
+          </div>
           <dl>
             <div><dt>控制发布</dt><dd id="publishRate">—</dd></div>
             <div><dt>输入看门狗</dt><dd id="inputTimeout">—</dd></div>

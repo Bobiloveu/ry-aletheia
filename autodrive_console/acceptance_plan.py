@@ -40,8 +40,7 @@ def _number(value: object, name: str, *, minimum: float, maximum: float, integer
 @dataclass(frozen=True)
 class AcceptanceCriteria:
     min_pass_rate: float | None = None
-    min_building_coverage: float | None = None
-    min_unit_coverage: float | None = None
+    min_physical_building_coverage: float | None = None
     min_floor_coverage: float | None = None
     min_door_coverage: float | None = None
     max_failed_tasks: int | None = None
@@ -50,8 +49,7 @@ class AcceptanceCriteria:
     def __post_init__(self) -> None:
         for name in (
             "min_pass_rate",
-            "min_building_coverage",
-            "min_unit_coverage",
+            "min_physical_building_coverage",
             "min_floor_coverage",
             "min_door_coverage",
         ):
@@ -66,19 +64,25 @@ class AcceptanceCriteria:
     @classmethod
     def from_dict(cls, document: dict[str, object]) -> "AcceptanceCriteria":
         expected = {
-            "min_pass_rate", "min_building_coverage", "min_unit_coverage", "min_floor_coverage",
+            "min_pass_rate", "min_physical_building_coverage", "min_floor_coverage",
             "min_door_coverage", "max_failed_tasks", "max_manual_interventions",
         }
-        unexpected = set(document) - expected
+        legacy = {"min_building_coverage", "min_unit_coverage"}
+        unexpected = set(document) - expected - legacy
         if unexpected:
             raise ValueError(f"验收标准包含未知字段：{', '.join(sorted(unexpected))}")
-        return cls(**{name: document.get(name) for name in expected})
+        # Aletheia 2.0 initially stored connected units as separate
+        # "building" / "unit" coverage dimensions.  Keep such saved criteria
+        # readable, but use the finer physical-building threshold thereafter.
+        values = {name: document.get(name) for name in expected}
+        if values["min_physical_building_coverage"] is None:
+            values["min_physical_building_coverage"] = document.get("min_unit_coverage", document.get("min_building_coverage"))
+        return cls(**values)
 
     def to_dict(self) -> dict[str, float | int | None]:
         return {
             "min_pass_rate": self.min_pass_rate,
-            "min_building_coverage": self.min_building_coverage,
-            "min_unit_coverage": self.min_unit_coverage,
+            "min_physical_building_coverage": self.min_physical_building_coverage,
             "min_floor_coverage": self.min_floor_coverage,
             "min_door_coverage": self.min_door_coverage,
             "max_failed_tasks": self.max_failed_tasks,
@@ -203,6 +207,7 @@ class AcceptancePlan:
     scope_type: str
     community: str
     building: int | None
+    unit: int | None
     mode: str
     random_seed: int
     task_pool_size: int
@@ -224,6 +229,7 @@ class AcceptancePlan:
             "scope_type": self.scope_type,
             "community": self.community,
             "building": self.building,
+            "unit": self.unit,
             "mode": self.mode,
             "random_seed": self.random_seed,
             "task_pool_size": self.task_pool_size,
@@ -249,6 +255,7 @@ class AcceptancePlan:
             scope_type=str(document["scope_type"]),
             community=str(document["community"]),
             building=int(document["building"]) if document.get("building") is not None else None,
+            unit=int(document["unit"]) if document.get("unit") is not None else None,
             mode=str(document["mode"]),
             random_seed=int(document["random_seed"]),
             task_pool_size=int(document["task_pool_size"]),
@@ -274,11 +281,11 @@ class AcceptancePlan:
             "scope_type": self.scope_type,
             "community": self.community,
             "building": self.building,
+            "unit": self.unit,
             "mode": self.mode,
-            "random_seed": self.random_seed,
             "task_pool_size": self.task_pool_size,
+            "selection_summary": selection_summary(self.items),
             "items": [item.to_public_dict() for item in self.items],
-            "criteria_snapshot": self.criteria_snapshot,
             "warnings": self.warnings,
             "status": self.status,
             "current_index": self.current_index,
@@ -305,8 +312,9 @@ class AcceptancePlanFactory:
         sample_size: int | None,
         random_seed: int | None,
         criteria: AcceptanceCriteria,
+        unit: int | None = None,
     ) -> AcceptancePlan:
-        pool = snapshot.select(scope_type, community, building)
+        pool = snapshot.select(scope_type, community, building, unit)
         if mode not in {"full", "sample"}:
             raise ValueError("计划模式必须是 full 或 sample")
         if mode == "full":
@@ -331,6 +339,7 @@ class AcceptancePlanFactory:
             scope_type=scope_type,
             community=community,
             building=building if scope_type == "building" else None,
+            unit=unit if scope_type == "building" else None,
             mode=mode,
             random_seed=random_seed,
             task_pool_size=len(pool),
@@ -346,22 +355,22 @@ def _coverage_aware_order(tasks: list[AcceptanceTask], *, community_scope: bool,
     tie_break = {task.filename: randomizer.random() for task in ordered}
     selected: list[AcceptanceTask] = []
     remaining = list(ordered)
-    building_count: dict[int, int] = {}
-    unit_count: dict[int, int] = {}
-    floor_count: dict[int, int] = {}
-    door_count: dict[int, int] = {}
+    physical_building_count: dict[tuple[int, int], int] = {}
+    floor_count: dict[tuple[int, int, int], int] = {}
+    door_count: dict[tuple[int, int, int, int], int] = {}
     while remaining:
         previous = selected[-1].parameters if selected else None
 
         def score(task: AcceptanceTask) -> tuple[float, ...]:
             p = task.parameters
+            physical_building = (p.building, p.unit)
+            floor = (*physical_building, p.floor)
+            door = (*floor, p.door)
             return (
-                float(building_count.get(p.building, 0)) if community_scope else 0.0,
-                float(unit_count.get(p.unit, 0)),
-                float(floor_count.get(p.floor, 0)),
-                float(door_count.get(p.door, 0)),
-                float(previous is not None and p.building == previous.building),
-                float(previous is not None and p.unit == previous.unit),
+                float(physical_building_count.get(physical_building, 0)) if community_scope else 0.0,
+                float(floor_count.get(floor, 0)),
+                float(door_count.get(door, 0)),
+                float(previous is not None and physical_building == (previous.building, previous.unit)),
                 float(previous is not None and p.floor == previous.floor),
                 tie_break[task.filename],
             )
@@ -370,36 +379,38 @@ def _coverage_aware_order(tasks: list[AcceptanceTask], *, community_scope: bool,
         remaining.remove(chosen)
         selected.append(chosen)
         p = chosen.parameters
-        building_count[p.building] = building_count.get(p.building, 0) + 1
-        unit_count[p.unit] = unit_count.get(p.unit, 0) + 1
-        floor_count[p.floor] = floor_count.get(p.floor, 0) + 1
-        door_count[p.door] = door_count.get(p.door, 0) + 1
+        physical_building = (p.building, p.unit)
+        floor = (*physical_building, p.floor)
+        door = (*floor, p.door)
+        physical_building_count[physical_building] = physical_building_count.get(physical_building, 0) + 1
+        floor_count[floor] = floor_count.get(floor, 0) + 1
+        door_count[door] = door_count.get(door, 0) + 1
     return selected
 
 
 def _coverage_warnings(pool: list[AcceptanceTask], selected_size: int, *, community_scope: bool) -> list[str]:
-    dimensions: list[tuple[str, set[int]]] = [
-        ("单元", {item.parameters.unit for item in pool}),
-        ("楼层", {item.parameters.floor for item in pool}),
-        ("户", {item.parameters.door for item in pool}),
-    ]
-    if community_scope:
-        dimensions.insert(0, ("楼栋", {item.parameters.building for item in pool}))
-    warnings: list[str] = []
-    for label, values in dimensions:
-        if len(values) > selected_size:
-            warnings.append(f"抽样数量不足以覆盖全部{label}（可用 {len(values)} 类，计划 {selected_size} 项）")
-        elif len(values) <= 1:
-            warnings.append(f"正式任务池仅含 {len(values)} 类{label}，无法扩大该维度覆盖")
-    return warnings
+    # A sample is deliberately not a census: a large community can have
+    # thousands of homes.  Coverage counts belong in the neutral plan summary,
+    # not as a warning merely because an intentionally small sample cannot
+    # visit every floor or door.
+    del pool, selected_size, community_scope
+    return []
+
+
+def selection_summary(items: list[AcceptancePlanItem]) -> dict[str, int]:
+    return {
+        "tasks": len(items),
+        "physical_buildings": len({(item.parameters.building, item.parameters.unit) for item in items}),
+        "floors": len({(item.parameters.building, item.parameters.unit, item.parameters.floor) for item in items}),
+        "doors": len({(item.parameters.building, item.parameters.unit, item.parameters.floor, item.parameters.door) for item in items}),
+    }
 
 
 def coverage_summary(plan: AcceptancePlan) -> CoverageSummary:
     dimensions = {
-        "building": lambda item: item.parameters.building,
-        "unit": lambda item: item.parameters.unit,
-        "floor": lambda item: item.parameters.floor,
-        "door": lambda item: item.parameters.door,
+        "physical_building": lambda item: (item.parameters.building, item.parameters.unit),
+        "floor": lambda item: (item.parameters.building, item.parameters.unit, item.parameters.floor),
+        "door": lambda item: (item.parameters.building, item.parameters.unit, item.parameters.floor, item.parameters.door),
     }
     planned = plan.items
     executed = [item for item in plan.items if item.status in TERMINAL_ITEM_STATUSES]
@@ -417,34 +428,39 @@ def coverage_summary(plan: AcceptancePlan) -> CoverageSummary:
 
 
 def evaluate_conclusion(plan: AcceptancePlan, criteria: AcceptanceCriteria) -> AcceptanceResult:
+    # Kept as an argument only so previously stored plans and internal callers
+    # remain readable.  New deployment acceptance is deliberately not a form
+    # of operator-entered percentage thresholds: every planned task must pass.
+    del criteria
     coverage = coverage_summary(plan)
     terminal_items = [item for item in plan.items if item.status in {"passed", "failed"}]
     passed = sum(item.status == "passed" for item in terminal_items)
     failed = sum(item.status == "failed" for item in terminal_items)
     pass_rate = round(passed / len(terminal_items) * 100, 1) if terminal_items else 0.0
     if plan.status != "completed":
-        return AcceptanceResult(None, "计划尚未完成，不能生成正式验收结论", coverage, pass_rate, failed)
+        return AcceptanceResult(None, "计划尚未完成；完成全部计划任务后才会给出本次验收结论", coverage, pass_rate, failed)
 
-    violations: list[str] = []
-    threshold_checks = {
-        "最低任务通过率": (criteria.min_pass_rate, pass_rate),
-        "最低楼栋覆盖率": (criteria.min_building_coverage, coverage.passed["building"]),
-        "最低单元覆盖率": (criteria.min_unit_coverage, coverage.passed["unit"]),
-        "最低楼层覆盖率": (criteria.min_floor_coverage, coverage.passed["floor"]),
-        "最低户覆盖率": (criteria.min_door_coverage, coverage.passed["door"]),
-    }
-    for label, (expected, actual) in threshold_checks.items():
-        if expected is not None and actual < expected:
-            violations.append(f"{label} {actual:g}% 未达到 {expected:g}%")
-    if criteria.max_failed_tasks is not None and failed > criteria.max_failed_tasks:
-        violations.append(f"失败任务数 {failed} 超过 {criteria.max_failed_tasks}")
-    if criteria.max_manual_interventions is not None and plan.manual_interventions > criteria.max_manual_interventions:
-        violations.append(f"人工干预次数 {plan.manual_interventions} 超过 {criteria.max_manual_interventions}")
-    if violations:
-        return AcceptanceResult("FAIL", "；".join(violations), coverage, pass_rate, failed)
-    if criteria.is_complete():
-        return AcceptanceResult("PASS", "所有已配置验收标准均已达到", coverage, pass_rate, failed)
-    return AcceptanceResult("CONDITIONAL_PASS", "验收执行完成，等待官方阈值确认", coverage, pass_rate, failed)
+    total = len(plan.items)
+    non_passed = total - passed
+    summary = selection_summary(plan.items)
+    label = "本次抽样" if plan.mode == "sample" else "本次全量验收"
+    coverage_text = f"覆盖 {summary['physical_buildings']} 个物理楼宇单元、{summary['floors']} 个楼层、{summary['doors']} 户"
+    if total > 0 and non_passed == 0:
+        return AcceptanceResult(
+            f"{plan.mode}_pass",
+            f"{label}通过：{passed}/{total} 项通过，通过率 {pass_rate:.1f}%；{coverage_text}。"
+            + ("该结论仅代表本次抽样，不代表全小区全量验收。" if plan.mode == "sample" else ""),
+            coverage,
+            pass_rate,
+            failed,
+        )
+    return AcceptanceResult(
+        f"{plan.mode}_fail",
+        f"{label}不通过：{passed}/{total} 项通过，通过率 {pass_rate:.1f}%；存在 {non_passed} 项未通过。{coverage_text}。",
+        coverage,
+        pass_rate,
+        failed,
+    )
 
 
 class AcceptancePlanStore:
