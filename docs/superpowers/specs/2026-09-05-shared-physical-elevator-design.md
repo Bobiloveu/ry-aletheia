@@ -1,107 +1,90 @@
-# Shared Physical Elevator Design
+# 共享物理电梯设计
 
-## Goal
+## 目标
 
-Represent one physical elevator once within a deployment project while allowing
-each served map to show its own elevator landing, centre coordinate and door
-orientation.  The experimental indoor-elevator compiler must continue to
-generate the current approved artifacts without writing to robot runtime
-directories.
+在同一部署项目内仅描述一次真实的物理电梯，同时允许每一张服务地图
+独立标记该电梯在本层的落点、中心坐标和电梯门朝向。实验性的室内电梯
+任务编译器必须继续生成当前已批准的产物，且不得写入机器人运行时目录。
 
-## Scope
+## 范围
 
-This change applies only to deployment-project persistence, the PC deployment
-editor, and the `indoor_elevator_v1` experimental compiler.  It does not change
-ROS ownership, runtime task installation, protocol wire formats, localization
-files, speed-mode definitions, or existing map assets.
+本次仅涉及部署项目的持久化数据、PC 部署编辑器及
+`indoor_elevator_v1` 实验编译器。不改变 ROS 所有权、运行时任务安装、
+通信线协议、定位配置文件、速度模式定义和既有地图资产。
 
-## Model
+## 数据模型
 
-The project document gains `physical_elevators`, a project-level list.  Each
-entry has a generated immutable `id`, the user-confirmed unique `elevator_id`,
-and the shared hardware facts:
+项目文档新增项目级数组 `physical_elevators`。每一项包含自动生成且不可
+变的 `id`、用户确认在项目内唯一的 `elevator_id`，以及以下共享硬件信息：
 
 - `elevator_protocol`
-- `min_floor` and `max_floor`
+- `min_floor` 与 `max_floor`
 
-An existing `kind: "elevator"` component becomes a map-local elevator landing.
-It keeps its existing `map_asset_id`, `x`, `y`, `yaw`, `label`, dimensions and
-`wait_distance_m`, and adds `physical_elevator_id`.  Its `yaw` remains the door
-direction for that individual landing; it is intentionally not shared because
-different floors may have different door-facing directions.
+既有 `kind: "elevator"` 组件改为地图本地的“电梯落点”。它保留已有的
+`map_asset_id`、`x`、`y`、`yaw`、`label`、尺寸和 `wait_distance_m`，并新增
+`physical_elevator_id`。其 `yaw` 始终表示该落点的电梯门方向，不能共享：
+不同楼层的电梯门可能面向不同方向。
 
-The map instance remains the authority for a landing's logical floor.  The
-compiler calculates its robot physical floor from that value (`logical + 1`),
-as it already does.  A landing therefore no longer stores editable `map_floor`
-or `physical_floor` facts.  Legacy copies remain harmless during migration but
-are ignored after the physical elevator relation is present.
+地图实例仍是落点逻辑楼层的唯一来源。编译器沿用现有规则，以逻辑楼层
+加一计算机器人协议的物理楼层。落点不再保存可编辑的 `map_floor` 或
+`physical_floor`；迁移后仍保留的旧字段不参与计算。
 
-## Editor workflow
+## 编辑器流程
 
-When a user puts the first elevator on a project map, the editor creates a new
-physical elevator and its first landing.  The editor asks for the unique
-elevator number and shared hardware details as it does today.
+用户在项目第一张地图放置电梯时，编辑器新建一个物理电梯及其首个落点，
+按现有流程填写唯一电梯编号和共享硬件信息。
 
-When a user puts an elevator on another map, the editor defaults to **关联已有
-电梯**.  It presents existing elevator numbers; choosing one creates only a
-landing and shows the shared fields as read-only context.  The user enters or
-adjusts only local geometry: size, wait distance, map position, and door
-orientation.  A deliberate **新建物理电梯** choice is also available for sites
-with more than one lift.
+用户在另一张地图放置电梯时，编辑器默认进入“关联已有电梯”，列出已有
+电梯编号。选择 `10014` 这类编号后只会新增落点，并以只读上下文展示
+共享字段。用户仅需填写或调整本地几何信息：尺寸、候梯距离、地图位置
+和门方向。对于确实有多部电梯的项目，仍提供显式的“新建物理电梯”选项。
 
-The map marker and its existing door-direction symbol are always rendered from
-the local landing `yaw`, including on floors that reference the same physical
-elevator.
+地图上的电梯图标和既有门方向标识始终由本地落点的 `yaw` 绘制，因此同一
+物理电梯在不同楼层仍会正确显示各自的门方向。
 
-## Compatibility and validation
+## 兼容与校验
 
-`DeploymentStore.get()` normalizes old projects before use.  For each legacy
-elevator component it creates or reuses one physical elevator keyed by its
-nonempty `attributes.elevator_id`, copies protocol and service range into the
-shared entity, and writes the local component relation.  If old copies for the
-same elevator disagree on shared facts, loading remains non-destructive and
-marks the compiler input invalid with a clear resolution error; it never picks
-one silently.
+`DeploymentStore.get()` 在读取旧项目时完成规范化迁移。它按非空的
+`attributes.elevator_id` 为旧电梯组件创建或复用一个物理电梯，将协议和
+服务楼层范围写入共享实体，并为原有组件补上本地关联。
 
-Creation rejects a duplicate physical `elevator_id` in the same project.
-Updating a shared physical entity is the only way to change its protocol or
-service range.  Removing a protocol that a physical elevator uses is rejected.
-Deleting a landing removes only that map marker; deleting a physical elevator is
-rejected until all of its landings have been removed.
+同一旧电梯的副本若存在共享字段冲突，读取过程保持非破坏性，编译预览会
+给出需要处理的明确错误，绝不悄悄任选一份数据。
 
-## Compiler behavior
+创建物理电梯时拒绝项目内重复的 `elevator_id`。协议或服务范围只能通过
+更新共享实体修改。正在被物理电梯使用的协议不能删除。删除某个落点仅会
+删除本地图标记；仍存在落点时，禁止删除物理电梯。
 
-`compile_indoor_elevator()` selects exactly one landing on each required map
-stage and requires that both landings refer to the same `physical_elevator_id`.
-It resolves protocol and service-range facts from the physical elevator, then
-derives each floor from its map instance and each wait/centre pose from that
-landing's local geometry and yaw.  Thus the generated caller origin-floor
-parameters and all approved behavior-tree names remain unchanged, while the
-two map markers cannot drift into independent descriptions of one lift.
+## 编译器行为
 
-For legacy fixture documents that have no `physical_elevators`, the pure
-compiler retains its current `elevator_id` pair validation.  Store-managed
-projects are migrated on read and use the new relation.
+`compile_indoor_elevator()` 在每个必需地图阶段各选择一个电梯落点，并要求
+两者引用同一个 `physical_elevator_id`。它从物理电梯读取协议和服务范围，
+从地图实例得到各层楼层，从本地落点的几何与 `yaw` 推导各自的候梯点和
+电梯中心点。
 
-## APIs and user-visible errors
+因此，生成的呼梯行为树 `origin_floor` 参数和所有现有已批准的行为树名称
+保持不变，但两张地图也无法再把同一部电梯维护成两套彼此漂移的硬件描述。
 
-Existing component endpoints remain the editor's marker API.  Add project-owned
-physical-elevator operations under the deployment HTTP boundary; browsers still
-call only HTTP and never ROS.  Errors distinguish: duplicate elevator number,
-unknown shared elevator, missing landing relation, two selected maps pointing
-at different physical elevators, and conflicting legacy shared fields.
+纯编译器的旧测试项目若尚未包含 `physical_elevators`，仍保留当前以
+`elevator_id` 配对的兼容校验；由 Store 管理的实际项目将在读取时迁移后
+使用新的关联关系。
 
-No cross-client contract changes are required: this is a deployment console
-document and its HTTP API has no Mobile consumer.  The backend and its web
-consumer will be changed together.
+## API 与可见错误
 
-## Tests
+原有组件接口继续承担地图标记操作。新增项目级物理电梯操作仍位于部署的
+HTTP 边界内；浏览器只调用 HTTP，绝不直接访问 ROS。
 
-Backend tests cover unique identifier enforcement, second-map association,
-legacy migration, shared-field consistency, protocol removal protection, and
-compiler rejection of a mismatched pair.  Compiler tests prove that separate
-landing yaws produce independent waiting points while both floor-specific
-behavior-tree parameters resolve from their map instances.  Web static tests
-cover the association controls and local door-marker rendering.
+错误信息将区分：重复电梯编号、未知共享电梯、缺失落点关联、两个阶段地图
+关联到不同物理电梯，以及旧数据共享字段冲突。
 
-The focused Pytest suites and the web build/check must pass before handoff.
+这属于部署控制台内部项目文档及其 HTTP API，Mobile 没有消费者，不需要
+更新跨客户端共享契约；后端与 Web 消费者将同步修改。
+
+## 测试
+
+后端测试覆盖唯一编号约束、第二张地图关联、旧项目迁移、共享字段一致性、
+协议删除保护，以及编译器对错误配对的拒绝。编译器测试证明不同落点的
+`yaw` 会生成不同候梯点，同时两个楼层的行为树参数仍由各自地图实例决定。
+Web 静态测试覆盖关联控件和本地门方向标识绘制。
+
+交付前必须通过相关 Pytest 测试和 Web 构建检查。
