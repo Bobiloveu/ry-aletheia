@@ -24,6 +24,9 @@ import '../features/live_observation/domain/pose_frame.dart';
 import '../features/live_observation/domain/video_status.dart';
 import '../features/live_observation/presentation/live_observation_screen.dart';
 import '../features/live_observation/presentation/whep_video_view.dart';
+import '../features/manual_control/application/manual_control_controller.dart';
+import '../features/manual_control/domain/vehicle_control_state.dart';
+import '../features/manual_control/presentation/manual_control_screen.dart';
 import '../features/reports/application/reports_controller.dart';
 import '../features/reports/domain/aletheia_report.dart';
 import '../features/reports/presentation/reports_screen.dart';
@@ -135,6 +138,9 @@ class _GalleryPreviewScope extends StatelessWidget {
       overrides: [
         robotConnectionControllerProvider.overrideWith(
           () => _GalleryRobotConnectionController(_connectionFor(spec)),
+        ),
+        manualControlControllerProvider.overrideWith(
+          () => _GalleryManualControlController(spec),
         ),
         liveObservationControllerProvider.overrideWith(
           () => _GalleryObservationController(_observationFor(spec, map)),
@@ -253,6 +259,7 @@ class _PreviewPageState extends State<_PreviewPage> {
         initialWorkspace: ObservationWorkspace.camera,
       ),
       GallerySurface.toolsHome => const ToolsScreen(),
+      GallerySurface.manualControl => const ManualControlScreen(),
       GallerySurface.testRuns => TestRunsScreen(
         scrollController: _testRunScrollController,
       ),
@@ -306,6 +313,51 @@ class _GalleryRobotConnectionController extends RobotConnectionController {
 
   @override
   void resumeHeartbeats() {}
+}
+
+class _GalleryManualControlController extends ManualControlController {
+  _GalleryManualControlController(this.spec);
+
+  final GalleryScreenSpec spec;
+
+  @override
+  ManualControlScreenState build() {
+    final emergency = spec.id == 'manual_control_emergency';
+    return ManualControlScreenState(
+      hasActiveSession: true,
+      message: emergency ? '急停已触发，方向控制已锁定。' : '手动控制已就绪。',
+      isError: emergency,
+      status: VehicleControlState.fromJson({
+        'runtime': 'ready',
+        'actual_source': 'miniapp',
+        'manual_ready': !emergency,
+        'can_begin_manual': false,
+        'session': {
+          'present': true,
+          'state': 'active',
+          'id': 'gallery-session',
+        },
+        'speed': {'linear_mps': .4, 'angular_radps': .6, 'min': .1, 'max': 1.0},
+        'emergency_stop': {
+          'state': emergency ? 'triggered' : 'normal',
+          'release': 'idle',
+        },
+        'chassis_parameters': {
+          'press': 1400,
+          'movement_acc': 1000,
+          'stop_acc': 1200,
+        },
+      }),
+    );
+  }
+
+  @override
+  Future<void> refresh() async {}
+
+  @override
+  Future<void> releaseEmergencyStop() async {
+    state = state.copyWith(message: 'Debug Gallery 不会向车端发送解除急停请求。');
+  }
 }
 
 class _GalleryObservationController extends LiveObservationController {

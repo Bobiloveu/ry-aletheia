@@ -7,6 +7,7 @@ import '../../../core/connection/robot_connection_controller.dart';
 import '../../robot_connection/presentation/robot_connection_screen.dart';
 import '../../reports/presentation/reports_screen.dart';
 import '../../tool_logs/presentation/tool_logs_screen.dart';
+import '../../manual_control/presentation/manual_control_screen.dart';
 import '../../test_runs/presentation/test_runs_screen.dart';
 import '../../runtime_settings/presentation/runtime_settings_screen.dart';
 import '../../scenario_setup/presentation/scenario_setup_screen.dart';
@@ -58,6 +59,20 @@ class ToolsScreen extends ConsumerWidget {
                   ),
                 ),
                 const SizedBox(height: 20),
+                _ToolEntry(
+                  icon: Icons.gamepad_outlined,
+                  title: '手动控制',
+                  detail: connected
+                      ? '在车端确认安全状态后，用摇杆执行受控的前进、后退与转向。'
+                      : '连接机器人后可查看车端控制状态。',
+                  actionLabel: connected ? '打开控制' : '连接机器人',
+                  onTap: () => context.go(
+                    connected
+                        ? ManualControlScreen.routePath
+                        : RobotConnectionScreen.routePath,
+                  ),
+                ),
+                const SizedBox(height: 12),
                 _ToolEntry(
                   icon: Icons.fact_check_outlined,
                   title: '自动化测试',

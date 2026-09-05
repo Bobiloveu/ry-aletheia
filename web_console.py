@@ -938,6 +938,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 session_id = str(data.get("session_id", ""))
                 command = str(data.get("command", ""))
                 payload = VEHICLE_CONTROL.stop(session_id) if command == "stop" else VEHICLE_CONTROL.set_command(session_id, command)
+            elif path == "/api/vehicle-control/vector":
+                payload = VEHICLE_CONTROL.set_vector(
+                    str(data.get("session_id", "")),
+                    data.get("linear_ratio"),
+                    data.get("angular_ratio"),
+                )
             elif path == "/api/vehicle-control/speed":
                 payload = VEHICLE_CONTROL.set_speed(
                     str(data.get("session_id", "")),

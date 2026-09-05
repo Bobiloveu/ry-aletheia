@@ -81,6 +81,30 @@ void main() {
   });
 
   testWidgets(
+    'manual-control emergency Gallery renders the locked release flow',
+    (tester) async {
+      final emergencySpecs = galleryScreenManifest
+          .where((spec) => spec.id == 'manual_control_emergency')
+          .toList();
+      expect(emergencySpecs, hasLength(1));
+
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            theme: AletheiaTheme.dark(),
+            home: DebugGalleryPreview(spec: emergencySpecs.single),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('急停已触发'), findsAtLeastNWidgets(1));
+      expect(find.text('请求解除急停'), findsOneWidget);
+      expect(find.byIcon(Icons.lock_outline_rounded), findsOneWidget);
+    },
+  );
+
+  testWidgets(
     'phone landscape renders the selected production page at device size',
     (tester) async {
       tester.view.physicalSize = const Size(2622, 1206);

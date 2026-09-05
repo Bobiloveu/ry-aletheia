@@ -114,6 +114,7 @@ lib/
 - `lib/debug_ui/gallery_manifest.dart` 是 Gallery、Golden 与生成 UI 文档的单一清单来源。
 - Mock 只能替换数据来源和状态，不能复制正式 Widget；不得访问机器人、ROS、HTTP、WebSocket 或 WebRTC。
 - 新状态先在 Gallery 预览，再更新必要 Golden。生成的 `docs/ui/SCREEN_INVENTORY.md` 和 `docs/ui/SCREEN_MAP.md` 不要手工编辑。
+- **任何新增生产页面，以及现有页面新增的关键操作、故障或空/加载状态，必须先加入 Debug Gallery。** Gallery 使用正式 Page/Widget 与本地 Fake，仅模拟数据与状态；不得把调试入口或真实命令带入 Release。
 
 ## 7. 验证最低要求
 

@@ -9,10 +9,10 @@ void main() {
     final theme = AletheiaTheme.light();
 
     expect(theme.brightness, Brightness.light);
-    expect(theme.scaffoldBackgroundColor, const Color(0xFFF2F6F5));
-    expect(theme.cardTheme.color, const Color(0xFFFCFEFD));
-    expect(theme.colorScheme.primary, const Color(0xFF216D65));
-    expect(theme.colorScheme.onPrimary, const Color(0xFFF8FCFB));
+    expect(theme.scaffoldBackgroundColor, const Color(0xFFF5F8FC));
+    expect(theme.cardTheme.color, const Color(0xFFFFFFFF));
+    expect(theme.colorScheme.primary, const Color(0xFF0A63C4));
+    expect(theme.colorScheme.onPrimary, const Color(0xFFFFFFFF));
     expect(AletheiaTheme.mapVirtualWall, const Color(0xFFB6433D));
     expect(
       theme.appBarTheme.systemOverlayStyle?.statusBarBrightness,

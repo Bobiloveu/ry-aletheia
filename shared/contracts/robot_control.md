@@ -6,8 +6,9 @@
 | --- | --- |
 | 运行时执行方 | `autodrive_console/vehicle_control.py` 拥有 ROS2 节点、安全定时器、控制源状态订阅和发布器。 |
 | HTTP 适配层 | `web_console.py` 拥有 `/api/vehicle-control/*` 请求校验和 HTTP 状态映射。 |
-| 当前消费者 | `web_console` 的手动控制与建图工作台页面。 |
-| Mobile 影响 | Mobile 当前没有 Existing 手动控制 UI。未来 Mobile 命令功能只有在其权限、确认和审计契约获批后，才能消费本受控 HTTP 契约。 |
+| 当前消费者 | `web_console` 的手动控制与建图工作台页面；`mobile/` 的“工具 / 手动控制”受控 HMI。 |
+| Mobile 影响 | Mobile 是 Existing HTTP 消费者：使用 `/vector` 提交连续的前后与转向比例，不直接访问 ROS、不会发送 Twist，也不提供导航、地点或横向平移命令。进入控制必须由操作员二次确认；摇杆只会在本地持有 `enter` 返回的会话 ID、车端 `manual_ready=true` 且真实急停为 `normal` 时解锁。进入中心、后台、离开页面或松开输入时 Mobile 均请求 STOP；Backend 仍是最终安全边界。 |
+| PC Web 影响 | PC Web 手动控制保持 Existing 四方向 `/command` 消费者，不调用 `/vector`，无需修改其页面或操作方式。 |
 | 兼容性 | 优先增量变更。任何破坏性变更必须同步修改 Backend、Web、受影响的 Mobile 工作、本文档和定向验证。 |
 
 ## ROS 所有权
@@ -44,7 +45,8 @@
 | `GET /api/vehicle-control` | 无 | 返回观测到的运行时/控制源/会话状态和安全限制。 |
 | `POST /api/vehicle-control/enter` | `{}` | 发布 STOP 后启动会话，或接管已实际确认的 `miniapp` 控制源。 |
 | `POST /api/vehicle-control/heartbeat` | `{ "session_id": "…" }` | 保持有效活动会话。 |
-| `POST /api/vehicle-control/command` | `{ "session_id": "…", "command": "forward\|backward\|left\|right\|stop" }` | 更新保持方向；`stop` 时发送 STOP。 |
+| `POST /api/vehicle-control/command` | `{ "session_id": "…", "command": "forward\|backward\|left\|right\|stop" }` | Existing PC 四方向入口；更新保持方向，`stop` 时发送 STOP。 |
+| `POST /api/vehicle-control/vector` | `{ "session_id": "…", "linear_ratio": number, "angular_ratio": number }` | Existing Mobile 连续输入入口。两个比例均须为有限 `[-1.0, 1.0]` 数值；Backend 以当前速度档换算目标。`(0,0)` 立即清除运动并走 STOP 路径，但保留会话。 |
 | `POST /api/vehicle-control/speed` | `{ "session_id": "…", "linear_speed": number, "angular_speed": number }` | 更新经过校验的线速度和角速度。 |
 | `POST /api/vehicle-control/stop` | `{ "session_id": "…" }` | 保留会话的同时立即发送 STOP。 |
 | `POST /api/vehicle-control/exit` | `{ "session_id": "…" }` | 停止、请求返回 `navigation`，并等待实际确认。 |
@@ -52,6 +54,8 @@
 | `POST /api/vehicle-control/chassis-parameters` | `{ "press": integer, "movement_acc": integer, "stop_acc": integer }` | 持久化并更新手动驾驶参数。`press` 为 20-2000，`movement_acc` 为 10-1000，`stop_acc` 为 20-2000。 |
 
 成功时返回当前状态对象。`200 OK` 表示没有控制源切换等待中；`202 Accepted` 表示切换仍在等待。`400 Bad Request` 表示输入格式错误或不支持的命令。`409 Conflict` 表示不安全控制状态、活动运行、重复会话或缺少控制源确认。`503 Service Unavailable` 表示 Backend ROS2 控制器无法运行。客户端在返回 `status` 时必须展示，且不得实现无界重试循环。
+
+`POST /enter` 的成功响应会携带供该客户端后续请求使用的会话 ID；常规 `GET` 状态快照只保证提供 `session.present` 和 `session.state`，客户端不得因轮询快照没有 ID 而丢弃已持有的有效会话 ID，也不得从快照自行生成或猜测 ID。
 
 ## 状态响应与安全限制
 
@@ -90,6 +94,8 @@
 
 Backend 以 **20 Hz** 发布。保持输入必须在 **350 ms** 前刷新；会话心跳必须在 **1200 ms** 前到达。缺失输入或心跳会触发安全停止；浏览器 UI 的刷新频率不能代替 Backend 看门狗。两项请求速度必须是 **0.10–1.00**（含边界）范围内的有限值。默认线速度为 **0.20 m/s**，默认角速度为 **0.30 rad/s**。客户端不能覆盖这些限制。
 
+`/vector` 不是直接 ROS 速度接口：`target_linear = linear_ratio × linear_mps`，`target_angular = angular_ratio × angular_radps`。移动端以车头向上为视觉坐标：上/下分别为正/负 `linear_ratio`，左/右分别为正/负 `angular_ratio`；因此右上为正线速度与负角速度，即前进并右转的弧线。它不是横向右前平移。新的向量目标与旧的 `/command` 目标互斥；任一后续 `/speed` 更新必须按保存的比例重新换算。急停、未知急停、外部切源、会话或输入超时、`stop`、`exit` 和 `(0,0)` 均清除两类目标并使用 `stop_acc`。
+
 `emergency_stop.state` 只能为 `normal`、`triggered` 或 `unknown`；unknown 不等价于 normal。`release` 为 `idle`、`waiting_confirmation`、`confirmed`、`failed` 或 `unconfirmable`，只能由实际 Bool 回调或超时变更。非零 Twist 使用持久化的 `movement_acc`，任何零 Twist（主动停止、输入/心跳超时、退出或外部控制源接管）使用 `stop_acc`。解除急停的固定 `acc=2000`、`press=1400` 与这些手动驾驶参数保持分离。
 
 `/is_emergency_stop` 订阅使用 `RELIABLE + TRANSIENT_LOCAL` QoS，以读取底盘锁存的当前状态。控制台启动期若仍为 `unknown`，同一 ROS 节点会以非阻塞、至多一个在途请求的方式调用 `/get_emergency_stop`；它只可填补 unknown，绝不能覆盖已由 Topic 确认的状态。服务不可用、超时或异常时仍为 `unknown` 并锁定手动运动，不能以订阅创建成功、旧缓存或服务失败推断为未急停。
@@ -99,10 +105,11 @@ Backend 以 **20 Hz** 发布。保持输入必须在 **350 ms** 前刷新；会�
 | 变更 | 必需的受影响检查 |
 | --- | --- |
 | ROS Topic、控制源枚举、Twist 映射、超时或速度策略 | Backend 测试、安全审查、本文档和 Web 行为验证；未来任何 Mobile 控制消费者也必须验证。 |
-| HTTP 字段、端点或响应变更 | Backend 测试、Web 测试、本文档和每个 Existing 消费者。 |
+| HTTP 字段、端点或响应变更 | Backend 测试、Web 测试、本文档和每个 Existing 消费者。`/vector` 变更必须验证 PC `/command` 回归、Mobile 向量映射和本表安全规则。 |
+| Mobile 手动 HMI 的交互或生命周期变更 | Mobile 单元/组件测试、`scripts/test-mobile.sh`，并手工确认二次进入、松手 STOP、后台 STOP→EXIT、急停 `unknown` 锁定和横竖屏布局。 |
 | 不改变请求语义的仅 Web 展示变更 | 仅 Web 检查；不编辑本文档。 |
 | 未来 Mobile 控制 UI | 先建立独立的权限/审计/确认契约，再更新本文档并运行 Mobile 检查。 |
 
 ## Planned（规划中）
 
-尚未批准新的直接 Mobile 操作协议。未来命令 UI 在成为 Existing 前，需要独立契约、权限模型、审计轨迹和显式确认流程。
+Mobile 已消费上表所列的受控 HTTP 契约；尚未批准导航、地点、任务执行、原始 ROS、横向移动或其他车辆操作协议。未来若要增加此类能力，必须先建立独立的权限模型、审计轨迹和显式确认流程，不能将其伪装为当前 `/command` 或 `/vector` 的扩展。

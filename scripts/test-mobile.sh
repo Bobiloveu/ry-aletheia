@@ -16,5 +16,13 @@ export PATH="$(dirname "$fvm_bin"):$PATH"
 export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
 export no_proxy="$NO_PROXY"
 cd "$ROOT/mobile"
-fvm flutter analyze
-fvm flutter test --concurrency=1 -r compact
+# Dart's test compiler and VM service use loopback HTTP. Some proxy clients
+# ignore NO_PROXY for that traffic and close the local connection before the
+# tester can start, so keep proxy configuration for install/build workflows
+# but never inherit it into the local analysis/test processes.
+without_proxy() {
+  env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+    -u http_proxy -u https_proxy -u all_proxy "$@"
+}
+without_proxy fvm flutter analyze
+without_proxy fvm flutter test --concurrency=1 -r compact

@@ -33,6 +33,8 @@
 | 观测 | 相机 | `/observation` | 视频状态读取失败 | 视频状态接口请求失败 | 可预览 | [已生成](screens/observe/video-error.png) |
 | 工具 | 工具 | `/tools` | 未连接 | 未选择可用机器人 | 可预览 | [已生成](screens/tools/disconnected.png) |
 | 工具 | 工具 | `/tools` | 可用工具入口 | 机器人已连接 | 可预览 | [已生成](screens/tools/connected.png) |
+| 工具 | 手动控制 | `/tools/manual-control` | 已进入手动会话，连续方向摇杆、双速度与底盘参数已可用 | 连接机器人后确认进入手动控制 | 可预览 | 待生成 |
+| 工具 | 手动控制 | `/tools/manual-control` | 急停已触发，方向控制锁定 | 车端返回已触发的急停状态 | 可预览 | 待生成 |
 | 工具 | 运行配置 | `/tools/runtime` | 受控参数与依赖编排 | 连接机器人后打开运行配置 | 可预览 | [已生成](screens/tools/runtime-settings-ready.png) |
 | 工具 | 场景前置配置 | `/tools/scenario-setup` | 方案可预览，当前常规配置 | 连接机器人后打开场景前置配置 | 可预览 | [已生成](screens/tools/scenario-setup-ready.png) |
 | 工具 | 场景前置配置 | `/tools/scenario-setup` | 已有方案待恢复 | 手动应用场景方案后 | 可预览 | [已生成](screens/tools/scenario-setup-pending-restore.png) |

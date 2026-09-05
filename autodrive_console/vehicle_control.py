@@ -152,6 +152,7 @@ class VehicleControlController:
         self._target_linear = 0.0
         self._target_angular = 0.0
         self._target_command: str | None = None
+        self._target_vector: tuple[float, float] | None = None
         self._linear_speed = self.config.linear_speed_mps
         self._angular_speed = self.config.angular_speed_radps
         # STOP 是一次性边沿事件。空闲会话不应持续占用 /cmd_vel_miniapp。
@@ -201,6 +202,8 @@ class VehicleControlController:
                 }
                 self._target_linear = 0.0
                 self._target_angular = 0.0
+                self._target_command = None
+                self._target_vector = None
                 self._manual_stop_latched = True
                 self._pending_source = None
                 self._switch_deadline = None
@@ -221,6 +224,8 @@ class VehicleControlController:
                 }
                 self._target_linear = 0.0
                 self._target_angular = 0.0
+                self._target_command = None
+                self._target_vector = None
                 self._manual_stop_latched = True
                 self._pending_source = self.SOURCE_MINIAPP
                 self._switch_deadline = now + self.config.switch_timeout_s
@@ -263,11 +268,50 @@ class VehicleControlController:
             if session["state"] != "active":
                 raise VehicleControlConflict("手动控制会话无效，禁止发送运动指令")
             self._target_command = command
+            self._target_vector = None
             self._apply_target_command_locked()
             self._manual_stop_latched = False
             session["last_input_at"] = now
             session["last_heartbeat_at"] = now
             return self._snapshot_locked()
+
+    def set_vector(
+        self,
+        session_id: str,
+        linear_ratio: object,
+        angular_ratio: object,
+    ) -> dict[str, Any]:
+        """以归一化前后/转向比例更新当前会话的连续运动目标。"""
+        self._ensure_started()
+        linear = self._validated_ratio(linear_ratio, "线速度比例")
+        angular = self._validated_ratio(angular_ratio, "转向速度比例")
+        now = self._clock()
+        publish_stop = False
+        with self._lock:
+            self._advance_safety_locked(now)
+            session = self._require_session_locked(session_id, allow_inactive=False)
+            if self._emergency_stop is not False:
+                raise VehicleControlConflict(self._emergency_motion_block_reason_locked())
+            if self._pending_source is not None or self._actual_source != self.SOURCE_MINIAPP:
+                raise VehicleControlConflict("尚未收到 /control_source_state=miniapp 的实际确认，禁止发送运动指令")
+            if session["state"] != "active":
+                raise VehicleControlConflict("手动控制会话无效，禁止发送运动指令")
+            if linear == 0.0 and angular == 0.0:
+                was_moving = bool(self._target_linear or self._target_angular)
+                self._clear_motion_locked()
+                self._manual_stop_latched = True
+                publish_stop = was_moving
+            else:
+                self._target_command = None
+                self._target_vector = (linear, angular)
+                self._apply_target_vector_locked()
+                self._manual_stop_latched = False
+            session["last_input_at"] = now
+            session["last_heartbeat_at"] = now
+            snapshot = self._snapshot_locked()
+        if publish_stop:
+            self._publish_stop_now()
+        return snapshot
 
     def set_speed(self, session_id: str, linear_speed: object, angular_speed: object) -> dict[str, Any]:
         """更新当前会话的速度档位，车端始终执行范围校验。"""
@@ -288,6 +332,8 @@ class VehicleControlController:
             self._angular_speed = angular
             if self._target_command:
                 self._apply_target_command_locked()
+            elif self._target_vector:
+                self._apply_target_vector_locked()
             session["last_heartbeat_at"] = now
             return self._snapshot_locked()
 
@@ -298,6 +344,7 @@ class VehicleControlController:
             self._target_linear = 0.0
             self._target_angular = 0.0
             self._target_command = None
+            self._target_vector = None
             self._manual_stop_latched = True
             if self._session:
                 self._session["last_input_at"] = self._clock()
@@ -374,6 +421,7 @@ class VehicleControlController:
             self._target_linear = 0.0
             self._target_angular = 0.0
             self._target_command = None
+            self._target_vector = None
             self._manual_stop_latched = True
             session["state"] = "exiting"
             session["last_heartbeat_at"] = now
@@ -401,6 +449,8 @@ class VehicleControlController:
             should_release = self._actual_source == self.SOURCE_MINIAPP or self._session is not None
             self._target_linear = 0.0
             self._target_angular = 0.0
+            self._target_command = None
+            self._target_vector = None
             self._manual_stop_latched = True
         if running and should_release:
             self._publish_stop_now()
@@ -716,12 +766,18 @@ class VehicleControlController:
         }.get(self._target_command)
         self._target_linear, self._target_angular = direction or (0.0, 0.0)
 
+    def _apply_target_vector_locked(self) -> None:
+        linear_ratio, angular_ratio = self._target_vector or (0.0, 0.0)
+        self._target_linear = linear_ratio * self._linear_speed
+        self._target_angular = angular_ratio * self._angular_speed
+
     def _clear_motion_locked(self) -> None:
         if self._target_linear or self._target_angular:
             self._stop_pending = True
         self._target_linear = 0.0
         self._target_angular = 0.0
         self._target_command = None
+        self._target_vector = None
 
     def _validated_speed(self, value: object, label: str) -> float:
         if isinstance(value, bool):
@@ -734,6 +790,18 @@ class VehicleControlController:
             raise VehicleControlError(
                 f"{label}必须在 {self.config.min_speed:.1f}–{self.config.max_speed:.1f} 之间"
             )
+        return numeric
+
+    @staticmethod
+    def _validated_ratio(value: object, label: str) -> float:
+        if isinstance(value, bool):
+            raise VehicleControlError(f"{label}必须是数值")
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError) as exc:
+            raise VehicleControlError(f"{label}必须是数值") from exc
+        if not math.isfinite(numeric) or not -1.0 <= numeric <= 1.0:
+            raise VehicleControlError(f"{label}必须在 -1.0–1.0 之间")
         return numeric
 
     def _require_session_locked(self, session_id: str, *, allow_inactive: bool) -> dict[str, Any]:

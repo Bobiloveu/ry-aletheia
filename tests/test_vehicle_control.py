@@ -344,6 +344,27 @@ class VehicleControlTests(unittest.TestCase):
         controller.release_emergency_stop.assert_called_once_with()
         self.assertEqual(handler._json.call_args.args[1], HTTPStatus.ACCEPTED)
 
+    def test_vector_action_forwards_session_and_ratios(self):
+        """HTTP 层只能把 Mobile 向量转交给受控 Controller，不接触 ROS。"""
+        handler = _vehicle_control_handler(
+            "/api/vehicle-control/vector",
+            {
+                "session_id": "manual-session",
+                "linear_ratio": 0.8,
+                "angular_ratio": -0.6,
+            },
+        )
+        controller = Mock()
+        controller.set_vector.return_value = {
+            "transition": None,
+            "emergency_stop": {"state": "normal", "release": "idle"},
+        }
+        with patch.object(web_console, "VEHICLE_CONTROL", controller):
+            handler._vehicle_control_action(handler.path)
+
+        controller.set_vector.assert_called_once_with("manual-session", 0.8, -0.6)
+        self.assertEqual(handler._json.call_args.args[1], HTTPStatus.OK)
+
     def test_input_watchdog_latches_stop_without_browser_input(self):
         self._confirm_emergency_normal()
         self.control._on_source_state(SimpleNamespace(data="navigation"))
@@ -403,6 +424,45 @@ class VehicleControlTests(unittest.TestCase):
         self.assertEqual(self.control._velocity_publisher.messages[-1].linear.x, 0.8)
         with self.assertRaises(VehicleControlError):
             self.control.set_speed(session_id, 1.1, 0.5)
+
+    def test_vector_combines_forward_and_right_turn_and_tracks_speed_changes(self):
+        """右上输入必须同时输出正线速度与负角速度，而非覆盖为单一方向。"""
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        session_id = self.control.begin_manual_session()["session"]["id"]
+        self.control.set_speed(session_id, 0.8, 0.6)
+
+        self.control.set_vector(session_id, 0.5, -0.75)
+        self.control._on_publish_tick()
+        twist = self.control._velocity_publisher.messages[-1]
+        self.assertAlmostEqual(twist.linear.x, 0.4)
+        self.assertAlmostEqual(twist.angular.z, -0.45)
+
+        self.control.set_speed(session_id, 0.4, 0.8)
+        self.control._on_publish_tick()
+        twist = self.control._velocity_publisher.messages[-1]
+        self.assertAlmostEqual(twist.linear.x, 0.2)
+        self.assertAlmostEqual(twist.angular.z, -0.6)
+
+    def test_vector_zero_stops_and_rejects_invalid_or_unsafe_input(self):
+        """中心、越界与失去急停确认均不能遗留运动向量。"""
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        session_id = self.control.begin_manual_session()["session"]["id"]
+        self.control.set_vector(session_id, 1.0, 1.0)
+
+        self.control.set_vector(session_id, 0.0, 0.0)
+        stop = self.control._velocity_publisher.messages[-1]
+        self.assertEqual((stop.linear.x, stop.angular.z, stop.linear.z), (0.0, 0.0, 1200.0))
+
+        with self.assertRaises(VehicleControlError):
+            self.control.set_vector(session_id, float("nan"), 0.0)
+        with self.assertRaises(VehicleControlError):
+            self.control.set_vector(session_id, 1.01, 0.0)
+
+        self.control._on_emergency_stop(SimpleNamespace(data=True))
+        with self.assertRaises(VehicleControlConflict):
+            self.control.set_vector(session_id, 0.5, 0.5)
 
     def test_exit_stops_before_requesting_navigation_and_waits_for_state(self):
         self._confirm_emergency_normal()

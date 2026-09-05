@@ -6,9 +6,9 @@
 
 Aletheia Mobile 是面向移动机器人的专业 HMI（Mobile Robot HMI / Test & Diagnostic Console）。当前能力是：机器人状态确认、实时地图/位姿/点云/视频观测、自动化测试与用例、报告、诊断、运行配置和维护入口。
 
-它不是通用 ROS 客户端，也不是控制台命令终端。观测链路只读；未来的 Robot Operation / Command 若被立项，必须使用独立的 API、权限、审计、风险确认和导航入口。
+它不是通用 ROS 客户端，也不是控制台命令终端。观测链路只读；当前唯一的操作例外是“工具 / 手动控制”对既有 `/api/vehicle-control/*` 的受控消费：它由 Repository → Riverpod Controller → 页面实现，必须持有后端创建的会话 ID，并以车端 `manual_ready`、实际控制源和急停状态为最终解锁条件。未来新增 Robot Operation / Command 仍必须使用独立的 API、权限、审计、风险确认和导航入口。
 
-明确不在移动端实现：离线升级 ZIP、RViz 开关、任意文件系统访问、任意 shell/ROS 命令、底盘与导航直接控制。
+明确不在移动端实现：离线升级 ZIP、RViz 开关、任意文件系统访问、任意 shell/ROS 命令、底盘与导航直接控制。现有手动控制不等于直接底盘控制：App 不发布 ROS/Twist，不选择 Topic，不发送地点、导航或对角向量命令。
 
 ## 2. 运行时总览
 
@@ -162,6 +162,7 @@ Pose 与 PointCloud 从车端独立二进制 WebSocket 获取（当前端口 `87
 | `tool_logs` | 诊断日志与受控下载 | 不提供任意路径访问 |
 | `runtime_settings` | 车端既有运行配置 | 复用既有 API 与确认语义 |
 | `scenario_setup` | 受控场景预览/选择/应用/恢复 | 只读受控目录文本、摘要和大小；不任意读写 |
+| `manual_control` | 受控手动会话、连续前后 + 转向输入、速度/底盘参数与急停状态 | 仅调用 vehicle-control HTTP API；中心/松手 STOP，后台/离页 STOP → EXIT；不直接 ROS |
 | `system_maintenance` | 控制台服务与安全停止 | 停止必须确认 |
 | `app_settings` | 本机语言、主题、版本、App 更新、反馈 | 不依赖机器人且不修改车端；反馈开发期无上传 |
 

@@ -39,7 +39,7 @@ void main() {
 
       expect(
         tester.widget<AppBar>(find.byType(AppBar)).backgroundColor,
-        const Color(0xFFF2F6F5),
+        const Color(0xFFF5F8FC),
       );
       expect(
         Theme.of(tester.element(find.byType(Scaffold).first)).brightness,

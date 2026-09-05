@@ -35,32 +35,32 @@ abstract final class AletheiaTheme {
     onError: Color(0xFF32110F),
   );
 
-  /// Daylight is a cool, low-glare field palette. It avoids pure white and
-  /// preserves a clear separation between canvas, working surfaces and input
-  /// controls in bright operational environments.
+  /// Daylight is a white-and-blue operations palette. Its restrained contrast
+  /// and cool blue actions give the phone surface a native Apple-like calm,
+  /// while semantic colours remain distinct from normal navigation chrome.
   static const _daylight = _AletheiaPalette(
-    canvas: Color(0xFFF2F6F5),
-    surface: Color(0xFFFCFEFD),
-    surfaceRaised: Color(0xFFE8EFED),
-    surfaceSunken: Color(0xFFE6EEEC),
-    surfaceMuted: Color(0xFFEDF3F1),
-    textPrimary: Color(0xFF16201F),
-    textSecondary: Color(0xFF41504E),
-    textTertiary: Color(0xFF667573),
-    border: Color(0xFFC5D1CE),
-    divider: Color(0xFFD9E3E0),
-    cyan: Color(0xFF216D65),
-    mint: Color(0xFF287243),
+    canvas: Color(0xFFF5F8FC),
+    surface: Color(0xFFFFFFFF),
+    surfaceRaised: Color(0xFFEDF3FA),
+    surfaceSunken: Color(0xFFE7EEF8),
+    surfaceMuted: Color(0xFFF0F5FB),
+    textPrimary: Color(0xFF172033),
+    textSecondary: Color(0xFF4E5C70),
+    textTertiary: Color(0xFF748298),
+    border: Color(0xFFCAD6E4),
+    divider: Color(0xFFDCE5EF),
+    cyan: Color(0xFF0A63C4),
+    mint: Color(0xFF137B68),
     warning: Color(0xFF8C5B08),
     danger: Color(0xFFB5423B),
     mapPointCloud: Color(0xFF087D93),
     mapVirtualWall: Color(0xFFB6433D),
     mapRobot: Color(0xFF9B650B),
-    mapRobotOutline: Color(0xFF16201F),
-    onPrimary: Color(0xFFF8FCFB),
-    onSecondary: Color(0xFFF8FCF9),
-    primaryContainer: Color(0xFFD3E8E3),
-    secondaryContainer: Color(0xFFD8EBD9),
+    mapRobotOutline: Color(0xFF172033),
+    onPrimary: Color(0xFFFFFFFF),
+    onSecondary: Color(0xFFFFFFFF),
+    primaryContainer: Color(0xFFD8E9FF),
+    secondaryContainer: Color(0xFFD8F0EA),
     errorContainer: Color(0xFFF5DDDA),
     onError: Color(0xFFFFF8F7),
   );

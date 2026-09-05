@@ -21,6 +21,7 @@ enum GallerySurface {
   observationMap,
   observationVideo,
   toolsHome,
+  manualControl,
   testRuns,
   testCases,
   logs,
@@ -372,6 +373,34 @@ const galleryScreenManifest = <GalleryScreenSpec>[
     trigger: '机器人已连接',
     surface: GallerySurface.toolsHome,
     screenshotPath: 'tools/connected.png',
+  ),
+  GalleryScreenSpec(
+    id: 'manual_control_ready',
+    module: GalleryModule.tools,
+    title: '手动控制',
+    route: '/tools/manual-control',
+    state: '已进入手动会话，连续方向摇杆、双速度与底盘参数已可用',
+    trigger: '连接机器人后确认进入手动控制',
+    surface: GallerySurface.manualControl,
+    screenshotPath: 'tools/manual-control-ready.png',
+    // The interactive direct-manipulation surface is covered by semantic
+    // widget tests and simulator review; it deliberately does not create a
+    // static golden that could conceal a gesture regression.
+    hasScreenshot: false,
+    appearance: GalleryAppearance.daylight,
+  ),
+  GalleryScreenSpec(
+    id: 'manual_control_emergency',
+    module: GalleryModule.tools,
+    title: '手动控制',
+    route: '/tools/manual-control',
+    state: '急停已触发，方向控制锁定',
+    trigger: '车端返回已触发的急停状态',
+    surface: GallerySurface.manualControl,
+    screenshotPath: 'tools/manual-control-emergency.png',
+    // The release affordance is interactive but must never contact a robot in
+    // the Gallery. Widget tests cover the production emergency surface.
+    hasScreenshot: false,
   ),
   GalleryScreenSpec(
     id: 'runtime_settings_ready',

@@ -304,9 +304,18 @@ class SettingsStore:
             if not candidate.is_absolute() or ".." in candidate.parts:
                 raise ValueError("机器人日志目录必须是安全的绝对路径")
             resolved = candidate.resolve(strict=False)
+            # Compare both the operator-entered path and its canonical path.
+            # macOS resolves /etc to /private/etc, while Linux commonly keeps
+            # /etc unchanged. Checking only the latter accidentally accepts
+            # the sensitive alias on macOS.
+            paths_to_check = (candidate, resolved)
+            forbidden_paths = tuple(
+                {path for root in ROBOT_LOG_FORBIDDEN_ROOTS for path in (root, root.resolve(strict=False))}
+            )
             if any(
-                resolved == forbidden or (forbidden != Path("/") and forbidden in resolved.parents)
-                for forbidden in ROBOT_LOG_FORBIDDEN_ROOTS
+                path == forbidden or (forbidden != Path("/") and forbidden in path.parents)
+                for path in paths_to_check
+                for forbidden in forbidden_paths
             ):
                 raise ValueError("机器人日志目录不能是系统敏感目录")
             if ".ssh" in resolved.parts:
