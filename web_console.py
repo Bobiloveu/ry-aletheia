@@ -645,6 +645,26 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
+        if path.startswith("/api/deployments/") and path.endswith("/physical-elevators"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/physical-elevators").strip("/"))
+                elevator = DEPLOYMENTS.add_physical_elevator(project_id, data)
+                self._json({"physical_elevator": elevator, "project": DEPLOYMENTS.get(project_id)}, HTTPStatus.CREATED)
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/physical-elevators/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "physical-elevators": raise DeploymentError("物理电梯路径无效")
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(parts[3])
+                elevator = DEPLOYMENTS.update_physical_elevator(project_id, unquote(parts[5]), data)
+                self._json({"physical_elevator": elevator, "project": DEPLOYMENTS.get(project_id)})
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         if path.startswith("/api/deployments/") and "/components/" in path:
             try:
                 parts = path.split("/")
@@ -1292,6 +1312,16 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 parts = path.split("/")
                 if len(parts) != 6 or parts[4] != "components": raise DeploymentError("组件路径无效")
                 DEPLOYMENTS.delete_component(unquote(parts[3]), unquote(parts[5]))
+                self._json({"deleted": True})
+            except DeploymentError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/physical-elevators/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "physical-elevators":
+                    raise DeploymentError("物理电梯路径无效")
+                DEPLOYMENTS.delete_physical_elevator(unquote(parts[3]), unquote(parts[5]))
                 self._json({"deleted": True})
             except DeploymentError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)

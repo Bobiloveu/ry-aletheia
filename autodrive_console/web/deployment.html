@@ -46,7 +46,9 @@
         </div>
       </header>
       <section class="page-grid">
-        <article class="panel span-5">
+        <section class="deployment-left-rail" aria-label="部署项目与地图">
+          <section class="deployment-setup-rail" aria-label="部署项目启动">
+        <article class="panel span-5 deployment-setup-project">
           <div id="newProjectForm">
             <div class="panel-title">
               <div>
@@ -75,7 +77,7 @@
           </section>
           <p id="projectMessage" class="inline-message"></p>
         </article>
-        <article class="panel span-7">
+        <article class="panel span-7 deployment-setup-flow">
           <h2>部署流程</h2>
           <ol class="deployment-flow" aria-label="部署建图流程">
             <li class="current"><b>1</b><span>创建项目并选择场景模型</span></li>
@@ -92,7 +94,7 @@
           </div>
           <p id="sceneModelMessage" class="inline-message">先创建或打开一个部署项目。</p>
         </article>
-        <article class="panel">
+        <article class="panel deployment-setup-projects">
           <div class="panel-title">
             <div>
               <p class="eyebrow">PROJECTS</p>
@@ -103,7 +105,7 @@
             <div class="page-empty">正在读取项目…</div>
           </div>
         </article>
-        <article class="panel">
+        <article class="panel deployment-map-import">
           <div class="panel-title">
             <div>
               <p class="eyebrow">MAP IMPORT</p>
@@ -151,6 +153,18 @@
           </div>
           <p id="mappingMessage" class="inline-message">创建项目后可选择“车端建图”。</p>
         </article>
+        <article class="panel span-12 map-assets-panel">
+          <div class="panel-title">
+            <div>
+              <h2 id="selectedProjectTitle">项目地图</h2>
+            </div>
+          </div>
+          <div id="mapList" class="deployment-map-list">
+            <div class="page-empty">项目地图将在这里显示。</div>
+          </div>
+        </article>
+          </section>
+        </section>
         <article class="panel span-12">
           <div class="panel-title">
             <div>
@@ -377,11 +391,51 @@
                 </button>
               </div>
             </section>
+            <section
+              id="elevatorLandingDialog"
+              class="elevator-landing-dialog deployment-hidden"
+              aria-label="放置电梯落点"
+            >
+              <header>
+                <div>
+                  <strong id="elevatorLandingDialogTitle">放置电梯落点</strong>
+                  <small id="elevatorLandingDialogDescription">共享硬件信息只维护一次；本层只确认门向与候梯距离。</small>
+                </div>
+                <button
+                  id="cancelElevatorLanding"
+                  class="popover-close"
+                  type="button"
+                  aria-label="取消放置电梯"
+                >
+                  ×
+                </button>
+              </header>
+              <div class="elevator-landing-mode" role="radiogroup" aria-label="电梯关联方式">
+                <label><input type="radio" name="elevatorLandingMode" value="existing" checked />关联已有电梯</label>
+                <label><input type="radio" name="elevatorLandingMode" value="new" />新建物理电梯</label>
+              </div>
+              <div id="existingElevatorLandingFields" class="elevator-landing-fields">
+                <label>选择物理电梯<select id="existingPhysicalElevator"></select></label>
+                <p id="existingPhysicalElevatorSummary" class="elevator-shared-summary"></p>
+              </div>
+              <div id="newElevatorLandingFields" class="elevator-landing-fields deployment-hidden">
+                <label>电梯编号<input id="newPhysicalElevatorNumber" type="text" placeholder="例如：10014" /></label>
+                <label>梯控协议<select id="newPhysicalElevatorProtocol"></select></label>
+                <label>最低服务楼层<input id="newPhysicalElevatorMinFloor" type="number" step="1" value="1" /></label>
+                <label>最高服务楼层<input id="newPhysicalElevatorMaxFloor" type="number" step="1" value="1" /></label>
+              </div>
+              <p id="elevatorLandingMessage" class="inline-message">选择要关联的物理电梯。</p>
+              <div class="component-actions">
+                <button id="confirmElevatorLanding" class="page-top-action" type="button">确认放置</button>
+                <button id="cancelElevatorLandingSecondary" class="compact-action" type="button">取消</button>
+              </div>
+            </section>
           </div>
           <p id="mapToolHint" class="page-muted">
             只需标记地图上的真实组件并填写属性。子任务顺序、跨图衔接点与路线由工具在实验预览中自动推导。
           </p>
         </article>
+        <section class="deployment-inspector-rail" aria-label="部署属性与检查">
         <article class="panel span-6 topology-panel">
           <div class="panel-title">
             <div>
@@ -480,16 +534,7 @@
             <p id="protocolMessage" class="inline-message"></p>
           </section>
         </article>
-        <article class="panel span-12 map-assets-panel">
-          <div class="panel-title">
-            <div>
-              <h2 id="selectedProjectTitle">项目地图</h2>
-            </div>
-          </div>
-          <div id="mapList" class="deployment-map-list">
-            <div class="page-empty">项目地图将在这里显示。</div>
-          </div>
-        </article>
+        </section>
       </section>
     </main>
     <script src="/deployment.js"></script>

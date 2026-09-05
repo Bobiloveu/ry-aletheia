@@ -9,6 +9,27 @@
 
 Backend 校验具有权威性：客户端展示并提交用户意图，但不得直接写入部署文件或机器人配置。地图图像、元数据、虚拟墙和拓扑编辑都保留项目/地图所有权。
 
+## 项目级物理电梯
+
+**Status: Existing（已实现，实验任务编译输入）**
+**消费者：** 当前仅 Web Console；Mobile 未实现且不得调用这些路由。
+
+一个 `SiteProject` 以 `physical_elevators` 保存真实电梯的唯一事实。每个实体在同一项目内的
+`elevator_id` 必须唯一，并保存 `elevator_protocol`、`min_floor` 和 `max_floor`。地图上的
+`elevator` 组件只保存 `physical_elevator_id`、门向（`yaw`）、尺寸和 `wait_distance_m`；因此同一
+实体可在大厅图和目标层图各有一个落点，而每张地图仍可独立标记电梯门方向。
+
+| Method | Route | Request | Response |
+| --- | --- | --- | --- |
+| `POST` | `/api/deployments/{project_id}/physical-elevators` | `{ "elevator_id": "10014", "elevator_protocol": "bluetooth", "min_floor": 1, "max_floor": 15 }` | `{ "physical_elevator": { … }, "project": { … } }`，`201 Created` |
+| `POST` | `/api/deployments/{project_id}/physical-elevators/{physical_elevator_id}` | 同上 | `{ "physical_elevator": { … }, "project": { … } }` |
+| `DELETE` | `/api/deployments/{project_id}/physical-elevators/{physical_elevator_id}` | 无 | `{ "deleted": true }` |
+
+后端拒绝重复编号、未知关联、无效服务楼层及正在被地图落点引用的实体删除。旧项目读取时会将
+旧组件重复的 `elevator_id` 自动迁移成同一实体；若旧协议或服务范围彼此冲突，实体会带有
+`migration_conflict`，实验编译明确拒绝，不能猜测采用其中任一配置。以上路由只修改项目快照，
+不写机器人任务、行为树、定位目录，也不调用 ROS 或 Supervisor。
+
 ## Planned（规划中）
 
 新的部署数据格式在成为跨客户端输入前，必须在 `shared/schemas` 中说明。Planned 字段在 Backend 暴露并完成校验前，始终保持 Planned 状态。

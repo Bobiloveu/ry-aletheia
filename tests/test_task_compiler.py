@@ -36,11 +36,20 @@ def two_map_project(tmp_path: Path) -> dict:
             {"map_asset_id": "lobby-map", "role": "lobby", "building": "1", "unit": "1", "floor": 1},
             {"map_asset_id": "target-map", "role": "typical_floor", "building": "1", "unit": "1", "floor": 15},
         ],
+        "physical_elevators": [
+            {
+                "id": "physical-elevator-a",
+                "elevator_id": "10014",
+                "elevator_protocol": "bluetooth",
+                "min_floor": 1,
+                "max_floor": 15,
+            }
+        ],
         "task_compiler": {"identity": {"community": "高科一号"}},
         "components": [
             {"id": "start", "map_asset_id": "lobby-map", "kind": "start", "x": 0.0, "y": -2.0, "yaw": 0.0, "attributes": {}},
-            {"id": "lobby-elevator", "map_asset_id": "lobby-map", "kind": "elevator", "x": 0.0, "y": 0.0, "yaw": 0.0, "attributes": {"elevator_id": "A", "width_m": 2.0, "height_m": 2.0, "wait_distance_m": 1.5, "map_floor": 1, "physical_floor": 2}},
-            {"id": "target-elevator", "map_asset_id": "target-map", "kind": "elevator", "x": 2.0, "y": 0.0, "yaw": pi, "attributes": {"elevator_id": "A", "width_m": 2.0, "height_m": 2.0, "wait_distance_m": 1.5, "map_floor": 15, "physical_floor": 16}},
+            {"id": "lobby-elevator", "map_asset_id": "lobby-map", "kind": "elevator", "x": 0.0, "y": 0.0, "yaw": 0.0, "attributes": {"physical_elevator_id": "physical-elevator-a", "width_m": 2.0, "height_m": 2.0, "wait_distance_m": 1.5}},
+            {"id": "target-elevator", "map_asset_id": "target-map", "kind": "elevator", "x": 2.0, "y": 0.0, "yaw": pi, "attributes": {"physical_elevator_id": "physical-elevator-a", "width_m": 2.0, "height_m": 2.0, "wait_distance_m": 1.5}},
             {"id": "target", "map_asset_id": "target-map", "kind": "target", "x": 5.0, "y": 3.0, "yaw": 0.25, "attributes": {"door": "1509"}},
         ],
         "_test_map_root": str(map_root),
@@ -78,7 +87,7 @@ def test_door_normals_cover_all_yaw_quadrants(two_map_project, yaw, expected):
 
 def test_compiler_rejects_missing_elevator_pair(two_map_project):
     two_map_project["components"] = two_map_project["components"][:-2] + two_map_project["components"][-1:]
-    with pytest.raises(CompilationError, match="同一电梯"):
+    with pytest.raises(CompilationError, match="同一物理电梯"):
         _compile(two_map_project)
 
 
@@ -136,10 +145,47 @@ def test_compiler_rejects_duplicate_elevators(two_map_project):
         _compile(two_map_project)
 
 
-def test_compiler_rejects_elevator_floor_that_disagrees_with_map_instance(two_map_project):
-    two_map_project["components"][2]["attributes"]["map_floor"] = 14
-    with pytest.raises(CompilationError, match="楼层"):
+def test_compiler_rejects_elevator_outside_the_shared_service_range(two_map_project):
+    two_map_project["physical_elevators"][0]["max_floor"] = 14
+    with pytest.raises(CompilationError, match="服务楼层"):
         _compile(two_map_project)
+
+
+def test_compiler_rejects_two_landings_that_reference_different_physical_elevators(two_map_project):
+    two_map_project["physical_elevators"].append(
+        {
+            "id": "physical-elevator-b",
+            "elevator_id": "10015",
+            "elevator_protocol": "bluetooth",
+            "min_floor": 1,
+            "max_floor": 15,
+        }
+    )
+    two_map_project["components"][2]["attributes"]["physical_elevator_id"] = "physical-elevator-b"
+    with pytest.raises(CompilationError, match="同一物理电梯"):
+        _compile(two_map_project)
+
+
+def test_compiler_rejects_a_shared_elevator_with_legacy_migration_conflict(two_map_project):
+    two_map_project["physical_elevators"][0]["migration_conflict"] = "梯控协议不一致"
+
+    with pytest.raises(CompilationError, match="旧数据冲突"):
+        _compile(two_map_project)
+
+
+def test_compiler_keeps_legacy_elevator_id_pairing_for_unmigrated_input(two_map_project):
+    two_map_project.pop("physical_elevators")
+    for component, floor in ((two_map_project["components"][1], 1), (two_map_project["components"][2], 15)):
+        component["attributes"] = {
+            "elevator_id": "10014",
+            "width_m": 2.0,
+            "height_m": 2.0,
+            "wait_distance_m": 1.5,
+            "map_floor": floor,
+            "physical_floor": floor + 1,
+        }
+
+    assert _compile(two_map_project).task_json["subtasks"][0]["subtask_name"] == "elevator_hall"
 
 
 def test_manifest_is_experimental_and_fingerprints_artifacts(two_map_project):
@@ -180,8 +226,9 @@ def test_gk1_store_preview_and_download_have_the_approved_indoor_structure(
     store.add_map_instance(project["id"], {"map_id": lobby["id"], "role": "lobby", "building": "1", "unit": "1", "floor": 1})
     store.add_map_instance(project["id"], {"map_id": target["id"], "role": "typical_floor", "building": "1", "unit": "1", "floor": 15})
     store.add_component(project["id"], {"map_id": lobby["id"], "kind": "start", "x": -1.0, "y": -1.0})
-    store.add_component(project["id"], {"map_id": lobby["id"], "kind": "elevator", "x": 0.0, "y": 0.0, "attributes": {"elevator_id": "A", "min_floor": 1, "max_floor": 15, "map_floor": 1}})
-    store.add_component(project["id"], {"map_id": target["id"], "kind": "elevator", "x": 0.0, "y": 1.0, "yaw": pi, "attributes": {"elevator_id": "A", "min_floor": 1, "max_floor": 15, "map_floor": 15}})
+    elevator = store.add_physical_elevator(project["id"], {"elevator_id": "A", "elevator_protocol": "bluetooth", "min_floor": 1, "max_floor": 15})
+    store.add_component(project["id"], {"map_id": lobby["id"], "kind": "elevator", "x": 0.0, "y": 0.0, "attributes": {"physical_elevator_id": elevator["id"]}})
+    store.add_component(project["id"], {"map_id": target["id"], "kind": "elevator", "x": 0.0, "y": 1.0, "yaw": pi, "attributes": {"physical_elevator_id": elevator["id"]}})
     target_component = store.add_component(project["id"], {"map_id": target["id"], "kind": "target", "x": 1.0, "y": 1.0})
     store.update_component(project["id"], target_component["id"], {"attributes": {"door": "1509"}})
     store.update_task_compiler_config(project["id"], {"community": "高科一号"})

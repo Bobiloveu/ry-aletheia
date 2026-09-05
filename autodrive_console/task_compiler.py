@@ -88,9 +88,16 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
     start = _one_component(components, lobby_asset["id"], "start", "大厅起点")
     target = _one_component(components, target_asset["id"], "target", "目标点")
     door = _door(target)
-    lobby_elevator, target_elevator = _elevator_pair(components, lobby_asset["id"], target_asset["id"])
-    lobby_physical_floor = _physical_floor(lobby_elevator, lobby_instance)
-    target_physical_floor = _physical_floor(target_elevator, target_instance)
+    if "physical_elevators" in project:
+        lobby_elevator, target_elevator, physical_elevator = _shared_elevator_pair(
+            project, components, lobby_asset["id"], target_asset["id"]
+        )
+        lobby_physical_floor = _shared_physical_floor(physical_elevator, lobby_instance)
+        target_physical_floor = _shared_physical_floor(physical_elevator, target_instance)
+    else:
+        lobby_elevator, target_elevator = _elevator_pair(components, lobby_asset["id"], target_asset["id"])
+        lobby_physical_floor = _physical_floor(lobby_elevator, lobby_instance)
+        target_physical_floor = _physical_floor(target_elevator, target_instance)
 
     _validate_point(lobby_asset, start, "起点")
     _validate_point(target_asset, target, "目标点")
@@ -311,6 +318,40 @@ def _elevator_pair(components: list[dict[str, Any]], lobby_id: str, target_id: s
     return lobby[0], target[0]
 
 
+def _shared_elevator_pair(
+    project: dict[str, Any], components: list[dict[str, Any]], lobby_id: str, target_id: str
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Resolve two map-local landings to their one project-level lift."""
+    raw = project.get("physical_elevators")
+    if not isinstance(raw, list):
+        raise CompilationError("物理电梯数据无效")
+    elevators = [item for item in components if item.get("kind") == "elevator"]
+    lobby = [item for item in elevators if item.get("map_asset_id") == lobby_id]
+    target = [item for item in elevators if item.get("map_asset_id") == target_id]
+    if len(elevators) != 2 or len(lobby) != 1 or len(target) != 1:
+        raise CompilationError("第一期必须恰有两个同一物理电梯落点，且大厅和目标层各一个")
+    landing_ids: list[str] = []
+    for landing in (lobby[0], target[0]):
+        attributes = landing.get("attributes")
+        identifier = str(attributes.get("physical_elevator_id") or "").strip() if isinstance(attributes, dict) else ""
+        if not identifier:
+            raise CompilationError("电梯落点必须关联物理电梯")
+        landing_ids.append(identifier)
+    if landing_ids[0] != landing_ids[1]:
+        raise CompilationError("大厅和目标层必须关联同一物理电梯")
+    matches = [item for item in raw if isinstance(item, dict) and item.get("id") == landing_ids[0]]
+    if len(matches) != 1:
+        raise CompilationError("电梯落点关联的物理电梯不存在")
+    physical = matches[0]
+    if isinstance(physical.get("migration_conflict"), str) and physical["migration_conflict"].strip():
+        raise CompilationError(f"物理电梯旧数据冲突：{physical['migration_conflict']}")
+    elevator_id = " ".join(str(physical.get("elevator_id") or "").split())
+    protocol = " ".join(str(physical.get("elevator_protocol") or "").split())
+    if not elevator_id or not protocol:
+        raise CompilationError("物理电梯缺少编号或梯控协议")
+    return lobby[0], target[0], physical
+
+
 def _number(value: Any, label: str) -> float:
     try:
         number = float(value)
@@ -366,6 +407,20 @@ def _physical_floor(elevator: dict[str, Any], instance: dict[str, Any]) -> int:
     if map_floor != logical_floor or floor != expected_physical:
         raise CompilationError("电梯楼层必须与所属地图实例一致")
     return floor
+
+
+def _shared_physical_floor(physical_elevator: dict[str, Any], instance: dict[str, Any]) -> int:
+    try:
+        logical_floor = int(instance.get("floor"))
+        minimum = int(physical_elevator.get("min_floor"))
+        maximum = int(physical_elevator.get("max_floor"))
+    except (TypeError, ValueError) as exc:
+        raise CompilationError("物理电梯或地图实例缺少有效楼层") from exc
+    if not -20 <= minimum <= maximum <= 120 or not -20 <= logical_floor <= 120:
+        raise CompilationError("电梯服务楼层范围无效")
+    if not minimum <= logical_floor <= maximum:
+        raise CompilationError("当前地图楼层不在物理电梯服务楼层范围内")
+    return logical_floor + 1
 
 
 def _pose(point: dict[str, float]) -> dict[str, dict[str, float]]:
@@ -459,7 +514,7 @@ def _render_localization(template: str, map_directory: Path) -> str:
 
 
 def _input_hash(project: dict[str, Any], value: CompilationInput, derived: dict[str, dict[str, float]]) -> str:
-    payload = {"profile": PROFILE, "input": value.__dict__, "scene_model": project.get("scene_model"), "components": project.get("components"), "map_assets": project.get("map_assets"), "map_instances": project.get("map_instances"), "map_stage_assignments": project.get("map_stage_assignments"), "derived": derived}
+    payload = {"profile": PROFILE, "input": value.__dict__, "scene_model": project.get("scene_model"), "components": project.get("components"), "physical_elevators": project.get("physical_elevators"), "map_assets": project.get("map_assets"), "map_instances": project.get("map_instances"), "map_stage_assignments": project.get("map_stage_assignments"), "derived": derived}
     return _sha(_json_bytes(payload))
 
 

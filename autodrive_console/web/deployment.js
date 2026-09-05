@@ -26,6 +26,7 @@ let transitionDraft = null;
 let routeDraft = [];
 let taskCompilerPreview = null;
 let taskCompilerProjectId = null;
+let elevatorLandingDraft = null;
 const mapView = { scale: 40, x: 0, y: 0 };
 const canvas = $("mapCanvas");
 const context = canvas.getContext("2d");
@@ -81,41 +82,6 @@ const COMPONENT_SPECS = {
   elevator: {
     name: "电梯",
     fields: [
-      {
-        key: "elevator_id",
-        label: "电梯编号",
-        type: "text",
-        placeholder: "例如：E-01",
-        default: "",
-      },
-      {
-        key: "elevator_protocol",
-        label: "梯控协议",
-        type: "select",
-        protocolCategory: "elevator_protocols",
-        default: "bluetooth",
-      },
-      {
-        key: "min_floor",
-        label: "最低逻辑楼层",
-        type: "number",
-        step: "1",
-        default: 1,
-      },
-      {
-        key: "max_floor",
-        label: "最高逻辑楼层",
-        type: "number",
-        step: "1",
-        default: 1,
-      },
-      {
-        key: "map_floor",
-        label: "当前地图所在楼层",
-        type: "number",
-        step: "1",
-        default: 1,
-      },
       {
         key: "wait_distance_m",
         label: "候梯距离（m）",
@@ -237,6 +203,22 @@ const protocolOptions = (category) => {
         item.label,
       ]);
 };
+const physicalElevators = () =>
+  Array.isArray(selectedProject?.physical_elevators)
+    ? selectedProject.physical_elevators
+    : [];
+const physicalElevatorFor = (component) =>
+  physicalElevators().find(
+    (item) => item.id === component?.attributes?.physical_elevator_id,
+  );
+const protocolTitle = (protocol) =>
+  protocolOptions("elevator_protocols").find(([id]) => id === protocol)?.[1] ||
+  protocol ||
+  "未配置";
+const mapInstanceFor = (mapId) =>
+  (selectedProject?.map_instances || []).find(
+    (item) => item.map_asset_id === mapId,
+  );
 async function request(url, options) {
   const response = await fetch(url, options);
   const data = await response.json().catch(() => ({}));
@@ -905,6 +887,20 @@ function componentLocalPoint(item, event) {
     y: Math.sin(yaw) * dx + Math.cos(yaw) * dy,
   };
 }
+function drawElevatorDoorMarker(width, height) {
+  const markerSize = Math.max(3, Math.min(8, Math.min(width, height) * 0.12));
+  const top = -height / 2 + markerSize * 0.45;
+  context.save();
+  context.shadowColor = "transparent";
+  context.fillStyle = "#ffffff";
+  context.beginPath();
+  context.moveTo(0, top - markerSize * 0.7);
+  context.lineTo(-markerSize * 0.7, top + markerSize * 0.45);
+  context.lineTo(markerSize * 0.7, top + markerSize * 0.45);
+  context.closePath();
+  context.fill();
+  context.restore();
+}
 function drawComponentSymbol(item, px, py) {
   const { width, height } = componentDimensions(item);
   const size = Math.max(width, height);
@@ -959,6 +955,7 @@ function drawComponentSymbol(item, px, py) {
   } else if (item.kind === "elevator") {
     sticker();
     context.strokeStyle = "#e9f1ff";
+    drawElevatorDoorMarker(width, height);
     line(0, -height * 0.37, 0, height * 0.37);
     line(-width * 0.25, -height * 0.37, -width * 0.25, height * 0.37);
     line(width * 0.25, -height * 0.37, width * 0.25, height * 0.37);
@@ -1138,9 +1135,19 @@ function selectMap(map) {
   activeMap = map;
   document.body.classList.remove("deployment-no-map");
   mapImage = new Image();
-  mapImage.onload = fitMap;
+  mapImage.onload = () => {
+    $("mapCanvasEmpty").classList.add("hidden");
+    fitMap();
+  };
+  mapImage.onerror = () => {
+    mapImage = null;
+    const empty = $("mapCanvasEmpty");
+    empty.querySelector("b").textContent = "地图预览加载失败";
+    empty.querySelector("small").textContent = "请检查项目地图快照是否完整，然后重新打开该地图。";
+    empty.classList.remove("hidden");
+    drawMap();
+  };
   mapImage.src = `/api/deployments/${encodeURIComponent(selectedProject.id)}/maps/${encodeURIComponent(map.id)}/preview.png`;
-  $("mapCanvasEmpty").classList.add("hidden");
   $("instanceControls").classList.remove("deployment-hidden");
   $("instanceMessage").textContent = `当前地图：${map.label}`;
   renderProject(selectedProject);
@@ -1502,27 +1509,180 @@ function renderComponentAttributes(component) {
       return `<label>${esc(field.label)}<input data-component-attribute="${esc(field.key)}" type="${esc(field.type)}" value="${esc(value)}" ${field.placeholder ? `placeholder="${esc(field.placeholder)}"` : ""} ${field.min ? `min="${esc(field.min)}"` : ""} ${field.max ? `max="${esc(field.max)}"` : ""} ${field.step ? `step="${esc(field.step)}"` : ""} /></label>`;
     })
     .join("");
-  const physicalFloor =
+  const sharedElevator = physicalElevatorFor(component);
+  const mapInstance = mapInstanceFor(component.map_asset_id);
+  const sharedContext =
     component.kind === "elevator"
-      ? `<div class="physical-floor"><span>自动计算的物理楼层</span><strong id="physicalFloorValue">${Number(attributes.map_floor ?? 1) + 1}</strong><small>物理楼层 = 当前地图所在楼层 + 1（1F → 2）</small></div>`
+      ? sharedElevator
+        ? `<div class="physical-floor"><span>关联物理电梯 · ${esc(sharedElevator.elevator_id)}</span><strong>${esc(protocolTitle(sharedElevator.elevator_protocol))} · ${esc(sharedElevator.min_floor)}F 至 ${esc(sharedElevator.max_floor)}F</strong><small>当前地图 ${esc(mapInstance?.floor ?? "未绑定楼层")}F · 物理楼层 ${mapInstance?.floor === undefined ? "待地图拓扑确认" : Number(mapInstance.floor) + 1}。门向、尺寸和候梯距离仅属于当前地图。</small><button class="compact-action edit-shared-elevator" type="button" data-physical-elevator-id="${esc(sharedElevator.id)}">编辑共享电梯</button></div>`
+        : '<p class="component-no-options">此电梯落点缺少共享电梯关联；请删除后重新关联。</p>'
       : "";
   $("componentAttributeFields").innerHTML =
-    `${controls}${physicalFloor}` ||
+    `${sharedContext}${controls}` ||
     '<p class="component-no-options">此组件暂没有附加部署属性。</p>';
 }
-function refreshPhysicalFloor() {
-  const value = $("physicalFloorValue");
-  if (!value) return;
-  const mapFloor = Number(
-    document.querySelector('[data-component-attribute="map_floor"]')?.value ??
-      1,
-  );
-  value.textContent = String(mapFloor + 1);
-}
-$("componentAttributeFields").addEventListener("input", refreshPhysicalFloor);
 function closeComponentPopover() {
   $("componentPopover").classList.add("deployment-hidden");
 }
+function elevatorLandingMode() {
+  return document.querySelector('input[name="elevatorLandingMode"]:checked')?.value || "existing";
+}
+function renderElevatorLandingDialog() {
+  const elevators = physicalElevators();
+  const editing = Boolean(elevatorLandingDraft?.editing);
+  const editingElevator = editing
+    ? elevators.find((item) => item.id === elevatorLandingDraft.physicalElevatorId)
+    : null;
+  const existing = $("existingPhysicalElevator");
+  const previous = existing.value;
+  existing.innerHTML = elevators.length
+    ? elevators
+        .map(
+          (item) =>
+            `<option value="${esc(item.id)}">${esc(item.elevator_id)} · ${esc(protocolTitle(item.elevator_protocol))}</option>`,
+        )
+        .join("")
+    : '<option value="">当前项目还没有物理电梯</option>';
+  if (elevators.some((item) => item.id === previous)) existing.value = previous;
+  const protocol = $("newPhysicalElevatorProtocol");
+  const previousProtocol = protocol.value;
+  protocol.innerHTML = protocolOptions("elevator_protocols")
+    .map(([id, label]) => `<option value="${esc(id)}">${esc(label)}</option>`)
+    .join("");
+  if (protocolOptions("elevator_protocols").some(([id]) => id === previousProtocol)) {
+    protocol.value = previousProtocol;
+  }
+  if (editingElevator) {
+    $("newPhysicalElevatorNumber").value = editingElevator.elevator_id;
+    protocol.value = editingElevator.elevator_protocol;
+    $("newPhysicalElevatorMinFloor").value = editingElevator.min_floor;
+    $("newPhysicalElevatorMaxFloor").value = editingElevator.max_floor;
+  }
+  const existingRadio = document.querySelector('input[name="elevatorLandingMode"][value="existing"]');
+  existingRadio.disabled = !elevators.length;
+  if (!elevators.length) {
+    document.querySelector('input[name="elevatorLandingMode"][value="new"]').checked = true;
+  }
+  const linked = elevators.find((item) => item.id === existing.value);
+  $("existingPhysicalElevatorSummary").textContent = linked
+    ? `编号 ${linked.elevator_id} · ${protocolTitle(linked.elevator_protocol)} · 服务 ${linked.min_floor}F 至 ${linked.max_floor}F。各楼层分别确认门方向。`
+    : "请先新建一部物理电梯，再在其他楼层关联它。";
+  const isNew = editing || elevatorLandingMode() === "new";
+  $("elevatorLandingDialogTitle").textContent = editing ? "编辑共享电梯" : "放置电梯落点";
+  $("elevatorLandingDialogDescription").textContent = editing
+    ? "此处修改的是同一部实体电梯的编号、协议和服务范围；各地图的门向不会被改动。"
+    : "共享硬件信息只维护一次；本层只确认门向与候梯距离。";
+  $("elevatorLandingDialog").querySelector(".elevator-landing-mode").classList.toggle("deployment-hidden", editing);
+  $("existingElevatorLandingFields").classList.toggle("deployment-hidden", isNew);
+  $("newElevatorLandingFields").classList.toggle("deployment-hidden", !isNew);
+  $("confirmElevatorLanding").textContent = editing ? "保存共享配置" : "确认放置";
+  $("confirmElevatorLanding").disabled = !elevatorLandingDraft || (!isNew && !linked);
+  $("elevatorLandingMessage").textContent = isNew
+    ? editing
+      ? "修改后会同步应用到该物理电梯的所有地图落点。"
+      : "共享编号、协议和服务楼层只在这里填写一次。"
+    : "当前地图将保存独立的电梯门方向、尺寸和候梯距离。";
+}
+function openElevatorLandingDialog(point) {
+  elevatorLandingDraft = { point };
+  $("elevatorLandingDialog").classList.remove("deployment-hidden");
+  renderElevatorLandingDialog();
+  $(elevatorLandingMode() === "new" ? "newPhysicalElevatorNumber" : "existingPhysicalElevator").focus();
+}
+function closeElevatorLandingDialog() {
+  elevatorLandingDraft = null;
+  $("elevatorLandingDialog").classList.add("deployment-hidden");
+}
+function openPhysicalElevatorEditor(physicalElevatorId) {
+  if (!physicalElevators().some((item) => item.id === physicalElevatorId)) return;
+  elevatorLandingDraft = { editing: true, physicalElevatorId };
+  $("elevatorLandingDialog").classList.remove("deployment-hidden");
+  renderElevatorLandingDialog();
+  $("newPhysicalElevatorNumber").focus();
+}
+async function confirmElevatorLanding() {
+  if (!selectedProject || !activeMap || !elevatorLandingDraft) return;
+  const button = $("confirmElevatorLanding");
+  button.disabled = true;
+  try {
+    if (elevatorLandingDraft.editing) {
+      const data = await request(
+        `/api/deployments/${encodeURIComponent(selectedProject.id)}/physical-elevators/${encodeURIComponent(elevatorLandingDraft.physicalElevatorId)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            elevator_id: $("newPhysicalElevatorNumber").value,
+            elevator_protocol: $("newPhysicalElevatorProtocol").value,
+            min_floor: Number($("newPhysicalElevatorMinFloor").value),
+            max_floor: Number($("newPhysicalElevatorMaxFloor").value),
+          }),
+        },
+      );
+      renderProject(data.project);
+      const component = data.project.components.find((item) => item.id === selectedComponent?.id);
+      if (component) selectComponent(component);
+      closeElevatorLandingDialog();
+      note("mapToolHint", "共享电梯配置已更新；所有关联地图均使用新的协议和服务楼层。");
+      return;
+    }
+    let physicalElevatorId = $("existingPhysicalElevator").value;
+    if (elevatorLandingMode() === "new") {
+      const created = await request(
+        `/api/deployments/${encodeURIComponent(selectedProject.id)}/physical-elevators`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            elevator_id: $("newPhysicalElevatorNumber").value,
+            elevator_protocol: $("newPhysicalElevatorProtocol").value,
+            min_floor: Number($("newPhysicalElevatorMinFloor").value),
+            max_floor: Number($("newPhysicalElevatorMaxFloor").value),
+          }),
+        },
+      );
+      physicalElevatorId = created.physical_elevator.id;
+      renderProject(created.project);
+    }
+    const data = await request(
+      `/api/deployments/${encodeURIComponent(selectedProject.id)}/components`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          map_id: activeMap.id,
+          kind: "elevator",
+          x: elevatorLandingDraft.point.x,
+          y: elevatorLandingDraft.point.y,
+          yaw: 0,
+          attributes: { physical_elevator_id: physicalElevatorId },
+        }),
+      },
+    );
+    renderProject(data.project);
+    selectComponent(data.component);
+    closeElevatorLandingDialog();
+    await refreshTopology();
+    note("mapToolHint", "已放置电梯落点；可拖动、旋转门方向，或右键调整候梯距离。");
+  } catch (error) {
+    note("elevatorLandingMessage", error.message, true);
+  } finally {
+    if (!$("elevatorLandingDialog").classList.contains("deployment-hidden")) {
+      button.disabled = false;
+    }
+  }
+}
+document.querySelectorAll('input[name="elevatorLandingMode"]').forEach((input) => {
+  input.addEventListener("change", renderElevatorLandingDialog);
+});
+$("existingPhysicalElevator").addEventListener("change", renderElevatorLandingDialog);
+$("confirmElevatorLanding").addEventListener("click", confirmElevatorLanding);
+$("cancelElevatorLanding").addEventListener("click", closeElevatorLandingDialog);
+$("cancelElevatorLandingSecondary").addEventListener("click", closeElevatorLandingDialog);
+$("componentAttributeFields").addEventListener("click", (event) => {
+  const button = event.target.closest(".edit-shared-elevator");
+  if (button) openPhysicalElevatorEditor(button.dataset.physicalElevatorId);
+});
 function openComponentPopover(component, event) {
   selectComponent(component);
   const popover = $("componentPopover");
@@ -1862,6 +2022,10 @@ canvas.addEventListener("pointerdown", async (event) => {
     try {
       if (placementKind === "map_transition") {
         await placeMapTransitionPoint(point);
+        return;
+      }
+      if (placementKind === "elevator") {
+        openElevatorLandingDialog(point);
         return;
       }
       const data = await request(

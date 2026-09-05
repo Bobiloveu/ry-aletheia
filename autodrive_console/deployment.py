@@ -134,6 +134,117 @@ class DeploymentStore:
             "identity": {"community": community, "last_preview_input_sha256": input_hash},
         }
 
+    @classmethod
+    def _normalise_physical_elevator(
+        cls, source: object, templates: object, *, identifier: str | None = None
+    ) -> dict[str, Any]:
+        """Validate the project-owned facts of one real elevator.
+
+        Coordinates, door facing and the waiting distance deliberately do not
+        belong here: they describe one landing on one map, not the shared
+        physical lift.
+        """
+        if not isinstance(source, dict):
+            raise DeploymentError("物理电梯属性无效")
+        elevator_id = " ".join(str(source.get("elevator_id") or "").split())
+        if not elevator_id:
+            raise DeploymentError("电梯编号不能为空")
+        if len(elevator_id) > 64:
+            raise DeploymentError("电梯编号不能超过 64 个字符")
+        catalogue = cls._normalise_component_templates(templates)
+        protocol = " ".join(str(source.get("elevator_protocol") or "").split())
+        if not protocol:
+            protocol = catalogue["elevator_protocols"][0]["id"]
+        if protocol not in {item["id"] for item in catalogue["elevator_protocols"]}:
+            raise DeploymentError("电梯通信协议不在当前项目模板中")
+        try:
+            minimum = int(source.get("min_floor"))
+            maximum = int(source.get("max_floor"))
+        except (TypeError, ValueError) as exc:
+            raise DeploymentError("电梯服务楼层必须为整数") from exc
+        if not -20 <= minimum <= maximum <= 120:
+            raise DeploymentError("电梯最低层和最高层范围无效")
+        result = {
+            "id": identifier or f"physical-elevator-{uuid.uuid4().hex[:12]}",
+            "elevator_id": elevator_id,
+            "elevator_protocol": protocol,
+            "min_floor": minimum,
+            "max_floor": maximum,
+        }
+        conflict = source.get("migration_conflict")
+        if isinstance(conflict, str) and conflict.strip():
+            result["migration_conflict"] = " ".join(conflict.split())[:240]
+        return result
+
+    def _normalise_physical_elevators(self, document: dict[str, Any]) -> bool:
+        """Migrate repeated legacy lift facts into project-level entities.
+
+        Legacy component fields remain for backwards readability, but landing
+        geometry remains local and all new consumers use the stable reference.
+        """
+        templates = document.get("component_templates")
+        raw = document.get("physical_elevators")
+        migrated = not isinstance(raw, list)
+        entries = raw if isinstance(raw, list) else []
+        physical: list[dict[str, Any]] = []
+        by_id: dict[str, dict[str, Any]] = {}
+        by_number: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                migrated = True
+                continue
+            raw_id = str(entry.get("id") or "").strip()
+            if not raw_id or raw_id in by_id:
+                migrated = True
+                raw_id = f"physical-elevator-{uuid.uuid4().hex[:12]}"
+            normalised = self._normalise_physical_elevator(entry, templates, identifier=raw_id)
+            if normalised["elevator_id"] in by_number:
+                raise DeploymentError("物理电梯编号重复")
+            physical.append(normalised)
+            by_id[raw_id] = normalised
+            by_number[normalised["elevator_id"]] = normalised
+            if normalised != entry:
+                migrated = True
+
+        for component in document.get("components", []):
+            if not isinstance(component, dict) or component.get("kind") != "elevator":
+                continue
+            attributes = component.get("attributes")
+            if not isinstance(attributes, dict):
+                continue
+            existing_id = str(attributes.get("physical_elevator_id") or "").strip()
+            if existing_id and existing_id in by_id:
+                continue
+            elevator_id = " ".join(str(attributes.get("elevator_id") or "").split())
+            if not elevator_id:
+                continue
+            legacy = self._normalise_physical_elevator(attributes, templates)
+            shared = by_number.get(elevator_id)
+            if shared is None:
+                physical.append(legacy)
+                by_id[legacy["id"]] = legacy
+                by_number[elevator_id] = legacy
+                shared = legacy
+                migrated = True
+            else:
+                divergent = [
+                    key
+                    for key in ("elevator_protocol", "min_floor", "max_floor")
+                    if shared[key] != legacy[key]
+                ]
+                if divergent:
+                    shared["migration_conflict"] = (
+                        f"旧电梯编号 {elevator_id} 的共享属性不一致：" + "、".join(divergent)
+                    )
+                    migrated = True
+            if attributes.get("physical_elevator_id") != shared["id"]:
+                attributes["physical_elevator_id"] = shared["id"]
+                migrated = True
+        if document.get("physical_elevators") != physical:
+            document["physical_elevators"] = physical
+            migrated = True
+        return migrated
+
     def _invalidate_task_compiler_preview(self, document: dict[str, Any]) -> None:
         compiler = self._normalise_task_compiler(document.get("task_compiler"))
         compiler["identity"]["last_preview_input_sha256"] = None
@@ -211,7 +322,7 @@ class DeploymentStore:
         while self._project_dir(project_id).exists():
             project_id = f"{base[:58]}-{index}"; index += 1
         now = self._now()
-        document = {"schema": self.SCHEMA, "type": "ry-aletheia.site-project", "id": project_id, "name": cleaned, "created_at": now, "updated_at": now, "scene_model": None, "map_assets": [], "map_stage_assignments": [], "buildings": [], "map_instances": [], "components": [], "waypoints": [], "routes": [], "map_transitions": [], "virtual_walls": [], "map_edits": [], "behavior_templates": [], "component_templates": self._default_component_templates(), "task_compiler": self._normalise_task_compiler(None), "deployment_config": {"state": "draft", "robot_target": None}, "mapping": {"mode": "import_or_robot", "recording": "not_started"}}
+        document = {"schema": self.SCHEMA, "type": "ry-aletheia.site-project", "id": project_id, "name": cleaned, "created_at": now, "updated_at": now, "scene_model": None, "map_assets": [], "map_stage_assignments": [], "buildings": [], "map_instances": [], "physical_elevators": [], "components": [], "waypoints": [], "routes": [], "map_transitions": [], "virtual_walls": [], "map_edits": [], "behavior_templates": [], "component_templates": self._default_component_templates(), "task_compiler": self._normalise_task_compiler(None), "deployment_config": {"state": "draft", "robot_target": None}, "mapping": {"mode": "import_or_robot", "recording": "not_started"}}
         self._write_json(self._document_path(project_id), document)
         return document
 
@@ -238,6 +349,8 @@ class DeploymentStore:
         if document.get("task_compiler") != compiler:
             document["task_compiler"] = compiler
             migrated = True
+        if self._normalise_physical_elevators(document):
+            migrated = True
         for component in document["components"]:
             if not isinstance(component, dict):
                 continue
@@ -261,6 +374,65 @@ class DeploymentStore:
                 migrated = True
         if migrated: self._write_json(target, document)
         return document
+
+    def add_physical_elevator(self, project_id: str, data: object) -> dict[str, Any]:
+        document = self.get(project_id)
+        elevator = self._normalise_physical_elevator(data, document.get("component_templates"))
+        if any(item.get("elevator_id") == elevator["elevator_id"] for item in document["physical_elevators"]):
+            raise DeploymentError("电梯编号已存在")
+        document["physical_elevators"].append(elevator)
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
+        return elevator
+
+    def update_physical_elevator(
+        self, project_id: str, physical_elevator_id: str, data: object
+    ) -> dict[str, Any]:
+        document = self.get(project_id)
+        if not isinstance(data, dict):
+            raise DeploymentError("物理电梯属性无效")
+        current = next(
+            (item for item in document["physical_elevators"] if item.get("id") == physical_elevator_id),
+            None,
+        )
+        if current is None:
+            raise DeploymentError("物理电梯不存在")
+        merged = {**current, **data}
+        updated = self._normalise_physical_elevator(
+            merged, document.get("component_templates"), identifier=physical_elevator_id
+        )
+        if any(
+            item.get("id") != physical_elevator_id
+            and item.get("elevator_id") == updated["elevator_id"]
+            for item in document["physical_elevators"]
+        ):
+            raise DeploymentError("电梯编号已存在")
+        current.clear()
+        current.update(updated)
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
+        return current
+
+    def delete_physical_elevator(self, project_id: str, physical_elevator_id: str) -> None:
+        document = self.get(project_id)
+        if any(
+            isinstance(item, dict)
+            and isinstance(item.get("attributes"), dict)
+            and item["attributes"].get("physical_elevator_id") == physical_elevator_id
+            for item in document["components"]
+        ):
+            raise DeploymentError("物理电梯仍有地图落点")
+        previous = len(document["physical_elevators"])
+        document["physical_elevators"] = [
+            item for item in document["physical_elevators"] if item.get("id") != physical_elevator_id
+        ]
+        if len(document["physical_elevators"]) == previous:
+            raise DeploymentError("物理电梯不存在")
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
 
     def update_task_compiler_config(self, project_id: str, data: dict[str, Any]) -> dict[str, Any]:
         document = self.get(project_id)
@@ -733,6 +905,8 @@ class DeploymentStore:
         component_id = f"component-{uuid.uuid4().hex[:12]}"
         attrs = data.get("attributes") if isinstance(data.get("attributes"), dict) else {}
         attrs = self._normalise_component_attributes(kind, attrs, document.get("component_templates"))
+        if kind == "elevator":
+            attrs = self._normalise_elevator_landing_attributes(document, attrs)
         component = {"id": component_id, "map_asset_id": map_id, "kind": kind, "label": label, "x": x, "y": y, "yaw": yaw, "attributes": attrs, "generated_waypoint_ids": []}
         # Offsets may later be supplied by configurable component templates.
         for index, point_kind in enumerate(recipes[kind]):
@@ -757,6 +931,8 @@ class DeploymentStore:
         attributes = data.get("attributes", component.get("attributes", {}))
         if not isinstance(attributes, dict): raise DeploymentError("组件属性无效")
         attributes = self._normalise_component_attributes(component["kind"], {**component.get("attributes", {}), **attributes}, document.get("component_templates"))
+        if component["kind"] == "elevator":
+            attributes = self._normalise_elevator_landing_attributes(document, attributes)
         label = " ".join(str(data.get("label", component["label"])).split())[:80]
         if not label: raise DeploymentError("组件名称不能为空")
         component.update({"x": x, "y": y, "yaw": yaw, "label": label, "attributes": attributes})
@@ -824,7 +1000,15 @@ class DeploymentStore:
         if len(templates[key]) <= 1:
             raise DeploymentError("每类组件至少保留一种通信协议")
         attribute_key = "access_protocol" if key == "access_protocols" else "elevator_protocol"
-        if any(item.get("attributes", {}).get(attribute_key) == identifier for item in document["components"] if isinstance(item, dict) and isinstance(item.get("attributes"), dict)):
+        component_uses_protocol = any(item.get("attributes", {}).get(attribute_key) == identifier for item in document["components"] if isinstance(item, dict) and isinstance(item.get("attributes"), dict))
+        physical_elevator_uses_protocol = key == "elevator_protocols" and any(
+            item.get("elevator_protocol") == identifier
+            for item in document.get("physical_elevators", [])
+            if isinstance(item, dict)
+        )
+        if physical_elevator_uses_protocol:
+            raise DeploymentError("该协议正在被物理电梯使用；请先修改对应电梯")
+        if component_uses_protocol:
             raise DeploymentError("该协议正在被组件使用；请先修改对应组件")
         previous = len(templates[key])
         templates[key] = [item for item in templates[key] if item["id"] != identifier]
@@ -927,7 +1111,7 @@ class DeploymentStore:
         """
         defaults: dict[str, Any] = {"width_m": cls.COMPONENT_DIMENSIONS.get(kind, (.8, .8))[0], "height_m": cls.COMPONENT_DIMENSIONS.get(kind, (.8, .8))[1]}
         profiles: dict[str, dict[str, Any]] = {
-            "elevator": {"elevator_id": "", "elevator_protocol": "bluetooth", "min_floor": 1, "max_floor": 1, "map_floor": 1, "wait_distance_m": 1.5},
+            "elevator": {"wait_distance_m": 1.5},
             "gate": {"gate_id": "", "access_protocol": "bluetooth", "speed_profile": "single_point"},
             "auto_door": {"door_id": "", "access_protocol": "bluetooth", "speed_profile": "single_point"},
             "narrow_passage": {"speed_profile": "narrow_point"},
@@ -938,25 +1122,23 @@ class DeploymentStore:
         }
         attributes = {**defaults, **profiles.get(kind, {}), **source}
         catalogue = cls._normalise_component_templates(templates)
+        protocol_category = "access_protocols" if kind in {"gate", "auto_door"} else None
+        protocol_key = "access_protocol" if protocol_category == "access_protocols" else "elevator_protocol" if protocol_category else None
+        # A project owns its protocol catalogue.  A newly placed component must
+        # therefore start with a protocol that this project actually exposes,
+        # rather than a historical global default such as ``bluetooth``.
+        # Explicit caller input is still validated below and never rewritten.
+        if protocol_category and protocol_key and protocol_key not in source:
+            attributes[protocol_key] = catalogue[protocol_category][0]["id"]
         cls._validate_dimensions(attributes)
         if kind == "elevator":
-            elevator_id = " ".join(str(attributes.get("elevator_id") or "").split())
-            if len(elevator_id) > 64: raise DeploymentError("电梯编号不能超过 64 个字符")
-            try:
-                minimum, maximum, map_floor = int(attributes["min_floor"]), int(attributes["max_floor"]), int(attributes["map_floor"])
-            except (TypeError, ValueError) as exc: raise DeploymentError("电梯楼层必须为整数") from exc
-            if not -20 <= minimum <= maximum <= 120: raise DeploymentError("电梯最低层和最高层范围无效")
-            if not minimum <= map_floor <= maximum: raise DeploymentError("当前地图所在楼层必须在电梯服务楼层范围内")
             try:
                 wait_distance_m = float(attributes["wait_distance_m"])
             except (TypeError, ValueError) as exc:
                 raise DeploymentError("候梯距离无效") from exc
             if not .5 <= wait_distance_m <= 5.0:
                 raise DeploymentError("候梯距离应在 0.5 至 5 米之间")
-            # Elevator commands count 1F as physical level 2.  The basement
-            # range validates service coverage, but logical labels such as
-            # -2, -1, 1 must not be treated as a continuous integer sequence.
-            attributes.update({"elevator_id": elevator_id, "min_floor": minimum, "max_floor": maximum, "map_floor": map_floor, "physical_floor": map_floor + 1, "wait_distance_m": wait_distance_m})
+            attributes["wait_distance_m"] = wait_distance_m
         if kind == "target":
             door = str(attributes.get("door") or "").strip()
             if door and not cls.TASK_COMPILER_DOOR.fullmatch(door):
@@ -967,11 +1149,36 @@ class DeploymentStore:
                 value = " ".join(str(attributes[key] or "").split())
                 if len(value) > 64: raise DeploymentError("组件属性不能超过 64 个字符")
                 attributes[key] = value
-        protocol_category = "access_protocols" if kind in {"gate", "auto_door"} else "elevator_protocols" if kind == "elevator" else None
-        protocol_key = "access_protocol" if protocol_category == "access_protocols" else "elevator_protocol" if protocol_category else None
         if protocol_category and protocol_key and attributes[protocol_key] not in {item["id"] for item in catalogue[protocol_category]}:
             raise DeploymentError("组件通信协议不在当前项目模板中")
         return attributes
+
+    @staticmethod
+    def _normalise_elevator_landing_attributes(
+        document: dict[str, Any], attributes: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Keep a map landing linked to an existing physical elevator only."""
+        physical_elevator_id = str(attributes.get("physical_elevator_id") or "").strip()
+        if not physical_elevator_id:
+            raise DeploymentError("电梯落点必须关联物理电梯")
+        if not any(
+            item.get("id") == physical_elevator_id
+            for item in document.get("physical_elevators", [])
+            if isinstance(item, dict)
+        ):
+            raise DeploymentError("物理电梯不存在")
+        local = dict(attributes)
+        for key in (
+            "elevator_id",
+            "elevator_protocol",
+            "min_floor",
+            "max_floor",
+            "map_floor",
+            "physical_floor",
+        ):
+            local.pop(key, None)
+        local["physical_elevator_id"] = physical_elevator_id
+        return local
 
     def add_virtual_wall(self, project_id: str, data: dict[str, Any]) -> dict[str, Any]:
         document = self.get(project_id); map_id = str(data.get("map_id", ""))
