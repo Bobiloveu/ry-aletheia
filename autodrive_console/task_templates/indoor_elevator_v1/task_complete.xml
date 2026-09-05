@@ -1,0 +1,7 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence name="NavigateWithUnloadingWater">
+      <PublishTaskStatus status_code="109"/>
+    </Sequence>
+  </BehaviorTree>
+</root>
