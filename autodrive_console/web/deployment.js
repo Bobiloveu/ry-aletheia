@@ -24,6 +24,8 @@ let spacePanActive = false;
 let topology = null;
 let transitionDraft = null;
 let routeDraft = [];
+let taskCompilerPreview = null;
+let taskCompilerProjectId = null;
 const mapView = { scale: 40, x: 0, y: 0 };
 const canvas = $("mapCanvas");
 const context = canvas.getContext("2d");
@@ -57,6 +59,13 @@ const COMPONENT_SPECS = {
   target: {
     name: "目标点",
     fields: [
+      {
+        key: "door",
+        label: "门牌号",
+        type: "text",
+        placeholder: "例如：1509",
+        default: "",
+      },
       {
         key: "arrival_action",
         label: "到达动作",
@@ -106,6 +115,15 @@ const COMPONENT_SPECS = {
         type: "number",
         step: "1",
         default: 1,
+      },
+      {
+        key: "wait_distance_m",
+        label: "候梯距离（m）",
+        type: "number",
+        min: "0.5",
+        max: "5",
+        step: "0.1",
+        default: 1.5,
       },
     ],
   },
@@ -230,6 +248,170 @@ function note(id, text, error = false) {
   target.textContent = text;
   target.style.color = error ? "#ff899a" : "#35d69c";
 }
+function taskCompilerMessage(text, error = false) {
+  const target = $("taskCompilerStatus");
+  target.textContent = text;
+  target.classList.toggle("error", error);
+}
+function compilerRecovery(error) {
+  return `${error}。请检查小区名称、地图阶段、组件属性和机器人地图来源后重试。`;
+}
+function renderTaskCompilerPreview(preview) {
+  const holder = $("taskCompilerPreview");
+  const download = $("downloadTaskCompilerBundle");
+  download.disabled = true;
+  if (!selectedProject) {
+    holder.className = "compiler-empty";
+    holder.textContent = "先打开部署项目，再保存任务信息。";
+    return;
+  }
+  if (!preview) {
+    holder.className = "compiler-empty";
+    holder.textContent = "保存后可生成只读预览；由服务端检查当前地图、组件与来源文件。";
+    return;
+  }
+  const errors = Array.isArray(preview.errors) ? preview.errors : [];
+  const warnings = Array.isArray(preview.warnings) ? preview.warnings : [];
+  if (preview.status !== "ready" || errors.length) {
+    holder.className = "compiler-blocking-errors";
+    holder.innerHTML = `<b>暂不能生成实验包</b><ul>${errors.map((item) => `<li>${esc(item)}</li>`).join("") || `<li>${esc(preview.status || "服务端未确认预览状态")}</li>`}</ul><p>${esc(preview.recovery || "请补齐上述信息后重新生成；不会写入机器人运行目录。")}</p>`;
+    taskCompilerMessage("预览未通过服务端校验。", true);
+    return;
+  }
+  const subtasks = Array.isArray(preview.task_json?.subtasks)
+    ? preview.task_json.subtasks
+    : [];
+  const steps = subtasks.map((subtask, index) => {
+    const waypoints = Array.isArray(subtask.waypoints) ? subtask.waypoints : [];
+    return `<li class="compiler-step"><span>${index + 1}</span><div><b>${esc(subtask.subtask_name || `子任务 ${index + 1}`)}</b><small>${waypoints.length} 个路点 · ${esc(subtask.map_url || "地图来源由服务端确认")}</small></div></li>`;
+  });
+  holder.className = "compiler-preview-ready";
+  holder.innerHTML = [
+    `<p class="compiler-ready-label">服务端已生成实验预览</p>`,
+    `<p class="compiler-output-note">实验产物，尚未安装到机器人</p>`,
+    steps.length
+      ? `<ol class="compiler-timeline">${steps.join("")}</ol>`
+      : '<div class="compiler-empty">预览没有返回可展示的子任务。</div>',
+    warnings.length
+      ? `<ul class="compiler-warning-list">${warnings.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`
+      : "",
+    `<p class="compiler-artifact-meta">${Array.isArray(preview.artifacts) ? preview.artifacts.length : 0} 个实验文件 · 输入校验 ${esc(preview.input_sha256 || "—")}</p>`,
+  ].join("");
+  download.disabled = false;
+  taskCompilerMessage("服务端校验完成；可下载到当前浏览器所在电脑。");
+}
+function renderTaskCompilerState(project) {
+  const compiler = project?.task_compiler || {};
+  const identity = compiler.identity || {};
+  const community = identity.community || "";
+  $("taskCompilerCommunity").value = community;
+  $("saveTaskCompilerConfig").disabled = !project;
+  $("generateTaskCompilerPreview").disabled = !project || !community;
+  const persistedPreviewHash = identity.last_preview_input_sha256 || null;
+  if (
+    taskCompilerProjectId !== project?.id ||
+    (taskCompilerPreview && taskCompilerPreview.input_sha256 !== persistedPreviewHash)
+  ) {
+    taskCompilerPreview = null;
+    taskCompilerProjectId = project?.id || null;
+  }
+  renderTaskCompilerPreview(taskCompilerPreview);
+  if (project && !taskCompilerPreview) {
+    taskCompilerMessage(
+      community
+        ? "任务信息已保存；可生成实验预览。"
+        : "填写并保存小区名称后，才可请求服务端预览。",
+    );
+  }
+}
+async function saveTaskCompilerConfig() {
+  if (!selectedProject) return;
+  const button = $("saveTaskCompilerConfig");
+  button.disabled = true;
+  taskCompilerMessage("正在保存任务信息…");
+  try {
+    const data = await request(
+      `/api/deployments/${encodeURIComponent(selectedProject.id)}/task-compiler/config`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ community: $("taskCompilerCommunity").value }),
+      },
+    );
+    selectedProject = {
+      ...selectedProject,
+      task_compiler: data.task_compiler,
+    };
+    taskCompilerPreview = null;
+    taskCompilerProjectId = selectedProject.id;
+    renderTaskCompilerState(selectedProject);
+    taskCompilerMessage("任务信息已保存；现在可生成实验预览。");
+  } catch (error) {
+    taskCompilerMessage(compilerRecovery(error.message), true);
+  } finally {
+    button.disabled = !selectedProject;
+  }
+}
+async function refreshTaskCompilerPreview() {
+  if (!selectedProject) return;
+  const button = $("generateTaskCompilerPreview");
+  button.disabled = true;
+  taskCompilerMessage("正在由服务端校验组件并生成实验预览…");
+  try {
+    const data = await request(
+      `/api/deployments/${encodeURIComponent(selectedProject.id)}/task-compiler/preview`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      },
+    );
+    taskCompilerPreview = data.preview;
+    taskCompilerProjectId = selectedProject.id;
+    renderTaskCompilerPreview(data.preview);
+  } catch (error) {
+    taskCompilerPreview = {
+      status: "blocked",
+      errors: [error.message],
+      recovery: "请检查小区名称、地图阶段、组件属性和机器人地图来源后重试。",
+    };
+    renderTaskCompilerPreview(taskCompilerPreview);
+  } finally {
+    button.disabled = !selectedProject?.task_compiler?.identity?.community;
+  }
+}
+async function downloadTaskCompilerBundle() {
+  if (!selectedProject || !taskCompilerPreview || $("downloadTaskCompilerBundle").disabled) return;
+  const button = $("downloadTaskCompilerBundle");
+  button.disabled = true;
+  taskCompilerMessage("正在准备实验包下载…");
+  try {
+    const response = await fetch(
+      `/api/deployments/${encodeURIComponent(selectedProject.id)}/task-compiler/download`,
+      { cache: "no-store" },
+    );
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || `实验包下载失败（HTTP ${response.status}）`);
+    }
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const name = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
+    link.href = objectUrl;
+    link.download = name ? decodeURIComponent(name) : "task-compiler-experimental.zip";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+    taskCompilerMessage("实验包已交给浏览器下载；保存位置由浏览器设置决定。");
+  } catch (error) {
+    taskCompilerMessage(compilerRecovery(error.message), true);
+  } finally {
+    button.disabled = taskCompilerPreview?.status !== "ready";
+  }
+}
 function renderMapStages() {
   if (!selectedProject) return;
   const model = selectedProject.scene_model || "indoor_outdoor";
@@ -242,12 +424,15 @@ function renderMapStages() {
     ? topology.stages
     : fallback.map((label, index) => ({ stage: String(index), label, status: "missing" }));
   $("mapStageSummary").innerHTML = stages
-    .map((stage, index) => `<span class="${stage.status === "complete" ? "done" : stage.status === "editing" ? "active" : ""}"><b>${stage.status === "complete" ? "✓" : index + 1}</b>${esc(stage.map_label || stage.label)}</span>`)
+    .map((stage, index) => {
+      const bound = Boolean(stage.map_asset_id);
+      return `<span class="${bound ? "done" : stage.status === "editing" ? "active" : ""}"><b>${bound ? "✓" : index + 1}</b>${esc(stage.map_label || stage.label)}</span>`;
+    })
     .join("");
-  const current = topology?.stages?.find((stage) => stage.status !== "complete");
+  const current = stages.find((stage) => !stage.map_asset_id);
   $("importMessage").textContent = current
     ? `当前待完善：${current.label}。可导入既有地图或使用下方车端建图。`
-    : "地图阶段已齐全；请继续检查交接、路线与虚拟墙。";
+    : "地图阶段已齐全；继续标记实际组件，任务编译器会自动推导路点与衔接。";
 }
 
 function renderTopology() {
@@ -256,31 +441,30 @@ function renderTopology() {
   const stageSelect = $("mapStageAssignment");
   const assignmentControls = $("stageAssignmentControls");
   if (!selectedProject || !topology) {
-    state.textContent = "等待项目";
-    state.className = "badge muted";
-    holder.innerHTML = '<div class="page-empty">阶段、交接点与路线完成后，会在这里显示只读检查结果。</div>';
+    if (state) {
+      state.textContent = "等待项目";
+      state.className = "badge muted";
+    }
+    if (holder) holder.innerHTML = '<div class="page-empty">等待地图阶段信息。</div>';
     assignmentControls.classList.add("deployment-hidden");
     return;
   }
-  state.textContent = topology.valid ? "拓扑完整" : "需完善";
-  state.className = `badge ${topology.valid ? "success" : "muted"}`;
+  if (state) {
+    state.textContent = topology.valid ? "拓扑完整" : "需完善";
+    state.className = `badge ${topology.valid ? "success" : "muted"}`;
+  }
   const stages = topology.stages || [];
-  holder.innerHTML = [
-    ...stages.map((stage) => `<div class="topology-stage ${esc(stage.status)}"><span>${stage.status === "complete" ? "✓" : stage.status === "editing" ? "•" : "—"}</span><div><b>${esc(stage.label)}</b><small>${esc(stage.map_label || "尚未绑定地图")}</small></div></div>`),
-    ...(topology.errors || []).map((error) => `<p class="topology-error">${esc(error)}</p>`),
-    `<p class="topology-meta">${(topology.transitions || []).length} 条地图衔接 · ${(topology.routes || []).length} 条地图内路线 · ${topology.virtual_wall_count || 0} 个虚拟墙</p>`,
-  ].join("");
+  if (holder) {
+    holder.innerHTML = stages
+      .map((stage) => `<div class="topology-stage ${esc(stage.status)}"><span>${stage.status === "complete" ? "✓" : stage.status === "editing" ? "•" : "—"}</span><div><b>${esc(stage.label)}</b><small>${esc(stage.map_label || "尚未绑定地图")}</small></div></div>`)
+      .join("");
+  }
   const mapStage = stages.find((stage) => stage.map_asset_id === activeMap?.id)?.stage;
   assignmentControls.classList.toggle("deployment-hidden", !activeMap || !stages.length);
   stageSelect.innerHTML = stages.map((stage) => `<option value="${esc(stage.stage)}" ${stage.stage === mapStage ? "selected" : ""}>${esc(stage.label)}</option>`).join("");
   $("stageAssignmentMessage").textContent = activeMap
     ? `${activeMap.label}${mapStage ? ` 当前属于：${stages.find((stage) => stage.stage === mapStage)?.label}` : " 尚未绑定地图阶段"}。`
     : "选择地图后可检查其阶段归属。";
-  $("routeDraftMessage").textContent = routeDraft.length
-    ? `已选择 ${routeDraft.length} 个当前地图路线点。`
-    : "选择“路线”后，按顺序点击当前地图的 Waypoint。";
-  $("saveRoute").disabled = routeDraft.length < 2;
-  $("clearRouteDraft").disabled = !routeDraft.length;
 }
 
 async function refreshTopology() {
@@ -391,6 +575,7 @@ function renderProject(project) {
   renderComponentTemplates();
   renderMapStages();
   renderTopology();
+  renderTaskCompilerState(project);
   renderMappingStatus();
   if (!activeMap && maps.length) selectMap(maps[0]);
   else drawMap();
@@ -1314,7 +1499,7 @@ function renderComponentAttributes(component) {
           : field.options;
         return `<label>${esc(field.label)}<select data-component-attribute="${esc(field.key)}">${options.map(([option, title]) => `<option value="${esc(option)}" ${String(value) === option ? "selected" : ""}>${esc(title)}</option>`).join("")}</select></label>`;
       }
-      return `<label>${esc(field.label)}<input data-component-attribute="${esc(field.key)}" type="${esc(field.type)}" value="${esc(value)}" ${field.placeholder ? `placeholder="${esc(field.placeholder)}"` : ""} ${field.step ? `step="${esc(field.step)}"` : ""} /></label>`;
+      return `<label>${esc(field.label)}<input data-component-attribute="${esc(field.key)}" type="${esc(field.type)}" value="${esc(value)}" ${field.placeholder ? `placeholder="${esc(field.placeholder)}"` : ""} ${field.min ? `min="${esc(field.min)}"` : ""} ${field.max ? `max="${esc(field.max)}"` : ""} ${field.step ? `step="${esc(field.step)}"` : ""} /></label>`;
     })
     .join("");
   const physicalFloor =
@@ -1551,35 +1736,9 @@ $("assignMapStage").addEventListener("click", async () => {
     note("stageAssignmentMessage", error.message, true);
   }
 });
-$("saveRoute").addEventListener("click", async () => {
-  if (!selectedProject || !activeMap || routeDraft.length < 2) return;
-  try {
-    const data = await request(
-      `/api/deployments/${encodeURIComponent(selectedProject.id)}/routes`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          map_asset_id: activeMap.id,
-          label: `${activeMap.label} 路线`,
-          waypoint_ids: routeDraft,
-        }),
-      },
-    );
-    routeDraft = [];
-    renderProject(data.project);
-    await refreshTopology();
-    note("mapToolHint", "当前地图路线已保存；跨地图路段由 Transition 单独表示。" );
-  } catch (error) {
-    note("mapToolHint", error.message, true);
-  }
-});
-$("clearRouteDraft").addEventListener("click", () => {
-  routeDraft = [];
-  renderTopology();
-  drawMap();
-  note("mapToolHint", "当前路线选择已清空；已保存路线不会受影响。" );
-});
+$("saveTaskCompilerConfig").addEventListener("click", saveTaskCompilerConfig);
+$("generateTaskCompilerPreview").addEventListener("click", refreshTaskCompilerPreview);
+$("downloadTaskCompilerBundle").addEventListener("click", downloadTaskCompilerBundle);
 let drag = null;
 let componentDrag = null;
 let componentResize = null;

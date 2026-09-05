@@ -523,6 +523,20 @@ def test_task_compiler_http_download_has_safe_zip_attachment_headers():
     assert handler.wfile.getvalue() == b"zip"
 
 
+def test_deployment_page_uses_component_task_compiler_routes():
+    """The PC deployment workflow must stay component-first and export-only."""
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "autodrive_console/web/deployment.js").read_text(encoding="utf-8")
+    html = (root / "autodrive_console/web/deployment.html").read_text(encoding="utf-8")
+
+    assert "/task-compiler/config" in source
+    assert "/task-compiler/preview" in source
+    assert "/task-compiler/download" in source
+    assert "任务编译预览" in html
+    assert 'data-waypoint-kind="map_transition"' not in html
+    assert 'data-waypoint-kind="route_link"' not in html
+
+
 def _task_compiler_source_map(root: Path, floor: str) -> Path:
     source = _map(root / "gk1" / floor)
     source.with_name("map.pgm").write_bytes(b"P5\n40 40\n255\n" + bytes(40 * 40))
