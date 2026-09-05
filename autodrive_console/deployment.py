@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .map_assets import MapAssetCache, MapAssetError
+from .task_compiler import CompilationPreview, bundle_zip, compile_indoor_elevator
 
 
 class DeploymentError(ValueError):
@@ -27,6 +28,10 @@ class DeploymentError(ValueError):
 class DeploymentStore:
     SCHEMA = 1
     MAP_ROOT = Path("/opt/ry/data/maps").resolve()
+    # This is deliberately not an export destination.  It documents the
+    # runtime boundary which experimental compiler exports must never cross.
+    RUNTIME_TASK_ROOT = Path("/opt/ry/data/tasks/origin_tasks").resolve()
+    EXPORTS_DIRNAME = "exports"
     STAGE_ORDER = {
         "outdoor": ("outdoor",),
         "indoor": ("lobby", "target_floor"),
@@ -39,6 +44,8 @@ class DeploymentStore:
     }
     PROJECT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
     MAP_ID = re.compile(r"map-[a-z0-9][a-z0-9-]{0,63}\Z")
+    TASK_COMPILER_COMMUNITY = re.compile(r"[^/\\\x00-\x1f]{1,80}\Z")
+    TASK_COMPILER_DOOR = re.compile(r"[A-Za-z0-9_-]{1,32}\Z")
     MAX_MAP_BYTES = 2 * 1024 * 1024 * 1024
     MAP_MEMBERS = ("map.yaml", "map.pgm", "map_walls.yaml")
     COMPONENT_LABELS = {"start": "起点", "target": "目标点", "building_entrance": "楼栋入口", "elevator": "电梯", "gate": "闸机", "auto_door": "自动门", "narrow_passage": "窄通道", "ramp": "坡道", "slow_zone": "减速区"}
@@ -100,6 +107,89 @@ class DeploymentStore:
         finally:
             if os.path.exists(temporary): os.unlink(temporary)
 
+    @staticmethod
+    def _write_bytes(target: Path, value: bytes) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(value)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, target)
+        finally:
+            if os.path.exists(temporary): os.unlink(temporary)
+
+    @classmethod
+    def _normalise_task_compiler(cls, source: object) -> dict[str, Any]:
+        raw = source if isinstance(source, dict) else {}
+        identity = raw.get("identity") if isinstance(raw.get("identity"), dict) else {}
+        community = " ".join(str(identity.get("community") or "").split())
+        if community in {".", ".."} or not cls.TASK_COMPILER_COMMUNITY.fullmatch(community):
+            community = ""
+        previous = identity.get("last_preview_input_sha256")
+        input_hash = previous if isinstance(previous, str) and re.fullmatch(r"[0-9a-f]{64}", previous) else None
+        return {
+            "profile": "indoor_elevator_v1",
+            "identity": {"community": community, "last_preview_input_sha256": input_hash},
+        }
+
+    def _invalidate_task_compiler_preview(self, document: dict[str, Any]) -> None:
+        compiler = self._normalise_task_compiler(document.get("task_compiler"))
+        compiler["identity"]["last_preview_input_sha256"] = None
+        document["task_compiler"] = compiler
+
+    def _compiler_export_root(self, project_id: str) -> Path:
+        project_root = self._project_dir(project_id).resolve()
+        root = (project_root / self.EXPORTS_DIRNAME).resolve()
+        if not root.is_relative_to(project_root):
+            raise DeploymentError("实验导出目录无效")
+        return root
+
+    def _compiler_export_directory(self, project_id: str, input_sha256: str) -> Path:
+        if not re.fullmatch(r"[0-9a-f]{64}", input_sha256):
+            raise DeploymentError("编译输入指纹无效")
+        root = self._compiler_export_root(project_id)
+        target = (root / input_sha256).resolve()
+        if not target.is_relative_to(root):
+            raise DeploymentError("实验导出目录无效")
+        return target
+
+    @staticmethod
+    def _preview_payload(preview: CompilationPreview) -> dict[str, Any]:
+        """Expose only rendered data and relative artifact metadata to HTTP callers."""
+        return {
+            "status": "ready",
+            "experimental": True,
+            "input_sha256": preview.input_sha256,
+            "task_json": preview.task_json,
+            "manifest": preview.manifest,
+            "derived_points": preview.derived_points,
+            "artifacts": [
+                {"path": artifact.relative_path, "sha256": artifact.sha256, "size_bytes": len(artifact.content)}
+                for artifact in preview.artifacts
+            ],
+            "warnings": list(preview.warnings),
+            "errors": list(preview.errors),
+            "statement": "实验产物，尚未安装到机器人。",
+        }
+
+    def _persist_task_compiler_preview(self, project_id: str, document: dict[str, Any], preview: CompilationPreview) -> None:
+        export_dir = self._compiler_export_directory(project_id, preview.input_sha256)
+        for artifact in preview.artifacts:
+            target = (export_dir / artifact.relative_path).resolve()
+            if not target.is_relative_to(export_dir):
+                raise DeploymentError("实验导出文件路径无效")
+            self._write_bytes(target, artifact.content)
+        # A manifest is the completion marker.  It is written only after every
+        # artifact was durably replaced below this project-owned export root.
+        self._write_json(export_dir / "manifest.json", preview.manifest)
+        compiler = self._normalise_task_compiler(document.get("task_compiler"))
+        compiler["identity"]["last_preview_input_sha256"] = preview.input_sha256
+        document["task_compiler"] = compiler
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
+
     def list_projects(self) -> list[dict[str, Any]]:
         if not self.root.is_dir(): return []
         result = []
@@ -121,7 +211,7 @@ class DeploymentStore:
         while self._project_dir(project_id).exists():
             project_id = f"{base[:58]}-{index}"; index += 1
         now = self._now()
-        document = {"schema": self.SCHEMA, "type": "ry-aletheia.site-project", "id": project_id, "name": cleaned, "created_at": now, "updated_at": now, "scene_model": None, "map_assets": [], "map_stage_assignments": [], "buildings": [], "map_instances": [], "components": [], "waypoints": [], "routes": [], "map_transitions": [], "virtual_walls": [], "map_edits": [], "behavior_templates": [], "component_templates": self._default_component_templates(), "deployment_config": {"state": "draft", "robot_target": None}, "mapping": {"mode": "import_or_robot", "recording": "not_started"}}
+        document = {"schema": self.SCHEMA, "type": "ry-aletheia.site-project", "id": project_id, "name": cleaned, "created_at": now, "updated_at": now, "scene_model": None, "map_assets": [], "map_stage_assignments": [], "buildings": [], "map_instances": [], "components": [], "waypoints": [], "routes": [], "map_transitions": [], "virtual_walls": [], "map_edits": [], "behavior_templates": [], "component_templates": self._default_component_templates(), "task_compiler": self._normalise_task_compiler(None), "deployment_config": {"state": "draft", "robot_target": None}, "mapping": {"mode": "import_or_robot", "recording": "not_started"}}
         self._write_json(self._document_path(project_id), document)
         return document
 
@@ -144,12 +234,24 @@ class DeploymentStore:
         if document.get("component_templates") != templates:
             document["component_templates"] = templates
             migrated = True
+        compiler = self._normalise_task_compiler(document.get("task_compiler"))
+        if document.get("task_compiler") != compiler:
+            document["task_compiler"] = compiler
+            migrated = True
         for component in document["components"]:
-            if not isinstance(component, dict) or component.get("kind") != "elevator":
+            if not isinstance(component, dict):
                 continue
             attributes = component.get("attributes")
             if not isinstance(attributes, dict):
                 continue
+            if component.get("kind") == "target" and "door" not in attributes:
+                attributes["door"] = ""
+                migrated = True
+            if component.get("kind") != "elevator":
+                continue
+            if "wait_distance_m" not in attributes:
+                attributes["wait_distance_m"] = 1.5
+                migrated = True
             try:
                 physical_floor = int(attributes.get("map_floor", 1)) + 1
             except (TypeError, ValueError):
@@ -159,6 +261,36 @@ class DeploymentStore:
                 migrated = True
         if migrated: self._write_json(target, document)
         return document
+
+    def update_task_compiler_config(self, project_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        document = self.get(project_id)
+        if not isinstance(data, dict):
+            raise DeploymentError("任务编译器配置无效")
+        community = " ".join(str(data.get("community") or "").split())
+        if community in {".", ".."} or not self.TASK_COMPILER_COMMUNITY.fullmatch(community):
+            raise DeploymentError("小区名称应为不含路径分隔符的 1 至 80 个字符")
+        compiler = self._normalise_task_compiler(document.get("task_compiler"))
+        compiler["identity"] = {"community": community, "last_preview_input_sha256": None}
+        document["task_compiler"] = compiler
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
+        return compiler
+
+    def task_compiler_preview(self, project_id: str) -> dict[str, Any]:
+        document = self.get(project_id)
+        preview = compile_indoor_elevator(document, map_root=self.MAP_ROOT)
+        self._persist_task_compiler_preview(project_id, document, preview)
+        return self._preview_payload(preview)
+
+    def task_compiler_bundle(self, project_id: str) -> tuple[str, bytes]:
+        document = self.get(project_id)
+        preview = compile_indoor_elevator(document, map_root=self.MAP_ROOT)
+        self._persist_task_compiler_preview(project_id, document, preview)
+        task_artifact = next((item for item in preview.artifacts if item.relative_path.startswith("tasks/")), None)
+        if task_artifact is None:
+            raise DeploymentError("实验任务文件缺失")
+        filename = f"{Path(task_artifact.relative_path).stem}_experimental.zip"
+        return filename, bundle_zip(preview)
 
     def set_scene_model(self, project_id: str, scene_model: object) -> dict[str, Any]:
         document = self.get(project_id)
@@ -170,6 +302,7 @@ class DeploymentStore:
         if any(stage not in allowed_stages for stage in assignments):
             raise DeploymentError("场景模型与已有地图阶段不兼容；请先调整地图阶段")
         document["scene_model"] = value
+        self._invalidate_task_compiler_preview(document)
         document["updated_at"] = self._now()
         self._write_json(self._document_path(project_id), document)
         return document
@@ -231,6 +364,7 @@ class DeploymentStore:
         asset = {"id": map_id, "label": cleaned_label, "kind": map_kind, "source_yaml": str(source), "files": {"yaml": f"maps/{map_id}/{source.name}", "image": f"maps/{map_id}/{image.name}", "walls": f"maps/{map_id}/{walls.name}" if walls in members else None, "pcd_count": len(pcd)}, "resolution_m": resolution, "origin": origin, "width": width, "height": height, "sha256": {item.name: self._sha256(item) for item in members}}
         document["map_assets"].append(asset)
         self._assign_next_stage(document, map_id)
+        self._invalidate_task_compiler_preview(document)
         document["updated_at"] = self._now(); self._write_json(self._document_path(project_id), document)
         return asset
 
@@ -276,6 +410,7 @@ class DeploymentStore:
             for key in self.STAGE_ORDER[scene_model]
             if key in assignments
         ]
+        self._invalidate_task_compiler_preview(document)
         document["updated_at"] = self._now()
         self._write_json(self._document_path(project_id), document)
         return self.stage_plan(project_id)
@@ -546,7 +681,10 @@ class DeploymentStore:
         instance = {"id": f"instance-{uuid.uuid4().hex[:12]}", "map_asset_id": map_id, "role": role, "building": building, "unit": unit, "floor": floor, "label": " ".join(str(data.get("label") or asset["label"]).split())[:80] or asset["label"]}
         if any(all(item.get(key) == instance[key] for key in ("role", "building", "unit", "floor")) for item in document["map_instances"]):
             raise DeploymentError("该物理位置已有地图实例；请使用 Floor Override 或先检查已有部署")
-        document["map_instances"].append(instance); document["updated_at"] = self._now(); self._write_json(self._document_path(project_id), document)
+        document["map_instances"].append(instance)
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
         return instance
 
     def add_waypoint(self, project_id: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -602,7 +740,10 @@ class DeploymentStore:
             point = {"id": f"waypoint-{uuid.uuid4().hex[:12]}", "map_asset_id": map_id, "kind": point_kind, "label": f"{label} · {point_kind}", "x": x + offset, "y": y, "yaw": yaw, "generated_by": component_id}
             self._validate_point(asset, point["x"], point["y"], yaw)
             document["waypoints"].append(point); component["generated_waypoint_ids"].append(point["id"])
-        document["components"].append(component); document["updated_at"] = self._now(); self._write_json(self._document_path(project_id), document)
+        document["components"].append(component)
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
         return component
 
     def update_component(self, project_id: str, component_id: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -624,6 +765,7 @@ class DeploymentStore:
         for index, point in enumerate(points):
             offset = (index - (len(points) - 1) / 2) * .45
             point.update({"x": x + offset, "y": y, "yaw": yaw}); self._validate_point(asset, point["x"], point["y"], yaw)
+        self._invalidate_task_compiler_preview(document)
         document["updated_at"] = self._now(); self._write_json(self._document_path(project_id), document)
         return component
 
@@ -765,6 +907,7 @@ class DeploymentStore:
         if not any(item.get("id") == component_id for item in document["components"]): raise DeploymentError("组件不存在")
         document["components"] = [item for item in document["components"] if item.get("id") != component_id]
         document["waypoints"] = [item for item in document["waypoints"] if item.get("generated_by") != component_id]
+        self._invalidate_task_compiler_preview(document)
         document["updated_at"] = self._now(); self._write_json(self._document_path(project_id), document)
 
     @staticmethod
@@ -784,13 +927,13 @@ class DeploymentStore:
         """
         defaults: dict[str, Any] = {"width_m": cls.COMPONENT_DIMENSIONS.get(kind, (.8, .8))[0], "height_m": cls.COMPONENT_DIMENSIONS.get(kind, (.8, .8))[1]}
         profiles: dict[str, dict[str, Any]] = {
-            "elevator": {"elevator_id": "", "elevator_protocol": "bluetooth", "min_floor": 1, "max_floor": 1, "map_floor": 1},
+            "elevator": {"elevator_id": "", "elevator_protocol": "bluetooth", "min_floor": 1, "max_floor": 1, "map_floor": 1, "wait_distance_m": 1.5},
             "gate": {"gate_id": "", "access_protocol": "bluetooth", "speed_profile": "single_point"},
             "auto_door": {"door_id": "", "access_protocol": "bluetooth", "speed_profile": "single_point"},
             "narrow_passage": {"speed_profile": "narrow_point"},
             "ramp": {"speed_profile": "slow_point"},
             "slow_zone": {"speed_profile": "slow_point"},
-            "target": {"arrival_action": "deliver"},
+            "target": {"arrival_action": "deliver", "door": ""},
             "start": {"start_action": "dispatch"},
         }
         attributes = {**defaults, **profiles.get(kind, {}), **source}
@@ -804,10 +947,21 @@ class DeploymentStore:
             except (TypeError, ValueError) as exc: raise DeploymentError("电梯楼层必须为整数") from exc
             if not -20 <= minimum <= maximum <= 120: raise DeploymentError("电梯最低层和最高层范围无效")
             if not minimum <= map_floor <= maximum: raise DeploymentError("当前地图所在楼层必须在电梯服务楼层范围内")
+            try:
+                wait_distance_m = float(attributes["wait_distance_m"])
+            except (TypeError, ValueError) as exc:
+                raise DeploymentError("候梯距离无效") from exc
+            if not .5 <= wait_distance_m <= 5.0:
+                raise DeploymentError("候梯距离应在 0.5 至 5 米之间")
             # Elevator commands count 1F as physical level 2.  The basement
             # range validates service coverage, but logical labels such as
             # -2, -1, 1 must not be treated as a continuous integer sequence.
-            attributes.update({"elevator_id": elevator_id, "min_floor": minimum, "max_floor": maximum, "map_floor": map_floor, "physical_floor": map_floor + 1})
+            attributes.update({"elevator_id": elevator_id, "min_floor": minimum, "max_floor": maximum, "map_floor": map_floor, "physical_floor": map_floor + 1, "wait_distance_m": wait_distance_m})
+        if kind == "target":
+            door = str(attributes.get("door") or "").strip()
+            if door and not cls.TASK_COMPILER_DOOR.fullmatch(door):
+                raise DeploymentError("目标门牌号应为 1 至 32 个字母、数字、连字符或下划线")
+            attributes["door"] = door
         for key in ("gate_id", "door_id", "access_protocol", "elevator_protocol", "control_protocol", "speed_profile", "arrival_action", "start_action"):
             if key in attributes:
                 value = " ".join(str(attributes[key] or "").split())

@@ -416,3 +416,87 @@ def test_transition_http_rejects_invalid_store_input():
 
     assert handler._json.call_args.args[1] == HTTPStatus.BAD_REQUEST
     assert "error" in handler._json.call_args.args[0]
+
+
+def _task_compiler_source_map(root: Path, floor: str) -> Path:
+    source = _map(root / "gk1" / floor)
+    source.with_name("map.pgm").write_bytes(b"P5\n40 40\n255\n" + bytes(40 * 40))
+    source.write_text(
+        "image: map.pgm\nresolution: 0.2\norigin: [-2.0, -2.0, 0.0]\n"
+        f"# compiler fixture {floor}\n",
+        encoding="utf-8",
+    )
+    return source
+
+
+def _compiler_ready_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    map_root = tmp_path / "robot-maps"
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", map_root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("任务编译器")
+    store.set_scene_model(project["id"], "indoor")
+    lobby = store.import_map(project["id"], _task_compiler_source_map(map_root, "P1"), "大厅", "lobby")
+    target = store.import_map(project["id"], _task_compiler_source_map(map_root, "P2"), "目标层", "typical_floor")
+    store.add_map_instance(project["id"], {"map_id": lobby["id"], "role": "lobby", "building": "1", "unit": "1", "floor": 1})
+    store.add_map_instance(project["id"], {"map_id": target["id"], "role": "typical_floor", "building": "1", "unit": "1", "floor": 15})
+    store.add_component(project["id"], {"map_id": lobby["id"], "kind": "start", "x": -1.0, "y": -1.0})
+    store.add_component(project["id"], {"map_id": lobby["id"], "kind": "elevator", "x": 0.0, "y": 0.0, "attributes": {"elevator_id": "A", "min_floor": 1, "max_floor": 15, "map_floor": 1}})
+    store.add_component(project["id"], {"map_id": target["id"], "kind": "elevator", "x": 0.0, "y": 1.0, "yaw": 3.141592653589793, "attributes": {"elevator_id": "A", "min_floor": 1, "max_floor": 15, "map_floor": 15}})
+    target_component = store.add_component(project["id"], {"map_id": target["id"], "kind": "target", "x": 1.0, "y": 1.0})
+    return store, project, target_component
+
+
+def test_task_compiler_migrates_legacy_project_and_persists_safe_identity(tmp_path: Path):
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("旧项目")
+    path = store._document_path(project["id"])
+    legacy = json.loads(path.read_text(encoding="utf-8"))
+    legacy.pop("task_compiler", None)
+    path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+    loaded = store.get(project["id"])
+
+    assert loaded["task_compiler"] == {
+        "profile": "indoor_elevator_v1",
+        "identity": {"community": "", "last_preview_input_sha256": None},
+    }
+    saved = store.update_task_compiler_config(project["id"], {"community": " 高科一号 "})
+    assert saved["identity"] == {"community": "高科一号", "last_preview_input_sha256": None}
+    for invalid in ("", "../gk1", "高" * 81):
+        with pytest.raises(DeploymentError):
+            store.update_task_compiler_config(project["id"], {"community": invalid})
+
+
+def test_task_compiler_component_attributes_invalidate_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    store, project, target = _compiler_ready_store(tmp_path, monkeypatch)
+    store.update_task_compiler_config(project["id"], {"community": "高科一号"})
+    store.update_component(project["id"], target["id"], {"attributes": {"door": "1509"}})
+    preview = store.task_compiler_preview(project["id"])
+    assert preview["input_sha256"]
+
+    updated = store.update_component(project["id"], target["id"], {"attributes": {"door": "1510"}})
+
+    assert updated["attributes"]["door"] == "1510"
+    assert store.get(project["id"])["task_compiler"]["identity"]["last_preview_input_sha256"] is None
+    with pytest.raises(DeploymentError):
+        store.update_component(project["id"], target["id"], {"attributes": {"door": "../1509"}})
+
+
+def test_task_compiler_preview_writes_only_project_owned_exports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    store, project, target = _compiler_ready_store(tmp_path, monkeypatch)
+    target = store.update_component(project["id"], target["id"], {"attributes": {"door": "1509"}})
+    store.update_task_compiler_config(project["id"], {"community": "高科一号"})
+    runtime_root = tmp_path / "runtime" / "origin_tasks"
+    runtime_root.mkdir(parents=True)
+    sentinel = runtime_root / "sentinel.json"
+    sentinel.write_bytes(b"runtime task must remain unchanged")
+    monkeypatch.setattr(DeploymentStore, "RUNTIME_TASK_ROOT", runtime_root.resolve(), raising=False)
+
+    preview = store.task_compiler_preview(project["id"])
+    export_root = store._project_dir(project["id"]) / "exports" / preview["input_sha256"]
+
+    assert target["attributes"]["door"] == "1509"
+    assert (export_root / "manifest.json").is_file()
+    assert (export_root / "tasks" / "高科一号_1_1_15_1509.json").is_file()
+    assert sentinel.read_bytes() == b"runtime task must remain unchanged"
+    assert store.get(project["id"])["task_compiler"]["identity"]["last_preview_input_sha256"] == preview["input_sha256"]
