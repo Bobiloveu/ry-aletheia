@@ -9,6 +9,7 @@ import pytest
 
 import web_console
 from autodrive_console.deployment import DeploymentError, DeploymentStore
+from autodrive_console.task_compiler import CompilationError
 
 
 def _map(directory: Path) -> Path:
@@ -416,6 +417,110 @@ def test_transition_http_rejects_invalid_store_input():
 
     assert handler._json.call_args.args[1] == HTTPStatus.BAD_REQUEST
     assert "error" in handler._json.call_args.args[0]
+
+
+def test_task_compiler_http_preview_returns_store_preview():
+    handler = _deployment_handler("/api/deployments/site/task-compiler/preview", {})
+
+    with patch.object(
+        web_console.DEPLOYMENTS, "task_compiler_preview", return_value={"status": "ready"}
+    ) as preview:
+        handler.do_POST()
+
+    preview.assert_called_once_with("site")
+    assert handler._json.call_args.args == ({"preview": {"status": "ready"}},)
+
+
+def test_task_compiler_http_config_requires_exact_community_payload():
+    handler = _deployment_handler(
+        "/api/deployments/site/task-compiler/config", {"community": "高科一号", "path": "/tmp"}
+    )
+
+    with patch.object(web_console.DEPLOYMENTS, "update_task_compiler_config") as update:
+        handler.do_POST()
+
+    update.assert_not_called()
+    assert handler._json.call_args.args[1] == HTTPStatus.BAD_REQUEST
+
+
+def test_task_compiler_http_config_rejects_malformed_json():
+    handler = _deployment_handler("/api/deployments/site/task-compiler/config")
+    handler.headers = {"Content-Length": "1"}
+    handler.rfile = io.BytesIO(b"{")
+
+    with patch.object(web_console.DEPLOYMENTS, "update_task_compiler_config") as update:
+        handler.do_POST()
+
+    update.assert_not_called()
+    assert handler._json.call_args.args[1] == HTTPStatus.BAD_REQUEST
+
+
+def test_task_compiler_http_config_returns_persisted_configuration():
+    handler = _deployment_handler("/api/deployments/site/task-compiler/config", {"community": "高科一号"})
+    expected = {"profile": "indoor_elevator_v1", "identity": {"community": "高科一号"}}
+
+    with patch.object(web_console.DEPLOYMENTS, "update_task_compiler_config", return_value=expected) as update:
+        handler.do_POST()
+
+    update.assert_called_once_with("site", {"community": "高科一号"})
+    assert handler._json.call_args.args == ({"task_compiler": expected},)
+
+
+def test_task_compiler_http_preview_maps_compilation_error_to_unprocessable_entity():
+    handler = _deployment_handler("/api/deployments/site/task-compiler/preview", {})
+
+    with patch.object(
+        web_console.DEPLOYMENTS, "task_compiler_preview", side_effect=CompilationError("缺少组件")
+    ):
+        handler.do_POST()
+
+    assert handler._json.call_args.args == ({"error": "缺少组件"}, HTTPStatus.UNPROCESSABLE_ENTITY)
+
+
+def test_task_compiler_http_preview_maps_store_error_to_bad_request():
+    handler = _deployment_handler("/api/deployments/site/task-compiler/preview", {})
+
+    with patch.object(
+        web_console.DEPLOYMENTS, "task_compiler_preview", side_effect=DeploymentError("项目不存在")
+    ):
+        handler.do_POST()
+
+    assert handler._json.call_args.args == ({"error": "项目不存在"}, HTTPStatus.BAD_REQUEST)
+
+
+def test_task_compiler_http_get_preview_returns_store_preview():
+    handler = _deployment_handler("/api/deployments/site/task-compiler/preview")
+
+    with patch.object(
+        web_console.DEPLOYMENTS, "task_compiler_preview", return_value={"status": "ready"}
+    ) as preview:
+        handler.do_GET()
+
+    preview.assert_called_once_with("site")
+    assert handler._json.call_args.args == ({"preview": {"status": "ready"}},)
+
+
+def test_task_compiler_http_download_has_safe_zip_attachment_headers():
+    handler = _deployment_handler("/api/deployments/site/task-compiler/download")
+    handler.send_response = Mock()
+    handler.send_header = Mock()
+    handler.end_headers = Mock()
+    handler.wfile = io.BytesIO()
+
+    with patch.object(
+        web_console.DEPLOYMENTS, "task_compiler_bundle", return_value=("高科一号_experimental.zip", b"zip")
+    ) as bundle:
+        handler.do_GET()
+
+    bundle.assert_called_once_with("site")
+    handler.send_response.assert_called_once_with(HTTPStatus.OK)
+    assert handler.send_header.call_args_list == [
+        (("Content-Type", "application/zip"),),
+        (("Content-Disposition", "attachment; filename=task-compiler-experimental.zip; filename*=UTF-8''%E9%AB%98%E7%A7%91%E4%B8%80%E5%8F%B7_experimental.zip"),),
+        (("Content-Length", "3"),),
+        (("X-Content-Type-Options", "nosniff"),),
+    ]
+    assert handler.wfile.getvalue() == b"zip"
 
 
 def _task_compiler_source_map(root: Path, floor: str) -> Path:
