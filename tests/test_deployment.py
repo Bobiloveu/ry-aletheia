@@ -85,7 +85,7 @@ def test_uploaded_client_map_is_snapshotted_without_requiring_robot_map_director
     )
 
     assert asset["label"] == "客户大厅"
-    assert asset["source_yaml"] == str(source.resolve())
+    assert Path(asset["source_yaml"]).is_relative_to(store._project_dir(project["id"]) / "maps")
     assert store.map_image(project["id"], asset["id"]).read_bytes() == (source.parent / "map.pgm").read_bytes()
 
 
@@ -300,6 +300,56 @@ def test_legacy_elevator_landings_migrate_to_one_shared_physical_elevator(
     } == {shared_id}
     assert [item["yaw"] for item in migrated["components"]] == [0.0, 3.141592653589793]
     assert [item["attributes"]["wait_distance_m"] for item in migrated["components"]] == [1.5, 2.0]
+
+
+def test_migration_links_one_unambiguous_legacy_landing_to_the_only_shared_elevator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = tmp_path / "maps"
+    first = _map(root / "P1")
+    second = _map(root / "P2")
+    second.write_text(
+        "image: map.pgm\nresolution: 0.05\norigin: [-1.0, -2.0, 0.0]\n# second map\n",
+        encoding="utf-8",
+    )
+    for source in (first, second):
+        source.with_name("map.pgm").write_bytes(b"P5\n100 100\n255\n" + bytes(100 * 100))
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("补全旧电梯落点")
+    first_map = store.import_map(project["id"], first, "大厅", "lobby")
+    second_map = store.import_map(project["id"], second, "目标层", "typical_floor")
+    shared = store.add_physical_elevator(
+        project["id"],
+        {"elevator_id": "10014", "elevator_protocol": "bluetooth", "min_floor": 1, "max_floor": 15},
+    )
+    linked = store.add_component(
+        project["id"],
+        {"map_id": first_map["id"], "kind": "elevator", "x": 0.0, "y": 0.0, "attributes": {"physical_elevator_id": shared["id"]}},
+    )
+    document_path = store._document_path(project["id"])
+    document = json.loads(document_path.read_text(encoding="utf-8"))
+    document["components"].append(
+        {
+            "id": "legacy-target-elevator",
+            "map_asset_id": second_map["id"],
+            "kind": "elevator",
+            "label": "电梯",
+            "x": 0.5,
+            "y": 0.5,
+            "yaw": 3.141592653589793,
+            "attributes": {"width_m": 1.8, "height_m": 2.0, "wait_distance_m": 1.5},
+            "generated_waypoint_ids": [],
+        }
+    )
+    document_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+
+    migrated = store.get(project["id"])
+
+    legacy = next(item for item in migrated["components"] if item["id"] == "legacy-target-elevator")
+    assert linked["attributes"]["physical_elevator_id"] == shared["id"]
+    assert legacy["attributes"]["physical_elevator_id"] == shared["id"]
+    assert legacy["yaw"] == 3.141592653589793
 
 
 def test_physical_elevator_identifier_is_unique_within_a_project(tmp_path: Path):

@@ -255,7 +255,9 @@ def test_gk1_store_preview_and_download_have_the_approved_indoor_structure(
 
     subtasks = preview["task_json"]["subtasks"]
     assert [item["subtask_name"] for item in subtasks] == ["elevator_hall", "1509", "1509_r", "elevator_hall_r"]
-    assert [item["map_url"] for item in subtasks] == [str(sources[0].resolve()), str(sources[1].resolve()), str(sources[1].resolve()), str(sources[0].resolve())]
+    snapshot_sources = [Path(item["source_yaml"]) for item in store.get(project["id"])["map_assets"]]
+    assert all(source.is_relative_to(store._project_dir(project["id"]) / "maps") for source in snapshot_sources)
+    assert [item["map_url"] for item in subtasks] == [str(snapshot_sources[0]), str(snapshot_sources[1]), str(snapshot_sources[1]), str(snapshot_sources[0])]
     assert [[point["speed_mode"] for point in item["waypoints"]] for item in subtasks] == [
         ["task_point", "single_point", "elevator_in"],
         ["backward", "single_point"],
@@ -268,3 +270,49 @@ def test_gk1_store_preview_and_download_have_the_approved_indoor_structure(
         ["", "1_1_elevator_in_x_n", "1_1_elevator_out_x_n"],
         ["1_1_close_elevdoor_n", "task_complete"],
     ]
+
+
+def test_store_compiles_browser_uploaded_map_snapshots_after_upload_staging_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Experimental exports must use the durable project snapshot, never upload staging."""
+    map_root = tmp_path / "robot-maps"
+    upload_root = tmp_path / "browser-upload"
+    map_root.mkdir()
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", map_root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("Gk1")
+    store.set_scene_model(project["id"], "indoor")
+
+    uploaded: list[Path] = []
+    for floor in ("lobby", "target"):
+        source = upload_root / floor / "map.yaml"
+        source.parent.mkdir(parents=True)
+        source.with_name("map.pgm").write_bytes(b"P5\n40 40\n255\n" + bytes(40 * 40))
+        source.write_text(
+            f"image: map.pgm\nresolution: 0.2\norigin: [-2.0, -2.0, 0.0]\n# {floor}\n",
+            encoding="utf-8",
+        )
+        uploaded.append(source)
+
+    lobby = store.import_uploaded_map(project["id"], uploaded[0], "大厅", "lobby", upload_root)
+    target = store.import_uploaded_map(project["id"], uploaded[1], "目标层", "typical_floor", upload_root)
+    for source in uploaded:
+        source.unlink()
+        source.with_name("map.pgm").unlink()
+    store.add_map_instance(project["id"], {"map_id": lobby["id"], "role": "lobby", "building": "1", "unit": "1", "floor": 1})
+    store.add_map_instance(project["id"], {"map_id": target["id"], "role": "typical_floor", "building": "1", "unit": "1", "floor": 15})
+    shared = store.add_physical_elevator(project["id"], {"elevator_id": "10014", "elevator_protocol": "bluetooth", "min_floor": 1, "max_floor": 15})
+    store.add_component(project["id"], {"map_id": lobby["id"], "kind": "start", "x": -1.0, "y": -1.0})
+    store.add_component(project["id"], {"map_id": lobby["id"], "kind": "elevator", "x": 0.0, "y": 0.0, "attributes": {"physical_elevator_id": shared["id"]}})
+    store.add_component(project["id"], {"map_id": target["id"], "kind": "elevator", "x": 0.0, "y": 1.0, "yaw": pi, "attributes": {"physical_elevator_id": shared["id"]}})
+    target_component = store.add_component(project["id"], {"map_id": target["id"], "kind": "target", "x": 1.0, "y": 1.0})
+    store.update_component(project["id"], target_component["id"], {"attributes": {"door": "1509"}})
+    store.update_task_compiler_config(project["id"], {"community": "高科一号"})
+
+    preview = store.task_compiler_preview(project["id"])
+
+    sources = [Path(item["source_yaml"]) for item in store.get(project["id"])["map_assets"]]
+    assert all(source.is_file() and source.is_relative_to(store._project_dir(project["id"]) / "maps") for source in sources)
+    assert [item["map_url"] for item in preview["task_json"]["subtasks"]] == [str(sources[0]), str(sources[1]), str(sources[1]), str(sources[0])]
+    assert any(item["path"].startswith("waypoint_tasks/gk1/") for item in preview["artifacts"])

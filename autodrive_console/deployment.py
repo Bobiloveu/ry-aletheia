@@ -240,6 +240,23 @@ class DeploymentStore:
             if attributes.get("physical_elevator_id") != shared["id"]:
                 attributes["physical_elevator_id"] = shared["id"]
                 migrated = True
+
+        unlinked = [
+            component
+            for component in document.get("components", [])
+            if isinstance(component, dict)
+            and component.get("kind") == "elevator"
+            and isinstance(component.get("attributes"), dict)
+            and not str(component["attributes"].get("physical_elevator_id") or "").strip()
+            and not " ".join(str(component["attributes"].get("elevator_id") or "").split())
+        ]
+        if len(physical) == 1 and len(unlinked) == 1:
+            attributes = dict(unlinked[0]["attributes"])
+            attributes["physical_elevator_id"] = physical[0]["id"]
+            unlinked[0]["attributes"] = self._normalise_elevator_landing_attributes(
+                document, attributes
+            )
+            migrated = True
         if document.get("physical_elevators") != physical:
             document["physical_elevators"] = physical
             migrated = True
@@ -349,6 +366,8 @@ class DeploymentStore:
         if document.get("task_compiler") != compiler:
             document["task_compiler"] = compiler
             migrated = True
+        if self._normalise_project_map_sources(document):
+            migrated = True
         if self._normalise_physical_elevators(document):
             migrated = True
         for component in document["components"]:
@@ -374,6 +393,47 @@ class DeploymentStore:
                 migrated = True
         if migrated: self._write_json(target, document)
         return document
+
+    def _site_id_for_source(self, project_id: str, source: Path) -> str:
+        """Derive a safe behavior-tree site ID without trusting upload staging."""
+        try:
+            relative = source.resolve().relative_to(self.MAP_ROOT.resolve())
+        except ValueError:
+            return project_id
+        if len(relative.parts) >= 2 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", relative.parts[0]):
+            return relative.parts[0]
+        return project_id
+
+    def _normalise_project_map_sources(self, document: dict[str, Any]) -> bool:
+        """Make project snapshots, not transient imports, the compiler source of truth."""
+        project_id = str(document["id"])
+        project_root = self._project_dir(project_id).resolve()
+        snapshot_root = (project_root / "maps").resolve()
+        migrated = False
+        for asset in document.get("map_assets", []):
+            if not isinstance(asset, dict):
+                continue
+            files = asset.get("files")
+            yaml_relative = files.get("yaml") if isinstance(files, dict) else None
+            if not isinstance(yaml_relative, str) or not yaml_relative:
+                continue
+            snapshot = (project_root / yaml_relative).resolve()
+            if (
+                snapshot.suffix.lower() not in {".yaml", ".yml"}
+                or not snapshot.is_relative_to(snapshot_root)
+                or not snapshot.is_file()
+            ):
+                continue
+            source_value = asset.get("source_yaml")
+            source = Path(source_value).resolve() if isinstance(source_value, str) and source_value else snapshot
+            if asset.get("source_yaml") != str(snapshot):
+                asset["source_yaml"] = str(snapshot)
+                migrated = True
+            site_id = asset.get("site_id")
+            if not isinstance(site_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", site_id):
+                asset["site_id"] = self._site_id_for_source(project_id, source)
+                migrated = True
+        return migrated
 
     def add_physical_elevator(self, project_id: str, data: object) -> dict[str, Any]:
         document = self.get(project_id)
@@ -450,13 +510,17 @@ class DeploymentStore:
 
     def task_compiler_preview(self, project_id: str) -> dict[str, Any]:
         document = self.get(project_id)
-        preview = compile_indoor_elevator(document, map_root=self.MAP_ROOT)
+        preview = compile_indoor_elevator(
+            document, map_root=self._project_dir(project_id) / "maps"
+        )
         self._persist_task_compiler_preview(project_id, document, preview)
         return self._preview_payload(preview)
 
     def task_compiler_bundle(self, project_id: str) -> tuple[str, bytes]:
         document = self.get(project_id)
-        preview = compile_indoor_elevator(document, map_root=self.MAP_ROOT)
+        preview = compile_indoor_elevator(
+            document, map_root=self._project_dir(project_id) / "maps"
+        )
         self._persist_task_compiler_preview(project_id, document, preview)
         task_artifact = next((item for item in preview.artifacts if item.relative_path.startswith("tasks/")), None)
         if task_artifact is None:
@@ -533,7 +597,8 @@ class DeploymentStore:
         cleaned_label = " ".join(str(label or source.parent.name).split())[:80] or source.parent.name
         map_kind = str(kind or "custom")
         if map_kind not in {"outdoor", "lobby", "typical_floor", "custom"}: raise DeploymentError("地图类型无效")
-        asset = {"id": map_id, "label": cleaned_label, "kind": map_kind, "source_yaml": str(source), "files": {"yaml": f"maps/{map_id}/{source.name}", "image": f"maps/{map_id}/{image.name}", "walls": f"maps/{map_id}/{walls.name}" if walls in members else None, "pcd_count": len(pcd)}, "resolution_m": resolution, "origin": origin, "width": width, "height": height, "sha256": {item.name: self._sha256(item) for item in members}}
+        snapshot_yaml = (target / source.name).resolve()
+        asset = {"id": map_id, "label": cleaned_label, "kind": map_kind, "source_yaml": str(snapshot_yaml), "site_id": self._site_id_for_source(project_id, source), "files": {"yaml": f"maps/{map_id}/{source.name}", "image": f"maps/{map_id}/{image.name}", "walls": f"maps/{map_id}/{walls.name}" if walls in members else None, "pcd_count": len(pcd)}, "resolution_m": resolution, "origin": origin, "width": width, "height": height, "sha256": {item.name: self._sha256(item) for item in members}}
         document["map_assets"].append(asset)
         self._assign_next_stage(document, map_id)
         self._invalidate_task_compiler_preview(document)

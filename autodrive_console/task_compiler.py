@@ -224,6 +224,10 @@ def _stage_assets(project: dict[str, Any], assets: dict[str, dict[str, Any]]) ->
 
 def _site_id(asset: dict[str, Any], root: Path) -> str:
     source = _source_path(asset, root)
+    configured = asset.get("site_id")
+    if isinstance(configured, str) and _SAFE_SITE_ID.fullmatch(configured):
+        asset["source_path"] = source
+        return configured
     relative = source.relative_to(root)
     if len(relative.parts) < 2 or not _SAFE_SITE_ID.fullmatch(relative.parts[0]):
         raise CompilationError("地图站点目录无效")
