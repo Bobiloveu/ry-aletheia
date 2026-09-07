@@ -7,7 +7,7 @@
 | 运行时执行方 | `autodrive_console/vehicle_control.py` 拥有 ROS2 节点、安全定时器、控制源状态订阅和发布器。 |
 | HTTP 适配层 | `web_console.py` 拥有 `/api/vehicle-control/*` 请求校验和 HTTP 状态映射。 |
 | 当前消费者 | `web_console` 的手动控制与建图工作台页面；`mobile/` 的“工具 / 手动控制”受控 HMI。 |
-| Mobile 影响 | Mobile 是 Existing HTTP 消费者：使用 `/vector` 提交连续的前后与转向比例，不直接访问 ROS、不会发送 Twist，也不提供导航、地点或横向平移命令。进入控制必须由操作员二次确认；摇杆只会在本地持有 `enter` 返回的会话 ID、车端 `manual_ready=true` 且真实急停为 `normal` 时解锁。进入中心、后台、离开页面或松开输入时 Mobile 均请求 STOP；Backend 仍是最终安全边界。 |
+| Mobile 影响 | Mobile 是 Existing HTTP 消费者：使用 `/vector` 提交连续的前后与转向比例，不直接访问 ROS、不会发送 Twist，也不提供导航、地点或横向平移命令。进入控制必须由操作员二次确认；摇杆只会在本地持有 `enter` 返回的会话 ID、车端 `manual_ready=true` 且真实急停为 `normal` 时解锁。多个 Web / Mobile 客户端可以同时持有各自会话，Backend 仍是唯一速度发布者和最终安全边界。 |
 | PC Web 影响 | PC Web 手动控制保持 Existing 四方向 `/command` 消费者，不调用 `/vector`，无需修改其页面或操作方式。 |
 | 兼容性 | 优先增量变更。任何破坏性变更必须同步修改 Backend、Web、受影响的 Mobile 工作、本文档和定向验证。 |
 
@@ -28,10 +28,10 @@
 
 允许 Aletheia 请求的控制源值为 `navigation` 和 `miniapp`。车端状态 Topic 还可能报告如 `remote` 的外部控制源；任何非空回传均为已确认的实际状态。`remote` 只表示当前来源，不是浏览器禁用切换请求的理由。
 
-1. 仅在不存在 Aletheia 手动会话且没有自动运行占有车辆时，才允许 `POST /api/vehicle-control/enter`。当前来源可以是 `navigation`、`miniapp`、`remote` 或尚未确认的值；请求本身不输出非零 Twist。
-2. `POST /api/vehicle-control/enter` 请求 `/control_source_cmd=miniapp` 并进入 `switching`，最多等待 **4.0 s** 取得 `/control_source_state=miniapp`。`POST /api/vehicle-control/navigation` 可在没有 Aletheia 会话时请求 `/control_source_cmd=navigation`；如存在 Aletheia miniapp 会话，严格先 STOP。
-3. 只有收到实际状态确认后，会话才成为 `active`；此后才可以接受非零命令或速度变更。
-4. `stop` 立即产生 Backend 生成的零 Twist。`exit` 执行 **STOP → 请求 `navigation` → 等待实际状态确认**。切换失败时会话保持无效，不能猜测控制已切换。
+1. 自动运行未占有车辆时，任意 Web / Mobile 客户端都可 `POST /api/vehicle-control/enter` 获取自己的会话。当前来源可以是 `navigation`、`miniapp`、`remote` 或尚未确认的值；同一轮 `miniapp` 切换允许其他客户端加入等待，且请求本身不输出非零 Twist。
+2. 首个 `POST /api/vehicle-control/enter` 请求 `/control_source_cmd=miniapp` 并进入 `switching`，最多等待 **4.0 s** 取得 `/control_source_state=miniapp`。`POST /api/vehicle-control/navigation` 是全局动作：严格先 STOP、清空全部会话，再请求 `/control_source_cmd=navigation`。
+3. 只有收到实际状态确认后，会话才成为 `active`；任一 active 会话均可接受非零命令或速度变更，**最后一条有效输入**更新 Backend 唯一的运动目标。
+4. `stop` 立即产生 Backend 生成的零 Twist。`exit` 执行 **STOP → 清空全部会话 → 请求 `navigation` → 等待实际状态确认**。切换失败时不能猜测控制已切换。
 5. 若其他控制源接管、控制源确认超时或 ROS2 控制器不可用，Backend 必须清除运动并拒绝后续移动。
 6. 只有 `/is_emergency_stop=false` 且控制源已实际确认 `miniapp` 时，手动会话才允许输出非零 Twist。`true` 或 `unknown` 会立即停止并拒绝后续运动。
 7. 软件解除急停只发布固定 `/command` 报文，随后最多等待 4.0 s；仅在收到 `/is_emergency_stop=false` 后才可显示成功。该动作不请求也不改变控制源。
@@ -56,7 +56,7 @@
 
 成功时返回当前状态对象。`200 OK` 表示没有控制源切换等待中；`202 Accepted` 表示切换仍在等待。`400 Bad Request` 表示输入格式错误或不支持的命令。`409 Conflict` 表示不安全控制状态、活动运行、重复会话或缺少控制源确认。`503 Service Unavailable` 表示 Backend ROS2 控制器无法运行。客户端在返回 `status` 时必须展示，且不得实现无界重试循环。
 
-`POST /enter` 的成功响应会携带供该客户端后续请求使用的会话 ID；常规 `GET` 状态快照只保证提供 `session.present` 和 `session.state`，客户端不得因轮询快照没有 ID 而丢弃已持有的有效会话 ID，也不得从快照自行生成或猜测 ID。
+`POST /enter` 以及使用该 ID 的会话操作响应会携带供该客户端后续请求使用的会话 ID；常规 `GET` 状态快照只保证提供聚合的 `session.present`、`session.state` 与 `shared_sessions` 计数，客户端不得因轮询快照没有 ID 而丢弃已持有的有效会话 ID，也不得从快照自行生成或猜测 ID。
 
 ## 状态响应与安全限制
 
@@ -70,6 +70,7 @@
   "manual_ready": true,
   "can_begin_manual": false,
   "session": { "present": true, "state": "active" },
+  "shared_sessions": { "active_count": 2, "switching_count": 0 },
   "safety": {
     "publish_hz": 20.0,
     "input_timeout_ms": 350,
@@ -101,9 +102,9 @@ Backend 以 **20 Hz** 发布。保持输入必须在 **350 ms** 前刷新；会�
 
 `car_state_sync.control_source` 与 `car_state_sync.emergency_stop` 取值为 `pending` 或 `confirmed`，分别说明实际控制源和急停真值是否已从车端收到。控制源收到 `remote` 等外部值时也必须为 `confirmed`，客户端应展示外部接管而非“正在读取”。客户端可把首次 `pending` 呈现为“正在读取车端状态”，但不得据此启用接管或运动；它不是将 unknown 推断为正常。
 
-`can_begin_manual` 表示可以发起 `miniapp` 切换请求，不表示可运动；`can_request_navigation` 表示可以发起 `navigation` 切换请求。两者在 `remote`、急停或急停未知时仍可为真。`manual_ready` 才是唯一的非零速度许可，仍要求有效会话、`miniapp` 实际确认及 `/is_emergency_stop=false`。
+`can_begin_manual` 表示当前客户端可以加入或发起 `miniapp` 会话，不表示可运动；`can_request_navigation` 表示可以发起全局 `navigation` 切换请求。两者在 `remote`、急停或急停未知时仍可为真。`manual_ready` 才是唯一的非零速度许可，仍要求至少一个有效会话、`miniapp` 实际确认及 `/is_emergency_stop=false`。`shared_sessions.active_count` 与 `switching_count` 只用于展示当前参与数，绝不泄露其他客户端的会话 ID。
 
-`/vector` 不是直接 ROS 速度接口：`target_linear = linear_ratio × linear_mps`，`target_angular = angular_ratio × angular_radps`。移动端以车头向上为视觉坐标：上/下分别为正/负 `linear_ratio`，左/右分别为正/负 `angular_ratio`；因此右上为正线速度与负角速度，即前进并右转的弧线。它不是横向右前平移。新的向量目标与旧的 `/command` 目标互斥；任一后续 `/speed` 更新必须按保存的比例重新换算。急停、未知急停、外部切源、会话或输入超时、`stop`、`exit` 和 `(0,0)` 均清除两类目标并使用 `stop_acc`。
+`/vector` 不是直接 ROS 速度接口：`target_linear = linear_ratio × linear_mps`，`target_angular = angular_ratio × angular_radps`。移动端以车头向上为视觉坐标：上/下分别为正/负 `linear_ratio`，左/右分别为正/负 `angular_ratio`；因此右上为正线速度与负角速度，即前进并右转的弧线。它不是横向右前平移。新的向量目标与旧的 `/command` 目标互斥；多个客户端中最后一条有效 `/command` 或 `/vector` 更新该唯一目标。任一后续 `/speed` 更新必须按保存的比例重新换算。急停、未知急停、外部切源、拥有当前目标的会话输入/心跳超时、任一 `stop`、`exit` 和 `(0,0)` 均清除两类目标并使用 `stop_acc`。
 
 `emergency_stop.state` 只能为 `normal`、`triggered` 或 `unknown`；unknown 不等价于 normal。`release` 为 `idle`、`waiting_confirmation`、`confirmed`、`failed` 或 `unconfirmable`，只能由实际 Bool 回调或超时变更。非零 Twist 使用持久化的 `movement_acc`，任何零 Twist（主动停止、输入/心跳超时、退出或外部控制源接管）使用 `stop_acc`。解除急停的固定 `acc=2000`、`press=1400` 与这些手动驾驶参数保持分离。
 

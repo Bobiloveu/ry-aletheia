@@ -176,7 +176,7 @@ class VehicleControlTests(unittest.TestCase):
         self.assertEqual(pending["transition"], "miniapp")
         self.assertTrue(pending["session"]["present"])
         self.assertFalse(pending["manual_ready"])
-        self.assertTrue(pending["can_begin_manual"] is False)
+        self.assertTrue(pending["can_begin_manual"])
         self.assertEqual(self.control._source_command_publisher.messages[-1].data, "miniapp")
 
     def test_external_control_source_can_request_navigation_without_a_manual_session(self):
@@ -187,6 +187,22 @@ class VehicleControlTests(unittest.TestCase):
 
         self.assertEqual(pending["transition"], "navigation")
         self.assertEqual(self.control._source_command_publisher.messages[-1].data, "navigation")
+
+    def test_confirmed_miniapp_allows_mobile_vector_after_web_session(self):
+        """手机可在网页会话已存在时加入，摇杆输入成为最新运动目标。"""
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+
+        first = self.control.begin_manual_session()["session"]["id"]
+        second = self.control.begin_manual_session()["session"]["id"]
+        self.control.set_command(first, "forward")
+        self.control.set_vector(second, 0.5, -0.75)
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.control.status()["shared_sessions"]["active_count"], 2)
+        self.assertEqual(self.control._target_vector, (0.5, -0.75))
+        self.assertAlmostEqual(self.control._target_linear, 0.1)
+        self.assertAlmostEqual(self.control._target_angular, -0.225)
 
     def test_twist_factory_preserves_miniapp_extended_protocol_fields(self):
         message = MiniappTwistFactory().build(_Twist, 0.2, -0.3)

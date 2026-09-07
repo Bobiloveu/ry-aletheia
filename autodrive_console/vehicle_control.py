@@ -152,7 +152,11 @@ class VehicleControlController:
         self._emergency_query_next_at = 0.0
         self._emergency_release = "idle"
         self._emergency_release_deadline: float | None = None
-        self._session: dict[str, Any] | None = None
+        # 会话只标识某个 Web / App 客户端是否仍在参与控制；车端只有一个
+        # /cmd_vel_miniapp publisher 和一份当前目标。多个客户端可同时加入，
+        # 最近一条有效输入取得该目标的所有权。
+        self._sessions: dict[str, dict[str, Any]] = {}
+        self._motion_session_id: str | None = None
         self._target_linear = 0.0
         self._target_angular = 0.0
         self._target_command: str | None = None
@@ -182,7 +186,7 @@ class VehicleControlController:
     def has_control_session(self) -> bool:
         """供既有任务入口做并发互锁；该查询不会启动 ROS2 节点。"""
         with self._lock:
-            return self._session is not None or self._pending_source == self.SOURCE_MINIAPP
+            return bool(self._sessions) or self._pending_source == self.SOURCE_MINIAPP
 
     def begin_manual_session(self) -> dict[str, Any]:
         self._ensure_started()
@@ -193,58 +197,49 @@ class VehicleControlController:
         adopted_existing_miniapp = False
         with self._lock:
             self._advance_safety_locked(now)
-            if self._session is not None:
-                raise VehicleControlConflict("已有 Aletheia 手动控制会话，请先停止并退出")
+            if self._pending_source == self.SOURCE_NAVIGATION:
+                raise VehicleControlConflict("正在等待切换至 navigation 的实际状态确认")
             if self._actual_source == self.SOURCE_MINIAPP:
-                # 手动源可能先由现有 miniapp 或现场控制台切入。此时不能要求
-                # 操作员先切回 navigation 再切回来；只要车端 state 已真实确认，
-                # Aletheia 就接管为一个新的短生命期安全会话，并先保持 STOP。
-                self._session = {
-                    "id": uuid.uuid4().hex,
-                    "state": "active",
-                    "created_at": now,
-                    "last_heartbeat_at": now,
-                    "last_input_at": now,
-                }
-                self._target_linear = 0.0
-                self._target_angular = 0.0
-                self._target_command = None
-                self._target_vector = None
-                self._manual_stop_latched = True
+                # 第一个客户端接管外部 miniapp 时先 STOP；后续客户端只加入，
+                # 不能因加入行为打断正在操作的其他客户端。
+                had_sessions = bool(self._sessions)
+                session = self._new_session_locked("active", now)
+                adopted_existing_miniapp = not had_sessions
+                if adopted_existing_miniapp:
+                    self._clear_motion_locked()
+                    self._manual_stop_latched = True
                 self._pending_source = None
                 self._switch_deadline = None
                 self._last_error = ""
-                adopted_existing_miniapp = True
-                snapshot = self._snapshot_locked(include_session_id=True)
+                snapshot = self._snapshot_locked(session_id=session["id"])
+            elif self._pending_source == self.SOURCE_MINIAPP:
+                # 同一轮切换中允许后续 Web/App 加入，等待同一个真实状态确认。
+                session = self._new_session_locked("switching", now)
+                snapshot = self._snapshot_locked(session_id=session["id"])
+            elif self._pending_source is not None:
+                raise VehicleControlConflict(f"正在等待切换至 {self._pending_source} 的实际状态确认")
             else:
                 # 控制源切换本身不输出非零 Twist。即使当前由 remote 等外部来源
                 # 接管，或急停状态尚未恢复，操作者也应能请求车端切换；是否成功
                 # 仍只能以 state Topic 回报确认，运动门控依旧严格 fail-closed。
-                self._session = {
-                    "id": uuid.uuid4().hex,
-                    "state": "switching",
-                    "created_at": now,
-                    "last_heartbeat_at": now,
-                    "last_input_at": now,
-                }
-                self._target_linear = 0.0
-                self._target_angular = 0.0
-                self._target_command = None
-                self._target_vector = None
+                session = self._new_session_locked("switching", now)
+                self._clear_motion_locked()
                 self._manual_stop_latched = True
                 self._pending_source = self.SOURCE_MINIAPP
                 self._switch_deadline = now + self.config.switch_timeout_s
                 self._last_error = ""
                 request_source = self.SOURCE_MINIAPP
-                snapshot = self._snapshot_locked(include_session_id=True)
+                snapshot = self._snapshot_locked(session_id=session["id"])
         if adopted_existing_miniapp:
             # 接管一个已经处于 miniapp 的车端时，先立即写入兼容 STOP 帧；绝不
             # 沿用任何外部控制端可能遗留的非零速度。
             self._publish_stop_now()
             LOGGER.info("已接管现有 miniapp 控制源，等待浏览器有效输入")
             return snapshot
+        if request_source is None:
+            return snapshot
         try:
-            self._publish_source_command(request_source or self.SOURCE_MINIAPP)
+            self._publish_source_command(request_source)
         except Exception as exc:
             with self._lock:
                 self._fail_locked(f"无法请求切换到 miniapp：{exc}")
@@ -254,9 +249,9 @@ class VehicleControlController:
     def heartbeat(self, session_id: str) -> dict[str, Any]:
         self._ensure_started()
         with self._lock:
-            self._require_session_locked(session_id, allow_inactive=False)
-            self._session["last_heartbeat_at"] = self._clock()
-            return self._snapshot_locked()
+            session = self._require_session_locked(session_id, allow_inactive=False)
+            session["last_heartbeat_at"] = self._clock()
+            return self._snapshot_locked(session_id=session_id)
 
     def set_command(self, session_id: str, command: str) -> dict[str, Any]:
         self._ensure_started()
@@ -274,11 +269,12 @@ class VehicleControlController:
                 raise VehicleControlConflict("手动控制会话无效，禁止发送运动指令")
             self._target_command = command
             self._target_vector = None
+            self._motion_session_id = session_id
             self._apply_target_command_locked()
             self._manual_stop_latched = False
             session["last_input_at"] = now
             session["last_heartbeat_at"] = now
-            return self._snapshot_locked()
+            return self._snapshot_locked(session_id=session_id)
 
     def set_vector(
         self,
@@ -309,11 +305,12 @@ class VehicleControlController:
             else:
                 self._target_command = None
                 self._target_vector = (linear, angular)
+                self._motion_session_id = session_id
                 self._apply_target_vector_locked()
                 self._manual_stop_latched = False
             session["last_input_at"] = now
             session["last_heartbeat_at"] = now
-            snapshot = self._snapshot_locked()
+            snapshot = self._snapshot_locked(session_id=session_id)
         if publish_stop:
             self._publish_stop_now()
         return snapshot
@@ -340,21 +337,19 @@ class VehicleControlController:
             elif self._target_vector:
                 self._apply_target_vector_locked()
             session["last_heartbeat_at"] = now
-            return self._snapshot_locked()
+            return self._snapshot_locked(session_id=session_id)
 
     def stop(self, session_id: str) -> dict[str, Any]:
         self._ensure_started()
         with self._lock:
             self._require_session_locked(session_id, allow_inactive=True)
-            self._target_linear = 0.0
-            self._target_angular = 0.0
-            self._target_command = None
-            self._target_vector = None
+            self._clear_motion_locked()
             self._manual_stop_latched = True
-            if self._session:
-                self._session["last_input_at"] = self._clock()
-                self._session["last_heartbeat_at"] = self._clock()
-            snapshot = self._snapshot_locked()
+            session = self._sessions.get(session_id)
+            if session:
+                session["last_input_at"] = self._clock()
+                session["last_heartbeat_at"] = self._clock()
+            snapshot = self._snapshot_locked(session_id=session_id)
         self._publish_stop_now()
         return snapshot
 
@@ -431,16 +426,16 @@ class VehicleControlController:
             if self._pending_source is not None:
                 raise VehicleControlConflict(f"正在等待切换至 {self._pending_source} 的实际状态确认")
             if self._actual_source == self.SOURCE_NAVIGATION:
-                self._session = None
+                self._sessions.clear()
+                self._motion_session_id = None
                 self._clear_motion_locked()
                 self._manual_stop_latched = False
                 return self._snapshot_locked()
-            publish_stop = self._session is not None or self._actual_source == self.SOURCE_MINIAPP
+            publish_stop = bool(self._sessions) or self._actual_source == self.SOURCE_MINIAPP
             self._clear_motion_locked()
             self._manual_stop_latched = True
-            if self._session:
-                self._session["state"] = "exiting"
-                self._session["last_heartbeat_at"] = now
+            self._sessions.clear()
+            self._motion_session_id = None
             self._pending_source = self.SOURCE_NAVIGATION
             self._switch_deadline = now + self.config.switch_timeout_s
             self._last_error = ""
@@ -458,10 +453,9 @@ class VehicleControlController:
     def end_manual_session(self, session_id: str) -> dict[str, Any]:
         """严格退出顺序：STOP -> 禁止非零 -> 请求 navigation -> 等真实反馈。"""
         self._ensure_started()
-        now = self._clock()
         with self._lock:
-            self._advance_safety_locked(now)
-            session = self._require_session_locked(session_id, allow_inactive=True)
+            self._advance_safety_locked(self._clock())
+            self._require_session_locked(session_id, allow_inactive=True)
         return self.request_navigation()
 
     def close(self) -> None:
@@ -471,7 +465,7 @@ class VehicleControlController:
                 return
             self._closed = True
             running = self._runtime_state == "ready"
-            should_release = self._actual_source == self.SOURCE_MINIAPP or self._session is not None
+            should_release = self._actual_source == self.SOURCE_MINIAPP or bool(self._sessions)
             self._target_linear = 0.0
             self._target_angular = 0.0
             self._target_command = None
@@ -598,17 +592,21 @@ class VehicleControlController:
             self._has_source_state = True
             self._last_source_update_at = self._clock()
             self._state_event.set()
-            if self._pending_source == self.SOURCE_MINIAPP and source == self.SOURCE_MINIAPP and self._session:
+            if self._pending_source == self.SOURCE_MINIAPP and source == self.SOURCE_MINIAPP and self._sessions:
                 self._pending_source = None
                 self._switch_deadline = None
-                self._session["state"] = "active"
-                self._session["last_heartbeat_at"] = self._clock()
+                now = self._clock()
+                for session in self._sessions.values():
+                    if session["state"] == "switching":
+                        session["state"] = "active"
+                        session["last_heartbeat_at"] = now
                 self._last_error = ""
                 LOGGER.info("已由 /control_source_state 确认 miniapp 控制权")
             elif self._pending_source == self.SOURCE_NAVIGATION and source == self.SOURCE_NAVIGATION:
                 self._pending_source = None
                 self._switch_deadline = None
-                self._session = None
+                self._sessions.clear()
+                self._motion_session_id = None
                 self._manual_stop_latched = False
                 self._last_error = ""
                 LOGGER.info("已由 /control_source_state 确认 navigation 接管")
@@ -617,8 +615,9 @@ class VehicleControlController:
                 was_moving = bool(self._target_linear or self._target_angular)
                 self._clear_motion_locked()
                 self._manual_stop_latched = True
-                if self._session and self._pending_source is None:
-                    self._session["state"] = "invalid"
+                if self._sessions and self._pending_source is None:
+                    self._sessions.clear()
+                    self._motion_session_id = None
                     self._last_error = f"实际控制源已离开 miniapp：{source}"
                 publish_stop = was_moving
         if publish_stop:
@@ -752,20 +751,27 @@ class VehicleControlController:
             self._clear_motion_locked()
             self._manual_stop_latched = True
             self._last_error = f"等待 /control_source_state={target} 超时；未确认控制源切换"
-            if self._session:
-                self._session["state"] = "invalid"
+            self._sessions.clear()
+            self._motion_session_id = None
             LOGGER.warning("%s", self._last_error)
-        if not self._session:
-            return
-        heartbeat_age = now - float(self._session["last_heartbeat_at"])
-        if heartbeat_age > self.config.heartbeat_timeout_s and self._session["state"] not in {"exiting", "invalid"}:
-            self._clear_motion_locked()
-            self._manual_stop_latched = True
-            self._session["state"] = "expired"
-            self._last_error = "前端控制心跳超时，已锁定 STOP"
-            LOGGER.warning("手动控制心跳超时，已停止车辆输出")
-            return
-        if (self._target_linear or self._target_angular) and now - float(self._session["last_input_at"]) > self.config.input_timeout_s:
+        expired = [
+            session_id
+            for session_id, session in self._sessions.items()
+            if now - float(session["last_heartbeat_at"]) > self.config.heartbeat_timeout_s
+            and session["state"] not in {"exiting", "invalid"}
+        ]
+        for session_id in expired:
+            del self._sessions[session_id]
+            if session_id == self._motion_session_id:
+                self._clear_motion_locked()
+                self._manual_stop_latched = True
+                self._last_error = "前端控制心跳超时，已锁定 STOP"
+                LOGGER.warning("手动控制心跳超时，已停止车辆输出")
+        motion_session = self._sessions.get(self._motion_session_id or "")
+        if (self._target_linear or self._target_angular) and (
+            motion_session is None
+            or now - float(motion_session["last_input_at"]) > self.config.input_timeout_s
+        ):
             self._clear_motion_locked()
             self._manual_stop_latched = True
             self._last_error = "控制输入超时，已锁定 STOP"
@@ -773,8 +779,7 @@ class VehicleControlController:
 
     def _manual_ready_locked(self) -> bool:
         return bool(
-            self._session
-            and self._session.get("state") == "active"
+            any(session.get("state") == "active" for session in self._sessions.values())
             and self._pending_source is None
             and self._actual_source == self.SOURCE_MINIAPP
             and self._emergency_stop is False
@@ -804,6 +809,18 @@ class VehicleControlController:
         self._target_angular = 0.0
         self._target_command = None
         self._target_vector = None
+        self._motion_session_id = None
+
+    def _new_session_locked(self, state: str, now: float) -> dict[str, Any]:
+        session = {
+            "id": uuid.uuid4().hex,
+            "state": state,
+            "created_at": now,
+            "last_heartbeat_at": now,
+            "last_input_at": now,
+        }
+        self._sessions[session["id"]] = session
+        return session
 
     def _validated_speed(self, value: object, label: str) -> float:
         if isinstance(value, bool):
@@ -831,11 +848,12 @@ class VehicleControlController:
         return numeric
 
     def _require_session_locked(self, session_id: str, *, allow_inactive: bool) -> dict[str, Any]:
-        if not isinstance(session_id, str) or not session_id or not self._session or session_id != self._session.get("id"):
+        if not isinstance(session_id, str) or not session_id or session_id not in self._sessions:
             raise VehicleControlConflict("手动控制会话无效或已结束")
-        if not allow_inactive and self._session.get("state") not in {"switching", "active"}:
+        session = self._sessions[session_id]
+        if not allow_inactive and session.get("state") not in {"switching", "active"}:
             raise VehicleControlConflict("手动控制会话已失效，禁止发送运动指令")
-        return self._session
+        return session
 
     def _fail_locked(self, message: str) -> None:
         self._clear_motion_locked()
@@ -845,8 +863,8 @@ class VehicleControlController:
             self._emergency_release = "unconfirmable"
             self._emergency_release_deadline = None
         self._last_error = message
-        if self._session:
-            self._session["state"] = "invalid"
+        self._sessions.clear()
+        self._motion_session_id = None
 
     def _publish_source_command(self, source: str) -> None:
         with self._publish_lock:
@@ -887,13 +905,20 @@ class VehicleControlController:
                 profile = self._twist_profile
             publisher.publish(self._twist_factory.build(twist_type, linear, angular, profile=profile))
 
-    def _snapshot_locked(self, *, include_session_id: bool = False) -> dict[str, Any]:
-        session = self._session
+    def _snapshot_locked(self, *, session_id: str | None = None) -> dict[str, Any]:
+        # 会话操作的响应只能描述请求者自己的 session；常规 GET 则只返回
+        # 聚合状态，避免任意客户端取得其他端的 opaque session_id。
+        session = self._sessions.get(session_id) if session_id else None
+        active_count = sum(1 for value in self._sessions.values() if value["state"] == "active")
+        switching_count = sum(1 for value in self._sessions.values() if value["state"] == "switching")
+        summary_state = (
+            "active" if active_count else "switching" if switching_count else "none"
+        )
         session_data: dict[str, Any] = {
-            "present": session is not None,
-            "state": session.get("state") if session else "none",
+            "present": session is not None if session_id else bool(self._sessions),
+            "state": session.get("state") if session else summary_state,
         }
-        if include_session_id and session:
+        if session_id and session:
             session_data["id"] = session["id"]
         actual = self._actual_source
         display_mode = "手动控制" if actual == self.SOURCE_MINIAPP else "自动驾驶" if actual == self.SOURCE_NAVIGATION else "未知"
@@ -915,9 +940,13 @@ class VehicleControlController:
             # 切换控制源与输出速度是两道独立闸门：当前 remote/未知或急停时仍可
             # 请求 miniapp，结果以 state Topic 确认；非零速度仍由 manual_ready
             # 和 _manual_ready_locked 的急停/会话条件严格控制。
-            "can_begin_manual": self._runtime_state == "ready" and self._pending_source is None and session is None and not self._active_run_guard(),
+            "can_begin_manual": self._runtime_state == "ready" and self._pending_source in {None, self.SOURCE_MINIAPP} and not self._active_run_guard(),
             "can_request_navigation": self._runtime_state == "ready" and self._pending_source is None,
             "session": session_data,
+            "shared_sessions": {
+                "active_count": active_count,
+                "switching_count": switching_count,
+            },
             "safety": {
                 "publish_hz": self.config.publish_hz,
                 "input_timeout_ms": int(self.config.input_timeout_s * 1000),
