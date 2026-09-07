@@ -1056,6 +1056,7 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("/api/vehicle-control/release-emergency-stop", script)
         self.assertIn("/api/vehicle-control/chassis-parameters", script)
         self.assertIn("/api/vehicle-control/navigation", script)
+        self.assertIn('requestNavigation.hidden = Boolean(sessionId) || state.actual_source === "navigation";', script)
         self.assertIn("car_state_sync", script)
         self.assertIn("正在读取车端状态", script)
         self.assertIn("已由车端确认切换至", script)

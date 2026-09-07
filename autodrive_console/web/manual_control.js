@@ -233,7 +233,7 @@
     enter.disabled = !state.can_begin_manual || switching;
     enter.textContent = isManual ? "开始手动控制" : "进入手动控制";
     enter.hidden = Boolean(sessionId);
-    requestNavigation.hidden = Boolean(sessionId);
+    requestNavigation.hidden = Boolean(sessionId) || state.actual_source === "navigation";
     requestNavigation.disabled = !state.can_request_navigation || switching;
     exit.hidden = !sessionId;
     exit.disabled = switching && state.transition === "navigation";
