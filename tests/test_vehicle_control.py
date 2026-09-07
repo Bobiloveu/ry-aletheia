@@ -218,7 +218,12 @@ class VehicleControlTests(unittest.TestCase):
 
     def test_emergency_query_bootstraps_unknown_without_overwriting_topic_state(self):
         """底盘查询只补齐启动盲区，实时 Topic 已确认的状态始终优先。"""
-        self.assertEqual(self.control.status()["emergency_stop"]["state"], "unknown")
+        pending = self.control.status()
+        self.assertEqual(pending["emergency_stop"]["state"], "unknown")
+        self.assertEqual(
+            pending["car_state_sync"],
+            {"control_source": "pending", "emergency_stop": "pending"},
+        )
 
         self.control._on_emergency_query_response(
             SimpleNamespace(is_emergency_stop=False),

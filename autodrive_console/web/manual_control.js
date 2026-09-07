@@ -174,9 +174,10 @@
     renderChassisParameterSaveState();
   }
 
-  function renderEmergencyStop(emergency) {
+  function renderEmergencyStop(emergency, carStateSync) {
     const state = emergency?.state || "unknown";
     const release = emergency?.release || "idle";
+    const pending = carStateSync?.emergency_stop === "pending";
     const panel = $("emergencyStopPanel");
     const label = $("emergencyStopState");
     const detail = $("emergencyStopDetail");
@@ -189,6 +190,9 @@
     } else if (state === "triggered") {
       label.textContent = "急停已触发";
       detail.textContent = release === "failed" ? "未在限定时间内收到解除确认，请检查物理急停与底盘状态。" : "手动运动已锁定。解除后仍需等待车端状态恢复。";
+    } else if (pending) {
+      label.textContent = "正在读取";
+      detail.textContent = "正在从车端读取急停状态；读取完成前手动运动保持锁定。";
     } else {
       label.textContent = "状态未知";
       detail.textContent = release === "unconfirmable" ? "解除结果无法确认，请检查 ROS2 与急停状态 Topic。" : "尚未收到 /is_emergency_stop 的真实状态，手动运动保持锁定。";
@@ -205,15 +209,17 @@
     lastStatus = state;
     const switching = Boolean(state.transition);
     const isManual = state.actual_source === "miniapp";
+    const carStateSync = state.car_state_sync || {};
+    const readingCarState = carStateSync.control_source === "pending" || carStateSync.emergency_stop === "pending";
     const sourceDot = $("sourceDot");
-    sourceDot.className = `source-dot ${switching ? "switching" : isManual ? "manual" : state.actual_source === "navigation" ? "auto" : "unknown"}`;
-    $("sourceName").textContent = switching ? `正在切换至 ${sourceLabel(state.transition)}` : sourceLabel(state.actual_source);
-    $("sessionBadge").textContent = state.manual_ready ? "控制已就绪" : state.session?.state === "expired" ? "心跳已失效" : switching ? "切换中" : "未接管";
-    $("sessionBadge").className = `session-badge ${state.manual_ready ? "ready" : state.transition_error || state.session?.state === "expired" ? "error" : ""}`;
+    sourceDot.className = `source-dot ${switching ? "switching" : readingCarState ? "syncing" : isManual ? "manual" : state.actual_source === "navigation" ? "auto" : "unknown"}`;
+    $("sourceName").textContent = switching ? `正在切换至 ${sourceLabel(state.transition)}` : readingCarState && state.actual_source === "unknown" ? "正在读取…" : sourceLabel(state.actual_source);
+    $("sessionBadge").textContent = state.manual_ready ? "控制已就绪" : state.session?.state === "expired" ? "心跳已失效" : switching ? "切换中" : readingCarState ? "读取中" : "未接管";
+    $("sessionBadge").className = `session-badge ${state.manual_ready ? "ready" : readingCarState ? "pending" : state.transition_error || state.session?.state === "expired" ? "error" : ""}`;
     $("publishRate").textContent = state.safety ? `${state.safety.publish_hz} Hz` : "—";
     $("inputTimeout").textContent = state.safety ? `${state.safety.input_timeout_ms} ms` : "—";
     $("heartbeatTimeout").textContent = state.safety ? `${state.safety.heartbeat_timeout_ms} ms` : "—";
-    renderEmergencyStop(state.emergency_stop);
+    renderEmergencyStop(state.emergency_stop, carStateSync);
     renderChassisParameters(state.chassis_parameters);
 
     const enter = $("enterManual");
@@ -230,7 +236,10 @@
     $("stopButton").disabled = !sessionId || state.session?.state === "none";
 
     const emergencyState = state.emergency_stop?.state || "unknown";
-    if (emergencyState === "triggered") {
+    if (readingCarState) {
+      $("gateTitle").textContent = "正在读取车端状态";
+      $("gateText").textContent = "正在读取急停与实际控制源；完成前方向控制保持锁定。";
+    } else if (emergencyState === "triggered") {
       $("gateTitle").textContent = "急停已触发";
       $("gateText").textContent = "车端已锁定手动运动。可发起软件解除，但必须等待 /is_emergency_stop 返回未触发。";
     } else if (emergencyState !== "normal") {

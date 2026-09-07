@@ -1055,6 +1055,8 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertRegex(page, r'id="stopAcc"[^>]*min="20"[^>]*max="2000"')
         self.assertIn("/api/vehicle-control/release-emergency-stop", script)
         self.assertIn("/api/vehicle-control/chassis-parameters", script)
+        self.assertIn("car_state_sync", script)
+        self.assertIn("正在读取车端状态", script)
 
     def test_manual_control_uses_paired_range_and_numeric_inputs_for_every_tunable_value(self):
         """现场人员应能拖动粗调，也能直接输入精确值，且五项参数使用同一交互模型。"""

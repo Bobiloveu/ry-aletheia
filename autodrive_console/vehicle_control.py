@@ -806,6 +806,10 @@ class VehicleControlController:
         if self._pending_source:
             display_mode = "正在切换"
         emergency_state = "normal" if self._emergency_stop is False else "triggered" if self._emergency_stop is True else "unknown"
+        car_state_sync = {
+            "control_source": "confirmed" if actual in {self.SOURCE_NAVIGATION, self.SOURCE_MINIAPP} else "pending",
+            "emergency_stop": "confirmed" if self._emergency_stop is not None else "pending",
+        }
         return {
             "runtime": self._runtime_state,
             "runtime_error": self._runtime_error,
@@ -829,6 +833,9 @@ class VehicleControlController:
                 "min": self.config.min_speed,
                 "max": self.config.max_speed,
             },
+            # 初次 HTTP 状态读取会惰性启动 ROS2 节点；此字段让客户端将短暂
+            # unknown 呈现为“正在读取”，但不改变任何 fail-closed 门控。
+            "car_state_sync": car_state_sync,
             "emergency_stop": {
                 "state": emergency_state,
                 "release": self._emergency_release,

@@ -76,6 +76,10 @@
     "min": 0.10,
     "max": 1.00
   },
+  "car_state_sync": {
+    "control_source": "confirmed",
+    "emergency_stop": "confirmed"
+  },
   "emergency_stop": {
     "state": "normal",
     "release": "idle"
@@ -89,6 +93,8 @@
 ```
 
 Backend 以 **20 Hz** 发布。保持输入必须在 **350 ms** 前刷新；会话心跳必须在 **1200 ms** 前到达。缺失输入或心跳会触发安全停止；浏览器 UI 的刷新频率不能代替 Backend 看门狗。两项请求速度必须是 **0.10–1.00**（含边界）范围内的有限值。默认线速度为 **0.20 m/s**，默认角速度为 **0.30 rad/s**。客户端不能覆盖这些限制。
+
+`car_state_sync.control_source` 与 `car_state_sync.emergency_stop` 取值为 `pending` 或 `confirmed`，分别说明实际控制源和急停真值是否已从车端收到。客户端可把首次 `pending` 呈现为“正在读取车端状态”，但不得据此启用接管或运动；它不是将 unknown 推断为正常。
 
 `emergency_stop.state` 只能为 `normal`、`triggered` 或 `unknown`；unknown 不等价于 normal。`release` 为 `idle`、`waiting_confirmation`、`confirmed`、`failed` 或 `unconfirmable`，只能由实际 Bool 回调或超时变更。非零 Twist 使用持久化的 `movement_acc`，任何零 Twist（主动停止、输入/心跳超时、退出或外部控制源接管）使用 `stop_acc`。解除急停的固定 `acc=2000`、`press=1400` 与这些手动驾驶参数保持分离。
 

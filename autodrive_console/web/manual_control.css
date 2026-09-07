@@ -8,6 +8,7 @@
 .source-dot.auto { background: var(--success); box-shadow: 0 0 0 4px rgba(48, 209, 88, .12); }
 .source-dot.manual { background: var(--warning); box-shadow: 0 0 0 4px rgba(255, 159, 10, .12); }
 .source-dot.switching { background: var(--accent); animation: source-pulse 1.2s ease-in-out infinite; }
+.source-dot.syncing { background: var(--accent); animation: source-pulse 1.2s ease-in-out infinite; }
 @keyframes source-pulse { 50% { transform: scale(.72); opacity: .55; } }
 .manual-layout { display: grid; grid-template-columns: minmax(0, 1fr) 282px; gap: 18px; align-items: start; }
 .manual-stage, .manual-facts { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
@@ -17,6 +18,7 @@
 .stage-status p { max-width: 59ch; margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
 .session-badge { flex: none; padding: 5px 9px; border-radius: 999px; color: var(--muted); background: var(--surface-raised); font-size: 11px; font-weight: 650; }
 .session-badge.ready { color: var(--success); background: var(--success-soft); }
+.session-badge.pending { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .session-badge.error { color: var(--danger); background: var(--danger-soft); }
 .control-gate { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin: 0 20px; padding: 15px 18px; border-radius: 12px; background: var(--surface-raised); }
 .gate-copy h3 { margin: 0; color: var(--ink); font-size: 14px; }
