@@ -1,5 +1,7 @@
 # 局部代价地图实时观测实施计划
 
+> 历史实施计划（2026-09-04）：本计划的原始范围仅为 PC 接入。Flutter Mobile 已在后续工作中接入相同的只读 `/costmap` lane；当前协议与消费者范围以 [shared/contracts/realtime_observation.md](../../../shared/contracts/realtime_observation.md) 和 [PROJECT_OVERVIEW.md](../../../PROJECT_OVERVIEW.md) 为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `executing-plans` to execute this plan task-by-task.
 
 **Goal:** 在不改变既有地图、点云、位姿、视频和移动端行为的前提下，把 ROS2 `/local_costmap/costmap` 以独立、latest-wins 的二进制实时通道显示到 PC 端实时运行观测中。

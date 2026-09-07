@@ -83,7 +83,7 @@ http://<小车IP>:8087
 | 地图交互与车体 | CSS 视图变换、DOM 车体层 | PixiJS 世界容器变换、保留 DOM 车体层 |
 | 点云时效策略 | 单槽 latest-wins、限频合成 | 保持相同单槽 latest-wins、限频与过期帧丢弃策略 |
 | 相机预览 | 原生 Canvas 2D 绘制 | 可选的 MediaMTX + WHEP/WebRTC 直出；浏览器原生视频元素解码，视频帧不经过 Python 或实时遥测链路 |
-| ROS/遥测/API | 既有实现 | 点云/位姿与 PC 局部代价地图使用专用 UDP + Binary WebSocket；保持既有控制边界，不新增机器人控制接口 |
+| ROS/遥测/API | 既有实现 | 点云/位姿与局部代价地图使用专用 UDP + Binary WebSocket；PC 与 Flutter Mobile 仅作只读消费，保持既有控制边界，不新增机器人控制接口 |
 | 开发工具链 | 手工管理 Python、Node 与构建工具 | 根目录 `pixi.toml`/`pixi.lock` 锁定 Python 3.10、Node 20、CMake、编译器、PyInstaller 与 pytest |
 
 `v2.0` 将地图、虚拟墙和点云重构为 PixiJS 分层渲染；相机则采用独立的按需 WebRTC 链路。目标检测和分割视频继续读取既有 ROS 图像话题；前、后、左、右物理相机由发布配置选择 ROS 或 ShmSDK 只读旁路。两者都只在工具私有运行时内编码、转发，不改变任务下发、Supervisor 编排、ROS2 原有节点或机器人控制边界。详细设计和环境边界见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)。
@@ -109,8 +109,8 @@ http://<小车IP>:8087
 ```text
 浏览器（PC / 手机）
   ├─ HTTP :8087：控制台、任务、报告与配置
-  ├─ Binary WebSocket :8768：点云、位姿与 PC 局部代价地图实时观测
-       └─ PixiJS：地图栅格、局部代价地图、虚拟墙、最新点云
+  ├─ Binary WebSocket :8768：点云、位姿与局部代价地图实时观测
+       └─ PC PixiJS / Flutter CustomPaint：地图栅格、局部代价地图、虚拟墙、最新点云
   └─ WHEP/WebRTC :8889：低延迟相机视频直出
              │
 RY Aletheia（小车普通账户）
@@ -122,16 +122,16 @@ RY Aletheia（小车普通账户）
 小车已有 ROS 2 Humble、定位、地图、导航与传感器节点
 ```
 
-实时位姿、点云和 PC 局部代价地图分别使用网页专用流，浏览器侧采用独立连接与“只保留最新帧”策略。PixiJS 只更新地图世界容器、最新点云几何或单张代价地图 texture，车体仍由独立 DOM 层显示，避免大帧拖慢车体显示。视频走浏览器与 MediaMTX 的直连 WebRTC 会话：Python 只负责配置、进程生命周期和健康状态，绝不转发视频帧。
+实时位姿、点云和局部代价地图分别使用专用流，PC 与 Flutter Mobile 均采用独立连接和“只保留最新帧”策略。PC PixiJS 更新地图世界容器、最新点云几何或单张代价地图 texture；Flutter CustomPaint 将最新 costmap 转为单张受限 RGBA 栅格，与底图共用 world transform。视频走浏览器与 MediaMTX 的直连 WebRTC 会话：Python 只负责配置、进程生命周期和健康状态，绝不转发视频帧。
 
 ### 实时观测链路约束
 
-实时观测不启动、也不经由 `foxglove_bridge`、`rosbridge_suite` 或隐藏 ROS topic。点云由 C++ 预处理进程读取 ROS 点云、投影到 `map` 后，以回环 UDP 交给 Aletheia 遥测网关；位姿由另一独立 C++ 进程读取 `map → base_*` TF；局部代价地图由第三个轻量实例读取 `/local_costmap/costmap`，按消息时间戳将 `header.frame_id` 与栅格原点投影到 `map`。网关向 PC 浏览器暴露三条 Binary WebSocket（同为 `:8768` 的 `/cloud`、`/pose`、`/costmap`）；移动端不连接或渲染 costmap，不具备 ROS 图发现、订阅、服务或控制能力。
+实时观测不启动、也不经由 `foxglove_bridge`、`rosbridge_suite` 或隐藏 ROS topic。点云由 C++ 预处理进程读取 ROS 点云、投影到 `map` 后，以回环 UDP 交给 Aletheia 遥测网关；位姿由另一独立 C++ 进程读取 `map → base_*` TF；局部代价地图由第三个轻量实例读取 `/local_costmap/costmap`，按消息时间戳将 `header.frame_id` 与栅格原点投影到 `map`。网关向 PC 浏览器与 Flutter Mobile 暴露三条 Binary WebSocket（同为 `:8768` 的 `/cloud`、`/pose`、`/costmap`）；移动端仅消费受控流，不具备 ROS 图发现、订阅、服务或控制能力。
 
 - UDP 仅绑定本机：点云为 `127.0.0.1:8769`、位姿为 `127.0.0.1:8770`、局部代价地图为 `127.0.0.1:8771`；每个分片 payload 最多 1152 Byte，UDP 包不会依赖 IP 分片。
 - 点云仅保留最新完整帧：最多 3000 个 `float32 x/y` 点；丢片、过期、乱序旧帧或网络拥塞都直接丢弃，不确认、不重传、不补历史。
 - 位姿只发送网页所需的 `timestamp / seq / x / y / yaw`，与点云使用独立进程、UDP 入口/发送槽、WebSocket 和浏览器渲染节奏；慢浏览器只能丢弃自己的旧帧，不能反压 ROS 回调。
-- 局部代价地图只供 PC：最多 65,535 个原始 OccupancyGrid cell，以单张动态纹理绘制。局部图无 TF、过期或切图时安全隐藏，恢复后只显示最新有效帧；其独立通道不能影响点云或位姿。
+- 局部代价地图供 PC 与 Flutter Mobile：最多 65,535 个原始 OccupancyGrid cell，以单张动态纹理/RGBA 栅格绘制。局部图无 TF、过期或切图时安全隐藏，恢复后只显示最新有效帧；其独立通道不能影响点云或位姿。
 - 页面关闭后，观测进程依照空闲回收策略停止；控制台退出或升级前会主动回收其遥测网关和预处理子进程。详细协议、故障边界和实车验证清单见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md#9-实时运行观测的工程策略)。
 
 ## 文档

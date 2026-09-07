@@ -13,12 +13,15 @@ import '../core/connection/robot_connection_controller.dart';
 import '../core/connection/robot_connection_state.dart';
 import '../core/connection/robot_endpoint.dart';
 import '../features/live_observation/application/cloud_telemetry_provider.dart';
+import '../features/live_observation/application/costmap_telemetry_provider.dart';
 import '../features/live_observation/application/live_observation_controller.dart';
 import '../features/live_observation/application/pose_telemetry_provider.dart';
 import '../features/live_observation/application/video_status_controller.dart';
 import '../features/live_observation/data/cloud_telemetry_client.dart';
+import '../features/live_observation/data/costmap_telemetry_client.dart';
 import '../features/live_observation/data/pose_telemetry_client.dart';
 import '../features/live_observation/domain/cloud_frame.dart';
+import '../features/live_observation/domain/costmap_frame.dart';
 import '../features/live_observation/domain/live_map.dart';
 import '../features/live_observation/domain/pose_frame.dart';
 import '../features/live_observation/domain/video_status.dart';
@@ -150,6 +153,7 @@ class _GalleryPreviewScope extends StatelessWidget {
         ),
         poseTelemetryProvider.overrideWith((ref) => _poseStreamFor(spec)),
         cloudTelemetryProvider.overrideWith((ref) => _cloudStreamFor(spec)),
+        costmapTelemetryProvider.overrideWith((ref) => _costmapStreamFor(spec)),
         testRunsControllerProvider.overrideWith(
           () => _GalleryTestRunsController(_testRunsStateFor(spec)),
         ),
@@ -842,6 +846,79 @@ Stream<CloudTelemetrySample> _cloudStreamFor(GalleryScreenSpec spec) {
           .4,
           .82,
           .72,
+        ]),
+      ),
+    ),
+  );
+}
+
+Stream<CostmapTelemetrySample> _costmapStreamFor(GalleryScreenSpec spec) {
+  if (spec.id != 'observe_live_costmap') {
+    return const Stream<CostmapTelemetrySample>.empty();
+  }
+  return Stream<CostmapTelemetrySample>.value(
+    CostmapTelemetrySample(
+      receivedAt: DateTime.now(),
+      receivedPackets: 1,
+      frame: CostmapFrame(
+        sequence: 7,
+        sourceTimestampNanoseconds:
+            DateTime.now().microsecondsSinceEpoch * 1000,
+        originX: -1.6,
+        originY: -1.2,
+        originYaw: 0,
+        resolution: .4,
+        width: 8,
+        height: 6,
+        cells: Uint8List.fromList(const [
+          0,
+          0,
+          0,
+          40,
+          85,
+          126,
+          253,
+          254,
+          0,
+          0,
+          30,
+          75,
+          110,
+          160,
+          253,
+          254,
+          0,
+          20,
+          60,
+          120,
+          180,
+          220,
+          253,
+          254,
+          0,
+          0,
+          30,
+          80,
+          130,
+          185,
+          230,
+          253,
+          0,
+          0,
+          0,
+          40,
+          95,
+          145,
+          205,
+          255,
+          255,
+          255,
+          0,
+          0,
+          60,
+          110,
+          160,
+          255,
         ]),
       ),
     ),

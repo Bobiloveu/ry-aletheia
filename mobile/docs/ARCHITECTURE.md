@@ -121,7 +121,7 @@ Controller 对外暴露 `AsyncValue` 或明确的不可变 state；Repository �
 地图视图不是“可以拖动的图片”，而是一个有世界坐标的 canvas。渲染顺序固定为：
 
 ```text
-base map → metre grid → virtual walls → future trajectory → point cloud → vehicle footprint / pose
+base map → metre grid → local costmap → virtual walls → future trajectory → point cloud → vehicle footprint / pose
 ```
 
 所有层必须共用同一 world-to-screen transform；地图 resolution、origin、缩放、平移在一个 viewport 内计算。栅格是米制参考，不是纯装饰：密度随着 zoom 调整，并使用低对比度色彩。地图边界之外显示深色 Workspace Canvas（可延续弱 grid），不使用突兀纯黑；平移受合理范围约束但允许检查周边空间。
@@ -135,14 +135,15 @@ base map → metre grid → virtual walls → future trajectory → point cloud 
 
 地图 active 状态以约 5 秒轮询为主；切换或 refresh 必须由 epoch 防止过期响应覆盖当前地图。
 
-### 6.2 Pose 与 PointCloud 二进制流
+### 6.2 Pose、PointCloud 与局部代价地图二进制流
 
 Pose 与 PointCloud 从车端独立二进制 WebSocket 获取（当前端口 `8768`，路径按现有实现分别为 pose/cloud）。协议为严格校验的 `ALTM` v1：验证 magic、版本、stream type、record count、payload 长度和有限 float 值。
 
 - Pose：读取网络序 3 个 `float32`（x/y/yaw）；本地待处理帧超过 250ms 直接丢弃。
 - Cloud：最多 3000 组 x/y；只保留一个未消费帧，在下一帧渲染时解码；超过 100ms 的帧丢弃。
 - `Float32List` 直接交给 `CustomPainter.drawRawPoints`，禁止每帧创建大量 `Offset`。
-- 断线可指数退避重连，但不得请求历史帧或堆积回放。
+- Costmap：独立订阅 `/costmap`（`kind=3`），验证 map 原点 x/y/yaw、resolution、uint16 宽高、维度乘积、总长度和有限数值；最多 65,535 cell。`0` 与 ROS unknown 的 `255` 透明，栅格行翻转后作为单张 RGBA 图层按地图原点/朝向绘制；接收超过 5 秒或切图后等待新帧时安全隐藏。
+- 三条流都可指数退避重连，但不得请求历史帧或堆积回放。costmap 仅是本地显示层，可在地图工具栏隐藏，不会停止车端数据或改变导航配置。
 
 ### 6.3 WHEP 视频
 
