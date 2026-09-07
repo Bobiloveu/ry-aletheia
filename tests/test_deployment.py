@@ -875,8 +875,10 @@ def test_deployment_empty_states_use_compact_layout_and_svg_brand_mark():
     assert "body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace) .map-workspace" in deployment_css
     assert "height: min(400px, calc(100vh - 250px));" in deployment_css
     assert "grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);" in deployment_css
-    assert ".mark svg {" in shell_css
-    assert "createBrandFallback" in shell_js
+    # 共享壳将品牌图形统一为可缓存的 /aletheia.svg 图片资源；不再维护
+    # 已移除的内嵌 SVG fallback。
+    assert ".mark img {" in shell_css
+    assert 'img[src="/aletheia.svg"]' in shell_js
 
     deployment_js = (root / "deployment.js").read_text(encoding="utf-8")
     assert "mapImage.onerror" in deployment_js
