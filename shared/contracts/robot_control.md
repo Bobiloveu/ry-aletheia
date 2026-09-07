@@ -25,7 +25,7 @@
 
 ## 控制源状态机
 
-允许的控制源值为 `navigation` 和 `miniapp`。
+允许 Aletheia 请求的控制源值为 `navigation` 和 `miniapp`。车端状态 Topic 还可能报告如 `remote` 的外部控制源；任何非空回传均为已确认的实际状态，但只有前两者符合 Aletheia 的受控会话条件。
 
 1. 仅在不存在 Aletheia 手动会话、没有自动运行占有车辆，且实际控制源为 `navigation` 或已确认的 `miniapp` 时，才允许 `POST /api/vehicle-control/enter`。
 2. 从 `navigation` 切换时，Backend 请求 `/control_source_cmd=miniapp` 并进入 `switching`，最多等待 **4.0 s** 取得 `/control_source_state=miniapp`。
@@ -94,7 +94,7 @@
 
 Backend 以 **20 Hz** 发布。保持输入必须在 **350 ms** 前刷新；会话心跳必须在 **1200 ms** 前到达。缺失输入或心跳会触发安全停止；浏览器 UI 的刷新频率不能代替 Backend 看门狗。两项请求速度必须是 **0.10–1.00**（含边界）范围内的有限值。默认线速度为 **0.20 m/s**，默认角速度为 **0.30 rad/s**。客户端不能覆盖这些限制。
 
-`car_state_sync.control_source` 与 `car_state_sync.emergency_stop` 取值为 `pending` 或 `confirmed`，分别说明实际控制源和急停真值是否已从车端收到。客户端可把首次 `pending` 呈现为“正在读取车端状态”，但不得据此启用接管或运动；它不是将 unknown 推断为正常。
+`car_state_sync.control_source` 与 `car_state_sync.emergency_stop` 取值为 `pending` 或 `confirmed`，分别说明实际控制源和急停真值是否已从车端收到。控制源收到 `remote` 等外部值时也必须为 `confirmed`，客户端应展示外部接管而非“正在读取”。客户端可把首次 `pending` 呈现为“正在读取车端状态”，但不得据此启用接管或运动；它不是将 unknown 推断为正常。
 
 `emergency_stop.state` 只能为 `normal`、`triggered` 或 `unknown`；unknown 不等价于 normal。`release` 为 `idle`、`waiting_confirmation`、`confirmed`、`failed` 或 `unconfirmable`，只能由实际 Bool 回调或超时变更。非零 Twist 使用持久化的 `movement_acc`，任何零 Twist（主动停止、输入/心跳超时、退出或外部控制源接管）使用 `stop_acc`。解除急停的固定 `acc=2000`、`press=1400` 与这些手动驾驶参数保持分离。
 

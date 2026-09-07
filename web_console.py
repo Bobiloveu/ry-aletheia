@@ -1718,6 +1718,12 @@ def run_console() -> None:
         # not run.  VideoManager.status() reports the same error to the page.
         LOGGER.warning("视频配置迁移未执行：%s", exc)
     try:
+        # 手动控制首次页面请求不能承担 ROS2 节点创建和锁存状态回放的延迟。
+        # 节点无法启动时仍保留控制台和状态页，由 fail-closed 状态明确锁定。
+        VEHICLE_CONTROL.start()
+    except VehicleControlUnavailable as exc:
+        LOGGER.warning("车辆控制 ROS2 模块预热失败：%s", exc)
+    try:
         server = ThreadingHTTPServer(("0.0.0.0", 8087), ConsoleHandler)
     except OSError as exc:
         if exc.errno == errno.EADDRINUSE:

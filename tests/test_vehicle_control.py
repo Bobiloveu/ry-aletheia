@@ -159,6 +159,23 @@ class VehicleControlTests(unittest.TestCase):
     def _confirm_emergency_normal(self):
         self.control._on_emergency_stop(SimpleNamespace(data=False))
 
+    def test_start_prewarms_the_ros_controller_before_any_status_request(self):
+        control = VehicleControlController()
+        with patch.object(control, "_ensure_started") as ensure_started:
+            control.start()
+        ensure_started.assert_called_once_with()
+
+    def test_external_control_source_is_confirmed_but_cannot_be_taken_over(self):
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="remote"))
+
+        state = self.control.status()
+
+        self.assertEqual(state["actual_source"], "remote")
+        self.assertEqual(state["car_state_sync"]["control_source"], "confirmed")
+        self.assertFalse(state["can_begin_manual"])
+        self.assertFalse(state["manual_ready"])
+
     def test_twist_factory_preserves_miniapp_extended_protocol_fields(self):
         message = MiniappTwistFactory().build(_Twist, 0.2, -0.3)
         self.assertEqual(message.linear.x, 0.2)

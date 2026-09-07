@@ -137,6 +137,10 @@ class VehicleControlController:
         self._Twist = None
 
         self._actual_source = "unknown"
+        # 控制源是否已经从车端收到，必须与其是否为 Aletheia 可接管的
+        # navigation/miniapp 分开建模。remote 等外部控制源是真实状态，不是
+        # 启动期尚未同步。
+        self._has_source_state = False
         self._last_source_update_at: float | None = None
         self._pending_source: str | None = None
         self._switch_deadline: float | None = None
@@ -160,10 +164,14 @@ class VehicleControlController:
 
     # ---- Public control contract -------------------------------------------------
 
+    def start(self) -> None:
+        """预热独占 ROS2 节点，使首个浏览器请求只读取状态。"""
+        self._ensure_started()
+
     def status(self) -> dict[str, Any]:
-        """返回车端已订阅到的实际状态；首次读取时延迟启动 ROS 节点。"""
+        """返回车端已订阅到的实际状态；兼容直接状态读取时的按需预热。"""
         try:
-            self._ensure_started()
+            self.start()
         except VehicleControlUnavailable:
             pass
         with self._lock:
@@ -520,6 +528,7 @@ class VehicleControlController:
         with self._lock:
             previous = self._actual_source
             self._actual_source = source
+            self._has_source_state = True
             self._last_source_update_at = self._clock()
             self._state_event.set()
             if self._pending_source == self.SOURCE_MINIAPP and source == self.SOURCE_MINIAPP and self._session:
@@ -807,7 +816,7 @@ class VehicleControlController:
             display_mode = "正在切换"
         emergency_state = "normal" if self._emergency_stop is False else "triggered" if self._emergency_stop is True else "unknown"
         car_state_sync = {
-            "control_source": "confirmed" if actual in {self.SOURCE_NAVIGATION, self.SOURCE_MINIAPP} else "pending",
+            "control_source": "confirmed" if self._has_source_state else "pending",
             "emergency_stop": "confirmed" if self._emergency_stop is not None else "pending",
         }
         return {

@@ -41,7 +41,9 @@
   }
 
   function sourceLabel(source) {
-    return source === "navigation" ? "自动驾驶" : source === "miniapp" ? "手动控制" : source || "未知";
+    if (source === "navigation") return "自动驾驶";
+    if (source === "miniapp") return "手动控制";
+    return source && source !== "unknown" ? `外部控制：${source}` : "未知";
   }
 
   function message(text, kind = "") {
@@ -263,8 +265,9 @@
         $("gateText").textContent = "请求接管后，仍须等待车端实际状态确认；确认前不会发送非零速度。";
       }
     } else {
-      $("gateTitle").textContent = "等待安全接管条件";
-      $("gateText").textContent = "当前控制源不是 navigation，或已有失效会话。请先恢复自动驾驶后再进入手动控制。";
+      const externalSource = state.actual_source && state.actual_source !== "unknown" ? state.actual_source : "未知";
+      $("gateTitle").textContent = `外部控制源 ${externalSource} 已接管`;
+      $("gateText").textContent = "请先在车端将控制源切回自动驾驶，再进入手动控制；Aletheia 不会抢占外部控制。";
     }
     if (state.transition_error) message(state.transition_error, "error");
   }
