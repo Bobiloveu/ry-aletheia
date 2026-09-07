@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
@@ -380,6 +381,7 @@ class _DirectionJoystickState extends State<_DirectionJoystick>
 
   Offset _offset = Offset.zero;
   VehicleControlVector _vector = VehicleControlVector.stop;
+  int? _activePointer;
   late final AnimationController _xReturn;
   late final AnimationController _yReturn;
 
@@ -437,6 +439,7 @@ class _DirectionJoystickState extends State<_DirectionJoystick>
   }
 
   void _release() {
+    _activePointer = null;
     if (!_vector.isStop) widget.onStop();
     _xReturn.value = _offset.dx;
     _yReturn.value = _offset.dy;
@@ -448,6 +451,22 @@ class _DirectionJoystickState extends State<_DirectionJoystick>
   void _syncSpringOffset() {
     if (!mounted) return;
     setState(() => _offset = Offset(_xReturn.value, _yReturn.value));
+  }
+
+  void _handlePointerDown(PointerDownEvent event, Size size) {
+    if (!widget.enabled || _activePointer != null) return;
+    _activePointer = event.pointer;
+    _update(event.localPosition, size);
+  }
+
+  void _handlePointerMove(PointerMoveEvent event, Size size) {
+    if (event.pointer != _activePointer) return;
+    _update(event.localPosition, size);
+  }
+
+  void _handlePointerEnd(PointerEvent event) {
+    if (event.pointer != _activePointer) return;
+    _release();
   }
 
   @override
@@ -476,67 +495,77 @@ class _DirectionJoystickState extends State<_DirectionJoystick>
                 (true, false) => null,
               };
               final heading = math.atan2(_offset.dx, -_offset.dy);
-              return GestureDetector(
+              return RawGestureDetector(
+                key: const ValueKey('manual-control-joystick-gesture-surface'),
                 behavior: HitTestBehavior.opaque,
-                onPanStart: widget.enabled
-                    ? (details) => _update(details.localPosition, size)
-                    : null,
-                onPanUpdate: widget.enabled
-                    ? (details) => _update(details.localPosition, size)
-                    : null,
-                onPanEnd: widget.enabled ? (_) => _release() : null,
-                onPanCancel: widget.enabled ? _release : null,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: widget.enabled
-                        ? AletheiaTheme.surfaceSunken
-                        : AletheiaTheme.surfaceRaised,
-                    border: Border.all(color: color.withValues(alpha: .28)),
-                  ),
-                  child: Center(
-                    child: Transform.translate(
-                      offset: _offset,
-                      child: Container(
-                        width: knobSize,
-                        height: knobSize,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: widget.enabled
-                              ? AletheiaTheme.surface
-                              : AletheiaTheme.surfaceRaised,
-                          border: Border.all(
-                            color: thumbColor.withValues(
-                              alpha: active ? .8 : .42,
+                // The joystick is a direct-manipulation control, so it owns
+                // every drag that starts here. Without eager ownership, the
+                // enclosing ListView can win a mostly vertical drag and make
+                // forward/reverse control scroll the page instead.
+                gestures: <Type, GestureRecognizerFactory>{
+                  EagerGestureRecognizer:
+                      GestureRecognizerFactoryWithHandlers<
+                        EagerGestureRecognizer
+                      >(EagerGestureRecognizer.new, (recognizer) {}),
+                },
+                child: Listener(
+                  behavior: HitTestBehavior.opaque,
+                  onPointerDown: (event) => _handlePointerDown(event, size),
+                  onPointerMove: (event) => _handlePointerMove(event, size),
+                  onPointerUp: _handlePointerEnd,
+                  onPointerCancel: _handlePointerEnd,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: widget.enabled
+                          ? AletheiaTheme.surfaceSunken
+                          : AletheiaTheme.surfaceRaised,
+                      border: Border.all(color: color.withValues(alpha: .28)),
+                    ),
+                    child: Center(
+                      child: Transform.translate(
+                        offset: _offset,
+                        child: Container(
+                          width: knobSize,
+                          height: knobSize,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: widget.enabled
+                                ? AletheiaTheme.surface
+                                : AletheiaTheme.surfaceRaised,
+                            border: Border.all(
+                              color: thumbColor.withValues(
+                                alpha: active ? .8 : .42,
+                              ),
+                              width: active ? 2 : 1.5,
                             ),
-                            width: active ? 2 : 1.5,
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: .10),
+                                blurRadius: 8,
+                                offset: const Offset(0, 3),
+                              ),
+                            ],
                           ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: .10),
-                              blurRadius: 8,
-                              offset: const Offset(0, 3),
-                            ),
-                          ],
-                        ),
-                        child: Center(
-                          child: thumbIcon == null
-                              ? Container(
-                                  width: 10,
-                                  height: 10,
-                                  decoration: BoxDecoration(
-                                    color: thumbColor.withValues(alpha: .7),
-                                    shape: BoxShape.circle,
+                          child: Center(
+                            child: thumbIcon == null
+                                ? Container(
+                                    width: 10,
+                                    height: 10,
+                                    decoration: BoxDecoration(
+                                      color: thumbColor.withValues(alpha: .7),
+                                      shape: BoxShape.circle,
+                                    ),
+                                  )
+                                : Transform.rotate(
+                                    angle: active ? heading : 0,
+                                    child: Icon(
+                                      thumbIcon,
+                                      color: thumbColor,
+                                      size: active ? 25 : 22,
+                                    ),
                                   ),
-                                )
-                              : Transform.rotate(
-                                  angle: active ? heading : 0,
-                                  child: Icon(
-                                    thumbIcon,
-                                    color: thumbColor,
-                                    size: active ? 25 : 22,
-                                  ),
-                                ),
+                          ),
                         ),
                       ),
                     ),

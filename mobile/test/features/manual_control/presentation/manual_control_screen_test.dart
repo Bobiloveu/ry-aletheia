@@ -183,6 +183,50 @@ void main() {
     await gesture.up();
   });
 
+  testWidgets('vertical joystick input never scrolls the manual control page', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(430, 932));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final repository = _ManualControlFakeRepository();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          robotConnectionControllerProvider.overrideWith(
+            _ConnectedController.new,
+          ),
+          manualControlRepositoryProvider.overrideWithValue(repository),
+        ],
+        child: MaterialApp(
+          theme: AletheiaTheme.light(),
+          home: const Scaffold(body: ManualControlScreen()),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('开始手动控制'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('进入控制'));
+    await tester.pump();
+
+    final scrollable = tester.state<ScrollableState>(
+      find.byType(Scrollable).first,
+    );
+    final joystick = find.bySemanticsLabel(RegExp('连续方向摇杆，当前停止'));
+    expect(
+      find.byKey(const ValueKey('manual-control-joystick-gesture-surface')),
+      findsOneWidget,
+    );
+    final gesture = await tester.startGesture(tester.getCenter(joystick));
+    await gesture.moveBy(const Offset(0, -96));
+    await tester.pump();
+
+    expect(scrollable.position.pixels, 0);
+    expect(repository.calls, contains('vector:manual-session:1.0:0.0'));
+
+    await gesture.up();
+  });
+
   testWidgets('exposes all three chassis parameters in the advanced panel', (
     tester,
   ) async {

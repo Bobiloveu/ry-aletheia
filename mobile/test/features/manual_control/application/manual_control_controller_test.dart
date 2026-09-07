@@ -12,6 +12,20 @@ import 'package:http/testing.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('polls vehicle status while connected before manual entry', () async {
+    final repository = _FakeManualControlRepository();
+    final container = _container(repository);
+    addTearDown(container.dispose);
+
+    container.read(manualControlControllerProvider.notifier);
+    await Future<void>.delayed(const Duration(milliseconds: 1200));
+
+    expect(
+      repository.calls.where((call) => call == 'status').length,
+      greaterThanOrEqualTo(2),
+    );
+  });
+
   test('releases an active session in STOP then EXIT order', () async {
     final repository = _FakeManualControlRepository()
       ..nextEnter = _readyState(sessionId: 'session-1');
@@ -53,25 +67,30 @@ void main() {
     },
   );
 
-  test('sends a held upper-right vector then stops at the joystick center', () async {
-    final repository = _FakeManualControlRepository()
-      ..nextEnter = _readyState(sessionId: 'session-1');
-    final container = _container(repository);
-    addTearDown(container.dispose);
-    final controller = container.read(manualControlControllerProvider.notifier);
-    await Future<void>.delayed(Duration.zero);
+  test(
+    'sends a held upper-right vector then stops at the joystick center',
+    () async {
+      final repository = _FakeManualControlRepository()
+        ..nextEnter = _readyState(sessionId: 'session-1');
+      final container = _container(repository);
+      addTearDown(container.dispose);
+      final controller = container.read(
+        manualControlControllerProvider.notifier,
+      );
+      await Future<void>.delayed(Duration.zero);
 
-    await controller.enter();
-    await controller.sendVector(const VehicleControlVector(.8, -.6));
-    await controller.sendVector(VehicleControlVector.stop);
+      await controller.enter();
+      await controller.sendVector(const VehicleControlVector(.8, -.6));
+      await controller.sendVector(VehicleControlVector.stop);
 
-    expect(repository.calls, [
-      'status',
-      'enter',
-      'vector:session-1:0.8:-0.6',
-      'stop:session-1',
-    ]);
-  });
+      expect(repository.calls, [
+        'status',
+        'enter',
+        'vector:session-1:0.8:-0.6',
+        'stop:session-1',
+      ]);
+    },
+  );
 
   test(
     'pausing releases the session and resuming never re-enters control',

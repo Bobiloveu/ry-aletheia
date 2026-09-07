@@ -59,7 +59,8 @@ class ManualControlScreenState {
 class ManualControlController extends Notifier<ManualControlScreenState> {
   static const _heartbeatInterval = Duration(milliseconds: 500);
   static const _inputInterval = Duration(milliseconds: 200);
-  static const _statusInterval = Duration(milliseconds: 500);
+  static const _idleStatusInterval = Duration(seconds: 1);
+  static const _activeStatusInterval = Duration(milliseconds: 500);
 
   Timer? _heartbeatTimer;
   Timer? _inputTimer;
@@ -69,6 +70,8 @@ class ManualControlController extends Notifier<ManualControlScreenState> {
   String? _sessionId;
   VehicleControlVector? _heldVector;
   int _requestEpoch = 0;
+  bool _statusRequestInFlight = false;
+  bool _statusPollingPaused = false;
 
   @override
   ManualControlScreenState build() {
@@ -88,11 +91,15 @@ class ManualControlController extends Notifier<ManualControlScreenState> {
       _endpoint = endpoint;
       _sessionId = null;
       _heldVector = null;
+      _statusRequestInFlight = false;
       if (oldEndpoint != null && oldSessionId != null) {
         unawaited(_release(oldEndpoint, oldSessionId));
       }
       if (endpoint != null) {
-        Future.microtask(() => _load(endpoint));
+        Future.microtask(() {
+          _startStatusPolling();
+          unawaited(_load(endpoint));
+        });
       }
     }
     return const ManualControlScreenState();
@@ -134,6 +141,7 @@ class ManualControlController extends Notifier<ManualControlScreenState> {
               : '正在等待车端确认控制源…',
         );
         _startSessionTimers();
+        _restartStatusPolling();
       },
     );
   }
@@ -187,9 +195,10 @@ class ManualControlController extends Notifier<ManualControlScreenState> {
     final endpoint = _endpoint;
     final sessionId = _sessionId;
     if (endpoint == null || sessionId == null) return;
-    _cancelTimers();
+    _cancelSessionTimers();
     _heldVector = null;
     _sessionId = null;
+    _restartStatusPolling();
     await _release(endpoint, sessionId, reportError: true);
   }
 
@@ -235,10 +244,16 @@ class ManualControlController extends Notifier<ManualControlScreenState> {
     );
   }
 
-  Future<void> pauseForLifecycle() => exit();
+  Future<void> pauseForLifecycle() async {
+    _statusPollingPaused = true;
+    _stopStatusPolling();
+    await exit();
+  }
 
   void resumeAfterLifecycle() {
     final endpoint = _endpoint;
+    _statusPollingPaused = false;
+    _startStatusPolling();
     if (endpoint != null) unawaited(_load(endpoint));
   }
 
@@ -294,7 +309,8 @@ class ManualControlController extends Notifier<ManualControlScreenState> {
   }
 
   Future<void> _load(RobotEndpoint endpoint, {bool showBusy = false}) async {
-    if (state.isActionPending) return;
+    if (state.isActionPending || _statusRequestInFlight) return;
+    _statusRequestInFlight = true;
     final requestEpoch = ++_requestEpoch;
     if (showBusy) {
       state = state.copyWith(isRefreshing: true, message: '', isError: false);
@@ -310,15 +326,19 @@ class ManualControlController extends Notifier<ManualControlScreenState> {
         message: '无法更新手动控制状态：${error.message}',
         isError: true,
       );
+    } finally {
+      if (endpoint == _endpoint) _statusRequestInFlight = false;
     }
   }
 
   void _setStatus(VehicleControlState status) {
+    final hadActiveSession = _sessionId != null;
     final sessionStillPresent = _sessionId != null && status.session.present;
     if (!sessionStillPresent) {
       _sessionId = null;
       _heldVector = null;
-      _cancelTimers();
+      _cancelSessionTimers();
+      if (hadActiveSession) _restartStatusPolling();
     }
     state = ManualControlScreenState(
       status: status,
@@ -336,10 +356,35 @@ class ManualControlController extends Notifier<ManualControlScreenState> {
         unawaited(_heartbeat(endpoint, sessionId));
       }
     });
-    _statusTimer ??= Timer.periodic(_statusInterval, (_) {
+  }
+
+  void _startStatusPolling() {
+    if (_statusPollingPaused || _endpoint == null || _statusTimer != null) {
+      return;
+    }
+    final interval = _sessionId == null
+        ? _idleStatusInterval
+        : _activeStatusInterval;
+    _statusTimer = Timer.periodic(interval, (_) {
       final endpoint = _endpoint;
-      if (endpoint != null) unawaited(_load(endpoint));
+      // Vector responses already contain an authoritative state snapshot while
+      // the joystick is held. A competing GET could otherwise arrive later
+      // and incorrectly lock the direct-manipulation surface mid-gesture.
+      if (endpoint == null || _heldVector != null || state.isActionPending) {
+        return;
+      }
+      unawaited(_load(endpoint));
     });
+  }
+
+  void _restartStatusPolling() {
+    _stopStatusPolling();
+    _startStatusPolling();
+  }
+
+  void _stopStatusPolling() {
+    _statusTimer?.cancel();
+    _statusTimer = null;
   }
 
   Future<void> _heartbeat(RobotEndpoint endpoint, String sessionId) async {
@@ -394,11 +439,14 @@ class ManualControlController extends Notifier<ManualControlScreenState> {
   }
 
   void _cancelTimers() {
+    _cancelSessionTimers();
+    _stopStatusPolling();
+  }
+
+  void _cancelSessionTimers() {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _inputTimer?.cancel();
     _inputTimer = null;
-    _statusTimer?.cancel();
-    _statusTimer = null;
   }
 }
