@@ -12,6 +12,7 @@
   let chassisSavePending = false;
   let chassisParametersDirty = false;
   let previousEmergencyRelease = null;
+  let requestedSource = null;
 
   const speedParameters = [
     { range: "linearSpeed", number: "linearSpeedNumber", output: "linearSpeedValue", unit: "m/s", decimals: 1 },
@@ -225,12 +226,15 @@
     renderChassisParameters(state.chassis_parameters);
 
     const enter = $("enterManual");
+    const requestNavigation = $("requestNavigation");
     const exit = $("exitManual");
     const ready = Boolean(state.manual_ready && sessionId);
     renderSpeed(state.speed, ready);
     enter.disabled = !state.can_begin_manual || switching;
     enter.textContent = isManual ? "开始手动控制" : "进入手动控制";
     enter.hidden = Boolean(sessionId);
+    requestNavigation.hidden = Boolean(sessionId);
+    requestNavigation.disabled = !state.can_request_navigation || switching;
     exit.hidden = !sessionId;
     exit.disabled = switching && state.transition === "navigation";
     $("driveArea").setAttribute("aria-disabled", String(!ready));
@@ -261,13 +265,21 @@
         $("gateTitle").textContent = adoptingExistingMiniapp ? "正在建立安全会话" : "手动控制源已确认";
         $("gateText").textContent = "车端已反馈 miniapp。Aletheia 会先写入 STOP 并建立看门狗会话，然后才允许方向控制。";
       } else {
-        $("gateTitle").textContent = "当前为自动驾驶";
-        $("gateText").textContent = "请求接管后，仍须等待车端实际状态确认；确认前不会发送非零速度。";
+        const externalSource = state.actual_source && state.actual_source !== "unknown" ? state.actual_source : "未知";
+        $("gateTitle").textContent = state.actual_source === "navigation" ? "当前为自动驾驶" : `外部控制源 ${externalSource} 已接管`;
+        $("gateText").textContent = "可请求切换至手动控制或自动驾驶；只有 /control_source_state 实际确认后才会更新结果，确认前不会发送非零速度。";
       }
     } else {
-      const externalSource = state.actual_source && state.actual_source !== "unknown" ? state.actual_source : "未知";
-      $("gateTitle").textContent = `外部控制源 ${externalSource} 已接管`;
-      $("gateText").textContent = "请先在车端将控制源切回自动驾驶，再进入手动控制；Aletheia 不会抢占外部控制。";
+      $("gateTitle").textContent = "当前无法请求手动控制";
+      $("gateText").textContent = state.transition_error || "自动化测试正在执行或已有控制会话，请等待当前状态结束后再试。";
+    }
+    if (!switching && requestedSource) {
+      if (state.actual_source === requestedSource) {
+        message(`已由车端确认切换至 ${sourceLabel(requestedSource)}。`, "success");
+        requestedSource = null;
+      } else if (state.transition_error) {
+        requestedSource = null;
+      }
     }
     if (state.transition_error) message(state.transition_error, "error");
   }
@@ -391,11 +403,12 @@
   async function enterManual({ adoptExisting = false } = {}) {
     if (!adoptExisting && !window.confirm("确认进入手动控制？\n\n车辆在收到 /control_source_state=miniapp 前不会解锁方向控制。")) return;
     message(adoptExisting ? "正在建立车端手动控制安全会话…" : "正在请求车端切换控制源…");
+    requestedSource = "miniapp";
     try {
       const state = await request("/api/vehicle-control/enter", {});
       sessionId = state.session?.id || null;
       render(state);
-    } catch (error) { if (error.status) render(error.status); message(error.message, "error"); }
+    } catch (error) { requestedSource = null; if (error.status) render(error.status); message(error.message, "error"); }
   }
 
   async function adoptExistingMiniapp() {
@@ -411,6 +424,7 @@
     clearHeld();
     if (!sessionId) return;
     message("正在 STOP 并等待自动驾驶实际接管…");
+    requestedSource = "navigation";
     try {
       const state = await request("/api/vehicle-control/exit", { session_id: sessionId });
       // 退出请求一经车端接受，浏览器就不再维持会话；车端仍保持 STOP，直到
@@ -418,7 +432,16 @@
       sessionId = null;
       render(state);
     }
-    catch (error) { if (error.status) render(error.status); message(error.message, "error"); }
+    catch (error) { requestedSource = null; if (error.status) render(error.status); message(error.message, "error"); }
+  }
+
+  async function requestNavigation() {
+    if (!window.confirm("确认请求切换至自动驾驶？\n\n页面会等待 /control_source_state=navigation 的实际回报，再显示结果。")) return;
+    message("正在请求车端切换至自动驾驶…");
+    requestedSource = "navigation";
+    try {
+      render(await request("/api/vehicle-control/navigation", {}));
+    } catch (error) { requestedSource = null; if (error.status) render(error.status); message(error.message, "error"); }
   }
 
   async function heartbeat() {
@@ -435,6 +458,7 @@
   }
 
   $("enterManual").addEventListener("click", enterManual);
+  $("requestNavigation").addEventListener("click", requestNavigation);
   $("exitManual").addEventListener("click", exitManual);
   $("stopButton").addEventListener("click", stop);
   $("releaseEmergencyStop").addEventListener("click", releaseEmergencyStop);

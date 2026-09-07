@@ -192,8 +192,6 @@ class VehicleControlController:
         adopted_existing_miniapp = False
         with self._lock:
             self._advance_safety_locked(now)
-            if self._emergency_stop is not False:
-                raise VehicleControlConflict(self._emergency_motion_block_reason_locked())
             if self._session is not None:
                 raise VehicleControlConflict("已有 Aletheia 手动控制会话，请先停止并退出")
             if self._actual_source == self.SOURCE_MINIAPP:
@@ -215,11 +213,10 @@ class VehicleControlController:
                 self._last_error = ""
                 adopted_existing_miniapp = True
                 snapshot = self._snapshot_locked(include_session_id=True)
-            elif self._actual_source != self.SOURCE_NAVIGATION:
-                raise VehicleControlConflict(
-                    f"当前实际控制源为 {self._actual_source}；等待 navigation 或 miniapp 的实际状态确认"
-                )
             else:
+                # 控制源切换本身不输出非零 Twist。即使当前由 remote 等外部来源
+                # 接管，或急停状态尚未恢复，操作者也应能请求车端切换；是否成功
+                # 仍只能以 state Topic 回报确认，运动门控依旧严格 fail-closed。
                 self._session = {
                     "id": uuid.uuid4().hex,
                     "state": "switching",
@@ -372,25 +369,37 @@ class VehicleControlController:
             raise VehicleControlUnavailable(f"无法发布解除急停指令：{exc}") from exc
         return snapshot
 
-    def end_manual_session(self, session_id: str) -> dict[str, Any]:
-        """严格退出顺序：STOP -> 禁止非零 -> 请求 navigation -> 等真实反馈。"""
+    def request_navigation(self) -> dict[str, Any]:
+        """请求车端切回自动驾驶，不要求先存在 Aletheia 手动会话。
+
+        该动作只发布允许值 navigation；若 Aletheia 当前拥有 miniapp 会话，先
+        STOP，再切换。remote 等外部来源不向 miniapp 速度 Topic 写入，避免在
+        外部控制端接管期间额外干预底盘。
+        """
         self._ensure_started()
         now = self._clock()
+        publish_stop = False
         with self._lock:
             self._advance_safety_locked(now)
-            session = self._require_session_locked(session_id, allow_inactive=True)
-            self._target_linear = 0.0
-            self._target_angular = 0.0
-            self._target_command = None
+            if self._pending_source is not None:
+                raise VehicleControlConflict(f"正在等待切换至 {self._pending_source} 的实际状态确认")
+            if self._actual_source == self.SOURCE_NAVIGATION:
+                self._session = None
+                self._clear_motion_locked()
+                self._manual_stop_latched = False
+                return self._snapshot_locked()
+            publish_stop = self._session is not None or self._actual_source == self.SOURCE_MINIAPP
+            self._clear_motion_locked()
             self._manual_stop_latched = True
-            session["state"] = "exiting"
-            session["last_heartbeat_at"] = now
+            if self._session:
+                self._session["state"] = "exiting"
+                self._session["last_heartbeat_at"] = now
             self._pending_source = self.SOURCE_NAVIGATION
             self._switch_deadline = now + self.config.switch_timeout_s
             self._last_error = ""
             snapshot = self._snapshot_locked()
-        # 绝不把仍在运动的 miniapp 会话直接切换到 navigation。
-        self._publish_stop_now()
+        if publish_stop:
+            self._publish_stop_now()
         try:
             self._publish_source_command(self.SOURCE_NAVIGATION)
         except Exception as exc:
@@ -398,6 +407,15 @@ class VehicleControlController:
                 self._fail_locked(f"无法请求切回 navigation：{exc}")
             raise VehicleControlUnavailable(f"无法发布 navigation 切换命令：{exc}") from exc
         return snapshot
+
+    def end_manual_session(self, session_id: str) -> dict[str, Any]:
+        """严格退出顺序：STOP -> 禁止非零 -> 请求 navigation -> 等真实反馈。"""
+        self._ensure_started()
+        now = self._clock()
+        with self._lock:
+            self._advance_safety_locked(now)
+            session = self._require_session_locked(session_id, allow_inactive=True)
+        return self.request_navigation()
 
     def close(self) -> None:
         """服务退出时的最后防线；不关闭共享的全局 rclpy runtime。"""
@@ -827,9 +845,11 @@ class VehicleControlController:
             "transition": self._pending_source,
             "transition_error": self._last_error,
             "manual_ready": self._manual_ready_locked(),
-            # 已经由 /control_source_state 确认的 miniapp 可以安全建立一条新的
-            # Aletheia watchdog 会话；不要求现场人员先来回切换控制源。
-            "can_begin_manual": self._runtime_state == "ready" and self._emergency_stop is False and actual in {self.SOURCE_NAVIGATION, self.SOURCE_MINIAPP} and session is None,
+            # 切换控制源与输出速度是两道独立闸门：当前 remote/未知或急停时仍可
+            # 请求 miniapp，结果以 state Topic 确认；非零速度仍由 manual_ready
+            # 和 _manual_ready_locked 的急停/会话条件严格控制。
+            "can_begin_manual": self._runtime_state == "ready" and self._pending_source is None and session is None and not self._active_run_guard(),
+            "can_request_navigation": self._runtime_state == "ready" and self._pending_source is None,
             "session": session_data,
             "safety": {
                 "publish_hz": self.config.publish_hz,

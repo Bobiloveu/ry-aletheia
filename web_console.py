@@ -999,6 +999,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 raise ValueError("手动控制请求必须是 JSON 对象")
             if path == "/api/vehicle-control/enter":
                 payload = VEHICLE_CONTROL.begin_manual_session()
+            elif path == "/api/vehicle-control/navigation":
+                payload = VEHICLE_CONTROL.request_navigation()
             elif path == "/api/vehicle-control/heartbeat":
                 payload = VEHICLE_CONTROL.heartbeat(str(data.get("session_id", "")))
             elif path == "/api/vehicle-control/command":

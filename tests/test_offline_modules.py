@@ -1055,8 +1055,10 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertRegex(page, r'id="stopAcc"[^>]*min="20"[^>]*max="2000"')
         self.assertIn("/api/vehicle-control/release-emergency-stop", script)
         self.assertIn("/api/vehicle-control/chassis-parameters", script)
+        self.assertIn("/api/vehicle-control/navigation", script)
         self.assertIn("car_state_sync", script)
         self.assertIn("正在读取车端状态", script)
+        self.assertIn("已由车端确认切换至", script)
 
     def test_console_prewarms_vehicle_control_before_listening_for_http_requests(self):
         """首个浏览器请求不应承担控制源和急停订阅节点的创建延迟。"""
