@@ -133,7 +133,7 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
     artifacts: list[Artifact] = []
 
     task_name = f"{community}_{building}_{unit}_{target_instance['floor']}_{door}.json"
-    artifacts.append(_artifact(f"tasks/{task_name}", _json_bytes(task_json)))
+    artifacts.append(_artifact(f"tasks/{task_name}", _task_json_bytes(task_json)))
     xml_values = _xml_values(
         input_value, lobby_asset, target_asset, lobby_physical_floor, target_physical_floor, lobby_elevator, lobby_inward
     )
@@ -535,6 +535,11 @@ def _safe_archive_path(relative_path: str) -> None:
 
 def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+
+
+def _task_json_bytes(value: dict[str, Any]) -> bytes:
+    """Match the readable, field-ordered task JSON used by the task editor."""
+    return (json.dumps(value, ensure_ascii=False, indent=2, default=str) + "\n").encode("utf-8")
 
 
 def _sha(content: bytes) -> str:
