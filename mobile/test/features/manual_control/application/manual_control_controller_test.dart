@@ -26,7 +26,7 @@ void main() {
     );
   });
 
-  test('releases an active session in STOP then EXIT order', () async {
+  test('explicit exit requests the backend global navigation transition', () async {
     final repository = _FakeManualControlRepository()
       ..nextEnter = _readyState(sessionId: 'session-1');
     final container = _container(repository);
@@ -40,7 +40,6 @@ void main() {
     expect(repository.calls, [
       'status',
       'enter',
-      'stop:session-1',
       'exit:session-1',
     ]);
   });
@@ -93,7 +92,7 @@ void main() {
   );
 
   test(
-    'pausing releases the session and resuming never re-enters control',
+    'pausing releases only this session and resuming never re-enters control',
     () async {
       final repository = _FakeManualControlRepository()
         ..nextEnter = _readyState(sessionId: 'session-1');
@@ -113,8 +112,7 @@ void main() {
         repository.calls,
         containsAllInOrder([
           'enter',
-          'stop:session-1',
-          'exit:session-1',
+          'release:session-1',
           'status',
         ]),
       );
@@ -199,6 +197,15 @@ class _FakeManualControlRepository extends ManualControlRepository {
     String sessionId,
   ) async {
     calls.add('exit:$sessionId');
+    return _state();
+  }
+
+  @override
+  Future<VehicleControlState> release(
+    RobotEndpoint endpoint,
+    String sessionId,
+  ) async {
+    calls.add('release:$sessionId');
     return _state();
   }
 }

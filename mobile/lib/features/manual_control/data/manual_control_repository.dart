@@ -52,6 +52,13 @@ class ManualControlRepository {
   Future<VehicleControlState> stop(RobotEndpoint endpoint, String sessionId) =>
       _post(endpoint, 'api/vehicle-control/stop', {'session_id': sessionId});
 
+  Future<VehicleControlState> release(
+    RobotEndpoint endpoint,
+    String sessionId,
+  ) => _post(endpoint, 'api/vehicle-control/release', {
+    'session_id': sessionId,
+  });
+
   Future<VehicleControlState> exit(RobotEndpoint endpoint, String sessionId) =>
       _post(endpoint, 'api/vehicle-control/exit', {'session_id': sessionId});
 

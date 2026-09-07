@@ -204,6 +204,23 @@ class VehicleControlTests(unittest.TestCase):
         self.assertAlmostEqual(self.control._target_linear, 0.1)
         self.assertAlmostEqual(self.control._target_angular, -0.225)
 
+    def test_releasing_mobile_session_keeps_other_client_in_manual_mode(self):
+        """App 离页只释放自己，不能把网页会话切回自动驾驶。"""
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        web_session = self.control.begin_manual_session()["session"]["id"]
+        mobile_session = self.control.begin_manual_session()["session"]["id"]
+        self.control.set_command(mobile_session, "forward")
+
+        released = self.control.release_manual_session(mobile_session)
+
+        self.assertFalse(released["session"]["present"])
+        self.assertEqual(released["actual_source"], "miniapp")
+        self.assertEqual(released["shared_sessions"]["active_count"], 1)
+        self.assertEqual(self.control._target_command, None)
+        self.control.set_command(web_session, "left")
+        self.assertEqual(self.control._target_command, "left")
+
     def test_twist_factory_preserves_miniapp_extended_protocol_fields(self):
         message = MiniappTwistFactory().build(_Twist, 0.2, -0.3)
         self.assertEqual(message.linear.x, 0.2)
@@ -413,6 +430,22 @@ class VehicleControlTests(unittest.TestCase):
             handler._vehicle_control_action(handler.path)
 
         controller.set_vector.assert_called_once_with("manual-session", 0.8, -0.6)
+        self.assertEqual(handler._json.call_args.args[1], HTTPStatus.OK)
+
+    def test_release_action_only_forwards_the_calling_session(self):
+        handler = _vehicle_control_handler(
+            "/api/vehicle-control/release",
+            {"session_id": "mobile-session"},
+        )
+        controller = Mock()
+        controller.release_manual_session.return_value = {
+            "transition": None,
+            "emergency_stop": {"state": "normal", "release": "idle"},
+        }
+        with patch.object(web_console, "VEHICLE_CONTROL", controller):
+            handler._vehicle_control_action(handler.path)
+
+        controller.release_manual_session.assert_called_once_with("mobile-session")
         self.assertEqual(handler._json.call_args.args[1], HTTPStatus.OK)
 
     def test_input_watchdog_latches_stop_without_browser_input(self):

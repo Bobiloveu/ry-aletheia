@@ -199,7 +199,7 @@ class ManualControlController extends Notifier<ManualControlScreenState> {
     _heldVector = null;
     _sessionId = null;
     _restartStatusPolling();
-    await _release(endpoint, sessionId, reportError: true);
+    await _exitToNavigation(endpoint, sessionId, reportError: true);
   }
 
   Future<void> setSpeed({
@@ -247,7 +247,7 @@ class ManualControlController extends Notifier<ManualControlScreenState> {
   Future<void> pauseForLifecycle() async {
     _statusPollingPaused = true;
     _stopStatusPolling();
-    await exit();
+    await _releaseActiveSession();
   }
 
   void resumeAfterLifecycle() {
@@ -393,7 +393,11 @@ class ManualControlController extends Notifier<ManualControlScreenState> {
       if (endpoint == _endpoint && sessionId == _sessionId) _setStatus(status);
     } on ApiException catch (_) {
       if (endpoint == _endpoint && sessionId == _sessionId) {
-        unawaited(exit());
+        _cancelSessionTimers();
+        _sessionId = null;
+        _heldVector = null;
+        _restartStatusPolling();
+        unawaited(_release(endpoint, sessionId));
       }
     }
   }
@@ -406,14 +410,7 @@ class ManualControlController extends Notifier<ManualControlScreenState> {
   }) async {
     VehicleControlState? latest;
     try {
-      latest = await _repository.stop(endpoint, sessionId);
-    } on ApiException catch (error) {
-      if (reportError && endpoint == _endpoint) {
-        state = state.copyWith(message: error.message, isError: true);
-      }
-    }
-    try {
-      latest = await _repository.exit(endpoint, sessionId);
+      latest = await _repository.release(endpoint, sessionId);
     } on ApiException catch (error) {
       if (reportError && endpoint == _endpoint) {
         state = state.copyWith(message: error.message, isError: true);
@@ -423,6 +420,24 @@ class ManualControlController extends Notifier<ManualControlScreenState> {
         endpoint == _endpoint &&
         _sessionId == null &&
         latest != null) {
+      state = ManualControlScreenState(status: latest);
+    }
+  }
+
+  Future<void> _exitToNavigation(
+    RobotEndpoint endpoint,
+    String sessionId, {
+    bool reportError = false,
+  }) async {
+    VehicleControlState? latest;
+    try {
+      latest = await _repository.exit(endpoint, sessionId);
+    } on ApiException catch (error) {
+      if (reportError && endpoint == _endpoint) {
+        state = state.copyWith(message: error.message, isError: true);
+      }
+    }
+    if (endpoint == _endpoint && _sessionId == null && latest != null) {
       state = ManualControlScreenState(status: latest);
     }
   }

@@ -162,7 +162,7 @@ Pose 与 PointCloud 从车端独立二进制 WebSocket 获取（当前端口 `87
 | `tool_logs` | 诊断日志与受控下载 | 不提供任意路径访问 |
 | `runtime_settings` | 车端既有运行配置 | 复用既有 API 与确认语义 |
 | `scenario_setup` | 受控场景预览/选择/应用/恢复 | 只读受控目录文本、摘要和大小；不任意读写 |
-| `manual_control` | 受控手动会话、连续前后 + 转向输入、速度/底盘参数与急停状态 | 仅调用 vehicle-control HTTP API；中心/松手 STOP，后台/离页 STOP → EXIT；不直接 ROS |
+| `manual_control` | 受控手动会话、连续前后 + 转向输入、速度/底盘参数与急停状态 | 仅调用 vehicle-control HTTP API；中心/松手 STOP，后台/离页仅 RELEASE 本端会话，明确退出才全局 EXIT → navigation；不直接 ROS |
 | `system_maintenance` | 控制台服务与安全停止 | 停止必须确认 |
 | `app_settings` | 本机语言、主题、版本、App 更新、反馈 | 不依赖机器人且不修改车端；反馈开发期无上传 |
 

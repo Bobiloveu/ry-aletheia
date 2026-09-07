@@ -1021,6 +1021,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/vehicle-control/stop":
                 payload = VEHICLE_CONTROL.stop(str(data.get("session_id", "")))
+            elif path == "/api/vehicle-control/release":
+                payload = VEHICLE_CONTROL.release_manual_session(str(data.get("session_id", "")))
             elif path == "/api/vehicle-control/exit":
                 payload = VEHICLE_CONTROL.end_manual_session(str(data.get("session_id", "")))
             elif path == "/api/vehicle-control/release-emergency-stop":

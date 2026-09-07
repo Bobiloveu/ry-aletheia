@@ -97,7 +97,7 @@ class _ManualControlScreenState extends ConsumerState<ManualControlScreen>
                     ),
                     const SizedBox(height: 7),
                     Text(
-                      '仅在现场具备安全条件时使用。松开摇杆、离开页面或 App 进入后台都会请求停止并退出手动会话。',
+                      '仅在现场具备安全条件时使用。松开摇杆会 STOP；离开页面或 App 进入后台只释放本端会话，不影响其他控制端。',
                       style: TextStyle(
                         color: AletheiaTheme.textSecondary,
                         height: 1.45,

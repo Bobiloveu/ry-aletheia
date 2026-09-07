@@ -63,6 +63,23 @@ void main() {
     });
   });
 
+  test('releases only the calling manual session', () async {
+    final requests = <http.Request>[];
+    final repository = ManualControlRepository(
+      AletheiaApiClient(
+        MockClient((request) async {
+          requests.add(request);
+          return http.Response(jsonEncode(_snapshot()), 200);
+        }),
+      ),
+    );
+
+    await repository.release(RobotEndpoint.parse('192.168.1.20'), 'session-1');
+
+    expect(requests.single.url.path, '/api/vehicle-control/release');
+    expect(jsonDecode(requests.single.body), {'session_id': 'session-1'});
+  });
+
   test(
     'uses the fixed release endpoint without session or path input',
     () async {

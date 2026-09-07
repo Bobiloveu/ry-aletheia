@@ -353,6 +353,27 @@ class VehicleControlController:
         self._publish_stop_now()
         return snapshot
 
+    def release_manual_session(self, session_id: str) -> dict[str, Any]:
+        """只释放一个客户端会话，不改变其他端的控制源归属。
+
+        若释放者正拥有最后一个非零目标，必须立即 STOP；其他客户端仍可在
+        miniapp 已确认的状态下继续提交自己的输入。
+        """
+        self._ensure_started()
+        publish_stop = False
+        with self._lock:
+            self._advance_safety_locked(self._clock())
+            self._require_session_locked(session_id, allow_inactive=True)
+            if self._motion_session_id == session_id:
+                self._clear_motion_locked()
+                self._manual_stop_latched = True
+                publish_stop = True
+            del self._sessions[session_id]
+            snapshot = self._snapshot_locked(session_id=session_id)
+        if publish_stop:
+            self._publish_stop_now()
+        return snapshot
+
     @staticmethod
     def normalize_chassis_parameters(parameters: dict[str, object]) -> dict[str, int]:
         """在 HTTP 适配前复用的底盘参数边界，不能只信任浏览器校验。"""

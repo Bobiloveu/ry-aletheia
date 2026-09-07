@@ -31,14 +31,14 @@
 1. 自动运行未占有车辆时，任意 Web / Mobile 客户端都可 `POST /api/vehicle-control/enter` 获取自己的会话。当前来源可以是 `navigation`、`miniapp`、`remote` 或尚未确认的值；同一轮 `miniapp` 切换允许其他客户端加入等待，且请求本身不输出非零 Twist。
 2. 首个 `POST /api/vehicle-control/enter` 请求 `/control_source_cmd=miniapp` 并进入 `switching`，最多等待 **4.0 s** 取得 `/control_source_state=miniapp`。`POST /api/vehicle-control/navigation` 是全局动作：严格先 STOP、清空全部会话，再请求 `/control_source_cmd=navigation`。
 3. 只有收到实际状态确认后，会话才成为 `active`；任一 active 会话均可接受非零命令或速度变更，**最后一条有效输入**更新 Backend 唯一的运动目标。
-4. `stop` 立即产生 Backend 生成的零 Twist。`exit` 执行 **STOP → 清空全部会话 → 请求 `navigation` → 等待实际状态确认**。切换失败时不能猜测控制已切换。
+4. `stop` 立即产生 Backend 生成的零 Twist。`release` 只删除调用方会话；若它拥有当前运动目标则立即 STOP，但绝不请求切源。`exit` 是全局动作，执行 **STOP → 清空全部会话 → 请求 `navigation` → 等待实际状态确认**。切换失败时不能猜测控制已切换。
 5. 若其他控制源接管、控制源确认超时或 ROS2 控制器不可用，Backend 必须清除运动并拒绝后续移动。
 6. 只有 `/is_emergency_stop=false` 且控制源已实际确认 `miniapp` 时，手动会话才允许输出非零 Twist。`true` 或 `unknown` 会立即停止并拒绝后续运动。
 7. 软件解除急停只发布固定 `/command` 报文，随后最多等待 4.0 s；仅在收到 `/is_emergency_stop=false` 后才可显示成功。该动作不请求也不改变控制源。
 
 ## 受控 HTTP API
 
-所有 POST 请求体都是不超过 16 KiB 的 JSON 对象。`session_id` 由 Backend 创建；客户端必须将其视为不透明值，在 `exit`、失效或错误后不得复用。
+所有 POST 请求体都是不超过 16 KiB 的 JSON 对象。`session_id` 由 Backend 创建；客户端必须将其视为不透明值，在 `release`、`exit`、失效或错误后不得复用。
 
 | 方法与端点 | 请求体 | 可接受动作 |
 | --- | --- | --- |
@@ -50,6 +50,7 @@
 | `POST /api/vehicle-control/vector` | `{ "session_id": "…", "linear_ratio": number, "angular_ratio": number }` | Existing Mobile 连续输入入口。两个比例均须为有限 `[-1.0, 1.0]` 数值；Backend 以当前速度档换算目标。`(0,0)` 立即清除运动并走 STOP 路径，但保留会话。 |
 | `POST /api/vehicle-control/speed` | `{ "session_id": "…", "linear_speed": number, "angular_speed": number }` | 更新经过校验的线速度和角速度。 |
 | `POST /api/vehicle-control/stop` | `{ "session_id": "…" }` | 保留会话的同时立即发送 STOP。 |
+| `POST /api/vehicle-control/release` | `{ "session_id": "…" }` | 仅释放调用方会话；若其拥有当前运动目标则 STOP，但保留其他端会话和已确认的 `miniapp` 控制源。供 App 后台、离页或断开连接使用。 |
 | `POST /api/vehicle-control/exit` | `{ "session_id": "…" }` | 停止、请求返回 `navigation`，并等待实际确认。 |
 | `POST /api/vehicle-control/release-emergency-stop` | `{}` | 仅当真实急停为 `true` 时发布固定解除报文，并等待 `/is_emergency_stop=false` 确认；等待中返回 `202`。 |
 | `POST /api/vehicle-control/chassis-parameters` | `{ "press": integer, "movement_acc": integer, "stop_acc": integer }` | 持久化并更新手动驾驶参数。`press` 为 20-2000，`movement_acc` 为 10-1000，`stop_acc` 为 20-2000。 |
@@ -104,7 +105,7 @@ Backend 以 **20 Hz** 发布。保持输入必须在 **350 ms** 前刷新；会�
 
 `can_begin_manual` 表示当前客户端可以加入或发起 `miniapp` 会话，不表示可运动；`can_request_navigation` 表示可以发起全局 `navigation` 切换请求。两者在 `remote`、急停或急停未知时仍可为真。`manual_ready` 才是唯一的非零速度许可，仍要求至少一个有效会话、`miniapp` 实际确认及 `/is_emergency_stop=false`。`shared_sessions.active_count` 与 `switching_count` 只用于展示当前参与数，绝不泄露其他客户端的会话 ID。
 
-`/vector` 不是直接 ROS 速度接口：`target_linear = linear_ratio × linear_mps`，`target_angular = angular_ratio × angular_radps`。移动端以车头向上为视觉坐标：上/下分别为正/负 `linear_ratio`，左/右分别为正/负 `angular_ratio`；因此右上为正线速度与负角速度，即前进并右转的弧线。它不是横向右前平移。新的向量目标与旧的 `/command` 目标互斥；多个客户端中最后一条有效 `/command` 或 `/vector` 更新该唯一目标。任一后续 `/speed` 更新必须按保存的比例重新换算。急停、未知急停、外部切源、拥有当前目标的会话输入/心跳超时、任一 `stop`、`exit` 和 `(0,0)` 均清除两类目标并使用 `stop_acc`。
+`/vector` 不是直接 ROS 速度接口：`target_linear = linear_ratio × linear_mps`，`target_angular = angular_ratio × angular_radps`。移动端以车头向上为视觉坐标：上/下分别为正/负 `linear_ratio`，左/右分别为正/负 `angular_ratio`；因此右上为正线速度与负角速度，即前进并右转的弧线。它不是横向右前平移。新的向量目标与旧的 `/command` 目标互斥；多个客户端中最后一条有效 `/command` 或 `/vector` 更新该唯一目标。任一后续 `/speed` 更新必须按保存的比例重新换算。急停、未知急停、外部切源、拥有当前目标的会话输入/心跳超时、任一 `stop`、`release`、`exit` 和 `(0,0)` 均清除两类目标并使用 `stop_acc`。
 
 `emergency_stop.state` 只能为 `normal`、`triggered` 或 `unknown`；unknown 不等价于 normal。`release` 为 `idle`、`waiting_confirmation`、`confirmed`、`failed` 或 `unconfirmable`，只能由实际 Bool 回调或超时变更。非零 Twist 使用持久化的 `movement_acc`，任何零 Twist（主动停止、输入/心跳超时、退出或外部控制源接管）使用 `stop_acc`。解除急停的固定 `acc=2000`、`press=1400` 与这些手动驾驶参数保持分离。
 
@@ -116,7 +117,7 @@ Backend 以 **20 Hz** 发布。保持输入必须在 **350 ms** 前刷新；会�
 | --- | --- |
 | ROS Topic、控制源枚举、Twist 映射、超时或速度策略 | Backend 测试、安全审查、本文档和 Web 行为验证；未来任何 Mobile 控制消费者也必须验证。 |
 | HTTP 字段、端点或响应变更 | Backend 测试、Web 测试、本文档和每个 Existing 消费者。`/vector` 变更必须验证 PC `/command` 回归、Mobile 向量映射和本表安全规则。 |
-| Mobile 手动 HMI 的交互或生命周期变更 | Mobile 单元/组件测试、`scripts/test-mobile.sh`，并手工确认二次进入、松手 STOP、后台 STOP→EXIT、急停 `unknown` 锁定和横竖屏布局。 |
+| Mobile 手动 HMI 的交互或生命周期变更 | Mobile 单元/组件测试、`scripts/test-mobile.sh`，并手工确认二次进入、松手 STOP、后台/离页仅 RELEASE、显式退出才 EXIT、急停 `unknown` 锁定和横竖屏布局。 |
 | 不改变请求语义的仅 Web 展示变更 | 仅 Web 检查；不编辑本文档。 |
 | 未来 Mobile 控制 UI | 先建立独立的权限/审计/确认契约，再更新本文档并运行 Mobile 检查。 |
 
