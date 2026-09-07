@@ -19,10 +19,14 @@ class StatusCommandTests(unittest.TestCase):
     def test_once_uses_the_actual_web_listener_not_the_onefile_bootstrap_parent(self):
         with tempfile.TemporaryDirectory() as temp:
             fake_bin = Path(temp)
+            # Linux 的 PID 上限是 4,194,304。使用其外的值可确保测试夹具
+            # 不会在 GitHub Runner 上意外读取真实 /proc/<pid>，从而稳定覆盖
+            # 状态脚本的 ps 回退路径。
+            listener_pid = "99999999"
             self._command(
                 fake_bin,
                 "ss",
-                'printf \'LISTEN 0 128 0.0.0.0:8087 0.0.0.0:* users:(("ry-aletheia",pid=222,fd=9))\\n\'',
+                'printf \'LISTEN 0 128 0.0.0.0:8087 0.0.0.0:* users:(("ry-aletheia",pid=222,fd=9))\\n\''.replace("222", listener_pid),
             )
             self._command(
                 fake_bin,
@@ -35,7 +39,7 @@ elif [[ "$*" == *"-p 222 -o %cpu="* ]]; then
   printf "3.0\\n"
 else
   exit 0
-fi''',
+fi'''.replace("222", listener_pid),
             )
             self._command(fake_bin, "pgrep", "exit 1")
             self._command(
@@ -55,7 +59,7 @@ fi''',
 
         self.assertIn("工具状态:     运行中（8087 已监听）", result.stdout)
         self.assertIn("工具总 CPU:   3.0%  （/proc 不可用，ps 平均值）", result.stdout)
-        self.assertIn("服务 PID:     222", result.stdout)
+        self.assertIn(f"服务 PID:     {listener_pid}", result.stdout)
         self.assertIn("内存占用:     20.0 MiB", result.stdout)
         self.assertIn("left_camera", result.stdout)
         self.assertIn("等待 ROS 图像", result.stdout)
