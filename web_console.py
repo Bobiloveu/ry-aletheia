@@ -27,6 +27,7 @@ from autodrive_console.case_workspace import CasePackageError, CaseWorkspace
 from autodrive_console.deployment import DeploymentError, DeploymentStore
 from autodrive_console.mapping import MappingError, MappingSessionController, MappingUnavailable
 from autodrive_console.observation import ObservationError, ObservationManager
+from autodrive_console.task_compiler import CompilationError
 from autodrive_console.robot_gateway import RobotGateway
 from autodrive_console.ros_executor import RosTaskExecutor
 from autodrive_console.runtime_env import clear_legacy_fastdds_override
@@ -283,6 +284,30 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._mapping_preview(session_id)
         elif path == "/api/deployments":
             self._json({"projects": DEPLOYMENTS.list_projects(), "mapping": MAPPING.status()})
+        elif path.startswith("/api/deployments/") and path.endswith("/task-compiler/preview"):
+            try:
+                project_id = self._task_compiler_project_id(path, "/task-compiler/preview")
+                self._json({"preview": DEPLOYMENTS.task_compiler_preview(project_id)})
+            except CompilationError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.UNPROCESSABLE_ENTITY)
+            except DeploymentError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path.startswith("/api/deployments/") and path.endswith("/task-compiler/download"):
+            try:
+                project_id = self._task_compiler_project_id(path, "/task-compiler/download")
+                filename, body = DEPLOYMENTS.task_compiler_bundle(project_id)
+            except CompilationError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.UNPROCESSABLE_ENTITY)
+            except DeploymentError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            else:
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Disposition", f"attachment; filename=task-compiler-experimental.zip; filename*=UTF-8''{quote(filename)}")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(body)
         elif path.startswith("/api/deployments/") and path.endswith("/preview.png"):
             parts = path.split("/")
             if len(parts) != 7 or parts[4] != "maps":
@@ -497,6 +522,28 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
+        if path.startswith("/api/deployments/") and path.endswith("/task-compiler/config"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                if not isinstance(data, dict) or set(data) != {"community"} or not isinstance(data["community"], str):
+                    raise DeploymentError("任务编译器配置仅接受小区名称")
+                project_id = self._task_compiler_project_id(path, "/task-compiler/config")
+                self._json({"task_compiler": DEPLOYMENTS.update_task_compiler_config(project_id, data)})
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/task-compiler/preview"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                if not isinstance(data, dict) or data:
+                    raise DeploymentError("任务编译预览请求必须为空对象")
+                project_id = self._task_compiler_project_id(path, "/task-compiler/preview")
+                self._json({"preview": DEPLOYMENTS.task_compiler_preview(project_id)})
+            except CompilationError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.UNPROCESSABLE_ENTITY)
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         if path.startswith("/api/deployments/") and path.endswith("/maps/import"):
             try:
                 data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
@@ -595,6 +642,26 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/components").strip("/"))
                 component = DEPLOYMENTS.add_component(project_id, data)
                 self._json({"component": component, "project": DEPLOYMENTS.get(project_id)}, HTTPStatus.CREATED)
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/physical-elevators"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/physical-elevators").strip("/"))
+                elevator = DEPLOYMENTS.add_physical_elevator(project_id, data)
+                self._json({"physical_elevator": elevator, "project": DEPLOYMENTS.get(project_id)}, HTTPStatus.CREATED)
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/physical-elevators/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "physical-elevators": raise DeploymentError("物理电梯路径无效")
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(parts[3])
+                elevator = DEPLOYMENTS.update_physical_elevator(project_id, unquote(parts[5]), data)
+                self._json({"physical_elevator": elevator, "project": DEPLOYMENTS.get(project_id)})
             except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
@@ -932,6 +999,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 raise ValueError("手动控制请求必须是 JSON 对象")
             if path == "/api/vehicle-control/enter":
                 payload = VEHICLE_CONTROL.begin_manual_session()
+            elif path == "/api/vehicle-control/navigation":
+                payload = VEHICLE_CONTROL.request_navigation()
             elif path == "/api/vehicle-control/heartbeat":
                 payload = VEHICLE_CONTROL.heartbeat(str(data.get("session_id", "")))
             elif path == "/api/vehicle-control/command":
@@ -1200,6 +1269,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    @staticmethod
+    def _task_compiler_project_id(path: str, suffix: str) -> str:
+        """Extract one project id without allowing a nested client path."""
+        prefix = "/api/deployments/"
+        if not path.startswith(prefix) or not path.endswith(suffix):
+            raise DeploymentError("任务编译器路径无效")
+        project_id = unquote(path[len(prefix):-len(suffix)])
+        if not project_id or "/" in project_id:
+            raise DeploymentError("任务编译器项目标识无效")
+        return project_id
+
     def _update_case_management(self, case_id: str) -> None:
         try:
             case = STORE.get_case(case_id)
@@ -1240,6 +1320,16 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 parts = path.split("/")
                 if len(parts) != 6 or parts[4] != "components": raise DeploymentError("组件路径无效")
                 DEPLOYMENTS.delete_component(unquote(parts[3]), unquote(parts[5]))
+                self._json({"deleted": True})
+            except DeploymentError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/physical-elevators/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "physical-elevators":
+                    raise DeploymentError("物理电梯路径无效")
+                DEPLOYMENTS.delete_physical_elevator(unquote(parts[3]), unquote(parts[5]))
                 self._json({"deleted": True})
             except DeploymentError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
@@ -1635,6 +1725,12 @@ def run_console() -> None:
         # configuration error merely because an optional video migration could
         # not run.  VideoManager.status() reports the same error to the page.
         LOGGER.warning("视频配置迁移未执行：%s", exc)
+    try:
+        # 手动控制首次页面请求不能承担 ROS2 节点创建和锁存状态回放的延迟。
+        # 节点无法启动时仍保留控制台和状态页，由 fail-closed 状态明确锁定。
+        VEHICLE_CONTROL.start()
+    except VehicleControlUnavailable as exc:
+        LOGGER.warning("车辆控制 ROS2 模块预热失败：%s", exc)
     try:
         server = ThreadingHTTPServer(("0.0.0.0", 8087), ConsoleHandler)
     except OSError as exc:

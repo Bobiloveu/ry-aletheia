@@ -46,7 +46,9 @@
         </div>
       </header>
       <section class="page-grid">
-        <article class="panel span-5">
+        <section class="deployment-left-rail" aria-label="部署项目与地图">
+          <section class="deployment-setup-rail" aria-label="部署项目启动">
+        <article class="panel span-5 deployment-setup-project">
           <div id="newProjectForm">
             <div class="panel-title">
               <div>
@@ -75,12 +77,12 @@
           </section>
           <p id="projectMessage" class="inline-message"></p>
         </article>
-        <article class="panel span-7">
+        <article class="panel span-7 deployment-setup-flow">
           <h2>部署流程</h2>
           <ol class="deployment-flow" aria-label="部署建图流程">
             <li class="current"><b>1</b><span>创建项目并选择场景模型</span></li>
             <li><b>2</b><span>逐张地图：外部导入或车端建图，再进行 2D 标记</span></li>
-            <li><b>3</b><span>检查 Transition、路线和虚拟墙，生成部署包</span></li>
+            <li><b>3</b><span>标记地图组件；工具据此自动推导子任务顺序与衔接点</span></li>
           </ol>
           <div id="sceneModelControls" class="settings-form deployment-hidden">
             <label>场景模型<select id="sceneModel">
@@ -92,7 +94,7 @@
           </div>
           <p id="sceneModelMessage" class="inline-message">先创建或打开一个部署项目。</p>
         </article>
-        <article class="panel">
+        <article class="panel deployment-setup-projects">
           <div class="panel-title">
             <div>
               <p class="eyebrow">PROJECTS</p>
@@ -103,7 +105,7 @@
             <div class="page-empty">正在读取项目…</div>
           </div>
         </article>
-        <article class="panel">
+        <article class="panel deployment-map-import">
           <div class="panel-title">
             <div>
               <p class="eyebrow">MAP IMPORT</p>
@@ -151,6 +153,18 @@
           </div>
           <p id="mappingMessage" class="inline-message">创建项目后可选择“车端建图”。</p>
         </article>
+        <article class="panel span-12 map-assets-panel">
+          <div class="panel-title">
+            <div>
+              <h2 id="selectedProjectTitle">项目地图</h2>
+            </div>
+          </div>
+          <div id="mapList" class="deployment-map-list">
+            <div class="page-empty">项目地图将在这里显示。</div>
+          </div>
+        </article>
+          </section>
+        </section>
         <article class="panel span-12">
           <div class="panel-title">
             <div>
@@ -236,33 +250,6 @@
                 <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="m5 17 5-10m0 10 5-10m0 10 4-8" /></svg
                 ><span>减速区</span></button
-              ><button
-                data-waypoint-kind="map_transition"
-                class="compact-action waypoint-tool"
-                type="button"
-                title="在当前地图放置跨地图交接点"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M5 8h9m0 0-3-3m3 3-3 3M19 16h-9m0 0 3-3m-3 3 3 3" />
-                </svg><span>交接点</span></button
-              ><button
-                data-waypoint-kind="transition_link"
-                class="compact-action waypoint-tool"
-                type="button"
-                title="依次选择相邻地图的两个交接点"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M9 7H7a4 4 0 0 0 0 8h2m6-8h2a4 4 0 0 1 0 8h-2M8 12h8" />
-                </svg><span>衔接</span></button
-              ><button
-                data-waypoint-kind="route_link"
-                class="compact-action waypoint-tool"
-                type="button"
-                title="按顺序选择当前地图的路线点"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M4 18c5-1 4-10 9-10h7M16 5l4 3-4 3M4 18h1" />
-                </svg><span>路线</span></button
               ><span class="toolbar-divider" aria-hidden="true"></span
               ><span class="eraser-brush-group"
                 ><button
@@ -404,11 +391,51 @@
                 </button>
               </div>
             </section>
+            <section
+              id="elevatorLandingDialog"
+              class="elevator-landing-dialog deployment-hidden"
+              aria-label="放置电梯落点"
+            >
+              <header>
+                <div>
+                  <strong id="elevatorLandingDialogTitle">放置电梯落点</strong>
+                  <small id="elevatorLandingDialogDescription">共享硬件信息只维护一次；本层只确认门向与候梯距离。</small>
+                </div>
+                <button
+                  id="cancelElevatorLanding"
+                  class="popover-close"
+                  type="button"
+                  aria-label="取消放置电梯"
+                >
+                  ×
+                </button>
+              </header>
+              <div class="elevator-landing-mode" role="radiogroup" aria-label="电梯关联方式">
+                <label><input type="radio" name="elevatorLandingMode" value="existing" checked />关联已有电梯</label>
+                <label><input type="radio" name="elevatorLandingMode" value="new" />新建物理电梯</label>
+              </div>
+              <div id="existingElevatorLandingFields" class="elevator-landing-fields">
+                <label>选择物理电梯<select id="existingPhysicalElevator"></select></label>
+                <p id="existingPhysicalElevatorSummary" class="elevator-shared-summary"></p>
+              </div>
+              <div id="newElevatorLandingFields" class="elevator-landing-fields deployment-hidden">
+                <label>电梯编号<input id="newPhysicalElevatorNumber" type="text" placeholder="例如：10014" /></label>
+                <label>梯控协议<select id="newPhysicalElevatorProtocol"></select></label>
+                <label>最低服务楼层<input id="newPhysicalElevatorMinFloor" type="number" step="1" value="1" /></label>
+                <label>最高服务楼层<input id="newPhysicalElevatorMaxFloor" type="number" step="1" value="1" /></label>
+              </div>
+              <p id="elevatorLandingMessage" class="inline-message">选择要关联的物理电梯。</p>
+              <div class="component-actions">
+                <button id="confirmElevatorLanding" class="page-top-action" type="button">确认放置</button>
+                <button id="cancelElevatorLandingSecondary" class="compact-action" type="button">取消</button>
+              </div>
+            </section>
           </div>
           <p id="mapToolHint" class="page-muted">
-            选择语义组件后点击地图，系统会自动派生其任务点。交接点用于连接相邻地图；路线只在当前地图内编辑。
+            只需标记地图上的真实组件并填写属性。子任务顺序、跨图衔接点与路线由工具在实验预览中自动推导。
           </p>
         </article>
+        <section class="deployment-inspector-rail" aria-label="部署属性与检查">
         <article class="panel span-6 topology-panel">
           <div class="panel-title">
             <div>
@@ -422,21 +449,25 @@
           </div>
           <p id="stageAssignmentMessage" class="inline-message">选择地图后可检查其阶段归属。</p>
         </article>
-        <article class="panel span-6 topology-panel">
+        <article class="panel span-6 task-compiler-panel" aria-labelledby="taskCompilerTitle">
           <div class="panel-title">
             <div>
-              <h2>部署拓扑预览</h2>
+              <h2 id="taskCompilerTitle">任务编译预览</h2>
             </div>
-            <span id="topologyState" class="badge muted">等待项目</span>
           </div>
-          <div id="topologyPreview" class="topology-preview">
-            <div class="page-empty">阶段、交接点与路线完成后，会在这里显示只读检查结果。</div>
+          <p class="page-muted">
+            仅用于核验组件能否生成室内单电梯任务；不会写入机器人任务、行为树或定位运行目录。
+          </p>
+          <div class="task-compiler-summary">
+            <label>小区名称<input id="taskCompilerCommunity" maxlength="80" placeholder="例如：高科一号" autocomplete="organization" /></label>
+            <button id="saveTaskCompilerConfig" class="compact-action" type="button">保存任务信息</button>
+            <button id="generateTaskCompilerPreview" class="page-top-action" type="button" disabled>生成实验预览</button>
           </div>
-          <div class="route-draft-actions">
-            <span id="routeDraftMessage" class="page-muted">选择“路线”后，按顺序点击当前地图的 Waypoint。</span>
-            <button id="saveRoute" class="compact-action" type="button" disabled>保存当前路线</button>
-            <button id="clearRouteDraft" class="compact-action" type="button" disabled>清空选择</button>
+          <p id="taskCompilerStatus" class="inline-message" role="status" aria-live="polite">先打开部署项目并保存小区名称。</p>
+          <div id="taskCompilerPreview" class="compiler-empty" aria-live="polite">
+            保存后可生成只读预览；由服务端检查当前地图、组件与来源文件。
           </div>
+          <button id="downloadTaskCompilerBundle" class="compact-action" type="button" disabled>下载实验包</button>
         </article>
         <article class="panel span-6">
           <div class="panel-title">
@@ -503,16 +534,7 @@
             <p id="protocolMessage" class="inline-message"></p>
           </section>
         </article>
-        <article class="panel span-12 map-assets-panel">
-          <div class="panel-title">
-            <div>
-              <h2 id="selectedProjectTitle">项目地图</h2>
-            </div>
-          </div>
-          <div id="mapList" class="deployment-map-list">
-            <div class="page-empty">项目地图将在这里显示。</div>
-          </div>
-        </article>
+        </section>
       </section>
     </main>
     <script src="/deployment.js"></script>

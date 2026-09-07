@@ -1,0 +1,8 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree"><Sequence name="WaitForElevator">
+    <GetTaskTargetInfo community="{community}" building="{building}" unit="{unit}" floor="{floor}" success="{task_target_success}"/><SetBlackboard output_key="origin_floor" value="{{ORIGIN_FLOOR}}"/>
+    <BuildElevatorDoorCommand floor="{origin_floor}" suffix="+" command="{origin_open_door_command}"/><BuildElevatorDoorCommand floor="{origin_floor}" suffix="-" command="{origin_close_door_command}"/><BuildElevatorDoorCommand floor="{floor}" suffix="+" command="{target_open_door_command}"/><BuildElevatorDoorCommand floor="{floor}" suffix="-" command="{target_close_door_command}"/>
+    <GetElevatorId building="{building}" community="{community}" elevator_id="{elevator_id}" success="{get_id_success}" unit="{unit}"/><SetUseWheelOdom map_path="{{TARGET_LOCALIZATION_YAML}}" use_wheel_odom="true"/><LocationElevatorSceneProc data="true"/><SwitchMap map_url="{{TARGET_MAP_YAML}}"/><SetUseWheelOdom map_path="{{SOURCE_LOCALIZATION_YAML}}" pitch="0.0" roll="0.0" use_wheel_odom="false" x="{{RELOCALIZE_X}}" y="{{RELOCALIZE_Y}}" yaw="{{RELOCALIZE_YAW}}" z="0.4"/><ElevatorDoorKeeper command="{target_close_door_command}"/><PublishTaskStatus status_code="202"/>
+    <RetryUntilSuccessful num_attempts="5"><Sequence name="CallAndCheckDoor"><PublishTaskStatus status_code="200"/><ElevatorCaller elevid="{elevator_id}" target_floor="{origin_floor}"/><PublishTaskStatus status_code="209"/><ElevatorDoorKeeper command="{origin_open_door_command}"/><ElevatorStatus car_status="out" enable="true"/></Sequence></RetryUntilSuccessful><LocationElevatorSceneProc data="false"/>
+  </Sequence></BehaviorTree>
+</root>

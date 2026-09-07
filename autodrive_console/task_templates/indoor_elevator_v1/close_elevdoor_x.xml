@@ -1,0 +1,3 @@
+<root main_tree_to_execute="MainTree"><BehaviorTree ID="MainTree"><Sequence name="WaitForElevator">
+  <GetTaskTargetInfo community="{community}" building="{building}" unit="{unit}" floor="{floor}" success="{task_target_success}"/><BuildElevatorDoorCommand floor="{floor}" suffix="-" command="{target_close_door_command}"/><PublishTaskStatus status_code="203"/><ElevatorDoorKeeper command="{target_close_door_command}"/><ChangeUssStatus status="false"/>
+</Sequence></BehaviorTree></root>

@@ -1055,6 +1055,18 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertRegex(page, r'id="stopAcc"[^>]*min="20"[^>]*max="2000"')
         self.assertIn("/api/vehicle-control/release-emergency-stop", script)
         self.assertIn("/api/vehicle-control/chassis-parameters", script)
+        self.assertIn("/api/vehicle-control/navigation", script)
+        self.assertIn('requestNavigation.hidden = Boolean(sessionId) || state.actual_source === "navigation";', script)
+        self.assertIn("car_state_sync", script)
+        self.assertIn("正在读取车端状态", script)
+        self.assertIn("已由车端确认切换至", script)
+
+    def test_console_prewarms_vehicle_control_before_listening_for_http_requests(self):
+        """首个浏览器请求不应承担控制源和急停订阅节点的创建延迟。"""
+        source = Path("web_console.py").read_text(encoding="utf-8")
+        script = (web_console.WEB_ROOT / "manual_control.js").read_text(encoding="utf-8")
+        self.assertLess(source.index("VEHICLE_CONTROL.start()"), source.index("server = ThreadingHTTPServer"))
+        self.assertIn("外部控制源", script)
 
     def test_manual_control_uses_paired_range_and_numeric_inputs_for_every_tunable_value(self):
         """现场人员应能拖动粗调，也能直接输入精确值，且五项参数使用同一交互模型。"""

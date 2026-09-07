@@ -12,6 +12,7 @@
   let chassisSavePending = false;
   let chassisParametersDirty = false;
   let previousEmergencyRelease = null;
+  let requestedSource = null;
 
   const speedParameters = [
     { range: "linearSpeed", number: "linearSpeedNumber", output: "linearSpeedValue", unit: "m/s", decimals: 1 },
@@ -41,7 +42,9 @@
   }
 
   function sourceLabel(source) {
-    return source === "navigation" ? "自动驾驶" : source === "miniapp" ? "手动控制" : source || "未知";
+    if (source === "navigation") return "自动驾驶";
+    if (source === "miniapp") return "手动控制";
+    return source && source !== "unknown" ? `外部控制：${source}` : "未知";
   }
 
   function message(text, kind = "") {
@@ -174,9 +177,10 @@
     renderChassisParameterSaveState();
   }
 
-  function renderEmergencyStop(emergency) {
+  function renderEmergencyStop(emergency, carStateSync) {
     const state = emergency?.state || "unknown";
     const release = emergency?.release || "idle";
+    const pending = carStateSync?.emergency_stop === "pending";
     const panel = $("emergencyStopPanel");
     const label = $("emergencyStopState");
     const detail = $("emergencyStopDetail");
@@ -189,6 +193,9 @@
     } else if (state === "triggered") {
       label.textContent = "急停已触发";
       detail.textContent = release === "failed" ? "未在限定时间内收到解除确认，请检查物理急停与底盘状态。" : "手动运动已锁定。解除后仍需等待车端状态恢复。";
+    } else if (pending) {
+      label.textContent = "正在读取";
+      detail.textContent = "正在从车端读取急停状态；读取完成前手动运动保持锁定。";
     } else {
       label.textContent = "状态未知";
       detail.textContent = release === "unconfirmable" ? "解除结果无法确认，请检查 ROS2 与急停状态 Topic。" : "尚未收到 /is_emergency_stop 的真实状态，手动运动保持锁定。";
@@ -205,24 +212,29 @@
     lastStatus = state;
     const switching = Boolean(state.transition);
     const isManual = state.actual_source === "miniapp";
+    const carStateSync = state.car_state_sync || {};
+    const readingCarState = carStateSync.control_source === "pending" || carStateSync.emergency_stop === "pending";
     const sourceDot = $("sourceDot");
-    sourceDot.className = `source-dot ${switching ? "switching" : isManual ? "manual" : state.actual_source === "navigation" ? "auto" : "unknown"}`;
-    $("sourceName").textContent = switching ? `正在切换至 ${sourceLabel(state.transition)}` : sourceLabel(state.actual_source);
-    $("sessionBadge").textContent = state.manual_ready ? "控制已就绪" : state.session?.state === "expired" ? "心跳已失效" : switching ? "切换中" : "未接管";
-    $("sessionBadge").className = `session-badge ${state.manual_ready ? "ready" : state.transition_error || state.session?.state === "expired" ? "error" : ""}`;
+    sourceDot.className = `source-dot ${switching ? "switching" : readingCarState ? "syncing" : isManual ? "manual" : state.actual_source === "navigation" ? "auto" : "unknown"}`;
+    $("sourceName").textContent = switching ? `正在切换至 ${sourceLabel(state.transition)}` : readingCarState && state.actual_source === "unknown" ? "正在读取…" : sourceLabel(state.actual_source);
+    $("sessionBadge").textContent = state.manual_ready ? "控制已就绪" : state.session?.state === "expired" ? "心跳已失效" : switching ? "切换中" : readingCarState ? "读取中" : "未接管";
+    $("sessionBadge").className = `session-badge ${state.manual_ready ? "ready" : readingCarState ? "pending" : state.transition_error || state.session?.state === "expired" ? "error" : ""}`;
     $("publishRate").textContent = state.safety ? `${state.safety.publish_hz} Hz` : "—";
     $("inputTimeout").textContent = state.safety ? `${state.safety.input_timeout_ms} ms` : "—";
     $("heartbeatTimeout").textContent = state.safety ? `${state.safety.heartbeat_timeout_ms} ms` : "—";
-    renderEmergencyStop(state.emergency_stop);
+    renderEmergencyStop(state.emergency_stop, carStateSync);
     renderChassisParameters(state.chassis_parameters);
 
     const enter = $("enterManual");
+    const requestNavigation = $("requestNavigation");
     const exit = $("exitManual");
     const ready = Boolean(state.manual_ready && sessionId);
     renderSpeed(state.speed, ready);
     enter.disabled = !state.can_begin_manual || switching;
     enter.textContent = isManual ? "开始手动控制" : "进入手动控制";
     enter.hidden = Boolean(sessionId);
+    requestNavigation.hidden = Boolean(sessionId) || state.actual_source === "navigation";
+    requestNavigation.disabled = !state.can_request_navigation || switching;
     exit.hidden = !sessionId;
     exit.disabled = switching && state.transition === "navigation";
     $("driveArea").setAttribute("aria-disabled", String(!ready));
@@ -230,7 +242,10 @@
     $("stopButton").disabled = !sessionId || state.session?.state === "none";
 
     const emergencyState = state.emergency_stop?.state || "unknown";
-    if (emergencyState === "triggered") {
+    if (readingCarState) {
+      $("gateTitle").textContent = "正在读取车端状态";
+      $("gateText").textContent = "正在读取急停与实际控制源；完成前方向控制保持锁定。";
+    } else if (emergencyState === "triggered") {
       $("gateTitle").textContent = "急停已触发";
       $("gateText").textContent = "车端已锁定手动运动。可发起软件解除，但必须等待 /is_emergency_stop 返回未触发。";
     } else if (emergencyState !== "normal") {
@@ -250,12 +265,21 @@
         $("gateTitle").textContent = adoptingExistingMiniapp ? "正在建立安全会话" : "手动控制源已确认";
         $("gateText").textContent = "车端已反馈 miniapp。Aletheia 会先写入 STOP 并建立看门狗会话，然后才允许方向控制。";
       } else {
-        $("gateTitle").textContent = "当前为自动驾驶";
-        $("gateText").textContent = "请求接管后，仍须等待车端实际状态确认；确认前不会发送非零速度。";
+        const externalSource = state.actual_source && state.actual_source !== "unknown" ? state.actual_source : "未知";
+        $("gateTitle").textContent = state.actual_source === "navigation" ? "当前为自动驾驶" : `外部控制源 ${externalSource} 已接管`;
+        $("gateText").textContent = "可请求切换至手动控制或自动驾驶；只有 /control_source_state 实际确认后才会更新结果，确认前不会发送非零速度。";
       }
     } else {
-      $("gateTitle").textContent = "等待安全接管条件";
-      $("gateText").textContent = "当前控制源不是 navigation，或已有失效会话。请先恢复自动驾驶后再进入手动控制。";
+      $("gateTitle").textContent = "当前无法请求手动控制";
+      $("gateText").textContent = state.transition_error || "自动化测试正在执行或已有控制会话，请等待当前状态结束后再试。";
+    }
+    if (!switching && requestedSource) {
+      if (state.actual_source === requestedSource) {
+        message(`已由车端确认切换至 ${sourceLabel(requestedSource)}。`, "success");
+        requestedSource = null;
+      } else if (state.transition_error) {
+        requestedSource = null;
+      }
     }
     if (state.transition_error) message(state.transition_error, "error");
   }
@@ -379,11 +403,12 @@
   async function enterManual({ adoptExisting = false } = {}) {
     if (!adoptExisting && !window.confirm("确认进入手动控制？\n\n车辆在收到 /control_source_state=miniapp 前不会解锁方向控制。")) return;
     message(adoptExisting ? "正在建立车端手动控制安全会话…" : "正在请求车端切换控制源…");
+    requestedSource = "miniapp";
     try {
       const state = await request("/api/vehicle-control/enter", {});
       sessionId = state.session?.id || null;
       render(state);
-    } catch (error) { if (error.status) render(error.status); message(error.message, "error"); }
+    } catch (error) { requestedSource = null; if (error.status) render(error.status); message(error.message, "error"); }
   }
 
   async function adoptExistingMiniapp() {
@@ -399,6 +424,7 @@
     clearHeld();
     if (!sessionId) return;
     message("正在 STOP 并等待自动驾驶实际接管…");
+    requestedSource = "navigation";
     try {
       const state = await request("/api/vehicle-control/exit", { session_id: sessionId });
       // 退出请求一经车端接受，浏览器就不再维持会话；车端仍保持 STOP，直到
@@ -406,7 +432,16 @@
       sessionId = null;
       render(state);
     }
-    catch (error) { if (error.status) render(error.status); message(error.message, "error"); }
+    catch (error) { requestedSource = null; if (error.status) render(error.status); message(error.message, "error"); }
+  }
+
+  async function requestNavigation() {
+    if (!window.confirm("确认请求切换至自动驾驶？\n\n页面会等待 /control_source_state=navigation 的实际回报，再显示结果。")) return;
+    message("正在请求车端切换至自动驾驶…");
+    requestedSource = "navigation";
+    try {
+      render(await request("/api/vehicle-control/navigation", {}));
+    } catch (error) { requestedSource = null; if (error.status) render(error.status); message(error.message, "error"); }
   }
 
   async function heartbeat() {
@@ -423,6 +458,7 @@
   }
 
   $("enterManual").addEventListener("click", enterManual);
+  $("requestNavigation").addEventListener("click", requestNavigation);
   $("exitManual").addEventListener("click", exitManual);
   $("stopButton").addEventListener("click", stop);
   $("releaseEmergencyStop").addEventListener("click", releaseEmergencyStop);

@@ -1,0 +1,15 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree"><Sequence name="WaitForElevator">
+    <GetTaskTargetInfo community="{community}" building="{building}" unit="{unit}" floor="{floor}" success="{task_target_success}"/>
+    <SetBlackboard output_key="origin_floor" value="{{ORIGIN_FLOOR}}"/>
+    <BuildElevatorDoorCommand floor="{origin_floor}" suffix="+" command="{origin_open_door_command}"/>
+    <BuildElevatorDoorCommand floor="{origin_floor}" suffix="-" command="{origin_close_door_command}"/>
+    <GetElevatorId building="{building}" community="{community}" elevator_id="{elevator_id}" success="{get_id_success}" unit="{unit}"/>
+    <ChangeUssStatus status="true"/>
+    <RetryUntilSuccessful num_attempts="10"><Sequence name="CallAndCheckDoor">
+      <PublishTaskStatus status_code="200"/><ElevatorCaller elevid="{elevator_id}" target_floor="{origin_floor}"/><PublishTaskStatus status_code="209"/>
+      <ElevatorDoorKeeper command="{origin_open_door_command}"/>
+      <Fallback name="CheckDoorOrWaitBeforeRetry"><ElevatorStatus car_status="in" enable="true"/><Sequence name="WaitBeforeRetry"><ElevatorDoorKeeper command="{origin_close_door_command}"/><Wait wait_duration="20"/><AlwaysFailure/></Sequence></Fallback>
+    </Sequence></RetryUntilSuccessful><PublishTaskStatus status_code="201"/>
+  </Sequence></BehaviorTree>
+</root>

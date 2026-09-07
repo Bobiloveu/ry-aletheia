@@ -1,6 +1,11 @@
 .deployment-hidden {
   display: none;
 }
+.deployment-left-rail,
+.deployment-setup-rail,
+.deployment-inspector-rail {
+  display: contents;
+}
 .current-project-card {
   min-width: 0;
 }
@@ -374,6 +379,101 @@
 .component-popover .component-edit-grid {
   margin-top: 10px;
 }
+.elevator-landing-dialog {
+  position: absolute;
+  z-index: 9;
+  top: 50%;
+  left: 50%;
+  width: min(390px, calc(100% - 28px));
+  padding: 16px;
+  transform: translate(-50%, -50%);
+  border: 1px solid #5e9fff;
+  border-radius: 12px;
+  background: rgba(31, 31, 33, 0.98);
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.38);
+}
+.elevator-landing-dialog header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: #dceeff;
+}
+.elevator-landing-dialog header strong,
+.elevator-landing-dialog header small {
+  display: block;
+}
+.elevator-landing-dialog header strong {
+  font-size: 13px;
+}
+.elevator-landing-dialog header small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.elevator-landing-mode {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.elevator-landing-mode label {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 7px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 11px;
+}
+.elevator-landing-mode input {
+  margin: 0;
+}
+.elevator-landing-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+.elevator-landing-fields > label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+.elevator-landing-fields > label:first-child:nth-last-child(2),
+.elevator-landing-fields > label:nth-child(2):last-child,
+.elevator-landing-fields > label:only-child,
+.elevator-shared-summary {
+  grid-column: 1 / -1;
+}
+.elevator-landing-fields input,
+.elevator-landing-fields select {
+  min-width: 0;
+  margin: 0;
+}
+.elevator-shared-summary {
+  margin: 0;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.elevator-landing-dialog .inline-message {
+  min-height: 18px;
+  margin: 10px 0 0;
+  font-size: 10px;
+}
+.elevator-landing-dialog .component-actions {
+  justify-content: flex-end;
+  margin-top: 10px;
+}
 .component-attribute-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -414,6 +514,12 @@
   font:
     700 17px ui-monospace,
     monospace;
+}
+.physical-floor .edit-shared-elevator {
+  width: max-content;
+  min-height: 28px;
+  margin: 7px 0 0;
+  font-size: 10px;
 }
 .popover-close {
   width: 26px;
@@ -572,9 +678,142 @@
   border-color: #c76772 !important;
   color: #ff9aa5 !important;
 }
+.task-compiler-panel .page-muted {
+  margin: 0 0 14px;
+  line-height: 1.55;
+}
+.task-compiler-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 9px;
+  align-items: end;
+}
+.task-compiler-summary .compact-action,
+.task-compiler-summary .page-top-action,
+.task-compiler-panel > .compact-action {
+  width: auto;
+  margin: 0;
+  white-space: nowrap;
+}
+.task-compiler-panel > .inline-message {
+  min-height: 18px;
+  margin: 10px 0 0;
+}
+.task-compiler-panel > .inline-message.error {
+  color: var(--red);
+}
+.task-compiler-summary label {
+  min-width: 0;
+}
+.task-compiler-summary input {
+  margin-bottom: 0;
+}
+.compiler-empty,
+.compiler-blocking-errors,
+.compiler-preview-ready {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-sunken);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+.compiler-empty {
+  min-height: 62px;
+  display: grid;
+  align-items: center;
+}
+.compiler-ready-label,
+.compiler-output-note,
+.compiler-artifact-meta {
+  margin: 0;
+}
+.compiler-ready-label {
+  color: var(--ink);
+  font-weight: 700;
+}
+.compiler-output-note {
+  margin-top: 3px;
+  color: var(--muted);
+}
+.compiler-timeline {
+  display: grid;
+  gap: 0;
+  margin: 12px 0 8px;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+.compiler-step {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+.compiler-step > span {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+}
+.compiler-step b,
+.compiler-step small {
+  display: block;
+}
+.compiler-step b {
+  color: var(--ink);
+  font-size: 11px;
+}
+.compiler-step small,
+.compiler-artifact-meta {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.compiler-blocking-errors {
+  color: var(--ink);
+}
+.compiler-blocking-errors b {
+  color: var(--red);
+}
+.compiler-blocking-errors ul,
+.compiler-warning-list {
+  margin: 8px 0;
+  padding-left: 18px;
+}
+.compiler-blocking-errors li {
+  color: var(--red);
+}
+.compiler-blocking-errors p {
+  margin: 7px 0 0;
+  color: var(--muted);
+}
+.compiler-warning-list {
+  color: var(--amber);
+  font-size: 10px;
+  line-height: 1.5;
+}
 @media (max-width: 780px) {
   .component-edit-grid {
     grid-template-columns: 1fr;
+  }
+  .task-compiler-summary {
+    grid-template-columns: 1fr;
+  }
+  .task-compiler-summary .compact-action,
+  .task-compiler-summary .page-top-action,
+  .task-compiler-panel > .compact-action {
+    width: 100%;
   }
   .map-workspace,
   .map-workspace canvas {
@@ -602,17 +841,20 @@
   body:has(#mapWorkspace) .page-grid > .panel {
     grid-column: auto;
   }
-  body:has(#mapWorkspace) .page-grid > .panel:has(#projectName) {
+  body:has(#mapWorkspace) .page-grid > .panel:has(#projectName),
+  body:has(#mapWorkspace) .page-grid > .deployment-setup-rail > .panel:has(#projectName) {
     grid-column: 1;
     grid-row: 1;
     padding: 18px;
   }
-  body:has(#mapWorkspace) .page-grid > .panel:has(#importControls) {
+  body:has(#mapWorkspace) .page-grid > .panel:has(#importControls),
+  body:has(#mapWorkspace) .page-grid > .deployment-setup-rail > .panel:has(#importControls) {
     grid-column: 1;
     grid-row: 2;
     padding: 18px;
   }
-  body:has(#mapWorkspace) .page-grid > .panel:has(#projectList) {
+  body:has(#mapWorkspace) .page-grid > .panel:has(#projectList),
+  body:has(#mapWorkspace) .page-grid > .deployment-setup-rail > .panel:has(#projectList) {
     grid-column: 1;
     grid-row: 5;
     padding: 18px;
@@ -641,14 +883,16 @@
     max-height: 280px;
     overflow: auto;
   }
-  body:has(#mapWorkspace) .page-grid > .panel:has(#projectList) {
+  body:has(#mapWorkspace) .page-grid > .panel:has(#projectList),
+  body:has(#mapWorkspace) .page-grid > .deployment-setup-rail > .panel:has(#projectList) {
     grid-column: 1;
     grid-row: 5;
     padding: 18px;
     max-height: 220px;
     overflow: auto;
   }
-  body:has(#mapWorkspace) .page-grid > .panel:nth-child(2) {
+  body:has(#mapWorkspace) .page-grid > .panel:nth-child(2),
+  body:has(#mapWorkspace) .page-grid > .deployment-setup-rail > .deployment-setup-flow {
     display: block;
     grid-column: 1;
     grid-row: 3;
@@ -658,6 +902,16 @@
     display: block;
     grid-column: 3;
     grid-row: 3;
+    padding: 18px;
+  }
+  body:has(#mapWorkspace) .page-grid > .panel:has(#stageAssignmentControls) {
+    grid-column: 3;
+    grid-row: 4;
+    padding: 18px;
+  }
+  body:has(#mapWorkspace) .page-grid > .task-compiler-panel {
+    grid-column: 3;
+    grid-row: 5;
     padding: 18px;
   }
   body:has(#mapWorkspace) .map-workspace,
@@ -774,6 +1028,14 @@ body.theme-light:has(#mapWorkspace) .component-popover {
   background: rgba(255, 255, 255, 0.97);
   box-shadow: 0 18px 42px rgba(0, 0, 0, 0.16);
 }
+body.theme-light:has(#mapWorkspace) .elevator-landing-dialog {
+  border-color: #0071e3;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.18);
+}
+body.theme-light:has(#mapWorkspace) .elevator-landing-dialog header {
+  color: #1d1d1f;
+}
 body.theme-light:has(#mapWorkspace) .component-popover header {
   color: #1d1d1f;
 }
@@ -867,29 +1129,264 @@ body.deployment-no-project:has(#mapWorkspace) .map-canvas-empty b::after {
 }
 @media (min-width: 1100px) {
   body.deployment-no-project:has(#mapWorkspace) .page-grid {
-    grid-template-columns: 200px minmax(560px, 1fr);
+    /* First-run remains an editor surface: give the setup rail enough room to
+       scan, then let the empty map claim every remaining pixel.  The regular
+       200 px project rail is intentionally too dense for the workflow copy. */
+    grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+    width: 100%;
+  }
+  /* Before a project is opened, the left rail is one connected decision
+     surface: create or reopen a project, then read the next three steps.
+     The controls keep their existing DOM and event bindings, while the
+     visual grouping prevents four unrelated cards from competing at once. */
+  body.deployment-no-project:has(#mapWorkspace) .deployment-setup-rail {
+    display: grid;
+    grid-column: 1;
+    grid-row: 1;
+    align-self: start;
+    gap: 0;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+  body.deployment-no-project:has(#mapWorkspace)
+    .deployment-setup-rail
+    > .deployment-setup-project,
+  body.deployment-no-project:has(#mapWorkspace)
+    .deployment-setup-rail
+    > .deployment-setup-projects,
+  body.deployment-no-project:has(#mapWorkspace)
+    .deployment-setup-rail
+    > .deployment-setup-flow {
+    margin: 0;
+    padding: 20px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    grid-column: auto;
+    grid-row: auto;
+    max-height: none;
+    overflow: visible;
+  }
+  body.deployment-no-project:has(#mapWorkspace)
+    .deployment-setup-rail
+    > .deployment-setup-project {
+    order: 1;
+  }
+  body.deployment-no-project:has(#mapWorkspace)
+    .deployment-setup-rail
+    > .deployment-setup-projects {
+    order: 2;
+    border-top: 1px solid var(--line);
+  }
+  body.deployment-no-project:has(#mapWorkspace)
+    .deployment-setup-rail
+    > .deployment-setup-flow {
+    order: 3;
+    border-top: 1px solid var(--line);
+  }
+  body.deployment-no-project:has(#mapWorkspace) .deployment-map-import,
+  body.deployment-no-project:has(#mapWorkspace) .topology-panel,
+  body.deployment-no-project:has(#mapWorkspace) .task-compiler-panel,
+  body.deployment-no-project:has(#mapWorkspace) .map-assets-panel,
+  body.deployment-no-project:has(#mapWorkspace) .page-grid > .mapping-session-panel {
+    display: none;
   }
   body.deployment-no-project:has(#mapWorkspace)
     .page-grid
     > .panel:has(#mapWorkspace) {
     grid-column: 2;
-    grid-row: 1 / span 4;
-  }
-  body.deployment-no-project:has(#mapWorkspace)
-    .page-grid
-    > .panel:has(#mapList) {
-    grid-column: 1;
-    grid-row: 3;
-  }
-  body.deployment-no-project:has(#mapWorkspace)
-    .page-grid
-    > .panel:has(#projectList) {
-    grid-column: 1;
-    grid-row: 4;
+    grid-row: 1;
+    min-width: 0;
   }
   body.deployment-no-project:has(#mapWorkspace) .map-workspace,
   body.deployment-no-project:has(#mapWorkspace) .map-workspace canvas {
     height: min(560px, calc(100vh - 230px));
     min-height: 460px;
+  }
+
+  /* A project without a map is an import step, not an empty full-height map
+     editor. Keep the next action and its destination together until a real
+     map asset exists; the normal three-column editor starts after import. */
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace) .page-grid {
+    grid-template-columns: minmax(236px, 300px) minmax(0, 1fr);
+  }
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace)
+    .page-grid
+    > .panel:has(#projectName),
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace)
+    .page-grid
+    > .deployment-setup-rail
+    > .panel:has(#projectName) {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace)
+    .page-grid
+    > .panel:nth-child(2),
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace)
+    .page-grid
+    > .deployment-setup-rail
+    > .deployment-setup-flow {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace)
+    .page-grid
+    > .panel:has(#importControls),
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace)
+    .page-grid
+    > .deployment-setup-rail
+    > .panel:has(#importControls) {
+    grid-column: 1;
+    grid-row: 3;
+  }
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace)
+    .page-grid
+    > .panel:has(#mapWorkspace) {
+    grid-column: 2;
+    grid-row: 1 / span 3;
+  }
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace)
+    .page-grid
+    > .panel:has(#projectList),
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace)
+    .page-grid
+    > .deployment-setup-rail
+    > .panel:has(#projectList),
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace)
+    .page-grid
+    > .panel:has(#mapList),
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace)
+    .page-grid
+    > .component-template-panel,
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace)
+    .page-grid
+    > .panel:has(#instanceControls),
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace)
+    .mapping-session-panel,
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace)
+    .page-grid
+    > .panel:has(#stageAssignmentControls),
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace)
+    .task-compiler-panel {
+    display: none;
+  }
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace) .map-workspace,
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace) .map-workspace canvas {
+    height: min(400px, calc(100vh - 250px));
+    min-height: 340px;
+  }
+}
+
+/* Desktop editor: the map stays central while project actions and review
+   controls are true rails.  This avoids using the map's height to position
+   unrelated cards lower down the page. */
+@media (min-width: 1100px) {
+  body:has(#mapWorkspace) .page-grid {
+    grid-template-columns: minmax(264px, 300px) minmax(0, 1fr) minmax(300px, 340px);
+    grid-auto-rows: min-content;
+    align-items: start;
+    gap: 16px;
+  }
+  body:has(#mapWorkspace) .deployment-left-rail,
+  body:has(#mapWorkspace) .deployment-inspector-rail {
+    display: grid;
+    align-self: start;
+    gap: 14px;
+    min-width: 0;
+  }
+  body:has(#mapWorkspace) .deployment-left-rail {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  body:has(#mapWorkspace) .deployment-inspector-rail {
+    grid-column: 3;
+    grid-row: 1;
+  }
+  body:has(#mapWorkspace) .deployment-left-rail > .deployment-setup-rail {
+    display: grid;
+    gap: 14px;
+  }
+  body:has(#mapWorkspace) .deployment-left-rail .panel,
+  body:has(#mapWorkspace) .deployment-inspector-rail .panel {
+    grid-column: auto;
+    grid-row: auto;
+    max-height: none;
+    overflow: visible;
+    padding: 18px;
+  }
+  body:has(#mapWorkspace) .page-grid > .panel:has(#mapWorkspace) {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+    padding: 16px;
+  }
+  body:has(#mapWorkspace) .task-compiler-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  body:has(#mapWorkspace) .task-compiler-summary label {
+    grid-column: 1 / -1;
+  }
+  body:has(#mapWorkspace) .task-compiler-summary .compact-action,
+  body:has(#mapWorkspace) .task-compiler-summary .page-top-action {
+    width: 100%;
+    white-space: normal;
+  }
+
+  body.deployment-no-project:has(#mapWorkspace) .page-grid {
+    grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  }
+  body.deployment-no-project:has(#mapWorkspace) .deployment-left-rail {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  body.deployment-no-project:has(#mapWorkspace) .deployment-left-rail > .deployment-setup-rail {
+    gap: 0;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+  body.deployment-no-project:has(#mapWorkspace) .deployment-left-rail .deployment-setup-rail > .panel {
+    margin: 0;
+    padding: 20px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+  body.deployment-no-project:has(#mapWorkspace) .deployment-left-rail .deployment-setup-projects,
+  body.deployment-no-project:has(#mapWorkspace) .deployment-left-rail .deployment-setup-flow {
+    border-top: 1px solid var(--line) !important;
+  }
+  body.deployment-no-project:has(#mapWorkspace) .deployment-left-rail .deployment-map-import,
+  body.deployment-no-project:has(#mapWorkspace) .deployment-left-rail .mapping-session-panel,
+  body.deployment-no-project:has(#mapWorkspace) .deployment-left-rail .map-assets-panel,
+  body.deployment-no-project:has(#mapWorkspace) .deployment-inspector-rail {
+    display: none;
+  }
+  body.deployment-no-project:has(#mapWorkspace) .page-grid > .panel:has(#mapWorkspace) {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace) .page-grid {
+    grid-template-columns: minmax(264px, 300px) minmax(0, 1fr);
+  }
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace) .deployment-left-rail {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace) .deployment-left-rail .deployment-setup-projects,
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace) .deployment-left-rail .map-assets-panel,
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace) .deployment-inspector-rail {
+    display: none;
+  }
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace) .page-grid > .panel:has(#mapWorkspace) {
+    grid-column: 2;
+    grid-row: 1;
   }
 }

@@ -159,6 +159,35 @@ class VehicleControlTests(unittest.TestCase):
     def _confirm_emergency_normal(self):
         self.control._on_emergency_stop(SimpleNamespace(data=False))
 
+    def test_start_prewarms_the_ros_controller_before_any_status_request(self):
+        control = VehicleControlController()
+        with patch.object(control, "_ensure_started") as ensure_started:
+            control.start()
+        ensure_started.assert_called_once_with()
+
+    def test_external_control_source_can_request_manual_but_cannot_move_before_confirmation(self):
+        """remote 只是当前来源，不能让操作者失去发起切换的入口。"""
+        self.control._on_emergency_stop(SimpleNamespace(data=True))
+        self.control._on_source_state(SimpleNamespace(data="remote"))
+
+        pending = self.control.begin_manual_session()
+
+        self.assertEqual(pending["actual_source"], "remote")
+        self.assertEqual(pending["transition"], "miniapp")
+        self.assertTrue(pending["session"]["present"])
+        self.assertFalse(pending["manual_ready"])
+        self.assertTrue(pending["can_begin_manual"] is False)
+        self.assertEqual(self.control._source_command_publisher.messages[-1].data, "miniapp")
+
+    def test_external_control_source_can_request_navigation_without_a_manual_session(self):
+        """没有 Aletheia 会话时也能请求车端切回自动驾驶。"""
+        self.control._on_source_state(SimpleNamespace(data="remote"))
+
+        pending = self.control.request_navigation()
+
+        self.assertEqual(pending["transition"], "navigation")
+        self.assertEqual(self.control._source_command_publisher.messages[-1].data, "navigation")
+
     def test_twist_factory_preserves_miniapp_extended_protocol_fields(self):
         message = MiniappTwistFactory().build(_Twist, 0.2, -0.3)
         self.assertEqual(message.linear.x, 0.2)
@@ -198,14 +227,14 @@ class VehicleControlTests(unittest.TestCase):
         self.assertEqual(velocity.linear.z, 1000.0)
 
     def test_unknown_or_triggered_emergency_stop_blocks_motion_and_uses_stop_acc(self):
-        """不能把未收到急停消息当作安全，触发后必须立即走统一 STOP。"""
+        """急停未知时可建立会话，但绝不能把它当作允许运动。"""
         self.control._on_source_state(SimpleNamespace(data="miniapp"))
         self.assertFalse(self.control.status()["manual_ready"])
+        session_id = self.control.begin_manual_session()["session"]["id"]
         with self.assertRaises(VehicleControlConflict):
-            self.control.begin_manual_session()
+            self.control.set_command(session_id, "forward")
 
         self.control._on_emergency_stop(SimpleNamespace(data=False))
-        session_id = self.control.begin_manual_session()["session"]["id"]
         self.control.set_command(session_id, "forward")
         self.control._on_publish_tick()
         self.assertEqual(self.control._velocity_publisher.messages[-1].linear.z, 1000.0)
@@ -218,7 +247,12 @@ class VehicleControlTests(unittest.TestCase):
 
     def test_emergency_query_bootstraps_unknown_without_overwriting_topic_state(self):
         """底盘查询只补齐启动盲区，实时 Topic 已确认的状态始终优先。"""
-        self.assertEqual(self.control.status()["emergency_stop"]["state"], "unknown")
+        pending = self.control.status()
+        self.assertEqual(pending["emergency_stop"]["state"], "unknown")
+        self.assertEqual(
+            pending["car_state_sync"],
+            {"control_source": "pending", "emergency_stop": "pending"},
+        )
 
         self.control._on_emergency_query_response(
             SimpleNamespace(is_emergency_stop=False),

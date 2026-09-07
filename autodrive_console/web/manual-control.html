@@ -54,9 +54,10 @@
           <div class="control-gate" id="controlGate">
             <div class="gate-copy">
               <h3 id="gateTitle">等待实际状态</h3>
-              <p id="gateText">页面不会根据点击推测控制权。确认控制源为“自动驾驶”后，才可以请求手动接管。</p>
+              <p id="gateText">可请求切换控制源；只有车端实际回报后才显示切换成功，方向控制始终等待安全条件确认。</p>
             </div>
             <button id="enterManual" class="manual-primary" type="button" disabled>进入手动控制</button>
+            <button id="requestNavigation" class="manual-secondary" type="button" disabled>切换至自动驾驶</button>
             <button id="exitManual" class="manual-secondary" type="button" hidden>停止并切回自动驾驶</button>
           </div>
 
