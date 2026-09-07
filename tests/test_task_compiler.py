@@ -5,6 +5,7 @@ import zipfile
 from io import BytesIO
 from math import isclose, pi
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 
@@ -81,6 +82,22 @@ def test_exported_task_json_keeps_the_approved_readable_field_order(two_map_proj
     assert text.index('"waypoint_task_id"') < text.index('"is_task_point"')
     assert text.index('"is_task_point"') < text.index('"speed_mode"')
     assert json.loads(text) == preview.task_json
+
+
+def test_exported_behavior_trees_keep_the_approved_readable_xml_hierarchy(two_map_project):
+    preview = _compile(two_map_project)
+    artifact = next(
+        item for item in preview.artifacts if item.relative_path.endswith("elevator_out_n_x.xml")
+    )
+    text = artifact.content.decode("utf-8")
+
+    assert text.startswith('<root main_tree_to_execute="MainTree">\n')
+    assert '\n  <BehaviorTree ID="MainTree">\n' in text
+    assert '\n    <Sequence name="WaitForElevator">\n' in text
+    assert '\n      <GetTaskTargetInfo ' in text
+    assert "</Sequence></BehaviorTree>" not in text
+    assert text.endswith("\n")
+    assert ElementTree.fromstring(text).tag == "root"
 
 
 def test_waiting_point_is_one_point_five_metres_beyond_the_door_face(two_map_project):

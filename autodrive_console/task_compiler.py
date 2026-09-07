@@ -17,6 +17,7 @@ import json
 import re
 import zipfile
 from typing import Any
+from xml.etree import ElementTree
 from xml.sax.saxutils import escape as xml_escape
 
 
@@ -504,7 +505,12 @@ def _render_xml(template: str, values: dict[str, str]) -> str:
     rendered = _TOKEN.sub(replace, template)
     if "{{" in rendered or "}}" in rendered:
         raise CompilationError("行为树模板包含未解析替换标记")
-    return rendered
+    try:
+        root = ElementTree.fromstring(rendered)
+    except ElementTree.ParseError as exc:
+        raise CompilationError(f"行为树模板不是有效 XML：{exc}") from exc
+    ElementTree.indent(root, space="  ")
+    return ElementTree.tostring(root, encoding="unicode", short_empty_elements=True) + "\n"
 
 
 def _render_localization(template: str, map_directory: Path) -> str:
