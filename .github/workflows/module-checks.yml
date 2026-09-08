@@ -92,6 +92,7 @@ jobs:
             sleep 10
           done
           flutter analyze
+          # Local/FVM equivalent: fvm flutter test --exclude-tags golden --concurrency=1 -r compact
           flutter test --exclude-tags golden --concurrency=1 -r compact
 
   mobile-golden:
@@ -112,6 +113,7 @@ jobs:
             if [ "$attempt" -eq 3 ]; then exit 1; fi
             sleep 10
           done
+          # Local/FVM equivalent: fvm flutter test test/debug_ui/gallery_golden_test.dart --concurrency=1 -r compact
           flutter test test/debug_ui/gallery_golden_test.dart --concurrency=1 -r compact
 
   android:
