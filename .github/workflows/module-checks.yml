@@ -91,9 +91,16 @@ jobs:
             if [ "$attempt" -eq 3 ]; then exit 1; fi
             sleep 10
           done
-          flutter analyze
+          # Flutter's compiler/tester talks to a loopback HTTP service. Keep
+          # dependency downloads proxy-aware, but never proxy local test traffic.
+          export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
+          export no_proxy="$NO_PROXY"
+          env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+            -u http_proxy -u https_proxy -u all_proxy flutter analyze
           # Local/FVM equivalent: fvm flutter test --exclude-tags golden --concurrency=1 -r compact
-          flutter test --exclude-tags golden --concurrency=1 -r compact
+          env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+            -u http_proxy -u https_proxy -u all_proxy \
+            flutter test --exclude-tags golden --concurrency=1 -r compact
 
   mobile-golden:
     needs: changes
@@ -113,8 +120,12 @@ jobs:
             if [ "$attempt" -eq 3 ]; then exit 1; fi
             sleep 10
           done
+          export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
+          export no_proxy="$NO_PROXY"
           # Local/FVM equivalent: fvm flutter test test/debug_ui/gallery_golden_test.dart --concurrency=1 -r compact
-          flutter test test/debug_ui/gallery_golden_test.dart --concurrency=1 -r compact
+          env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+            -u http_proxy -u https_proxy -u all_proxy \
+            flutter test test/debug_ui/gallery_golden_test.dart --concurrency=1 -r compact
 
   android:
     needs: changes
