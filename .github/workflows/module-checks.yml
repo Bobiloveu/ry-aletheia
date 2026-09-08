@@ -76,23 +76,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Bootstrap Dart for FVM; the action-provided SDK is linked into FVM's cache.
+      # CI pins the same SDK version as mobile/.fvmrc via flutter-action.
+      # FVM remains the local developer entrypoint; CI must not download a
+      # second SDK on a fresh runner with an empty FVM cache.
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: 3.47.1
           channel: stable
-      - run: dart pub global activate fvm 4.3.0
-      - run: echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
       - working-directory: mobile
         run: |
-          flutter_version="$(sed -n 's/.*"flutter"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' .fvmrc)"
-          flutter_root="${FLUTTER_ROOT:-$(dirname "$(dirname "$(command -v flutter)")")}"
-          mkdir -p .fvm
-          ln -s "$flutter_root" .fvm/flutter_sdk
-          test "$(fvm flutter --version | sed -n '1s/^Flutter \([^ ]*\).*/\1/p')" = "$flutter_version"
-          fvm flutter pub get
-          fvm flutter analyze
-          fvm flutter test --exclude-tags golden --concurrency=1 -r compact
+          flutter pub get
+          flutter analyze
+          flutter test --exclude-tags golden --concurrency=1 -r compact
 
   mobile-golden:
     needs: changes
@@ -104,17 +99,10 @@ jobs:
         with:
           flutter-version: 3.47.1
           channel: stable
-      - run: dart pub global activate fvm 4.3.0
-      - run: echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
       - working-directory: mobile
         run: |
-          flutter_version="$(sed -n 's/.*"flutter"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' .fvmrc)"
-          flutter_root="${FLUTTER_ROOT:-$(dirname "$(dirname "$(command -v flutter)")")}"
-          mkdir -p .fvm
-          ln -s "$flutter_root" .fvm/flutter_sdk
-          test "$(fvm flutter --version | sed -n '1s/^Flutter \([^ ]*\).*/\1/p')" = "$flutter_version"
-          fvm flutter pub get
-          fvm flutter test test/debug_ui/gallery_golden_test.dart --concurrency=1 -r compact
+          flutter pub get
+          flutter test test/debug_ui/gallery_golden_test.dart --concurrency=1 -r compact
 
   android:
     needs: changes
@@ -130,17 +118,10 @@ jobs:
         with:
           flutter-version: 3.47.1
           channel: stable
-      - run: dart pub global activate fvm 4.3.0
-      - run: echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
       - working-directory: mobile
         run: |
-          flutter_version="$(sed -n 's/.*"flutter"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' .fvmrc)"
-          flutter_root="${FLUTTER_ROOT:-$(dirname "$(dirname "$(command -v flutter)")")}"
-          mkdir -p .fvm
-          ln -s "$flutter_root" .fvm/flutter_sdk
-          test "$(fvm flutter --version | sed -n '1s/^Flutter \([^ ]*\).*/\1/p')" = "$flutter_version"
-          fvm flutter pub get
-          fvm flutter build apk --debug
+          flutter pub get
+          flutter build apk --debug
 
   ios:
     needs: changes
@@ -152,14 +133,7 @@ jobs:
         with:
           flutter-version: 3.47.1
           channel: stable
-      - run: dart pub global activate fvm 4.3.0
-      - run: echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
       - working-directory: mobile
         run: |
-          flutter_version="$(sed -n 's/.*"flutter"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' .fvmrc)"
-          flutter_root="${FLUTTER_ROOT:-$(dirname "$(dirname "$(command -v flutter)")")}"
-          mkdir -p .fvm
-          ln -s "$flutter_root" .fvm/flutter_sdk
-          test "$(fvm flutter --version | sed -n '1s/^Flutter \([^ ]*\).*/\1/p')" = "$flutter_version"
-          fvm flutter pub get
-          fvm flutter build ios --simulator --debug --no-codesign
+          flutter pub get
+          flutter build ios --simulator --debug --no-codesign
