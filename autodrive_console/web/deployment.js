@@ -1,3 +1,22 @@
+import {
+  COMPONENT_SPECS,
+  componentName,
+  protocolOptions,
+  protocolTitle,
+} from "./deployment/component-specs.js";
+import {
+  canvasPointToMap,
+  componentDimensions as getComponentDimensions,
+  componentLocalPoint as getComponentLocalPoint,
+  isComponentHit,
+  isPointOnMap,
+  isResizeHandleHit,
+  isRotateHandleHit,
+  mapPointToCanvas,
+  zoomAt,
+} from "./deployment/canvas-geometry.js";
+import { drawDeploymentCanvas } from "./deployment/canvas-renderer.js";
+
 const $ = (id) => document.getElementById(id);
 const esc = (value) => {
   const node = document.createElement("span");
@@ -32,177 +51,6 @@ const canvas = $("mapCanvas");
 const context = canvas.getContext("2d");
 let canvasResizeFrame = null;
 document.body.classList.add("deployment-no-project", "deployment-no-map");
-const DEFAULT_COMPONENT_TEMPLATES = {
-  access_protocols: [
-    { id: "bluetooth", label: "蓝牙" },
-    { id: "4g", label: "4G" },
-  ],
-  elevator_protocols: [
-    { id: "bluetooth", label: "蓝牙" },
-    { id: "4g", label: "4G" },
-  ],
-};
-const COMPONENT_SPECS = {
-  start: {
-    name: "起点",
-    fields: [
-      {
-        key: "start_action",
-        label: "起始动作",
-        type: "select",
-        options: [
-          ["dispatch", "派送起始"],
-          ["return", "返程起始"],
-        ],
-      },
-    ],
-  },
-  target: {
-    name: "目标点",
-    fields: [
-      {
-        key: "door",
-        label: "门牌号",
-        type: "text",
-        placeholder: "例如：1509",
-        default: "",
-      },
-      {
-        key: "arrival_action",
-        label: "到达动作",
-        type: "select",
-        options: [
-          ["deliver", "投递"],
-          ["wait", "等待"],
-          ["return", "返程"],
-        ],
-      },
-    ],
-  },
-  elevator: {
-    name: "电梯",
-    fields: [
-      {
-        key: "wait_distance_m",
-        label: "候梯距离（m）",
-        type: "number",
-        min: "0.5",
-        max: "5",
-        step: "0.1",
-        default: 1.5,
-      },
-    ],
-  },
-  gate: {
-    name: "闸机",
-    fields: [
-      {
-        key: "gate_id",
-        label: "闸机编号",
-        type: "text",
-        placeholder: "例如：G-01",
-      },
-      {
-        key: "access_protocol",
-        label: "控制协议",
-        type: "select",
-        protocolCategory: "access_protocols",
-        default: "bluetooth",
-      },
-      {
-        key: "speed_profile",
-        label: "速度模式",
-        type: "select",
-        options: [
-          ["single_point", "常规"],
-          ["slow_point", "减速"],
-          ["narrow_point", "窄通道"],
-        ],
-      },
-    ],
-  },
-  auto_door: {
-    name: "自动门",
-    fields: [
-      {
-        key: "door_id",
-        label: "门编号",
-        type: "text",
-        placeholder: "例如：D-01",
-      },
-      {
-        key: "access_protocol",
-        label: "控制协议",
-        type: "select",
-        protocolCategory: "access_protocols",
-        default: "bluetooth",
-      },
-      {
-        key: "speed_profile",
-        label: "速度模式",
-        type: "select",
-        options: [
-          ["single_point", "常规"],
-          ["slow_point", "减速"],
-        ],
-      },
-    ],
-  },
-  narrow_passage: {
-    name: "窄通道",
-    fields: [
-      {
-        key: "speed_profile",
-        label: "速度模式",
-        type: "select",
-        options: [
-          ["narrow_point", "窄通道"],
-          ["slow_point", "减速"],
-          ["single_point", "常规"],
-        ],
-      },
-    ],
-  },
-  ramp: {
-    name: "坡道",
-    fields: [
-      {
-        key: "speed_profile",
-        label: "速度模式",
-        type: "select",
-        options: [
-          ["slow_point", "减速"],
-          ["single_point", "常规"],
-        ],
-      },
-    ],
-  },
-  slow_zone: {
-    name: "减速区",
-    fields: [
-      {
-        key: "speed_profile",
-        label: "速度模式",
-        type: "select",
-        options: [
-          ["slow_point", "减速"],
-          ["single_point", "常规"],
-        ],
-      },
-    ],
-  },
-};
-const componentName = (component) =>
-  COMPONENT_SPECS[component.kind]?.name || component.label || component.kind;
-const protocolOptions = (category) => {
-  const options = selectedProject?.component_templates?.[category];
-  return Array.isArray(options) && options.length
-    ? options.map((item) => [item.id, item.label])
-    : (DEFAULT_COMPONENT_TEMPLATES[category] || []).map((item) => [
-        item.id,
-        item.label,
-      ]);
-};
 const physicalElevators = () =>
   Array.isArray(selectedProject?.physical_elevators)
     ? selectedProject.physical_elevators
@@ -211,10 +59,6 @@ const physicalElevatorFor = (component) =>
   physicalElevators().find(
     (item) => item.id === component?.attributes?.physical_elevator_id,
   );
-const protocolTitle = (protocol) =>
-  protocolOptions("elevator_protocols").find(([id]) => id === protocol)?.[1] ||
-  protocol ||
-  "未配置";
 const mapInstanceFor = (mapId) =>
   (selectedProject?.map_instances || []).find(
     (item) => item.map_asset_id === mapId,
@@ -603,6 +447,7 @@ function renderComponentTemplates() {
     .map(
       ([category, title]) =>
         `<div class="protocol-template-group"><b>${title}</b><div>${protocolOptions(
+          selectedProject,
           category,
         )
           .map(
@@ -671,52 +516,23 @@ function drawGrid(width, height) {
   context.restore();
 }
 function componentDimensions(item) {
-  return {
-    width: Number(item.attributes?.width_m || 0.8) * mapView.scale,
-    height: Number(item.attributes?.height_m || 0.8) * mapView.scale,
-  };
+  return getComponentDimensions(item, mapView.scale);
 }
 function componentCanvasPoint(item) {
-  return {
-    x: mapView.x + (item.x - activeMap.origin[0]) * mapView.scale,
-    y:
-      mapView.y +
-      (activeMap.height * activeMap.resolution_m -
-        (item.y - activeMap.origin[1])) *
-        mapView.scale,
-  };
+  return mapPointToCanvas(item, activeMap, mapView);
 }
 function worldCanvasPoint(point) {
-  return {
-    x: mapView.x + (point.x - activeMap.origin[0]) * mapView.scale,
-    y:
-      mapView.y +
-      (activeMap.height * activeMap.resolution_m -
-        (point.y - activeMap.origin[1])) *
-        mapView.scale,
-  };
+  return mapPointToCanvas(point, activeMap, mapView);
 }
 function canvasPointFromEvent(event) {
   const box = canvas.getBoundingClientRect();
   return { x: event.clientX - box.left, y: event.clientY - box.top };
 }
 function worldPointFromEvent(event) {
-  const point = canvasPointFromEvent(event);
-  return {
-    x: activeMap.origin[0] + (point.x - mapView.x) / mapView.scale,
-    y:
-      activeMap.origin[1] +
-      (activeMap.height * activeMap.resolution_m -
-        (point.y - mapView.y) / mapView.scale),
-  };
+  return canvasPointToMap(canvasPointFromEvent(event), activeMap, mapView);
 }
 function pointIsOnActiveMap(point) {
-  return (
-    point.x >= activeMap.origin[0] &&
-    point.x <= activeMap.origin[0] + activeMap.width * activeMap.resolution_m &&
-    point.y >= activeMap.origin[1] &&
-    point.y <= activeMap.origin[1] + activeMap.height * activeMap.resolution_m
-  );
+  return isPointOnMap(point, activeMap);
 }
 function drawEraseOperation(edit, draft = false) {
   const points = edit.points || [];
@@ -877,15 +693,7 @@ function drawMapRoutes() {
   if (routeDraft.length) drawLine(routeDraft, "rgba(255, 149, 0, .95)", true);
 }
 function componentLocalPoint(item, event) {
-  const point = componentCanvasPoint(item);
-  const pointer = canvasPointFromEvent(event);
-  const dx = pointer.x - point.x;
-  const dy = pointer.y - point.y;
-  const yaw = Number(item.yaw || 0);
-  return {
-    x: Math.cos(yaw) * dx - Math.sin(yaw) * dy,
-    y: Math.sin(yaw) * dx + Math.cos(yaw) * dy,
-  };
+  return getComponentLocalPoint(item, canvasPointFromEvent(event), activeMap, mapView);
 }
 function drawElevatorDoorMarker(width, height) {
   const markerSize = Math.max(3, Math.min(8, Math.min(width, height) * 0.12));
@@ -1043,91 +851,21 @@ function drawComponentSymbol(item, px, py) {
 }
 function drawMap() {
   const box = canvas.getBoundingClientRect();
-  context.clearRect(0, 0, box.width, box.height);
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, box.width, box.height);
-  if (!activeMap || !mapImage) {
-    const preview = mappingSession?.preview;
-    if (!liveMapImage || !preview?.width || !preview?.height) return;
-    const scale = Math.min((box.width - 48) / preview.width, (box.height - 48) / preview.height);
-    const width = preview.width * scale;
-    const height = preview.height * scale;
-    context.imageSmoothingEnabled = false;
-    context.drawImage(liveMapImage, (box.width - width) / 2, (box.height - height) / 2, width, height);
-    context.strokeStyle = "#0a84ff";
-    context.strokeRect((box.width - width) / 2, (box.height - height) / 2, width, height);
-    return;
-  }
-  drawGrid(box.width, box.height);
-  const pixels = mapView.scale * activeMap.resolution_m;
-  context.save();
-  context.imageSmoothingEnabled = false;
-  context.drawImage(
+  drawDeploymentCanvas({
+    context,
+    canvasBox: box,
+    activeMap,
     mapImage,
-    mapView.x,
-    mapView.y,
-    activeMap.width * pixels,
-    activeMap.height * pixels,
-  );
-  context.strokeStyle = "#38d59a";
-  context.lineWidth = 1.5;
-  context.strokeRect(
-    mapView.x,
-    mapView.y,
-    activeMap.width * pixels,
-    activeMap.height * pixels,
-  );
-  context.save();
-  context.beginPath();
-  context.rect(
-    mapView.x,
-    mapView.y,
-    activeMap.width * pixels,
-    activeMap.height * pixels,
-  );
-  context.clip();
-  drawMapEdits();
-  context.restore();
-  drawMapRoutes();
-  for (const point of (selectedProject?.waypoints || []).filter(
-    (item) => item.map_asset_id === activeMap.id && !item.generated_by,
-  )) {
-    const px = mapView.x + (point.x - activeMap.origin[0]) * mapView.scale;
-    const py =
-      mapView.y +
-      (activeMap.height * activeMap.resolution_m -
-        (point.y - activeMap.origin[1])) *
-        mapView.scale;
-    const palette = { start: "#39dcad", target: "#ffbd61", map_transition: "#b995ef" };
-    const color = palette[point.kind] || "#5bb8ff";
-    context.fillStyle = color;
-    context.beginPath();
-    context.arc(px, py, point.kind === "map_transition" ? 7 : 5, 0, Math.PI * 2);
-    context.fill();
-    if (point.kind === "map_transition") {
-      context.strokeStyle = "#fff";
-      context.lineWidth = 1.5;
-      context.beginPath();
-      context.arc(px, py, 3, 0, Math.PI * 2);
-      context.stroke();
-    }
-    context.fillStyle = "rgba(18, 28, 34, .9)";
-    context.font = "600 10px system-ui, sans-serif";
-    context.textAlign = "left";
-    context.fillText(point.label, px + 8, py - 8);
-  }
-  for (const item of (selectedProject?.components || []).filter(
-    (component) => component.map_asset_id === activeMap.id,
-  )) {
-    const px = mapView.x + (item.x - activeMap.origin[0]) * mapView.scale;
-    const py =
-      mapView.y +
-      (activeMap.height * activeMap.resolution_m -
-        (item.y - activeMap.origin[1])) *
-        mapView.scale;
-    drawComponentSymbol(item, px, py);
-  }
-  context.restore();
+    liveMapImage,
+    mappingPreview: mappingSession?.preview,
+    project: selectedProject,
+    view: mapView,
+    drawGrid,
+    drawMapEdits,
+    drawMapRoutes,
+    drawComponentSymbol,
+    mapPointToCanvas,
+  });
 }
 function selectMap(map) {
   if (!selectedProject) return;
@@ -1502,7 +1240,7 @@ function renderComponentAttributes(component) {
       const value = attributes[field.key] ?? field.default ?? "";
       if (field.type === "select") {
         const options = field.protocolCategory
-          ? protocolOptions(field.protocolCategory)
+          ? protocolOptions(selectedProject, field.protocolCategory)
           : field.options;
         return `<label>${esc(field.label)}<select data-component-attribute="${esc(field.key)}">${options.map(([option, title]) => `<option value="${esc(option)}" ${String(value) === option ? "selected" : ""}>${esc(title)}</option>`).join("")}</select></label>`;
       }
@@ -1514,7 +1252,7 @@ function renderComponentAttributes(component) {
   const sharedContext =
     component.kind === "elevator"
       ? sharedElevator
-        ? `<div class="physical-floor"><span>关联物理电梯 · ${esc(sharedElevator.elevator_id)}</span><strong>${esc(protocolTitle(sharedElevator.elevator_protocol))} · ${esc(sharedElevator.min_floor)}F 至 ${esc(sharedElevator.max_floor)}F</strong><small>当前地图 ${esc(mapInstance?.floor ?? "未绑定楼层")}F · 物理楼层 ${mapInstance?.floor === undefined ? "待地图拓扑确认" : Number(mapInstance.floor) + 1}。门向、尺寸和候梯距离仅属于当前地图。</small><button class="compact-action edit-shared-elevator" type="button" data-physical-elevator-id="${esc(sharedElevator.id)}">编辑共享电梯</button></div>`
+        ? `<div class="physical-floor"><span>关联物理电梯 · ${esc(sharedElevator.elevator_id)}</span><strong>${esc(protocolTitle(selectedProject, sharedElevator.elevator_protocol))} · ${esc(sharedElevator.min_floor)}F 至 ${esc(sharedElevator.max_floor)}F</strong><small>当前地图 ${esc(mapInstance?.floor ?? "未绑定楼层")}F · 物理楼层 ${mapInstance?.floor === undefined ? "待地图拓扑确认" : Number(mapInstance.floor) + 1}。门向、尺寸和候梯距离仅属于当前地图。</small><button class="compact-action edit-shared-elevator" type="button" data-physical-elevator-id="${esc(sharedElevator.id)}">编辑共享电梯</button></div>`
         : '<p class="component-no-options">此电梯落点缺少共享电梯关联；请删除后重新关联。</p>'
       : "";
   $("componentAttributeFields").innerHTML =
@@ -1539,17 +1277,17 @@ function renderElevatorLandingDialog() {
     ? elevators
         .map(
           (item) =>
-            `<option value="${esc(item.id)}">${esc(item.elevator_id)} · ${esc(protocolTitle(item.elevator_protocol))}</option>`,
+            `<option value="${esc(item.id)}">${esc(item.elevator_id)} · ${esc(protocolTitle(selectedProject, item.elevator_protocol))}</option>`,
         )
         .join("")
     : '<option value="">当前项目还没有物理电梯</option>';
   if (elevators.some((item) => item.id === previous)) existing.value = previous;
   const protocol = $("newPhysicalElevatorProtocol");
   const previousProtocol = protocol.value;
-  protocol.innerHTML = protocolOptions("elevator_protocols")
+  protocol.innerHTML = protocolOptions(selectedProject, "elevator_protocols")
     .map(([id, label]) => `<option value="${esc(id)}">${esc(label)}</option>`)
     .join("");
-  if (protocolOptions("elevator_protocols").some(([id]) => id === previousProtocol)) {
+  if (protocolOptions(selectedProject, "elevator_protocols").some(([id]) => id === previousProtocol)) {
     protocol.value = previousProtocol;
   }
   if (editingElevator) {
@@ -1565,7 +1303,7 @@ function renderElevatorLandingDialog() {
   }
   const linked = elevators.find((item) => item.id === existing.value);
   $("existingPhysicalElevatorSummary").textContent = linked
-    ? `编号 ${linked.elevator_id} · ${protocolTitle(linked.elevator_protocol)} · 服务 ${linked.min_floor}F 至 ${linked.max_floor}F。各楼层分别确认门方向。`
+    ? `编号 ${linked.elevator_id} · ${protocolTitle(selectedProject, linked.elevator_protocol)} · 服务 ${linked.min_floor}F 至 ${linked.max_floor}F。各楼层分别确认门方向。`
     : "请先新建一部物理电梯，再在其他楼层关联它。";
   const isNew = editing || elevatorLandingMode() === "new";
   $("elevatorLandingDialogTitle").textContent = editing ? "编辑共享电梯" : "放置电梯落点";
@@ -1698,14 +1436,11 @@ function openComponentPopover(component, event) {
 }
 function componentAt(event) {
   if (!activeMap) return null;
+  const pointer = canvasPointFromEvent(event);
   return (selectedProject?.components || [])
     .filter((item) => item.map_asset_id === activeMap.id)
     .reverse()
-    .find((item) => {
-      const point = componentLocalPoint(item, event);
-      const { width, height } = componentDimensions(item);
-      return Math.abs(point.x) <= width / 2 && Math.abs(point.y) <= height / 2;
-    });
+    .find((item) => isComponentHit(item, pointer, activeMap, mapView));
 }
 
 function waypointAt(event) {
@@ -1789,16 +1524,22 @@ async function placeMapTransitionPoint(point) {
 function resizeHandleAt(event) {
   if (!selectedComponent || selectedComponent.map_asset_id !== activeMap?.id)
     return false;
-  const point = componentLocalPoint(selectedComponent, event);
-  const { width, height } = componentDimensions(selectedComponent);
-  return Math.hypot(point.x - width / 2 - 9, point.y - height / 2 - 9) <= 16;
+  return isResizeHandleHit(
+    selectedComponent,
+    canvasPointFromEvent(event),
+    activeMap,
+    mapView,
+  );
 }
 function rotateHandleAt(event) {
   if (!selectedComponent || selectedComponent.map_asset_id !== activeMap?.id)
     return false;
-  const point = componentLocalPoint(selectedComponent, event);
-  const { width, height } = componentDimensions(selectedComponent);
-  return Math.hypot(point.x - width / 2 - 29, point.y - height / 2 - 9) <= 13;
+  return isRotateHandleHit(
+    selectedComponent,
+    canvasPointFromEvent(event),
+    activeMap,
+    mapView,
+  );
 }
 $("saveComponent").addEventListener("click", async () => {
   if (!selectedComponent || !selectedProject) return;
@@ -2265,14 +2006,8 @@ canvas.addEventListener(
       setEraserDiameter(eraserDiameterM + (event.deltaY < 0 ? 0.1 : -0.1));
       return;
     }
-    const old = mapView.scale;
     const pointer = canvasPointFromEvent(event);
-    mapView.scale = Math.max(
-      5,
-      Math.min(500, old * (event.deltaY < 0 ? 1.12 : 0.89)),
-    );
-    mapView.x = pointer.x - ((pointer.x - mapView.x) * mapView.scale) / old;
-    mapView.y = pointer.y - ((pointer.y - mapView.y) * mapView.scale) / old;
+    Object.assign(mapView, zoomAt(mapView, pointer, event.deltaY));
     drawMap();
   },
   { passive: false },

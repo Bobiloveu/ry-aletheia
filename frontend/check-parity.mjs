@@ -64,5 +64,21 @@ for (const value of [
     console.error(`FAIL: Robot Logs platform migration missing ${value}`);
   }
 }
+const deploymentPage = readFileSync('../autodrive_console/web/deployment.html', 'utf8');
+const deploymentSource = readFileSync('../autodrive_console/web/deployment.js', 'utf8');
+for (const value of [
+  'type="module" src="/deployment.js"',
+  'from "./deployment/component-specs.js"',
+  'from "./deployment/canvas-geometry.js"',
+  'from "./deployment/canvas-renderer.js"',
+  '/api/deployments',
+  '/api/mapping/sessions',
+  '/task-compiler/preview',
+]) {
+  if (!(deploymentPage + deploymentSource).includes(value)) {
+    failed = true;
+    console.error(`FAIL: Deployment modularization missing ${value}`);
+  }
+}
 if (failed) process.exit(1);
 console.log('PASS: Vue 运行配置页与任务指挥台保留原页面关键区块、共享样式及控制接口。');

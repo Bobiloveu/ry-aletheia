@@ -11,7 +11,7 @@
 | `/runtime-settings.html` | `frontend/` | `frontend/src/main.js` | Vue/Vite 页面，构建输出到 `autodrive_console/web-vue/`。 |
 | `/live-observation.html` | `frontend/` | `frontend/src/liveObservation.js` | Vue/Vite 页面，构建输出到 `autodrive_console/web-vue/`。 |
 | `/vue/dashboard.html` | `frontend/` | `frontend/src/dashboard.js` | Vue/Vite 页面，构建输出到 `autodrive_console/web-vue/`。 |
-| `/deployment.html` | `autodrive_console/web/` | `deployment.js` | 传统页面，部署建图主入口。 |
+| `/deployment.html` | `autodrive_console/web/` | `deployment.js` | 传统页面，部署建图主入口；入口只保留状态、DOM、事件和 API，组件定义与 Canvas 几何/主渲染位于 `web/deployment/`。 |
 | `/mapping-workbench.html` | `autodrive_console/web/` | `mapping_workbench.js` | 传统页面，部署建图工作台。 |
 | `/manual-control.html` | `autodrive_console/web/` | `manual_control.js` | 传统页面，车辆控制界面。 |
 | `/acceptance-test.html` | `autodrive_console/web/` | `acceptance_test.js` | 传统页面，部署验收。 |
@@ -27,6 +27,9 @@
 | --- | --- | --- |
 | JSON 请求与标准错误 | `autodrive_console/web/platform/http.js` | 传统页面；统一 `no-store` 策略及 HTTP JSON 错误。 |
 | 文件大小、Unix 时间格式化 | `autodrive_console/web/platform/format.js` | 传统页面；避免同类格式化函数重复实现。 |
+| 部署组件定义 | `autodrive_console/web/deployment/component-specs.js` | 部署建图页面；组件字段、名称及项目协议回退。 |
+| 部署 Canvas 几何 | `autodrive_console/web/deployment/canvas-geometry.js` | 部署建图页面；坐标换算、命中检测和缩放计算。 |
+| 部署 Canvas 主渲染 | `autodrive_console/web/deployment/canvas-renderer.js` | 部署建图页面；只消费绘制快照，不读页面状态或网络。 |
 | 页面壳、侧栏、主题 | `autodrive_console/web/app_shell.js`、`app_shell.css` | 既有共享壳层；未进行迁移或重写。 |
 
 新增传统页面的通用能力应优先放入 `web/platform/`，保持无页面状态、无 DOM 副作用，并配套 `frontend/test/platform/` 的 Node 单元测试。涉及 API、ROS Topic、WebSocket 或共享数据模型时，仍须先更新 `shared/contracts/`。
