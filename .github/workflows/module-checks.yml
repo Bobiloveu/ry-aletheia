@@ -76,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Bootstrap Dart for FVM; fvm install then reads mobile/.fvmrc as the Flutter SDK source of truth.
+      # Bootstrap Dart for FVM; the action-provided SDK is linked into FVM's cache.
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: 3.47.1
@@ -85,7 +85,12 @@ jobs:
       - run: echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
       - working-directory: mobile
         run: |
-          fvm install
+          flutter_version="$(sed -n 's/.*"flutter"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' .fvmrc)"
+          flutter_root="${FLUTTER_ROOT:-$(dirname "$(dirname "$(command -v flutter)")")}"
+          export FVM_CACHE_PATH="$RUNNER_TEMP/fvm-cache"
+          mkdir -p "$FVM_CACHE_PATH/versions"
+          ln -s "$flutter_root" "$FVM_CACHE_PATH/versions/$flutter_version"
+          fvm use "$flutter_version" --skip-setup --skip-pub-get
           fvm flutter pub get
           fvm flutter analyze
           fvm flutter test --exclude-tags golden --concurrency=1 -r compact
@@ -104,7 +109,12 @@ jobs:
       - run: echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
       - working-directory: mobile
         run: |
-          fvm install
+          flutter_version="$(sed -n 's/.*"flutter"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' .fvmrc)"
+          flutter_root="${FLUTTER_ROOT:-$(dirname "$(dirname "$(command -v flutter)")")}"
+          export FVM_CACHE_PATH="$RUNNER_TEMP/fvm-cache"
+          mkdir -p "$FVM_CACHE_PATH/versions"
+          ln -s "$flutter_root" "$FVM_CACHE_PATH/versions/$flutter_version"
+          fvm use "$flutter_version" --skip-setup --skip-pub-get
           fvm flutter pub get
           fvm flutter test test/debug_ui/gallery_golden_test.dart --concurrency=1 -r compact
 
@@ -126,7 +136,12 @@ jobs:
       - run: echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
       - working-directory: mobile
         run: |
-          fvm install
+          flutter_version="$(sed -n 's/.*"flutter"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' .fvmrc)"
+          flutter_root="${FLUTTER_ROOT:-$(dirname "$(dirname "$(command -v flutter)")")}"
+          export FVM_CACHE_PATH="$RUNNER_TEMP/fvm-cache"
+          mkdir -p "$FVM_CACHE_PATH/versions"
+          ln -s "$flutter_root" "$FVM_CACHE_PATH/versions/$flutter_version"
+          fvm use "$flutter_version" --skip-setup --skip-pub-get
           fvm flutter pub get
           fvm flutter build apk --debug
 
@@ -144,6 +159,11 @@ jobs:
       - run: echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
       - working-directory: mobile
         run: |
-          fvm install
+          flutter_version="$(sed -n 's/.*"flutter"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' .fvmrc)"
+          flutter_root="${FLUTTER_ROOT:-$(dirname "$(dirname "$(command -v flutter)")")}"
+          export FVM_CACHE_PATH="$RUNNER_TEMP/fvm-cache"
+          mkdir -p "$FVM_CACHE_PATH/versions"
+          ln -s "$flutter_root" "$FVM_CACHE_PATH/versions/$flutter_version"
+          fvm use "$flutter_version" --skip-setup --skip-pub-get
           fvm flutter pub get
           fvm flutter build ios --simulator --debug --no-codesign
