@@ -87,7 +87,7 @@ jobs:
       - working-directory: mobile
         run: |
           for attempt in 1 2 3; do
-            flutter pub get && break
+            dart pub get --enforce-lockfile && break
             if [ "$attempt" -eq 3 ]; then exit 1; fi
             sleep 10
           done
@@ -109,7 +109,7 @@ jobs:
       - working-directory: mobile
         run: |
           for attempt in 1 2 3; do
-            flutter pub get && break
+            dart pub get --enforce-lockfile && break
             if [ "$attempt" -eq 3 ]; then exit 1; fi
             sleep 10
           done
@@ -134,7 +134,7 @@ jobs:
       - working-directory: mobile
         run: |
           for attempt in 1 2 3; do
-            flutter pub get && break
+            dart pub get --enforce-lockfile && break
             if [ "$attempt" -eq 3 ]; then exit 1; fi
             sleep 10
           done
@@ -154,7 +154,7 @@ jobs:
       - working-directory: mobile
         run: |
           for attempt in 1 2 3; do
-            flutter pub get && break
+            dart pub get --enforce-lockfile && break
             if [ "$attempt" -eq 3 ]; then exit 1; fi
             sleep 10
           done
