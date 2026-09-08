@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0 --base /",
     "build": "vite build",
-    "check": "node check-parity.mjs && vite build --emptyOutDir --outDir ../autodrive_console/web-vue"
+    "test:unit": "node --test",
+    "check": "npm run test:unit && node check-parity.mjs && vite build --emptyOutDir --outDir ../autodrive_console/web-vue"
   },
   "dependencies": {
     "pixi.js": "^8.20.0",

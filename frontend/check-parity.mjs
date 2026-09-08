@@ -50,5 +50,19 @@ for (const route of ['/acceptance-test.html', '/acceptance_test.js', '/acceptanc
     console.error(`FAIL: Vue 预览未代理既有部署验收资源 ${route}`);
   }
 }
+const robotLogsPage = readFileSync('../autodrive_console/web/robot-logs.html', 'utf8');
+const robotLogsSource = readFileSync('../autodrive_console/web/robot_logs.js', 'utf8');
+for (const value of [
+  'type="module" src="/robot_logs.js"',
+  'from "./platform/http.js"',
+  'from "./platform/format.js"',
+  '/api/robot-logs/sources',
+  '/api/robot-logs/downloads',
+]) {
+  if (!(robotLogsPage + robotLogsSource).includes(value)) {
+    failed = true;
+    console.error(`FAIL: Robot Logs platform migration missing ${value}`);
+  }
+}
 if (failed) process.exit(1);
 console.log('PASS: Vue 运行配置页与任务指挥台保留原页面关键区块、共享样式及控制接口。');

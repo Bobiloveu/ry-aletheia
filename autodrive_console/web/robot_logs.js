@@ -1,18 +1,11 @@
+import { requestJson } from "./platform/http.js";
+import { formatFileSize, formatUnixSeconds } from "./platform/format.js";
+
 const $ = (id) => document.getElementById(id);
 const esc = (value) => { const node = document.createElement('span'); node.textContent = value ?? ''; return node.innerHTML; };
 const state = { sources: [], selectedSourceId: null, files: [], selectedFileIds: new Set(), fileRequest: null, downloading: false };
 let searchTimer = null;
 
-function formatBytes(value) {
-  const bytes = Number(value) || 0;
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MiB`;
-}
-function formatTime(value) {
-  const time = new Date((Number(value) || 0) * 1000);
-  return Number.isNaN(time.getTime()) ? '未知时间' : time.toLocaleString('zh-CN', { hour12: false });
-}
 function setMessage(id, message = '', tone = '') {
   const node = $(id);
   node.textContent = message;
@@ -29,19 +22,13 @@ function setDownloadProgress(download, index, total) {
   $('downloadProgressBar').value = percent;
   $('downloadProgressDetail').textContent = download.state === 'prepared'
     ? '等待浏览器开始接收文件。'
-    : `${formatBytes(sent)} / ${formatBytes(size)} · 小车正在传输到浏览器`;
+    : `${formatFileSize(sent)} / ${formatFileSize(size)} · 小车正在传输到浏览器`;
 }
 function hideDownloadProgress() {
   $('downloadProgress').hidden = true;
   $('downloadProgressBar').value = 0;
 }
 function sleep(milliseconds) { return new Promise((resolve) => window.setTimeout(resolve, milliseconds)); }
-async function requestJson(url, options) {
-  const response = await fetch(url, { cache: 'no-store', ...options });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || '请求失败');
-  return payload;
-}
 function sourceRows() {
   return state.sources.map((source) => `<div class="source-directory-row" data-source-id="${esc(source.id)}"><label>名称<input data-field="name" value="${esc(source.name)}" maxlength="64" /></label><label>本机目录<input data-field="path" value="${esc(source.path)}" maxlength="512" spellcheck="false" /></label><button class="outline-button danger-outline remove-source" type="button">删除</button></div>`).join('');
 }
@@ -62,7 +49,7 @@ function renderSourceSelector() {
 function updateSelectionSummary() {
   const selected = state.files.filter((file) => state.selectedFileIds.has(file.id));
   const bytes = selected.reduce((total, file) => total + Number(file.size_bytes || 0), 0);
-  $('selectedCount').textContent = selected.length ? `已选 ${selected.length} 个 · ${formatBytes(bytes)}` : '未选择文件';
+  $('selectedCount').textContent = selected.length ? `已选 ${selected.length} 个 · ${formatFileSize(bytes)}` : '未选择文件';
   $('downloadSelected').disabled = !selected.length || state.downloading;
   $('selectAllFiles').checked = Boolean(state.files.length) && state.files.every((file) => state.selectedFileIds.has(file.id));
   $('selectAllFiles').indeterminate = Boolean(selected.length) && selected.length < state.files.length;
@@ -74,7 +61,7 @@ function renderFiles() {
   } else if (!state.files.length) {
     list.innerHTML = '<tr><td colspan="4" class="table-empty">没有匹配的日志文件。</td></tr>';
   } else {
-    list.innerHTML = state.files.map((file) => `<tr><td><input class="file-checkbox" type="checkbox" data-file-id="${esc(file.id)}" aria-label="选择 ${esc(file.name)}" ${state.selectedFileIds.has(file.id) ? 'checked' : ''} /></td><td class="file-name" title="${esc(file.name)}">${esc(file.name)}</td><td>${esc(formatBytes(file.size_bytes))}</td><td>${esc(formatTime(file.modified_at))}</td></tr>`).join('');
+    list.innerHTML = state.files.map((file) => `<tr><td><input class="file-checkbox" type="checkbox" data-file-id="${esc(file.id)}" aria-label="选择 ${esc(file.name)}" ${state.selectedFileIds.has(file.id) ? 'checked' : ''} /></td><td class="file-name" title="${esc(file.name)}">${esc(file.name)}</td><td>${esc(formatFileSize(file.size_bytes))}</td><td>${esc(formatUnixSeconds(file.modified_at))}</td></tr>`).join('');
   }
   updateSelectionSummary();
 }
