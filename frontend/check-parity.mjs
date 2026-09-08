@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 
 const original = readFileSync('../autodrive_console/web/runtime-settings.html', 'utf8');
+const runtimeSettingsSource = readFileSync('../autodrive_console/web/runtime_settings.js', 'utf8');
 const sharedNavigation = readFileSync('../autodrive_console/web/brand_version.js', 'utf8');
 const vue = readFileSync('./src/main.js', 'utf8');
 const originalDashboard = readFileSync('../autodrive_console/web/index.html', 'utf8');
@@ -30,6 +31,12 @@ for (const asset of ['styles.css', 'refinement.css', 'page_views.css']) {
 }
 for (const endpoint of ['/api/settings', '/api/system/upgrade']) {
   if (!vue.includes(endpoint)) { failed = true; console.error(`FAIL: Vue 未接入原 API ${endpoint}`); }
+}
+for (const value of ['type="module" src="/runtime_settings.js"', 'from "./platform/http.js"', '/api/settings', '/api/system/upgrade']) {
+  if (!(original + runtimeSettingsSource).includes(value)) {
+    failed = true;
+    console.error(`FAIL: 运行配置页未接入共享请求层：${value}`);
+  }
 }
 if (failed) process.exit(1);
 
@@ -74,6 +81,7 @@ for (const value of [
   'from "./deployment/component-specs.js"',
   'from "./deployment/canvas-geometry.js"',
   'from "./deployment/canvas-renderer.js"',
+  'from "./platform/http.js"',
   '/api/deployments',
   '/api/mapping/sessions',
   '/task-compiler/preview',
@@ -97,6 +105,99 @@ for (const value of [
   if (!(mappingWorkbenchPage + mappingWorkbenchSource).includes(value)) {
     failed = true;
     console.error(`FAIL: Mapping workbench platform migration missing ${value}`);
+  }
+}
+const manualControlPage = readFileSync('../autodrive_console/web/manual-control.html', 'utf8');
+const manualControlSource = readFileSync('../autodrive_console/web/manual_control.js', 'utf8');
+for (const value of [
+  'type="module" src="/manual_control.js"',
+  'from "./platform/vehicle-control.js"',
+  '/api/vehicle-control/enter',
+  '/api/vehicle-control/command',
+  '/api/vehicle-control/release-emergency-stop',
+]) {
+  if (!(manualControlPage + manualControlSource).includes(value)) {
+    failed = true;
+    console.error(`FAIL: Manual Control platform migration missing ${value}`);
+  }
+}
+const acceptancePage = readFileSync('../autodrive_console/web/acceptance-test.html', 'utf8');
+const acceptanceSource = readFileSync('../autodrive_console/web/acceptance_test.js', 'utf8');
+for (const value of [
+  'type="module" src="/acceptance_test.js"',
+  'from "./platform/http.js"',
+  '/api/acceptance/catalog',
+  '/api/acceptance/plans/current',
+  '/api/acceptance/plans',
+]) {
+  if (!(acceptancePage + acceptanceSource).includes(value)) {
+    failed = true;
+    console.error(`FAIL: Acceptance platform migration missing ${value}`);
+  }
+}
+const scenarioSetupPage = readFileSync('../autodrive_console/web/scenario-setup.html', 'utf8');
+const scenarioSetupSource = readFileSync('../autodrive_console/web/scenario_setup.js', 'utf8');
+for (const value of [
+  'type="module" src="/scenario_setup.js"',
+  'from "./platform/http.js"',
+  '/api/scenario-setup',
+  '/api/scenario-setup/file',
+  '/api/scenario-setup/browse',
+]) {
+  if (!(scenarioSetupPage + scenarioSetupSource).includes(value)) {
+    failed = true;
+    console.error(`FAIL: Scenario setup platform migration missing ${value}`);
+  }
+}
+const toolLogsPage = readFileSync('../autodrive_console/web/tool-logs.html', 'utf8');
+const toolLogsSource = readFileSync('../autodrive_console/web/tool-logs.js', 'utf8');
+for (const value of [
+  'type="module" src="/tool-logs.js"',
+  'from "./platform/http.js"',
+  'from "./platform/format.js"',
+  '/api/tool-logs?scope=',
+  '/api/tool-logs/files',
+]) {
+  if (!(toolLogsPage + toolLogsSource).includes(value)) {
+    failed = true;
+    console.error(`FAIL: Tool Logs platform migration missing ${value}`);
+  }
+}
+const reportsPage = readFileSync('../autodrive_console/web/reports.html', 'utf8');
+const reportsSource = readFileSync('../autodrive_console/web/reports.js', 'utf8');
+for (const value of [
+  'type="module" src="/reports.js"',
+  'from "./platform/http.js"',
+  '/api/reports',
+  '/api/runs/latest',
+  '/api/reports/${encodeURIComponent(filename)}',
+]) {
+  if (!(reportsPage + reportsSource).includes(value)) {
+    failed = true;
+    console.error(`FAIL: Reports platform migration missing ${value}`);
+  }
+}
+for (const value of [
+  'type="module" src="/app.js"',
+  'from "./platform/http.js"',
+  '/api/cases',
+  '/api/runs/latest',
+  '/api/system/shutdown',
+]) {
+  if (!(originalDashboard + readFileSync('../autodrive_console/web/app.js', 'utf8')).includes(value)) {
+    failed = true;
+    console.error(`FAIL: Dashboard platform migration missing ${value}`);
+  }
+}
+if (!vueDashboard.includes('controller.type = "module"')) {
+  failed = true;
+  console.error('FAIL: Vue dashboard compatibility loader must preserve the module controller entry.');
+}
+for (const sourceName of ['app.js', 'case_library.js', 'reports.js', 'runtime_settings.js', 'scenario_setup.js', 'tool-logs.js']) {
+  const source = readFileSync(`../autodrive_console/web/${sourceName}`, 'utf8');
+  if (source.includes('ry-aletheia-theme')) {
+    failed = true;
+    console.error(`FAIL: ${sourceName} 不得重复注册共享主题控制。`);
   }
 }
 if (failed) process.exit(1);

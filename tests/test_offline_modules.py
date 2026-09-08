@@ -166,6 +166,27 @@ class OfflineModuleTests(unittest.TestCase):
             page = (web_console.WEB_ROOT / page_name).read_text(encoding="utf-8")
             self.assertIn('<script src="/app_shell.js"></script>', page, page_name)
 
+    def test_static_page_injection_does_not_load_the_shared_shell_twice(self):
+        """页面已声明共享壳时，HTTP 注入只能补品牌脚本，不能重复绑定主题监听器。"""
+        def rendered(root: Path, page: str) -> bytes:
+            handler = object.__new__(web_console.ConsoleHandler)
+            handler.send_error = Mock()
+            handler.send_response = Mock()
+            handler.send_header = Mock()
+            handler.end_headers = Mock()
+            handler.wfile = io.BytesIO()
+            handler._static_from(root, page)
+            return handler.wfile.getvalue()
+
+        desktop = rendered(web_console.WEB_ROOT, "index.html")
+        vue = rendered(web_console.VUE_WEB_ROOT, "dashboard.html")
+        shell = b'<script src="/app_shell.js"></script>'
+        version = b'<script src="/brand_version.js"></script>'
+        self.assertEqual(desktop.count(shell), 1)
+        self.assertEqual(desktop.count(version), 1)
+        self.assertEqual(vue.count(shell), 1)
+        self.assertEqual(vue.count(version), 1)
+
     def test_deployment_page_has_a_dedicated_current_project_status_card(self):
         """Prevents an open project from being visually indistinguishable from a blank new-project form."""
         page = (web_console.WEB_ROOT / "deployment.html").read_text(encoding="utf-8")

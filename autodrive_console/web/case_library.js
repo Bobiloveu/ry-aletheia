@@ -3,8 +3,6 @@ import { requestJson } from "./platform/http.js";
 const $ = (id) => document.getElementById(id);
 const esc = (value) => { const node = document.createElement('span'); node.textContent = value ?? ''; return node.innerHTML; };
 const request = (url, options) => requestJson(url, options);
-function initializeTheme() { const key = 'ry-aletheia-theme'; const apply = () => { const light = localStorage.getItem(key) === 'light'; document.body.classList.toggle('theme-light', light); document.documentElement.style.colorScheme = light ? 'light' : 'dark'; }; const toggle = () => { localStorage.setItem(key, document.body.classList.contains('theme-light') ? 'dark' : 'light'); apply(); }; const mark = document.querySelector('.brand .mark'); mark?.addEventListener('click', toggle); mark?.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); } }); if (mark) { mark.tabIndex = 0; mark.setAttribute('role', 'button'); } apply(); }
-initializeTheme();
 const lifecycleOptions = (value) => [['draft', '草拟'], ['local_verified', '本机已验证'], ['published', '可交付'], ['deprecated', '已停用']].map(([id, label]) => `<option value="${id}" ${id === value ? 'selected' : ''}>${label}</option>`).join('');
 const scenarioOptions = (profiles, selectedId) => `<option value="">未绑定（常规配置）</option>${profiles.map((profile) => `<option value="${esc(profile.id)}" ${profile.id === selectedId ? 'selected' : ''}>${esc(profile.name)}</option>`).join('')}`;
 function message(text, error = false) { $('caseMessage').textContent = text; $('caseMessage').style.color = error ? '#ff899a' : '#35d69c'; }

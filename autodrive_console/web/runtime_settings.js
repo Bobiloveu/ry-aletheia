@@ -1,21 +1,19 @@
+import { requestJson } from "./platform/http.js";
+
 const $ = id => document.getElementById(id);
-const initializeTheme = () => { const key = 'ry-aletheia-theme'; const apply = () => { const light = localStorage.getItem(key) === 'light'; document.body.classList.toggle('theme-light', light); document.documentElement.style.colorScheme = light ? 'light' : 'dark'; const mark = document.querySelector('.brand .mark'); if (mark) { mark.tabIndex = 0; mark.setAttribute('role', 'button'); mark.setAttribute('aria-label', light ? '切换到深色主题' : '切换到白天主题'); mark.title = light ? '切换到深色主题' : '切换到白天主题'; } }; const toggle = () => { localStorage.setItem(key, document.body.classList.contains('theme-light') ? 'dark' : 'light'); apply(); }; const mark = document.querySelector('.brand .mark'); mark?.addEventListener('click', toggle); mark?.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); } }); apply(); };
-initializeTheme();
 let upgradeSupported = false;
 let selectedUpgradeFile = null;
 
 async function loadSettings() {
   try {
-    const response = await fetch('/api/settings'); const data = await response.json();
-    if (!response.ok) throw new Error(data.error || '配置读取失败');
+    const data = await requestJson('/api/settings', {}, { errorMessage: '配置读取失败' });
     $('taskDirectory').value = data.task_directory; $('commandTimeout').value = data.command_timeout_s; $('elevatorWaitTimeout').value = data.elevator_wait_timeout_s; $('taskExecutionTimeout').value = data.task_execution_timeout_s;
   } catch (error) { $('settingsMessage').textContent = error.message; }
 }
 function updateUpgradeButton() { $('applyUpgrade').disabled = !upgradeSupported || !selectedUpgradeFile; }
 async function loadUpgradeStatus() {
   try {
-    const response = await fetch('/api/system/upgrade'); const data = await response.json();
-    if (!response.ok) throw new Error(data.error || '升级状态读取失败');
+    const data = await requestJson('/api/system/upgrade', {}, { errorMessage: '升级状态读取失败' });
     upgradeSupported = Boolean(data.supported);
     $('upgradeState').textContent = upgradeSupported ? '可升级' : '不可用';
     $('upgradeState').className = `badge ${upgradeSupported ? '' : 'muted'}`;
@@ -66,8 +64,7 @@ function uploadUpgrade() {
 
 $('saveSettings').addEventListener('click', async () => {
   try {
-    const response = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({task_directory:$('taskDirectory').value.trim(), command_timeout_s:Number($('commandTimeout').value), elevator_wait_timeout_s:Number($('elevatorWaitTimeout').value), task_execution_timeout_s:Number($('taskExecutionTimeout').value)})});
-    const data = await response.json(); if (!response.ok) throw new Error(data.error || '配置保存失败'); $('settingsMessage').textContent = '本机运行配置已保存。';
+    await requestJson('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({task_directory:$('taskDirectory').value.trim(), command_timeout_s:Number($('commandTimeout').value), elevator_wait_timeout_s:Number($('elevatorWaitTimeout').value), task_execution_timeout_s:Number($('taskExecutionTimeout').value)})}, { errorMessage: '配置保存失败' }); $('settingsMessage').textContent = '本机运行配置已保存。';
   } catch (error) { $('settingsMessage').textContent = error.message; }
 });
 $('upgradeFile').addEventListener('change', event => selectUpgradeFile(event.target.files[0]));

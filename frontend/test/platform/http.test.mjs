@@ -54,6 +54,26 @@ test("requestJson keeps the generic error message when an error body is not JSON
   );
 });
 
+test("requestJson allows a page to preserve its own fallback error copy", async () => {
+  await assert.rejects(
+    () => requestJson("/api/example", {}, {
+      errorMessage: "日志读取失败",
+      fetchImpl: async () => response({ ok: false, status: 502, body: {} }),
+    }),
+    (error) => error instanceof RequestError && error.message === "日志读取失败",
+  );
+});
+
+test("requestJson lets a page retain an HTTP-status-aware fallback error", async () => {
+  await assert.rejects(
+    () => requestJson("/api/example", {}, {
+      errorMessage: (status) => `请求失败（HTTP ${status}）`,
+      fetchImpl: async () => response({ ok: false, status: 502, body: {} }),
+    }),
+    (error) => error instanceof RequestError && error.message === "请求失败（HTTP 502）",
+  );
+});
+
 test("requestJson does not hide a transport error", async () => {
   const disconnected = new TypeError("Failed to fetch");
   await assert.rejects(

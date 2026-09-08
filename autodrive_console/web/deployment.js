@@ -16,6 +16,7 @@ import {
   zoomAt,
 } from "./deployment/canvas-geometry.js";
 import { drawDeploymentCanvas } from "./deployment/canvas-renderer.js";
+import { requestJson } from "./platform/http.js";
 
 const $ = (id) => document.getElementById(id);
 const esc = (value) => {
@@ -63,12 +64,7 @@ const mapInstanceFor = (mapId) =>
   (selectedProject?.map_instances || []).find(
     (item) => item.map_asset_id === mapId,
   );
-async function request(url, options) {
-  const response = await fetch(url, options);
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || "请求失败");
-  return data;
-}
+const request = (url, options) => requestJson(url, options);
 function note(id, text, error = false) {
   const target = $(id);
   target.textContent = text;

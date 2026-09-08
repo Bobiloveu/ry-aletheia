@@ -1,3 +1,5 @@
+import { requestVehicleControl } from "./platform/vehicle-control.js";
+
 (() => {
   const $ = (id) => document.getElementById(id);
   const driveButtons = [...document.querySelectorAll("[data-command]")];
@@ -24,22 +26,7 @@
     { range: "stopAccRange", number: "stopAcc", output: "stopAccValue", minimum: 20, maximum: 2000 },
   ];
 
-  async function request(path, payload, keepalive = false) {
-    const response = await fetch(path, {
-      method: payload === undefined ? "GET" : "POST",
-      headers: payload === undefined ? undefined : { "Content-Type": "application/json" },
-      body: payload === undefined ? undefined : JSON.stringify(payload),
-      cache: "no-store",
-      keepalive,
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const error = new Error(data.error || `请求失败（${response.status}）`);
-      error.status = data.status;
-      throw error;
-    }
-    return data;
-  }
+  const request = (path, payload, keepalive = false) => requestVehicleControl(path, payload, keepalive);
 
   function sourceLabel(source) {
     if (source === "navigation") return "自动驾驶";
@@ -294,7 +281,7 @@
         adoptExistingMiniapp();
       }
     } catch (error) {
-      if (error.status) render(error.status);
+      if (error.vehicleState) render(error.vehicleState);
       message(error.message, "error");
     }
   }
@@ -310,7 +297,7 @@
     clearHeld();
     if (!sessionId) return;
     try { render(await request("/api/vehicle-control/stop", { session_id: sessionId })); }
-    catch (error) { if (error.status) render(error.status); message(error.message, "error"); }
+    catch (error) { if (error.vehicleState) render(error.vehicleState); message(error.message, "error"); }
   }
 
   async function updateSpeed() {
@@ -322,7 +309,7 @@
         angular_speed: Number($("angularSpeed").value),
       });
       render(state);
-    } catch (error) { if (error.status) render(error.status); message(error.message, "error"); }
+    } catch (error) { if (error.vehicleState) render(error.vehicleState); message(error.message, "error"); }
   }
 
   function readChassisParameters() {
@@ -361,7 +348,7 @@
       $("chassisParameterMessage").textContent = "参数已保存，将用于后续运动和 STOP 指令。";
       $("chassisParameterMessage").className = "parameter-message success";
     } catch (error) {
-      if (error.status) render(error.status);
+      if (error.vehicleState) render(error.vehicleState);
       $("chassisParameterMessage").textContent = error.message;
       $("chassisParameterMessage").className = "parameter-message error";
     } finally {
@@ -375,7 +362,7 @@
     message("已发送解除急停请求，正在等待车端状态确认。");
     try {
       render(await request("/api/vehicle-control/release-emergency-stop", {}));
-    } catch (error) { if (error.status) render(error.status); message(error.message, "error"); }
+    } catch (error) { if (error.vehicleState) render(error.vehicleState); message(error.message, "error"); }
   }
 
   function scheduleSpeedUpdate() {
@@ -386,7 +373,7 @@
   async function sendHeld() {
     if (!sessionId || !heldCommand) return;
     try { render(await request("/api/vehicle-control/command", { session_id: sessionId, command: heldCommand })); }
-    catch (error) { clearHeld(); if (error.status) render(error.status); message(error.message, "error"); }
+    catch (error) { clearHeld(); if (error.vehicleState) render(error.vehicleState); message(error.message, "error"); }
   }
 
   function beginHold(command, button) {
@@ -408,7 +395,7 @@
       const state = await request("/api/vehicle-control/enter", {});
       sessionId = state.session?.id || null;
       render(state);
-    } catch (error) { requestedSource = null; if (error.status) render(error.status); message(error.message, "error"); }
+    } catch (error) { requestedSource = null; if (error.vehicleState) render(error.vehicleState); message(error.message, "error"); }
   }
 
   async function adoptExistingMiniapp() {
@@ -432,7 +419,7 @@
       sessionId = null;
       render(state);
     }
-    catch (error) { requestedSource = null; if (error.status) render(error.status); message(error.message, "error"); }
+    catch (error) { requestedSource = null; if (error.vehicleState) render(error.vehicleState); message(error.message, "error"); }
   }
 
   async function requestNavigation() {
@@ -441,13 +428,13 @@
     requestedSource = "navigation";
     try {
       render(await request("/api/vehicle-control/navigation", {}));
-    } catch (error) { requestedSource = null; if (error.status) render(error.status); message(error.message, "error"); }
+    } catch (error) { requestedSource = null; if (error.vehicleState) render(error.vehicleState); message(error.message, "error"); }
   }
 
   async function heartbeat() {
     if (!sessionId) return;
     try { render(await request("/api/vehicle-control/heartbeat", { session_id: sessionId })); }
-    catch (error) { clearHeld(); if (error.status) render(error.status); message(error.message, "error"); }
+    catch (error) { clearHeld(); if (error.vehicleState) render(error.vehicleState); message(error.message, "error"); }
   }
 
   function leavePageSafely() {
