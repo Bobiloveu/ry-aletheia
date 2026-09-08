@@ -81,9 +81,10 @@ for (const value of [
     console.error(`FAIL: Deployment modularization missing ${value}`);
   }
 }
-if (!deploymentCss.includes('@import url("/deployment/compiler.css")')) {
+for (const stylesheet of ["compiler.css", "tools.css"]) {
+  if (deploymentCss.includes(`@import url("/deployment/${stylesheet}")`)) continue;
   failed = true;
-  console.error('FAIL: Deployment CSS does not preserve the compiler style module import.');
+  console.error(`FAIL: Deployment CSS does not preserve the ${stylesheet} module import.`);
 }
 if (failed) process.exit(1);
 console.log('PASS: Vue 运行配置页与任务指挥台保留原页面关键区块、共享样式及控制接口。');

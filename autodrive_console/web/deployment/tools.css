@@ -1,0 +1,48 @@
+.waypoint-tool,
+.compact-action#panTool,
+.compact-action#resetMapView { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; }
+.waypoint-tool > span,
+.compact-action#panTool > span,
+.compact-action#resetMapView > span { float: none; color: inherit; font: inherit; line-height: inherit; }
+.toolbar-divider { width: 1px; height: 22px; margin: 0 3px; background: var(--line-strong); }
+.erase-tool.active-tool { border-color: #41d8d1 !important; background: rgba(65, 216, 209, 0.14) !important; color: #8cfff8 !important; }
+.eraser-brush-group { position: relative; z-index: 3; min-width: 0; }
+.eraser-brush-group > .compact-action { width: 100%; }
+.eraser-brush-group > .compact-action small { margin-left: 3px; color: currentColor; font-size: 9px; opacity: 0.72; }
+.eraser-size-control {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 164px;
+  min-height: 42px;
+  padding: 7px 8px 7px 10px;
+  border: 1px solid rgba(65, 216, 209, 0.7);
+  border-radius: 9px;
+  background: rgba(11, 30, 37, 0.98);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.eraser-size-control > span:first-child { display: grid; gap: 1px; }
+.eraser-size-control b { color: #a4fffa; font: 650 10px ui-monospace, monospace; }
+.eraser-size-control small { color: var(--muted); font-size: 9px; }
+.eraser-size-control.deployment-hidden { display: none; }
+.eraser-shape-toggle { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface-raised); }
+.eraser-shape-toggle button { display: grid; width: 20px; height: 20px; min-height: 0; margin: 0; padding: 0; place-items: center; border: 0; border-radius: 4px; background: transparent; box-shadow: none; color: var(--muted); font-size: 17px; line-height: 1; }
+.eraser-shape-toggle button.active { background: rgba(65, 216, 209, 0.2); color: #9ffcf7; }
+.erase-history { border-color: rgba(65, 216, 209, 0.45) !important; }
+.waypoint-tool,
+.compact-action#panTool,
+.compact-action#resetMapView { border-color: var(--line-strong); background: var(--surface-raised); color: var(--ink); }
+.waypoint-tool:hover,
+.compact-action#panTool:hover,
+.compact-action#resetMapView:hover { border-color: var(--accent); background: var(--accent-soft); color: #dceeff; }
+.tool-icon { width: 16px; height: 16px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.waypoint-tool:not(.active-tool) .tool-icon { opacity: 0.86; }
+.danger-action { border-color: #c76772 !important; color: #ff9aa5 !important; }

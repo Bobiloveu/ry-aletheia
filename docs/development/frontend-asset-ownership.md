@@ -31,6 +31,7 @@
 | 部署 Canvas 几何 | `autodrive_console/web/deployment/canvas-geometry.js` | 部署建图页面；坐标换算、命中检测和缩放计算。 |
 | 部署 Canvas 主渲染 | `autodrive_console/web/deployment/canvas-renderer.js` | 部署建图页面；只消费绘制快照，不读页面状态或网络。 |
 | 部署任务编译器样式 | `autodrive_console/web/deployment/compiler.css` | 由 `deployment.css` 按原层叠顺序导入；只负责实验包预览与任务编译器视觉。 |
+| 部署工具栏样式 | `autodrive_console/web/deployment/tools.css` | 由 `deployment.css` 在编译器样式之前导入；负责平移、路点、擦除和危险操作工具。 |
 | 页面壳、侧栏、主题 | `autodrive_console/web/app_shell.js`、`app_shell.css` | 既有共享壳层；未进行迁移或重写。 |
 
 新增传统页面的通用能力应优先放入 `web/platform/`，保持无页面状态、无 DOM 副作用，并配套 `frontend/test/platform/` 的 Node 单元测试。涉及 API、ROS Topic、WebSocket 或共享数据模型时，仍须先更新 `shared/contracts/`。
