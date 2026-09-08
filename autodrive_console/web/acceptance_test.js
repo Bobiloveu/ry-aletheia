@@ -1,9 +1,11 @@
+import { requestJson } from "./platform/http.js";
+
 (() => {
   const DRAFT_KEY = 'ry-aletheia-acceptance-draft-v1';
   const $ = (id) => document.getElementById(id);
   const state = { catalog: null, scenario: null, settings: null, plan: null, draftRestored: false };
   const message = (text = '', error = false) => { const box = $('pageMessage'); box.textContent = text; box.hidden = !text; box.classList.toggle('error', error); };
-  const request = async (url, options) => { const response = await fetch(url, options); const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.error || '请求失败'); return body; };
+  const request = (url, options) => requestJson(url, options);
   const scope = () => document.querySelector('input[name="scope"]:checked').value;
   const mode = () => document.querySelector('input[name="mode"]:checked').value;
   const selectedProfile = () => (state.scenario?.document?.profiles || []).find((profile) => profile.id === $('acceptanceScenarioProfile').value);

@@ -76,6 +76,7 @@ createApp({
       await nextTick();
       controller = document.createElement("script");
       controller.src = legacyControllerUrl();
+      controller.type = "module";
       controller.async = false;
       controller.dataset.vueDashboardController = "true";
       document.body.appendChild(controller);

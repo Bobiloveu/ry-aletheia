@@ -1,6 +1,6 @@
+import { requestJson } from "./platform/http.js";
+
 const $ = (id) => document.getElementById(id);
-const initializeTheme = () => { const key = 'ry-aletheia-theme'; const apply = () => { const light = localStorage.getItem(key) === 'light'; document.body.classList.toggle('theme-light', light); document.documentElement.style.colorScheme = light ? 'light' : 'dark'; const mark = document.querySelector('.brand .mark'); if (mark) { mark.tabIndex = 0; mark.setAttribute('role', 'button'); mark.setAttribute('aria-label', light ? '切换到深色主题' : '切换到白天主题'); mark.title = light ? '切换到深色主题' : '切换到白天主题'; } }; const toggle = () => { localStorage.setItem(key, document.body.classList.contains('theme-light') ? 'dark' : 'light'); apply(); }; const mark = document.querySelector('.brand .mark'); mark?.addEventListener('click', toggle); mark?.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); } }); apply(); };
-initializeTheme();
 let cases = [], uiPreferences = { case_id: '', count: 20, interval_seconds: 3 }, dependencyPlan = { enabled: false, steps: [] }, monitorNodes = [], supervisorProcesses = [], timer = null, currentRun = null;
 const acknowledgedStallAlerts = new Set();
 const trajectoryView = { scale: 1, x: 0, y: 0, drag: null };
@@ -29,8 +29,8 @@ function minutes(seconds) { return `${(Number(seconds || 0) / 60).toFixed(2)} �
 
 async function loadCases() {
   try {
-    const response = await fetch('/api/cases'); const data = await response.json();
-    if (!response.ok || !Array.isArray(data.cases)) throw new Error(data.error || '用例扫描接口返回异常');
+    const data = await requestJson('/api/cases', {}, { errorMessage: '用例扫描接口返回异常' });
+    if (!Array.isArray(data.cases)) throw new Error(data.error || '用例扫描接口返回异常');
     cases = data.cases; $('caseCount').textContent = cases.length;
     $('caseSelect').innerHTML = cases.length ? cases.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.alias || c.filename)}</option>`).join('') : '<option>未发现有效用例</option>';
     applyUiPreferences();
@@ -49,7 +49,12 @@ function applyUiPreferences() {
 }
 function rememberUiPreferences() {
   uiPreferences = { case_id: $('caseSelect').value || '', count: Number($('count').value || 20), interval_seconds: Number($('interval').value || 0) };
-  fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ui_preferences: uiPreferences }) }).catch(() => {});
+  requestJson('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ui_preferences: uiPreferences }) }).catch(() => {});
+}
+function supervisorEmptyState() {
+  if (dependencyPlan?.enabled) return '已启用 Supervisor 依赖编排；开始测试后将按已保存阶段准备节点。';
+  if (monitorNodes.length) return '开始测试后将检查已保存的 Supervisor 监控节点状态。';
+  return '未配置 Supervisor 监控节点；常规测试不会因该项阻断。可在“测试依赖编排”中识别并按需保存。';
 }
 function supervisorEmptyState() {
   if (dependencyPlan?.enabled) return '已启用 Supervisor 依赖编排；开始测试后将按已保存阶段准备节点。';
@@ -119,9 +124,9 @@ function renderRun(run) {
   renderNodes(run?.preflight); renderLiveProgress(run); const active = ['running', 'queued', 'preparing', 'awaiting_recovery', 'recovering', 'cancelling'].includes(run?.status); $('startButton').disabled = active || !cases.length; $('cancelButton').disabled = !['queued', 'preparing', 'running', 'awaiting_recovery', 'recovering'].includes(run?.status); $('recoveryAction').hidden = run?.status !== 'awaiting_recovery'; $('resumeButton').disabled = run?.status !== 'awaiting_recovery'; $('serviceState').textContent = run?.error || (run?.preflight?.ros_service?.ok ? '本机依赖与 ROS2 服务均已就绪' : '等待本机节点预检');
 }
 async function loadSettings() {
-  const settings = await (await fetch('/api/settings')).json(); uiPreferences = settings.ui_preferences || uiPreferences; dependencyPlan = settings.dependency_plan || { enabled: false, steps: [] }; monitorNodes = settings.monitor_nodes || []; applyUiPreferences(); renderDependencyEditor();
+  const settings = await requestJson('/api/settings'); uiPreferences = settings.ui_preferences || uiPreferences; dependencyPlan = settings.dependency_plan || { enabled: false, steps: [] }; monitorNodes = settings.monitor_nodes || []; applyUiPreferences(); renderDependencyEditor();
 }
-async function poll() { const data = await (await fetch('/api/runs/latest')).json(); renderRun(data.run); if (['running', 'queued', 'preparing', 'awaiting_recovery', 'recovering', 'cancelling'].includes(data.run?.status)) timer = setTimeout(poll, 1000); }
+async function poll() { const data = await requestJson('/api/runs/latest'); renderRun(data.run); if (['running', 'queued', 'preparing', 'awaiting_recovery', 'recovering', 'cancelling'].includes(data.run?.status)) timer = setTimeout(poll, 1000); }
 function toast(message, tone = 'success') { const element = $('toast'); element.textContent = message; element.className = `toast show ${tone}`; clearTimeout(toast.timer); toast.timer = setTimeout(() => element.className = 'toast', 3200); }
 function confirmAction({ eyebrow, title, body, confirmText, danger = false }) {
   return new Promise(resolve => { const dialog = $('confirmDialog'); $('dialogEyebrow').textContent = eyebrow; $('dialogTitle').textContent = title; $('dialogBody').textContent = body; $('dialogConfirm').textContent = confirmText; $('dialogConfirm').className = danger ? 'danger-confirm' : ''; dialog.classList.add('show'); dialog.setAttribute('aria-hidden', 'false'); const finish = answer => { dialog.classList.remove('show'); dialog.setAttribute('aria-hidden', 'true'); $('dialogConfirm').onclick = null; $('dialogCancel').onclick = null; resolve(answer); }; $('dialogConfirm').onclick = () => finish(true); $('dialogCancel').onclick = () => finish(false); });
@@ -163,10 +168,10 @@ function renderDependencyEditor() {
 }
 async function discoverSupervisor() {
   $('dependencyMessage').textContent = '正在读取本机 Supervisor 状态…';
-  try { const response = await fetch('/api/supervisor/processes'); const data = await response.json(); if (!response.ok) throw new Error(data.error); supervisorProcesses = data.processes; $('dependencyMessage').style.color = '#35d69c'; $('dependencyMessage').textContent = `已识别 ${supervisorProcesses.length} 个 Supervisor 进程。`; renderDependencyEditor(); } catch (error) { $('dependencyMessage').style.color = ''; $('dependencyMessage').textContent = error.message; }
+  try { const data = await requestJson('/api/supervisor/processes'); supervisorProcesses = data.processes; $('dependencyMessage').style.color = '#35d69c'; $('dependencyMessage').textContent = `已识别 ${supervisorProcesses.length} 个 Supervisor 进程。`; renderDependencyEditor(); } catch (error) { $('dependencyMessage').style.color = ''; $('dependencyMessage').textContent = error.message; }
 }
 function saveDependencyPlan() {
-  return fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dependency_plan: dependencyPlan, monitor_nodes: monitorNodes }) }).then(async response => { const data = await response.json(); if (!response.ok) throw new Error(data.error); dependencyPlan = data.dependency_plan; monitorNodes = data.monitor_nodes || []; return data; });
+  return requestJson('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dependency_plan: dependencyPlan, monitor_nodes: monitorNodes }) }).then(data => { dependencyPlan = data.dependency_plan; monitorNodes = data.monitor_nodes || []; return data; });
 }
 
 $('caseSelect').addEventListener('change', () => { showCase(); rememberUiPreferences(); });
@@ -177,8 +182,7 @@ function closeStallDialog() { $('stallDialog').classList.remove('show'); $('stal
 async function submitStallAction(action, label) {
   if (!currentRun) return;
   try {
-    const response = await fetch(`/api/runs/${encodeURIComponent(currentRun.id)}/stall-action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
-    const data = await response.json(); if (!response.ok) throw new Error(data.error);
+    const data = await requestJson(`/api/runs/${encodeURIComponent(currentRun.id)}/stall-action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
     closeStallDialog(); renderRun(data.run); toast(`${label}，已写入本次测试记录。`, action === 'mark_attempt_failed' ? 'warning' : 'success'); poll();
   } catch (error) { toast(`停滞处置提交失败：${error.message}`, 'error'); }
 }
@@ -203,17 +207,17 @@ $('trajectoryCanvas').addEventListener('pointercancel', () => { trajectoryView.d
 $('startButton').addEventListener('click', async () => {
   $('formMessage').textContent = '';
   const testCase = cases.find(item => item.id === $('caseSelect').value); const accepted = await confirmAction({ eyebrow: 'CONFIRM TEST EXECUTION', title: '确认开始自动化测试？', body: `用例：${testCase?.alias || testCase?.filename || '未选择'}；执行 ${$('count').value} 轮，每轮间隔 ${$('interval').value} 秒。`, confirmText: '确认开始' }); if (!accepted) return;
-  try { const response = await fetch('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ caseId: $('caseSelect').value, count: +$('count').value, intervalSeconds: +$('interval').value, prepareTrajectoryMaps: true }) }); const data = await response.json(); if (!response.ok) throw new Error(data.error); renderRun(data.run); toast('测试计划已创建，正在执行前置条件校验。'); poll(); } catch (error) { $('formMessage').textContent = error.message; }
+  try { const data = await requestJson('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ caseId: $('caseSelect').value, count: +$('count').value, intervalSeconds: +$('interval').value, prepareTrajectoryMaps: true }) }); renderRun(data.run); toast('测试计划已创建，正在执行前置条件校验。'); poll(); } catch (error) { $('formMessage').textContent = error.message; }
 });
 $('cancelButton').addEventListener('click', async () => {
   if (!currentRun) return;
   const accepted = await confirmAction({ eyebrow: 'STOP REMAINING TESTS', title: '确认终止剩余测试轮次？', body: '不会强行中断已发出的 ROS 服务调用；当前轮结束后，将不再发起后续轮次。', confirmText: '终止剩余轮次', danger: true }); if (!accepted) return;
-  try { const response = await fetch(`/api/runs/${encodeURIComponent(currentRun.id)}/cancel`, { method: 'POST' }); const data = await response.json(); if (!response.ok) throw new Error(data.error); renderRun(data.run); toast('已请求终止：当前轮完成后将停止后续测试。', 'warning'); poll(); } catch (error) { toast(`终止请求失败：${error.message}`, 'error'); }
+  try { const data = await requestJson(`/api/runs/${encodeURIComponent(currentRun.id)}/cancel`, { method: 'POST' }); renderRun(data.run); toast('已请求终止：当前轮完成后将停止后续测试。', 'warning'); poll(); } catch (error) { toast(`终止请求失败：${error.message}`, 'error'); }
 });
 $('resumeButton').addEventListener('click', async () => {
   if (!currentRun) return;
   const accepted = await confirmAction({ eyebrow: 'MANUAL RECOVERY CONFIRMATION', title: '确认车辆已恢复到测试起点？', body: '继续后将重新执行当前依赖编排、等待 Supervisor 节点稳定 RUNNING、重新发现 ROS2 服务，然后从下一轮开始执行。失败轮次会保留为 FAILED。', confirmText: '确认恢复并继续' }); if (!accepted) return;
-  try { const response = await fetch(`/api/runs/${encodeURIComponent(currentRun.id)}/resume`, { method: 'POST' }); const data = await response.json(); if (!response.ok) throw new Error(data.error); renderRun(data.run); toast('已确认人工恢复，正在重新执行依赖预检。', 'warning'); poll(); } catch (error) { toast(`恢复请求失败：${error.message}`, 'error'); }
+  try { const data = await requestJson(`/api/runs/${encodeURIComponent(currentRun.id)}/resume`, { method: 'POST' }); renderRun(data.run); toast('已确认人工恢复，正在重新执行依赖预检。', 'warning'); poll(); } catch (error) { toast(`恢复请求失败：${error.message}`, 'error'); }
 });
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 async function waitForConsoleShutdown(timeoutMilliseconds = 8000) {

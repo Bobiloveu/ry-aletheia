@@ -1632,7 +1632,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         if target.suffix == ".html":
             # 所有控制台页面共享品牌版本提示，避免四个独立页面重复维护同一段标记。
-            body = body.replace(b"</body>", b'<script src="/brand_version.js"></script><script src="/app_shell.js"></script></body>')
+            shell_scripts = b'<script src="/brand_version.js"></script>'
+            # 传统页面已直接引用公共壳层；重复注入会让品牌主题与导航监听器
+            # 被注册两次。Vue 构建页没有该标签时仍由服务端补齐。
+            if b'<script src="/app_shell.js"></script>' not in body:
+                shell_scripts += b'<script src="/app_shell.js"></script>'
+            body = body.replace(b"</body>", shell_scripts + b"</body>")
             content_type = "text/html; charset=utf-8"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)

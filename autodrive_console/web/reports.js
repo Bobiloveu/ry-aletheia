@@ -1,6 +1,6 @@
+import { requestJson } from "./platform/http.js";
+
 const $ = id => document.getElementById(id);
-const initializeTheme = () => { const key = 'ry-aletheia-theme'; const apply = () => { const light = localStorage.getItem(key) === 'light'; document.body.classList.toggle('theme-light', light); document.documentElement.style.colorScheme = light ? 'light' : 'dark'; const mark = document.querySelector('.brand .mark'); if (mark) { mark.tabIndex = 0; mark.setAttribute('role', 'button'); mark.setAttribute('aria-label', light ? '切换到深色主题' : '切换到白天主题'); mark.title = light ? '切换到深色主题' : '切换到白天主题'; } }; const toggle = () => { localStorage.setItem(key, document.body.classList.contains('theme-light') ? 'dark' : 'light'); apply(); }; const mark = document.querySelector('.brand .mark'); mark?.addEventListener('click', toggle); mark?.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); } }); apply(); };
-initializeTheme();
 const esc = value => { const node = document.createElement('span'); node.textContent = value ?? ''; return node.innerHTML; };
 const formatBytes = bytes => bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
 const status = value => ({queued:'排队中',preparing:'预检中',running:'执行中',awaiting_recovery:'等待人工恢复',recovering:'恢复预检中',cancelling:'正在终止',cancelled:'已取消',completed:'已完成',blocked:'已拦截',failed:'运行中断'})[value] || '暂无运行';
@@ -15,9 +15,11 @@ function reportRow(item) {
 
 async function loadReports() {
   try {
-    const [reportResponse, runResponse] = await Promise.all([fetch('/api/reports'), fetch('/api/runs/latest')]);
-    const reports = await reportResponse.json(), latest = await runResponse.json();
-    if (!reportResponse.ok) throw new Error(reports.error || '报告索引读取失败');
+    const [reports, runResponse] = await Promise.all([
+      requestJson('/api/reports', {}, { errorMessage: '报告索引读取失败' }),
+      fetch('/api/runs/latest'),
+    ]);
+    const latest = await runResponse.json();
     const run = latest.run;
     $('latestStatus').textContent = status(run?.status);
     $('latestDetail').textContent = run ? `${run.case.filename} · ${run.summary.completed}/${run.requestedCount} 次完成 · ${run.summary.passed} 通过 / ${run.summary.failed} 失败` : '尚未创建自动化测试计划。';
@@ -36,9 +38,7 @@ $('reportList').addEventListener('click', async event => {
   if (!window.confirm(`确认删除报告“${filename}”？\n\n将同时删除对应 CSV 和该报告专属轨迹证据文件，此操作不可恢复。`)) return;
   button.disabled = true;
   try {
-    const response = await fetch(`/api/reports/${encodeURIComponent(filename)}`, {method: 'DELETE'});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || '删除失败');
+    await requestJson(`/api/reports/${encodeURIComponent(filename)}`, { method: 'DELETE' }, { errorMessage: '删除失败' });
     await loadReports();
   } catch (error) {
     button.disabled = false;

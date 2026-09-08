@@ -1,0 +1,53 @@
+# Web 前端源码与资源归属
+
+更新时间：2026-09-08
+
+项目当前处于渐进迁移期：`frontend/` 与 `autodrive_console/web/` 会并存。修改页面前，先按本表确认唯一的源码入口；不要因页面地址相近而跨目录复制或修改实现。
+
+## 页面归属
+
+| 页面地址 | 当前源码目录 | 主要入口 | 说明 |
+| --- | --- | --- | --- |
+| `/runtime-settings.html` | `frontend/` | `frontend/src/main.js` | Vue/Vite 页面，构建输出到 `autodrive_console/web-vue/`。 |
+| `/live-observation.html` | `frontend/` | `frontend/src/liveObservation.js` | Vue/Vite 页面，构建输出到 `autodrive_console/web-vue/`。 |
+| `/vue/dashboard.html` | `frontend/` | `frontend/src/dashboard.js` | Vue/Vite 页面，构建输出到 `autodrive_console/web-vue/`。 |
+| `/deployment.html` | `autodrive_console/web/` | `deployment.js` | 传统页面，部署建图主入口；入口只保留状态、DOM、事件和 API，组件定义与 Canvas 几何/主渲染位于 `web/deployment/`。 |
+| `/mapping-workbench.html` | `autodrive_console/web/` | `mapping_workbench.js` | 传统页面，部署建图工作台；请求适配层位于 `web/mapping-workbench/api.js`，保留车辆状态回显语义。 |
+| `/manual-control.html` | `autodrive_console/web/` | `manual_control.js` | 传统页面，车辆控制界面；通过 `web/platform/vehicle-control.js` 保留后端返回的车辆状态。 |
+| `/acceptance-test.html` | `autodrive_console/web/` | `acceptance_test.js` | 传统页面，部署验收；普通 JSON 请求通过平台层，当前验收计划的 404 仍按“尚未创建计划”处理。 |
+| `/case-library.html` | `autodrive_console/web/` | `case_library.js` | 传统页面，测试用例管理；导入、导出等文件传输保持页面专属实现。 |
+| `/reports.html` | `autodrive_console/web/` | `reports.js` | 传统页面，报告中心；报告索引与删除通过平台层，最新运行状态保持非阻断读取。 |
+| `/robot-logs.html` | `autodrive_console/web/` | `robot_logs.js` | 传统页面；使用统一 HTTP 与格式化模块。 |
+| `/tool-logs.html` | `autodrive_console/web/` | `tool-logs.js` | 传统页面；使用统一 HTTP 与格式化模块。 |
+| `/scenario-setup.html` | `autodrive_console/web/` | `scenario_setup.js` | 传统页面；普通 JSON 请求通过平台层，文件浏览交互仍在页面内。 |
+
+`web_console.py` 负责将以上地址分别路由至 `web/` 或已构建的 `web-vue/`。`autodrive_console/web-vue/` 是构建产物，不是人工编辑目录。
+
+## 共用能力归属
+
+| 能力 | 位置 | 适用范围 |
+| --- | --- | --- |
+| JSON 请求与标准错误 | `autodrive_console/web/platform/http.js` | 传统页面；统一 `no-store` 策略及 HTTP JSON 错误。 |
+| 文件大小、Unix 时间格式化 | `autodrive_console/web/platform/format.js` | 传统页面；避免同类格式化函数重复实现。 |
+| 车辆控制请求适配 | `autodrive_console/web/platform/vehicle-control.js` | 手动控制；在保留 HTTP 错误的同时，显式暴露后端附带的车辆状态供界面刷新。 |
+| 部署组件定义 | `autodrive_console/web/deployment/component-specs.js` | 部署建图页面；组件字段、名称及项目协议回退。 |
+| 部署 Canvas 几何 | `autodrive_console/web/deployment/canvas-geometry.js` | 部署建图页面；坐标换算、命中检测和缩放计算。 |
+| 部署 Canvas 主渲染 | `autodrive_console/web/deployment/canvas-renderer.js` | 部署建图页面；只消费绘制快照，不读页面状态或网络。 |
+| 部署任务编译器样式 | `autodrive_console/web/deployment/compiler.css` | 由 `deployment.css` 按原层叠顺序导入；只负责实验包预览与任务编译器视觉。 |
+| 部署工具栏样式 | `autodrive_console/web/deployment/tools.css` | 由 `deployment.css` 在编译器样式之前导入；负责平移、路点、擦除和危险操作工具。 |
+| 页面壳、侧栏、主题 | `autodrive_console/web/app_shell.js`、`app_shell.css` | 唯一主题与桌面导航实现；传统页面不得再注册同类主题监听器。服务端只为未声明壳层的页面补注入脚本。 |
+
+新增传统页面的通用能力应优先放入 `web/platform/`，保持无页面状态、无 DOM 副作用，并配套 `frontend/test/platform/` 的 Node 单元测试。涉及 API、ROS Topic、WebSocket 或共享数据模型时，仍须先更新 `shared/contracts/`。
+
+## 样式维护约束
+
+传统页面的样式仍按加载顺序覆盖：基础样式、主题与细化样式、页面视图样式、页面专属样式、`app_shell.css`。在迁移未完成前：
+
+- 页面专属布局只修改对应页面样式文件，避免借全局选择器修补局部问题；
+- `app_shell.css` 与 `app_shell.js` 是公共壳层，修改前必须检查全部消费者；
+- 不为单页需求再复制请求、时间或尺寸格式化函数；先复用平台层；
+- `fetch` 只保留给文件下载、`FormData` 上传、重启/关机存活探测，或把某个 HTTP 状态当作正常页面状态的接口；其余 JSON API 使用 `requestJson`；
+- DOM 查询、页面状态、事件绑定和页面专有中文提示留在页面入口，不迁入 `platform/`，以免通用层反向依赖页面 DOM；
+- Vue 页面只从 `frontend/` 修改，并用 `pixi run frontend-check` 生成和验证产物。
+
+本阶段不迁移页面、不改变路由，也不调整机器人控制或部署业务逻辑；目标是先建立明确边界，再按页面逐步收敛。

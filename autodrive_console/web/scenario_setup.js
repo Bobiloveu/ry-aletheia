@@ -1,7 +1,13 @@
+import { requestJson } from "./platform/http.js";
+
 (() => {
   const $ = (id) => document.getElementById(id);
   let documentState; let browserState; let commandCandidates = []; let lastInspection = {}; let lastActiveBackup = null; let lastTransaction = { state: 'normal', restore_available: false, message: '未检测到待恢复事务' };
-  const request = async (url, options = {}) => { const response = await fetch(url, { cache: 'no-store', headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }, ...options }); const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.error || `请求失败（HTTP ${response.status}）`); return body; };
+  const request = (url, options = {}) => requestJson(
+    url,
+    { cache: 'no-store', headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }, ...options },
+    { errorMessage: (status) => `请求失败（HTTP ${status}）` },
+  );
   const escape = (value) => String(value || '').replace(/[&<>"']/g, (item) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[item]);
   const detected = (value, fallback) => value ? `自动识别：${escape(value)}` : fallback;
   function statusCopy(transaction, active) {
@@ -90,8 +96,5 @@
     if (candidate) documentState.bindings[slot] = { kind: candidate.kind, prefix: candidate.prefix, occurrence: candidate.occurrence };
     else delete documentState.bindings[slot];
   });
-  const brandMark = document.querySelector('.mark');
-  if (brandMark) brandMark.addEventListener('click', () => { const key = 'ry-aletheia-theme'; const light = !document.body.classList.contains('theme-light'); document.body.classList.toggle('theme-light', light); localStorage.setItem(key, light ? 'light' : 'dark'); });
-  if (localStorage.getItem('ry-aletheia-theme') === 'light') document.body.classList.add('theme-light');
   refresh();
 })();
