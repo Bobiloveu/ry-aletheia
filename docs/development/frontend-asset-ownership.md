@@ -12,7 +12,7 @@
 | `/live-observation.html` | `frontend/` | `frontend/src/liveObservation.js` | Vue/Vite 页面，构建输出到 `autodrive_console/web-vue/`。 |
 | `/vue/dashboard.html` | `frontend/` | `frontend/src/dashboard.js` | Vue/Vite 页面，构建输出到 `autodrive_console/web-vue/`。 |
 | `/deployment.html` | `autodrive_console/web/` | `deployment.js` | 传统页面，部署建图主入口；入口只保留状态、DOM、事件和 API，组件定义与 Canvas 几何/主渲染位于 `web/deployment/`。 |
-| `/mapping-workbench.html` | `autodrive_console/web/` | `mapping_workbench.js` | 传统页面，部署建图工作台。 |
+| `/mapping-workbench.html` | `autodrive_console/web/` | `mapping_workbench.js` | 传统页面，部署建图工作台；请求适配层位于 `web/mapping-workbench/api.js`，保留车辆状态回显语义。 |
 | `/manual-control.html` | `autodrive_console/web/` | `manual_control.js` | 传统页面，车辆控制界面。 |
 | `/acceptance-test.html` | `autodrive_console/web/` | `acceptance_test.js` | 传统页面，部署验收。 |
 | `/case-library.html` | `autodrive_console/web/` | `case_library.js` | 传统页面，测试用例管理。 |

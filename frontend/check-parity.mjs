@@ -67,6 +67,8 @@ for (const value of [
 const deploymentPage = readFileSync('../autodrive_console/web/deployment.html', 'utf8');
 const deploymentSource = readFileSync('../autodrive_console/web/deployment.js', 'utf8');
 const deploymentCss = readFileSync('../autodrive_console/web/deployment.css', 'utf8');
+const mappingWorkbenchPage = readFileSync('../autodrive_console/web/mapping-workbench.html', 'utf8');
+const mappingWorkbenchSource = readFileSync('../autodrive_console/web/mapping_workbench.js', 'utf8');
 for (const value of [
   'type="module" src="/deployment.js"',
   'from "./deployment/component-specs.js"',
@@ -85,6 +87,17 @@ for (const stylesheet of ["compiler.css", "tools.css"]) {
   if (deploymentCss.includes(`@import url("/deployment/${stylesheet}")`)) continue;
   failed = true;
   console.error(`FAIL: Deployment CSS does not preserve the ${stylesheet} module import.`);
+}
+for (const value of [
+  'type="module" src="/mapping_workbench.js"',
+  'from "./mapping-workbench/api.js"',
+  '/api/vehicle-control/heartbeat',
+  '/api/mapping/sessions',
+]) {
+  if (!(mappingWorkbenchPage + mappingWorkbenchSource).includes(value)) {
+    failed = true;
+    console.error(`FAIL: Mapping workbench platform migration missing ${value}`);
+  }
 }
 if (failed) process.exit(1);
 console.log('PASS: Vue 运行配置页与任务指挥台保留原页面关键区块、共享样式及控制接口。');

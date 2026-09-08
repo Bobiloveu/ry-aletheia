@@ -1,3 +1,5 @@
+import { requestWorkbenchJson } from "./mapping-workbench/api.js";
+
 (() => {
   const $ = (id) => document.getElementById(id);
   const driveButtons = [...document.querySelectorAll("[data-command]")];
@@ -12,22 +14,8 @@
   let controlTimer = null;
   let speedTimer = null;
 
-  async function request(path, payload, keepalive = false) {
-    const response = await fetch(path, {
-      method: payload === undefined ? "GET" : "POST",
-      headers: payload === undefined ? undefined : { "Content-Type": "application/json" },
-      body: payload === undefined ? undefined : JSON.stringify(payload),
-      cache: "no-store",
-      keepalive,
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const error = new Error(data.error || `请求失败（${response.status}）`);
-      error.status = data.status;
-      throw error;
-    }
-    return data;
-  }
+  const request = (path, payload, keepalive = false) =>
+    requestWorkbenchJson(path, payload, keepalive);
 
   const sourceLabel = (source) => source === "navigation" ? "自动驾驶" : source === "miniapp" ? "手动控制" : source || "未知";
   const formatSpeed = (value, unit) => `${Number(value).toFixed(1)} ${unit}`;
@@ -132,12 +120,12 @@
     clearHeld();
     if (!sessionId) return;
     try { renderVehicle(await request("/api/vehicle-control/stop", { session_id: sessionId })); }
-    catch (error) { if (error.status) renderVehicle(error.status); message(error.message, "error"); }
+    catch (error) { if (error.vehicleState) renderVehicle(error.vehicleState); message(error.message, "error"); }
   }
   async function sendHeld() {
     if (!sessionId || !heldCommand) return;
     try { renderVehicle(await request("/api/vehicle-control/command", { session_id: sessionId, command: heldCommand })); }
-    catch (error) { clearHeld(); if (error.status) renderVehicle(error.status); message(error.message, "error"); }
+    catch (error) { clearHeld(); if (error.vehicleState) renderVehicle(error.vehicleState); message(error.message, "error"); }
   }
   function beginHold(command, button) {
     if (!vehicle?.manual_ready || !sessionId || heldCommand === command) return;
@@ -150,7 +138,7 @@
       const state = await request("/api/vehicle-control/enter", {});
       sessionId = state.session?.id || null;
       renderVehicle(state);
-    } catch (error) { if (error.status) renderVehicle(error.status); message(error.message, "error"); }
+    } catch (error) { if (error.vehicleState) renderVehicle(error.vehicleState); message(error.message, "error"); }
   }
   async function exitManual() {
     clearHeld();
@@ -158,13 +146,13 @@
     try {
       const state = await request("/api/vehicle-control/exit", { session_id: sessionId });
       sessionId = null; renderVehicle(state);
-    } catch (error) { if (error.status) renderVehicle(error.status); message(error.message, "error"); }
+    } catch (error) { if (error.vehicleState) renderVehicle(error.vehicleState); message(error.message, "error"); }
   }
   async function updateSpeed() {
     if (!sessionId || !vehicle?.manual_ready) return;
     try {
       renderVehicle(await request("/api/vehicle-control/speed", { session_id: sessionId, linear_speed: Number($("linearSpeed").value), angular_speed: Number($("angularSpeed").value) }));
-    } catch (error) { if (error.status) renderVehicle(error.status); message(error.message, "error"); }
+    } catch (error) { if (error.vehicleState) renderVehicle(error.vehicleState); message(error.message, "error"); }
   }
   async function startMapping() {
     if (!mapping?.session) return;
