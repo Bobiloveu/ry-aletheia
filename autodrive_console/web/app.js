@@ -51,6 +51,11 @@ function rememberUiPreferences() {
   uiPreferences = { case_id: $('caseSelect').value || '', count: Number($('count').value || 20), interval_seconds: Number($('interval').value || 0) };
   fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ui_preferences: uiPreferences }) }).catch(() => {});
 }
+function supervisorEmptyState() {
+  if (dependencyPlan?.enabled) return '已启用 Supervisor 依赖编排；开始测试后将按已保存阶段准备节点。';
+  if (monitorNodes.length) return '开始测试后将检查已保存的 Supervisor 监控节点状态。';
+  return '未配置 Supervisor 监控节点；常规测试不会因该项阻断。可在“测试依赖编排”中识别并按需保存。';
+}
 function renderNodes(preflight) {
   const nodes = preflight?.node_states || [];
   const scenario = preflight?.scenario;
@@ -61,12 +66,12 @@ function renderNodes(preflight) {
   const serviceStatus = preflight?.ros_service ? ` · ${preflight.ros_service.message}` : '';
   const finalGateStatus = preflight?.final_dependency_gate ? ` · 服务后总闸 ${preflight.final_dependency_gate.ok ? '通过' : '未通过'}` : '';
   const checkedAt = preflight?.node_states_checked_at ? ` · 最近检查 ${new Date(preflight.node_states_checked_at).toLocaleTimeString('zh-CN', { hour12: false })}` : '';
-  const summary = preflight ? `${scenarioStatus ? `${scenarioStatus} · ` : ''}${preflight.task_sync}${orchestrationStatus}${serviceStatus}${finalGateStatus}${mapStatus ? ` · ${mapStatus.message}` : ''}${checkedAt}` : '开始测试后将按编排重启并检查本机 Supervisor 节点。';
+  const summary = preflight ? `${scenarioStatus ? `${scenarioStatus} · ` : ''}${preflight.task_sync}${orchestrationStatus}${serviceStatus}${finalGateStatus}${mapStatus ? ` · ${mapStatus.message}` : ''}${checkedAt}` : supervisorEmptyState();
   const ready = Boolean(preflight?.final_dependency_gate?.ok || (orchestration?.enabled && orchestration.all_ready));
   const blocked = Boolean(preflight && !ready && (preflight.final_dependency_gate || orchestration?.enabled));
   $('syncStatus').textContent = !preflight ? '等待预检' : ready ? '预检通过' : blocked ? '预检未通过' : '预检已更新';
   $('preflightSummary').textContent = summary;
-  $('nodeGrid').innerHTML = nodes.length ? nodes.map(node => `<div class="node"><div class="node-top"><b>${escapeHtml(node.label)}</b><span class="node-state ${node.status === 'RUNNING' ? 'running' : 'bad'}">${escapeHtml(node.status)}</span></div><small>${escapeHtml(node.supervisor)}${node.required ? ' · REQUIRED' : ' · OPTIONAL'}</small></div>`).join('') : '<div class="node-empty">开始测试后自动读取本机 Supervisor 节点状态</div>';
+  $('nodeGrid').innerHTML = nodes.length ? nodes.map(node => `<div class="node"><div class="node-top"><b>${escapeHtml(node.label)}</b><span class="node-state ${node.status === 'RUNNING' ? 'running' : 'bad'}">${escapeHtml(node.status)}</span></div><small>${escapeHtml(node.supervisor)}${node.required ? ' · REQUIRED' : ' · OPTIONAL'}</small></div>`).join('') : `<div class="node-empty">${escapeHtml(supervisorEmptyState())}</div>`;
 }
 function renderLiveProgress(run) {
   const progress = run?.liveProgress;

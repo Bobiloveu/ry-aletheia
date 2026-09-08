@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 
-DEFAULT_NODES = [
+LEGACY_DEFAULT_NODES = [
     {"id": "chassis", "label": "底盘节点", "supervisor": "DRIVERS:102-chassis_node", "required": True},
     {"id": "elevator", "label": "梯控服务节点", "supervisor": "DRIVERS:111-elevator_server", "required": True},
     {"id": "localization", "label": "定位节点", "supervisor": "MODULES:209-lightning", "required": True},
@@ -63,7 +63,9 @@ class RobotSettings:
     # 仅为 Supervisor 查询提权；控制台和 ROS2 客户端必须以普通用户运行。
     supervisor_command: str = "sudo -n supervisorctl status"
     command_timeout_s: int = 8
-    nodes: list[dict] = field(default_factory=lambda: list(DEFAULT_NODES))
+    # Supervisor 进程名随车辆镜像而异；新车不继承开发车辆的
+    # REQUIRED 节点。实施人员发现本机进程后再按需保存监控/依赖编排。
+    nodes: list[dict] = field(default_factory=list)
     # 操作者在编排界面选择的“运行依赖就绪状态”节点；空值时兼容旧配置。
     monitor_nodes: list[str] = field(default_factory=list)
     case_aliases: dict[str, str] = field(default_factory=dict)
@@ -116,6 +118,11 @@ class SettingsStore:
                 raw["supervisor_command"] = "sudo -n supervisorctl status"
             defaults = asdict(RobotSettings())
             defaults.update({key: value for key, value in raw.items() if key in defaults})
+            # 仅迁移历史硬编码模板。与模板不同的节点列表是现场已保存的
+            # 本车配置，必须原样保留。
+            if raw.get("nodes") == LEGACY_DEFAULT_NODES:
+                defaults["nodes"] = []
+                defaults["monitor_nodes"] = []
             # 旧版本的 live_observation 是一个较小的字典；深度合并以确保升级后
             # 自动获得车型库等新增字段，而不是被旧字典整体覆盖。
             stored_observation = raw.get("live_observation")
@@ -225,8 +232,8 @@ class SettingsStore:
             raise ValueError("请选择一个有效的当前车型")
         SettingsStore._validate_vehicle_control(settings.vehicle_control)
         SettingsStore._validate_robot_logs(settings.robot_logs)
-        if not isinstance(settings.nodes, list) or not settings.nodes:
-            raise ValueError("至少需要配置一个 Supervisor 节点")
+        if not isinstance(settings.nodes, list):
+            raise ValueError("Supervisor 节点配置格式错误")
         if not isinstance(settings.monitor_nodes, list) or not all(isinstance(name, str) and SUPERVISOR_PROCESS_NAME.fullmatch(name) for name in settings.monitor_nodes):
             raise ValueError("默认监控节点配置格式错误")
         if len(set(settings.monitor_nodes)) != len(settings.monitor_nodes):

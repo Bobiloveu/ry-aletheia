@@ -142,6 +142,11 @@ class RobotGateway:
         return True, "定位与导航启动节点已重启并稳定 RUNNING"
 
     def _check_supervisor(self) -> tuple[list[dict], str | None]:
+        # Supervisor 监控和依赖编排都是按车选配。未配置任何健康节点时
+        # 不访问 Supervisor，避免其它车辆因开发车的节点或提权环境被阻断。
+        if not self._health_nodes():
+            self._publish_states([])
+            return [], None
         try:
             parsed = {item.name: item.status for item in SupervisorClient(self.settings.supervisor_command, self.settings.command_timeout_s).discover()}
         except RuntimeError as exc:
