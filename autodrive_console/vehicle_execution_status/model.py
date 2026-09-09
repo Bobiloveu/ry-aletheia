@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 
 PUBLIC_LABELS: dict[str, str] = {
+    "emergency_stop": "急停已触发",
+    "manual_control": "手动控制中",
     "task": "任务中",
     "calling_elevator": "呼梯中",
     "entering_elevator": "进梯中",

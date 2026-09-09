@@ -119,6 +119,7 @@ VEHICLE_CONTROL = VehicleControlController(
 # 即使没有浏览器打开，其 volatile ROS 话题也必须被持续接收。
 VEHICLE_EXECUTION_STATUS = VehicleExecutionStatusMonitor(
     restarting_nodes=RUNS.dependency_restart_active,
+    vehicle_control_status=VEHICLE_CONTROL.status,
 )
 # 建图会话不复用测试执行器或手动控制 node。它只管理 Lightning 进程与本机
 # 栅格预览订阅，所有临时 YAML/预览都写入部署工作区，绝不覆盖机器人配置。

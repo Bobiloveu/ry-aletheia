@@ -4,10 +4,11 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from typing import Callable
 
 from .classifier import classify_execution_state
-from .model import NavigationState, TaskEvent, snapshot_for, unavailable_snapshot
+from .model import ExecutionSnapshot, NavigationState, TaskEvent, snapshot_for, unavailable_snapshot
 
 
 LOGGER = logging.getLogger("ry_aletheia.vehicle_execution_status")
@@ -23,11 +24,15 @@ class VehicleExecutionStatusMonitor:
         self,
         *,
         restarting_nodes: Callable[[], bool] | None = None,
+        vehicle_control_status: Callable[[], Mapping[str, object]] | None = None,
         clock: Callable[[], float] = time.monotonic,
         freshness_s: float = 4.0,
         task_event_freshness_s: float = 15.0,
     ) -> None:
         self._restarting_nodes = restarting_nodes or (lambda: False)
+        # 复用既有控制器对 /control_source_state 与 /is_emergency_stop 的唯一
+        # 真实确认；本监控器不创建第二组 ROS 订阅或任何控制通道。
+        self._vehicle_control_status = vehicle_control_status or (lambda: {})
         self._clock = clock
         self.freshness_s = float(freshness_s)
         self.task_event_freshness_s = float(task_event_freshness_s)
@@ -90,6 +95,9 @@ class VehicleExecutionStatusMonitor:
     def status(self) -> dict[str, str]:
         """Return a tiny public snapshot and never surface ROS details to a client."""
         now = self._clock()
+        control_snapshot = self._control_override_snapshot()
+        if control_snapshot is not None:
+            return control_snapshot.to_public_dict()
         try:
             restarting_nodes = bool(self._restarting_nodes())
         except Exception:
@@ -117,6 +125,29 @@ class VehicleExecutionStatusMonitor:
             restarting_nodes=False,
         )
         return snapshot.to_public_dict()
+
+    def _control_override_snapshot(self) -> ExecutionSnapshot | None:
+        """Map only confirmed safety/control facts into the minimal public phases."""
+        try:
+            control_status = self._vehicle_control_status()
+        except Exception:
+            LOGGER.exception("读取车辆控制安全状态失败")
+            return None
+        if not isinstance(control_status, Mapping):
+            return None
+
+        emergency_stop = control_status.get("emergency_stop")
+        if isinstance(emergency_stop, Mapping) and emergency_stop.get("state") == "triggered":
+            return snapshot_for("emergency_stop")
+
+        sync = control_status.get("car_state_sync")
+        if (
+            control_status.get("actual_source") == "miniapp"
+            and isinstance(sync, Mapping)
+            and sync.get("control_source") == "confirmed"
+        ):
+            return snapshot_for("manual_control")
+        return None
 
     def _ensure_started(self) -> None:
         with self._lock:

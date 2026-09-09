@@ -103,6 +103,8 @@ Backend 以 **20 Hz** 发布。保持输入必须在 **350 ms** 前刷新；会�
 
 `car_state_sync.control_source` 与 `car_state_sync.emergency_stop` 取值为 `pending` 或 `confirmed`，分别说明实际控制源和急停真值是否已从车端收到。控制源收到 `remote` 等外部值时也必须为 `confirmed`，客户端应展示外部接管而非“正在读取”。客户端可把首次 `pending` 呈现为“正在读取车端状态”，但不得据此启用接管或运动；它不是将 unknown 推断为正常。
 
+Desktop Web 的车辆执行状态页通过 Backend 内部 `VehicleExecutionStatusMonitor` 只读消费本控制器快照：`emergency_stop.state=triggered` 显示“急停已触发”，已确认的 `actual_source=miniapp` 显示“手动控制中”。这不创建新的浏览器控制接口、不改变多端会话或底盘安全门控，也不得由浏览器会话、点击结果或 `pending` 状态推断。
+
 `can_begin_manual` 表示当前客户端可以加入或发起 `miniapp` 会话，不表示可运动；`can_request_navigation` 表示可以发起全局 `navigation` 切换请求。两者在 `remote`、急停或急停未知时仍可为真。`manual_ready` 才是唯一的非零速度许可，仍要求至少一个有效会话、`miniapp` 实际确认及 `/is_emergency_stop=false`。`shared_sessions.active_count` 与 `switching_count` 只用于展示当前参与数，绝不泄露其他客户端的会话 ID。
 
 `/vector` 不是直接 ROS 速度接口：`target_linear = linear_ratio × linear_mps`，`target_angular = angular_ratio × angular_radps`。移动端以车头向上为视觉坐标：上/下分别为正/负 `linear_ratio`，左/右分别为正/负 `angular_ratio`；因此右上为正线速度与负角速度，即前进并右转的弧线。它不是横向右前平移。新的向量目标与旧的 `/command` 目标互斥；多个客户端中最后一条有效 `/command` 或 `/vector` 更新该唯一目标。任一后续 `/speed` 更新必须按保存的比例重新换算。急停、未知急停、外部切源、拥有当前目标的会话输入/心跳超时、任一 `stop`、`release`、`exit` 和 `(0,0)` 均清除两类目标并使用 `stop_acc`。

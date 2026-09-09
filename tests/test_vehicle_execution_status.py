@@ -164,6 +164,51 @@ def test_monitor_reports_controlled_restart_without_ros_traffic() -> None:
     assert monitor.status() == {"phase": "restarting_nodes", "label": "节点重启中"}
 
 
+def test_monitor_prioritizes_a_confirmed_chassis_emergency_over_every_execution_phase() -> None:
+    """A latched chassis emergency must replace both manual and task presentation."""
+    monitor = VehicleExecutionStatusMonitor(
+        clock=lambda: 10.0,
+        vehicle_control_status=lambda: {
+            "actual_source": "miniapp",
+            "car_state_sync": {"control_source": "confirmed"},
+            "emergency_stop": {"state": "triggered"},
+        },
+    )
+    monitor.observe_navigation(FakeNavigation(status="running", current_task="elevator_in_1.xml"), received_at=9.0)
+
+    assert monitor.status() == {"phase": "emergency_stop", "label": "急停已触发"}
+
+
+def test_monitor_reports_confirmed_miniapp_control_before_task_progress() -> None:
+    """The real miniapp source, not a browser session, defines manual control display."""
+    monitor = VehicleExecutionStatusMonitor(
+        clock=lambda: 10.0,
+        vehicle_control_status=lambda: {
+            "actual_source": "miniapp",
+            "car_state_sync": {"control_source": "confirmed"},
+            "emergency_stop": {"state": "normal"},
+        },
+    )
+    monitor.observe_navigation(FakeNavigation(status="running", current_task="elevator_in_1.xml"), received_at=9.0)
+
+    assert monitor.status() == {"phase": "manual_control", "label": "手动控制中"}
+
+
+def test_monitor_does_not_infer_manual_control_until_the_vehicle_source_is_confirmed() -> None:
+    """A pending source transition must keep the known robot task phase, never claim manual control."""
+    monitor = VehicleExecutionStatusMonitor(
+        clock=lambda: 10.0,
+        vehicle_control_status=lambda: {
+            "actual_source": "miniapp",
+            "car_state_sync": {"control_source": "pending"},
+            "emergency_stop": {"state": "normal"},
+        },
+    )
+    monitor.observe_navigation(FakeNavigation(status="running", current_task="elevator_in_1.xml"), received_at=9.0)
+
+    assert monitor.status() == {"phase": "entering_elevator", "label": "进梯中"}
+
+
 def test_run_manager_keeps_restart_activity_true_until_nested_control_ends() -> None:
     """Overlapping dependency stages cannot briefly show a false idle state."""
     manager = RunManager(Path("unused"), object(), object())

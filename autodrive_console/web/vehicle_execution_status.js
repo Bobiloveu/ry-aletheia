@@ -2,6 +2,8 @@ import { requestJson } from "./platform/http.js";
 
 const UNAVAILABLE_STATUS = Object.freeze({ phase: "unavailable", label: "状态暂不可用" });
 const ALLOWED_PHASES = new Set([
+  "emergency_stop",
+  "manual_control",
   "task",
   "calling_elevator",
   "entering_elevator",

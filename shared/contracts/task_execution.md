@@ -36,7 +36,7 @@ Backend 拥有任务文件、校验、执行状态、报告、取消、恢复和
 }
 ```
 
-`phase` 是闭集：`task`、`calling_elevator`、`entering_elevator`、`riding_elevator`、`exiting_elevator`、`closing_elevator_door`、`opening_gate`、`closing_gate`、`opening_access_door`、`closing_access_door`、`draining_or_unloading`、`completed`、`restarting_nodes`、`unavailable`。无论 ROS 运行时未启动、消息过期、模板/状态码未知或语义冲突，接口都以 HTTP 200 安全返回：
+`phase` 是闭集：`emergency_stop`、`manual_control`、`task`、`calling_elevator`、`entering_elevator`、`riding_elevator`、`exiting_elevator`、`closing_elevator_door`、`opening_gate`、`closing_gate`、`opening_access_door`、`closing_access_door`、`draining_or_unloading`、`completed`、`restarting_nodes`、`unavailable`。显示优先级为真实急停、已确认的 `miniapp` 控制源、受控节点重启、车辆任务行为。急停只采纳既有 `VehicleControlController` 对 `/is_emergency_stop=true` 的锁存确认；手动控制只采纳其对 `/control_source_state=miniapp` 的确认，绝不由浏览器会话或点击结果推断。无论 ROS 运行时未启动、消息过期、模板/状态码未知或语义冲突，接口都以 HTTP 200 安全返回：
 
 ```json
 {

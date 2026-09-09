@@ -22,6 +22,17 @@ test("execution status accepts only a complete approved response tuple", () => {
   });
 });
 
+test("execution status accepts emergency and confirmed manual display phases", () => {
+  assert.deepEqual(normalizeExecutionStatus({ phase: "emergency_stop", label: "急停已触发" }), {
+    phase: "emergency_stop",
+    label: "急停已触发",
+  });
+  assert.deepEqual(normalizeExecutionStatus({ phase: "manual_control", label: "手动控制中" }), {
+    phase: "manual_control",
+    label: "手动控制中",
+  });
+});
+
 test("execution status does not reset animation for an unchanged state", () => {
   assert.equal(
     shouldRenderExecutionStatus(
