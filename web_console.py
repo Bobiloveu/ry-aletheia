@@ -53,6 +53,7 @@ from autodrive_console.vehicle_control import (
     VehicleControlError,
     VehicleControlUnavailable,
 )
+from autodrive_console.vehicle_execution_status import VehicleExecutionStatusMonitor
 
 
 def ensure_ros_environment() -> None:
@@ -113,6 +114,11 @@ ACCEPTANCE = AcceptanceOrchestrator(
 VEHICLE_CONTROL = VehicleControlController(
     active_run_guard=RUNS.has_active_run,
     twist_profile=MiniappTwistProfile(**SETTINGS.load().vehicle_control),
+)
+# 执行状态是只读的全局车辆事实，不附着到按轮创建/停止的 TrajectorySession。
+# 即使没有浏览器打开，其 volatile ROS 话题也必须被持续接收。
+VEHICLE_EXECUTION_STATUS = VehicleExecutionStatusMonitor(
+    restarting_nodes=RUNS.dependency_restart_active,
 )
 # 建图会话不复用测试执行器或手动控制 node。它只管理 Lightning 进程与本机
 # 栅格预览订阅，所有临时 YAML/预览都写入部署工作区，绝不覆盖机器人配置。
@@ -252,6 +258,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._static_from(WEB_ROOT, "mapping-workbench.html")
         elif path == "/manual-control.html":
             self._static_from(WEB_ROOT, "manual-control.html")
+        elif path == "/vehicle-execution-status.html":
+            self._static_from(WEB_ROOT, "vehicle-execution-status.html", inject_console_shell=False)
         elif path == "/acceptance-test.html":
             self._static_from(WEB_ROOT, "acceptance-test.html")
         elif path == "/vue/dashboard.html":
@@ -264,6 +272,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         elif path == "/api/vehicle-control":
             # 返回的是订阅 /control_source_state 得到的实际源状态，不由前端点击推断。
             self._json(VEHICLE_CONTROL.status())
+        elif path == "/api/vehicle-execution-status":
+            self._json(VEHICLE_EXECUTION_STATUS.status())
         elif path == "/api/acceptance/catalog":
             self._json(ACCEPTANCE.catalog_summary())
         elif path == "/api/acceptance/criteria":
@@ -1623,14 +1633,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         for trajectory_dir in trajectory_dirs:
             shutil.rmtree(trajectory_dir)
 
-    def _static_from(self, root: Path, requested: str) -> None:
+    def _static_from(self, root: Path, requested: str, *, inject_console_shell: bool = True) -> None:
         target = (root / requested).resolve()
         if root not in target.parents or not target.is_file():
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         body = target.read_bytes()
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-        if target.suffix == ".html":
+        if target.suffix == ".html" and inject_console_shell:
             # 所有控制台页面共享品牌版本提示，避免四个独立页面重复维护同一段标记。
             shell_scripts = b'<script src="/brand_version.js"></script>'
             # 传统页面已直接引用公共壳层；重复注入会让品牌主题与导航监听器
@@ -1738,6 +1748,8 @@ def run_console() -> None:
         VEHICLE_CONTROL.start()
     except VehicleControlUnavailable as exc:
         LOGGER.warning("车辆控制 ROS2 模块预热失败：%s", exc)
+    # 状态监控始终只读；ROS 不可用时页面安全显示“状态暂不可用”，不能阻塞控制台。
+    VEHICLE_EXECUTION_STATUS.start()
     try:
         server = ThreadingHTTPServer(("0.0.0.0", 8087), ConsoleHandler)
     except OSError as exc:
@@ -1770,6 +1782,7 @@ def run_console() -> None:
         video_runtime.stop()
         MAPPING.close()
         VEHICLE_CONTROL.close()
+        VEHICLE_EXECUTION_STATUS.close()
         OBSERVATION.stop()
         server.server_close()
     if server.restart_command:

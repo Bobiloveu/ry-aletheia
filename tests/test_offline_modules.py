@@ -196,6 +196,39 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertEqual(vue.count(shell), 1)
         self.assertEqual(vue.count(version), 1)
 
+    def test_execution_status_api_returns_the_read_only_monitor_snapshot(self):
+        """The browser endpoint is an adapter, not a second status classifier."""
+        handler = object.__new__(web_console.ConsoleHandler)
+        handler.path = "/api/vehicle-execution-status"
+        handler.headers = {"User-Agent": "desktop-test"}
+        handler._json = Mock()
+        expected = {"phase": "riding_elevator", "label": "乘梯中"}
+
+        with patch.object(web_console.VEHICLE_EXECUTION_STATUS, "status", return_value=expected):
+            handler.do_GET()
+
+        handler._json.assert_called_once_with(expected)
+
+    def test_execution_status_page_can_opt_out_of_desktop_shell_injection(self):
+        """The dedicated display must not inherit nav or brand scripts from normal pages."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "vehicle-execution-status.html").write_text(
+                "<!doctype html><html><body><main></main></body></html>", encoding="utf-8"
+            )
+            handler = object.__new__(web_console.ConsoleHandler)
+            handler.send_error = Mock()
+            handler.send_response = Mock()
+            handler.send_header = Mock()
+            handler.end_headers = Mock()
+            handler.wfile = io.BytesIO()
+
+            handler._static_from(root, "vehicle-execution-status.html", inject_console_shell=False)
+
+        rendered = handler.wfile.getvalue()
+        self.assertNotIn(b"/app_shell.js", rendered)
+        self.assertNotIn(b"/brand_version.js", rendered)
+
     def test_deployment_page_has_a_dedicated_current_project_status_card(self):
         """Prevents an open project from being visually indistinguishable from a blank new-project form."""
         page = (web_console.WEB_ROOT / "deployment.html").read_text(encoding="utf-8")

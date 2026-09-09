@@ -23,6 +23,30 @@ Backend 拥有任务文件、校验、执行状态、报告、取消、恢复和
 
 `GET /api/reports` 继续返回 `filename`、`size`、`modified_at`、`csv_filename`，并增量返回 `report_type: "test" | "acceptance"` 和 `title`。所有现有消费者可忽略新增字段；两类报告均使用既有预览、HTML 下载、CSV 下载与删除路径。验收报告为单文件 HTML，内嵌已验证的轨迹 SVG；删除时只会依据 Aletheia 写入的受限清单删除其专属轨迹目录。
 
+## 车辆执行状态显示（Desktop Web）
+
+**运行时执行方：** Backend `VehicleExecutionStatusMonitor`；**现有消费者：** PC Web `/vehicle-execution-status.html`；**非消费者：** Mobile 与未来车载屏。本能力只读订阅既有 `/task_status`、`/navigate_todoor_detailed_status`，不创建 ROS 控制通道、不下发任务，也不影响底盘、导航、电梯或 Supervisor 的既有安全边界。
+
+`GET /api/vehicle-execution-status` 返回不可缓存的 JSON 快照，响应严格只有两个字段：
+
+```json
+{
+  "phase": "riding_elevator",
+  "label": "乘梯中"
+}
+```
+
+`phase` 是闭集：`task`、`calling_elevator`、`entering_elevator`、`riding_elevator`、`exiting_elevator`、`closing_elevator_door`、`opening_gate`、`closing_gate`、`opening_access_door`、`closing_access_door`、`draining_or_unloading`、`completed`、`restarting_nodes`、`unavailable`。无论 ROS 运行时未启动、消息过期、模板/状态码未知或语义冲突，接口都以 HTTP 200 安全返回：
+
+```json
+{
+  "phase": "unavailable",
+  "label": "状态暂不可用"
+}
+```
+
+`restarting_nodes` 仅表示 `RunManager` 正在执行 Aletheia 已配置的 Supervisor 依赖控制与稳定等待，绝不从普通运行状态、进程名或浏览器行为推测。当前 PC 页面只显示 `phase` 与 `label`；未来 Mobile/车载消费者接入前必须在本文档更新消费者清单并运行其定向验证。当前定向验证为 `scripts/test-backend.sh` 和 `scripts/test-web.sh`。
+
 ## Planned（规划中）
 
 新的任务 schema 版本在使用前，需要在 `shared/schemas` 中提供 JSON Schema、经过 Backend 校验、完成消费者兼容性评审并给出迁移说明。
