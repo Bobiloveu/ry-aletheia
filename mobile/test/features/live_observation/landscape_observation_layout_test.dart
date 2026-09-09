@@ -106,6 +106,51 @@ void main() {
     },
   );
 
+  testWidgets('costmap preview shares the live map workspace and can hide', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(2532, 1170);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: AletheiaTheme.dark(),
+          home: MediaQuery(
+            data: const MediaQueryData(
+              size: Size(844, 390),
+              devicePixelRatio: 3,
+              padding: EdgeInsets.only(top: 20),
+              viewPadding: EdgeInsets.only(top: 20),
+            ),
+            child: DebugGalleryPreview(
+              spec: galleryScreenById('observe_live_costmap'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 120));
+
+    final worldTransform = find.byKey(const ValueKey('map-world-transform'));
+    final costmapLayer = find.byKey(const ValueKey('map-costmap-layer'));
+    expect(costmapLayer, findsOneWidget);
+    expect(
+      find.ancestor(of: costmapLayer, matching: worldTransform),
+      findsOneWidget,
+    );
+    final toggle = find.byTooltip('隐藏局部代价地图');
+    expect(toggle, findsOneWidget);
+    await tester.tap(toggle);
+    await tester.pump();
+    expect(find.byKey(const ValueKey('map-costmap-layer')), findsNothing);
+    expect(find.byTooltip('显示局部代价地图'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('two-finger map zoom keeps the midpoint anchored', (
     tester,
   ) async {

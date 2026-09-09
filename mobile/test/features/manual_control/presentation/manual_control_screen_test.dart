@@ -104,7 +104,7 @@ void main() {
     },
   );
 
-  testWidgets('backgrounding an active manual page requests STOP then EXIT', (
+  testWidgets('backgrounding an active manual page releases only this session', (
     tester,
   ) async {
     final repository = _ManualControlFakeRepository();
@@ -136,8 +136,7 @@ void main() {
     expect(repository.calls, [
       'status',
       'enter',
-      'stop:manual-session',
-      'exit:manual-session',
+      'release:manual-session',
     ]);
   });
 
@@ -316,6 +315,15 @@ class _ManualControlFakeRepository extends ManualControlRepository {
     String sessionId,
   ) async {
     calls.add('stop:$sessionId');
+    return _status();
+  }
+
+  @override
+  Future<VehicleControlState> release(
+    RobotEndpoint endpoint,
+    String sessionId,
+  ) async {
+    calls.add('release:$sessionId');
     return _status();
   }
 

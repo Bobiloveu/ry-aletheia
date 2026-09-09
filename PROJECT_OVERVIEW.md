@@ -13,7 +13,7 @@ RY Aletheia 是部署在机器人小车 Ubuntu 主机上的离线自动测试平
 - 任务仅通过既有 `/start_execute_tasks` 服务下发，不向底盘或导航发布控制指令。
 - 不修改任务 JSON；别名、依赖编排和场景方案均保存在工具配置目录。
 - 场景前置配置只替换启动脚本中已登记的 FCRP 与 lightning 参数。应用场景时以先落盘的可校验恢复事务、定向原子替换和运行依赖重启验证构成闭环；恢复常规方案时只回写启动脚本，不操作运行中的节点，常规参数在相关节点下次自行启动时生效。部署验收可冻结一份已有场景方案及已有 Supervisor 编排，并仅在整份验收序列开始前应用/执行一次；序列内每项任务不重复重启，结束、取消或异常后同样只回写常规启动配置。
-- 实时观测采用“时效优先”：点云、位姿和仅 PC 使用的局部代价地图过期帧直接丢弃，不追赶历史画面；可选视频走独立的低延迟 WebRTC 链路。
+- 实时观测采用“时效优先”：点云、位姿和局部代价地图过期帧直接丢弃，不追赶历史画面；PC 与 Flutter Mobile 只读消费各自独立的最新帧，可选视频走独立的低延迟 WebRTC 链路。
 - 手动控制只能在 `/control_source_state=miniapp` 且急停状态已确认 `false` 时发送非零速度。实时状态由 `/is_emergency_stop` 订阅提供；若启动时锁存样本未送达，仅在 `unknown` 阶段以同一 ROS 节点异步调用 `/get_emergency_stop` 补齐底盘当前状态。服务异常仍保持 `unknown`，不能猜测为安全。软件解除急停只发送经实车验证的固定 `/command` 报文，并且必须收到急停状态恢复 `false` 后才确认成功；它不切换控制权，也不替代物理急停。
 - `config/console.json` 的 `vehicle_control` 仅保存手动驾驶 `press`、`movement_acc` 与 `stop_acc`。零 Twist 统一使用 `stop_acc`，非零 Twist 使用 `movement_acc`；这些参数绝不改变固定解除急停报文。
 - 小车运行阶段不依赖互联网、Node.js、npm 或开发源码；主程序必须以普通账户运行。
@@ -28,7 +28,7 @@ Flutter 客户端是 Aletheia 面向可信局域网中移动机器人的专业 H
 
 测试执行不再启动、管理或暴露 RViz。轨迹证据由既有地图与 SVG 轨迹报告链路统一提供；历史配置中的 `open_rviz` 偏好仅在升级读取时被清理，不能再影响运行行为。
 
-移动端观测必须忠实消费既有数据契约：地图按底图、虚拟墙、未来真实轨迹、点云、车体轮廓的顺序分层；车体尺寸以运行配置的 active vehicle model 为准。相机必须识别车端配置中的 1 至 6 路流，操作者可独立启停已配置流并切换主画面。Flutter 宽横屏可同时解码固定上限三路真实 WHEP/WebRTC（主画面加两路辅助画面）；竖屏保留单主画面，第四路必须等待已有解码会话释放。这个客户端上限避免把全部六路相机无约束地变成移动端高频负载，且不改变既有视频 API、ROS 或 MediaMTX 契约。
+移动端观测必须忠实消费既有数据契约：地图按底图、米制格栅、局部代价地图、虚拟墙、未来真实轨迹、点云、车体轮廓的顺序分层；车体尺寸以运行配置的 active vehicle model 为准。costmap 只读消费 `/costmap`，按真实 map 原点/朝向/分辨率绘制；未知/自由 cell 透明，5 秒无新帧或切图后安全隐藏，显示开关仅影响本机。相机必须识别车端配置中的 1 至 6 路流，操作者可独立启停已配置流并切换主画面。Flutter 宽横屏可同时解码固定上限三路真实 WHEP/WebRTC（主画面加两路辅助画面）；竖屏保留单主画面，第四路必须等待已有解码会话释放。这个客户端上限避免把全部六路相机无约束地变成移动端高频负载，且不改变既有视频 API、ROS 或 MediaMTX 契约。
 
 ## 2. 功能域
 
@@ -40,7 +40,7 @@ Flutter 客户端是 Aletheia 面向可信局域网中移动机器人的专业 H
 | 场景前置配置 | 选择 FCRP `.launch.py` 与 lightning YAML，受控替换 `handle_modules.sh`；应用/恢复均让受控依赖重读脚本并确认稳定运行。 |
 | 多地图轨迹 | 缓存实际地图，叠加实际轨迹、理想路线、虚拟墙并归档。 |
 | 报告中心 | 统一生成、预览、下载、删除自动测试报告与部署验收报告。两类报告均为可离线查看的单文件 HTML；验收报告额外归档范围、覆盖、每项时间/结果和已验证的轨迹证据。 |
-| 实时运行观测 | 地图、虚拟墙、车体轮廓、定位、点云、仅 PC 的局部代价地图，以及网页按需启停的低延迟相机视频。 |
+| 实时运行观测 | 地图、虚拟墙、车体轮廓、定位、点云、PC 与 Flutter Mobile 的局部代价地图，以及网页按需启停的低延迟相机视频。 |
 | 运行配置 | 依赖编排、车型、实时观测、升级和持久化设置。 |
 | 工具日志 | 独立记录升级、ROS2、专用遥测、观测和异常诊断。 |
 | 机器人日志下载 | Desktop Web 管理当前小车的可读系统日志目录，按文件名筛选并逐文件下载到打开网页的电脑；显示小车到浏览器的传输进度，默认仅在下载副本中将可识别 ROS 时间转为北京时间，可关闭后保留原始文本。 |
@@ -64,7 +64,7 @@ Flutter 客户端是 Aletheia 面向可信局域网中移动机器人的专业 H
 ```text
 同网段浏览器
   │ HTTP :8087（控制台、API、报告）
-  │ Binary WebSocket :8768（专用实时遥测：点云/位姿/PC 局部代价地图）
+  │ Binary WebSocket :8768（专用实时遥测：点云/位姿/局部代价地图）
   │ WHEP/WebRTC :8889（可选相机直出）
   ▼
 RY Aletheia（普通账户）
@@ -82,7 +82,7 @@ RY Aletheia（普通账户）
        └─ 运行数据：tasks、config、reports、maps_cache、updates、logs
 ```
 
-测试执行经 HTTP API 进入 `RunManager`。地图仍由既有缓存/API 机制加载。C++ 点云、位姿和局部代价地图预处理分别写入独立最新数据槽，并分别经独立的回环 UDP 入口交给 Aletheia 专用遥测网关；网关只组装最新完整帧，并以三条 Binary WebSocket 分离大栅格、点云与位姿。costmap 仅 PC 浏览器连接，避免影响移动端；相机视频不经过遥测网关：浏览器用 WHEP 与本机 MediaMTX 建立 WebRTC 会话，Python 只提供受控的状态与开关 API。
+测试执行经 HTTP API 进入 `RunManager`。地图仍由既有缓存/API 机制加载。C++ 点云、位姿和局部代价地图预处理分别写入独立最新数据槽，并分别经独立的回环 UDP 入口交给 Aletheia 专用遥测网关；网关只组装最新完整帧，并以三条 Binary WebSocket 分离大栅格、点云与位姿。PC 与 Flutter Mobile 可独立连接 costmap，并各自在单槽 latest-wins 路径中安全显示，不相互反压；相机视频不经过遥测网关：浏览器用 WHEP 与本机 MediaMTX 建立 WebRTC 会话，Python 只提供受控的状态与开关 API。
 
 ## 4. 目录与数据所有权
 
@@ -201,7 +201,7 @@ PixiJS 最新点云几何       ├─ Pixi 世界容器：缩放、拖动（固
 车体 DOM 覆盖层           ┘
 ```
 
-实时二维地图由 PixiJS 管理：静态占据地图为纹理，局部代价地图为单张动态 texture，虚拟墙和点云为独立图层；首次取得或切图时才更新静态地图纹理。PC 默认显示局部代价地图并允许临时隐藏；其图层顺序固定为静态地图、PC 米制格栅（如启用）、costmap、虚拟墙、点云和 DOM 车体。costmap 由 `header.stamp` 时刻的 `map ← header.frame_id` 与 `info.origin` 合成，未知/自由 cell 透明，不能假定 `odom == map`；数据超过 5 秒、切图或 TF 暂不可用时安全隐藏。唯一受限例外是新鲜 `odom` 栅格的精确 TF 查询失败、且最新 `map ← odom` 已验证为完整 3D 单位变换，此时可无损显示；任何非单位或无法验证的变换仍安全隐藏。PC 保留原有高对比蓝色观测主题和无格栅画面；仅移动端的 `html.mobile-console` 额外绘制严格对齐 `map` 世界坐标的米制格栅，并按当前缩放在 1m、2m、5m 小格之间自适应，主格恒为小格的 5 倍。移动端不建立 `/costmap` 连接或渲染其图层。拖动、缩放与位姿跟随只更新 Pixi 世界容器变换，点云只替换最新一帧几何，均不重绘静态底图。缩放以鼠标位置为中心，中键或左键拖动仅改变视图变换。地图必须稳定保持原始 `map` 坐标朝向，不能在进入页面时按车体初始航向旋转；只允许车体 DOM 图标旋转。相机视频先由独立的浏览器原生 `<video>` 元素接收 WHEP/WebRTC，再作为 PixiJS `Video Texture` 合成到相机卡片；视频数据本身不进入 Canvas 2D、WebSocket 或 Python。
+实时二维地图的 PC Web 由 PixiJS 管理，Flutter Mobile 由 CustomPaint 管理：静态占据地图分别为纹理/图像，局部代价地图为单张动态 texture/RGBA 栅格，虚拟墙和点云为独立图层；首次取得或切图时才更新静态地图。两端默认显示局部代价地图并允许仅本机临时隐藏；图层顺序固定为静态地图、米制格栅（如启用）、costmap、虚拟墙、点云和车体。costmap 由 `header.stamp` 时刻的 `map ← header.frame_id` 与 `info.origin` 合成，未知/自由 cell 透明，不能假定 `odom == map`；数据超过 5 秒、切图或 TF 暂不可用时安全隐藏。唯一受限例外是新鲜 `odom` 栅格的精确 TF 查询失败、且最新 `map ← odom` 已验证为完整 3D 单位变换，此时可无损显示；任何非单位或无法验证的变换仍安全隐藏。PC 保留原有高对比蓝色观测主题；Flutter 以同一 map world transform 叠加受限 costmap 栅格。拖动、缩放与位姿跟随只更新各自世界容器变换，点云只替换最新一帧几何，均不重绘静态底图。地图必须稳定保持原始 `map` 坐标朝向，不能在进入页面时按车体初始航向旋转；只允许车体图标旋转。相机视频先由独立的浏览器原生 `<video>` 元素接收 WHEP/WebRTC，再作为 PixiJS `Video Texture` 合成到相机卡片；视频数据本身不进入 Canvas 2D、WebSocket 或 Python。
 
 ### 9.2 时效优先与背压
 
@@ -268,7 +268,7 @@ PixiJS 最新点云几何       ├─ Pixi 世界容器：缩放、拖动（固
 
 ## 10. 前端维护
 
-前端源位于 `frontend/src/`，构建产物输出到 `autodrive_console/web-vue/`。主要页面为任务指挥台、实时运行观测、测试用例管理、场景前置配置、报告中心、运行配置和工具日志。实时观测页依赖 `pixi.js`：`liveObservation.js` 负责地图纹理、单张 costmap texture、虚拟墙、点云图层、DOM 车体层与页面交互；PC 地图独占工作区，不保留冗余图像订阅选择器。costmap 仅在 PC 连接 `/costmap`，默认可见且可临时隐藏；移动端不增加此流或控件。相机卡片以原生 `<video>` 接收 WHEP/WebRTC，并转为 PixiJS `Video Texture`。桌面网格按启用路数自适应列数；移动端五路时保持一主四预览，六路时切换为均衡 3×2（横屏）或 2×3（竖屏）矩阵，确保所有画面完整可见。控制调用 `/api/video/status` 与 `/api/video/control`，不会直接接触 ROS 或 MediaMTX。
+前端源位于 `frontend/src/`，构建产物输出到 `autodrive_console/web-vue/`。主要页面为任务指挥台、实时运行观测、测试用例管理、场景前置配置、报告中心、运行配置和工具日志。PC 实时观测页依赖 `pixi.js`：`liveObservation.js` 负责地图纹理、单张 costmap texture、虚拟墙、点云图层、DOM 车体层与页面交互；PC 地图独占工作区，不保留冗余图像订阅选择器。Flutter Mobile 同样连接 `/costmap`，将其最新有效帧绘制为与 PC 等价色标的单张 RGBA 栅格，默认可见且可临时隐藏；该显示偏好不写入车端。相机卡片以原生 `<video>` 接收 WHEP/WebRTC，并转为 PixiJS `Video Texture`。桌面网格按启用路数自适应列数；移动端五路时保持一主四预览，六路时切换为均衡 3×2（横屏）或 2×3（竖屏）矩阵，确保所有画面完整可见。控制调用 `/api/video/status` 与 `/api/video/control`，不会直接接触 ROS 或 MediaMTX。
 
 共享视觉样式集中在 `autodrive_console/web/*.css` 与 `frontend/src/*.css`。PC 与移动端必须有明确样式边界：移动主题仅以 `html.mobile-console` 或 `/m/` 壳层选择器生效，不能用未限定的 `:root`、`body`、`aside`、地图配色或格栅逻辑覆盖 PC。深/浅主题只写浏览器 Local Storage，不写机器人配置。新页面默认避免冗余说明文字，但必须保留必要的安全状态和错误反馈。
 
@@ -375,7 +375,7 @@ cmake --build build/live_preprocessor --parallel 2
 
 ### 11.4 专用实时遥测的边界
 
-完整离线包不包含通用 ROS-Web Bridge，也不会复制整套 ROS Humble。`ObservationManager` 只拥有 Aletheia 创建的三个 C++ 预处理进程和本机遥测网关：点云 UDP 接收端固定绑定 `127.0.0.1:8769`，位姿 UDP 接收端固定绑定 `127.0.0.1:8770`，局部代价地图 UDP 接收端固定绑定 `127.0.0.1:8771`，浏览器 Binary WebSocket 端口为 `8768`。网关没有 ROS client、topic 发现、订阅选择或控制接口；它只接受具有固定二进制协议的本机点云、位姿和 costmap 帧。costmap lane 仅在 PC Web 页面连接，移动端保持既有两条观测流。
+完整离线包不包含通用 ROS-Web Bridge，也不会复制整套 ROS Humble。`ObservationManager` 只拥有 Aletheia 创建的三个 C++ 预处理进程和本机遥测网关：点云 UDP 接收端固定绑定 `127.0.0.1:8769`，位姿 UDP 接收端固定绑定 `127.0.0.1:8770`，局部代价地图 UDP 接收端固定绑定 `127.0.0.1:8771`，浏览器 Binary WebSocket 端口为 `8768`。网关没有 ROS client、topic 发现、订阅选择或控制接口；它只接受具有固定二进制协议的本机点云、位姿和 costmap 帧。costmap lane 可由 PC Web 与 Flutter Mobile 独立只读连接；每个客户端独立 latest-wins，不会改变车端处理或其它流。
 
 网关健康状态来自自身受控生命周期和有效帧时间，而不是对其他 ROS 服务或 WebSocket 端口做裸 TCP 探测。任何启动、端口占用、无点云、无 TF、浏览器连接失败或源数据过期都会记录到工具日志；网络发送与 ROS 回调隔离，慢浏览器只能丢弃自己的历史帧。
 

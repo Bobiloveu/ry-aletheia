@@ -76,19 +76,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Bootstrap Dart for FVM; fvm install then reads mobile/.fvmrc as the Flutter SDK source of truth.
+      # CI pins the same SDK version as mobile/.fvmrc via flutter-action.
+      # FVM remains the local developer entrypoint; CI must not download a
+      # second SDK on a fresh runner with an empty FVM cache.
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: 3.47.1
           channel: stable
-      - run: dart pub global activate fvm 4.3.0
-      - run: echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+          cache: true
       - working-directory: mobile
         run: |
-          fvm install
-          fvm flutter pub get
-          fvm flutter analyze
-          fvm flutter test --exclude-tags golden --concurrency=1 -r compact
+          for attempt in 1 2 3; do
+            dart pub get --enforce-lockfile && break
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep 10
+          done
+          # Flutter's compiler/tester talks to a loopback HTTP service. Keep
+          # dependency downloads proxy-aware, but never proxy local test traffic.
+          export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
+          export no_proxy="$NO_PROXY"
+          env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+            -u http_proxy -u https_proxy -u all_proxy flutter analyze
+          # Local/FVM equivalent: fvm flutter test --exclude-tags golden --concurrency=1 -r compact
+          env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+            -u http_proxy -u https_proxy -u all_proxy \
+            flutter test --exclude-tags golden --concurrency=1 -r compact
 
   mobile-golden:
     needs: changes
@@ -100,13 +112,20 @@ jobs:
         with:
           flutter-version: 3.47.1
           channel: stable
-      - run: dart pub global activate fvm 4.3.0
-      - run: echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+          cache: true
       - working-directory: mobile
         run: |
-          fvm install
-          fvm flutter pub get
-          fvm flutter test test/debug_ui/gallery_golden_test.dart --concurrency=1 -r compact
+          for attempt in 1 2 3; do
+            dart pub get --enforce-lockfile && break
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep 10
+          done
+          export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
+          export no_proxy="$NO_PROXY"
+          # Local/FVM equivalent: fvm flutter test test/debug_ui/gallery_golden_test.dart --concurrency=1 -r compact
+          env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+            -u http_proxy -u https_proxy -u all_proxy \
+            flutter test test/debug_ui/gallery_golden_test.dart --concurrency=1 -r compact
 
   android:
     needs: changes
@@ -122,13 +141,15 @@ jobs:
         with:
           flutter-version: 3.47.1
           channel: stable
-      - run: dart pub global activate fvm 4.3.0
-      - run: echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+          cache: true
       - working-directory: mobile
         run: |
-          fvm install
-          fvm flutter pub get
-          fvm flutter build apk --debug
+          for attempt in 1 2 3; do
+            dart pub get --enforce-lockfile && break
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep 10
+          done
+          flutter build apk --debug
 
   ios:
     needs: changes
@@ -140,10 +161,12 @@ jobs:
         with:
           flutter-version: 3.47.1
           channel: stable
-      - run: dart pub global activate fvm 4.3.0
-      - run: echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+          cache: true
       - working-directory: mobile
         run: |
-          fvm install
-          fvm flutter pub get
-          fvm flutter build ios --simulator --debug --no-codesign
+          for attempt in 1 2 3; do
+            dart pub get --enforce-lockfile && break
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep 10
+          done
+          flutter build ios --simulator --debug --no-codesign

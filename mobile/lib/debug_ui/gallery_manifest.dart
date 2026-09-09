@@ -261,6 +261,16 @@ const galleryScreenManifest = <GalleryScreenSpec>[
     screenshotPath: 'observe/live-map.png',
   ),
   GalleryScreenSpec(
+    id: 'observe_live_costmap',
+    module: GalleryModule.observe,
+    title: '实时观测',
+    route: '/observation',
+    state: '地图、位置、点云与局部代价地图正常',
+    trigger: '机器人实时遥测已推送局部导航代价地图',
+    surface: GallerySurface.observationMap,
+    screenshotPath: 'observe/live-costmap.png',
+  ),
+  GalleryScreenSpec(
     id: 'observe_stress',
     module: GalleryModule.observe,
     title: '实时观测压力场景',

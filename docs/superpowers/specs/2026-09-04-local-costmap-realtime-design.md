@@ -1,5 +1,7 @@
 # PC 实时观测：局部代价地图设计
 
+> 历史设计记录（2026-09-04）：本文描述当时的 PC-only 首次接入范围，不能作为当前消费者范围的事实来源。Flutter Mobile 后续已接入同一只读 `/costmap` 契约；请以 [shared/contracts/realtime_observation.md](../../../shared/contracts/realtime_observation.md) 与 [PROJECT_OVERVIEW.md](../../../PROJECT_OVERVIEW.md) 为准。
+
 **日期：** 2026-09-04
 **状态：** 已实施；自动化、前端生产构建与 C++ 编译已通过，实车验收待执行。
 **范围：** 仅扩展 PC 实时运行观测；不修改 Flutter 移动端、导航、地图、任务、视频或任何机器人控制路径。

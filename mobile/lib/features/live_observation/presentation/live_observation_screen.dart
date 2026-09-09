@@ -12,12 +12,17 @@ import '../../../app/motion/aletheia_motion.dart';
 import '../../../app/theme/aletheia_theme.dart';
 import '../../../core/connection/robot_connection_controller.dart';
 import '../application/cloud_telemetry_provider.dart';
+import '../application/costmap_telemetry_provider.dart';
+import '../application/costmap_visibility_controller.dart';
 import '../application/live_observation_controller.dart';
 import '../application/pose_telemetry_provider.dart';
 import '../application/video_display_layout_controller.dart';
 import '../application/video_status_controller.dart';
 import '../data/cloud_telemetry_client.dart';
+import '../data/costmap_telemetry_client.dart';
 import '../domain/cloud_frame.dart';
+import '../domain/costmap_frame.dart';
+import '../domain/costmap_raster.dart';
 import '../domain/live_map.dart';
 import '../domain/pose_frame.dart';
 import '../domain/video_status.dart';
@@ -1816,6 +1821,7 @@ class _MapToolbar extends StatelessWidget {
             icon: const Icon(Icons.videocam_outlined),
           ),
           _MapFollowAction(cameraFollowController: cameraFollowController),
+          const _CostmapVisibilityAction(),
           if (onFullscreen != null)
             IconButton(
               key: const ValueKey('map-fullscreen-enter-action'),
@@ -1900,6 +1906,7 @@ class _MapToolRail extends StatelessWidget {
           icon: const Icon(Icons.videocam_outlined),
         ),
         _MapFollowAction(cameraFollowController: cameraFollowController),
+        const _CostmapVisibilityAction(),
         if (onFullscreen != null)
           IconButton(
             key: const ValueKey('map-fullscreen-enter-action'),
@@ -1960,6 +1967,23 @@ class _MapFollowAction extends StatelessWidget {
       );
     },
   );
+}
+
+class _CostmapVisibilityAction extends ConsumerWidget {
+  const _CostmapVisibilityAction();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final visible = ref.watch(costmapVisibilityProvider);
+    return IconButton(
+      key: const ValueKey('map-costmap-visibility-action'),
+      tooltip: visible ? '隐藏局部代价地图' : '显示局部代价地图',
+      visualDensity: VisualDensity.compact,
+      color: visible ? AletheiaTheme.cyan : null,
+      onPressed: ref.read(costmapVisibilityProvider.notifier).toggle,
+      icon: Icon(visible ? Icons.layers_rounded : Icons.layers_outlined),
+    );
+  }
 }
 
 class _MapOperationalReadout extends ConsumerWidget {
@@ -2153,6 +2177,7 @@ class _MapViewportState extends ConsumerState<_MapViewport>
     ref.listen(poseTelemetryProvider, (_, next) {
       next.whenData((sample) => _onPose(sample.frame));
     });
+    final costmapVisible = ref.watch(costmapVisibilityProvider);
     final preview = ref.watch(liveMapPreviewBuilderProvider);
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -2261,6 +2286,16 @@ class _MapViewportState extends ConsumerState<_MapViewport>
                                           viewportScale: _scale,
                                         ),
                                       ),
+                                      if (costmapVisible)
+                                        RepaintBoundary(
+                                          key: const ValueKey(
+                                            'map-costmap-layer',
+                                          ),
+                                          child: _CostmapMapLayer(
+                                            mapId: widget.map.id,
+                                            metadata: widget.map.metadata,
+                                          ),
+                                        ),
                                       RepaintBoundary(
                                         child: _VirtualWallMapLayer(
                                           metadata: widget.map.metadata,
@@ -2764,6 +2799,215 @@ class _WorldGridPainter extends CustomPainter {
   bool shouldRepaint(covariant _WorldGridPainter oldDelegate) =>
       oldDelegate.metadata != metadata ||
       oldDelegate.viewportScale != viewportScale;
+}
+
+/// A compact raster overlay for the robot's current local navigation costs.
+///
+/// The image is rebuilt only for the latest frame. It is drawn in the exact
+/// same map coordinate space as the static map, grid, walls, cloud and pose.
+class _CostmapMapLayer extends ConsumerStatefulWidget {
+  const _CostmapMapLayer({required this.mapId, required this.metadata});
+
+  final String mapId;
+  final LiveMapMetadata metadata;
+
+  @override
+  ConsumerState<_CostmapMapLayer> createState() => _CostmapMapLayerState();
+}
+
+class _CostmapMapLayerState extends ConsumerState<_CostmapMapLayer> {
+  static const _displayMaximumAge = Duration(seconds: 5);
+
+  ui.Image? _image;
+  CostmapTelemetrySample? _displayedSample;
+  CostmapTelemetrySample? _pendingSample;
+  Timer? _expiryTimer;
+  bool _rasterizing = false;
+  bool _awaitingMapSwitchFrame = false;
+  int? _mapSwitchFenceSequence;
+  int? _lastScheduledSequence;
+
+  @override
+  void didUpdateWidget(covariant _CostmapMapLayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.mapId == widget.mapId) {
+      return;
+    }
+    _awaitingMapSwitchFrame = true;
+    _mapSwitchFenceSequence = null;
+    _pendingSample = null;
+    _lastScheduledSequence = null;
+    _clearDisplayedRaster();
+  }
+
+  @override
+  void dispose() {
+    _expiryTimer?.cancel();
+    _image?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sample = ref
+        .watch(costmapTelemetryProvider)
+        .maybeWhen(data: (value) => value, orElse: () => null);
+    if (sample != null && _lastScheduledSequence != sample.frame.sequence) {
+      _lastScheduledSequence = sample.frame.sequence;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _acceptSample(sample);
+        }
+      });
+    }
+    return IgnorePointer(
+      child: CustomPaint(
+        key: const ValueKey('map-costmap-paint'),
+        painter: _CostmapPainter(
+          metadata: widget.metadata,
+          frame: _displayedSample?.frame,
+          image: _image,
+        ),
+        child: const SizedBox.expand(),
+      ),
+    );
+  }
+
+  void _acceptSample(CostmapTelemetrySample sample) {
+    if (_awaitingMapSwitchFrame) {
+      final fence = _mapSwitchFenceSequence;
+      if (fence == null) {
+        _mapSwitchFenceSequence = sample.frame.sequence;
+        return;
+      }
+      if (sample.frame.sequence == fence) {
+        return;
+      }
+      _awaitingMapSwitchFrame = false;
+    }
+    if (DateTime.now().difference(sample.receivedAt) > _displayMaximumAge) {
+      _clearDisplayedRaster();
+      return;
+    }
+    _pendingSample = sample;
+    unawaited(_rasterizeLatest());
+  }
+
+  Future<void> _rasterizeLatest() async {
+    if (_rasterizing) {
+      return;
+    }
+    _rasterizing = true;
+    while (_pendingSample != null) {
+      final sample = _pendingSample!;
+      _pendingSample = null;
+      final image = await _decodeCostmapRaster(sample.frame);
+      if (!mounted) {
+        image.dispose();
+        return;
+      }
+      if (DateTime.now().difference(sample.receivedAt) > _displayMaximumAge) {
+        image.dispose();
+        continue;
+      }
+      final previous = _image;
+      setState(() {
+        _image = image;
+        _displayedSample = sample;
+      });
+      previous?.dispose();
+      _scheduleExpiry(sample);
+    }
+    _rasterizing = false;
+  }
+
+  void _scheduleExpiry(CostmapTelemetrySample sample) {
+    _expiryTimer?.cancel();
+    final remaining =
+        _displayMaximumAge - DateTime.now().difference(sample.receivedAt);
+    _expiryTimer = Timer(remaining.isNegative ? Duration.zero : remaining, () {
+      if (!mounted || !identical(_displayedSample, sample)) {
+        return;
+      }
+      _clearDisplayedRaster();
+    });
+  }
+
+  void _clearDisplayedRaster() {
+    _expiryTimer?.cancel();
+    final previous = _image;
+    if (mounted) {
+      setState(() {
+        _image = null;
+        _displayedSample = null;
+      });
+    } else {
+      _image = null;
+      _displayedSample = null;
+    }
+    previous?.dispose();
+  }
+}
+
+Future<ui.Image> _decodeCostmapRaster(CostmapFrame frame) {
+  final completer = Completer<ui.Image>();
+  ui.decodeImageFromPixels(
+    costmapRgbaBytes(frame),
+    frame.width,
+    frame.height,
+    ui.PixelFormat.rgba8888,
+    completer.complete,
+    rowBytes: frame.width * 4,
+  );
+  return completer.future;
+}
+
+class _CostmapPainter extends CustomPainter {
+  const _CostmapPainter({
+    required this.metadata,
+    required this.frame,
+    required this.image,
+  });
+
+  final LiveMapMetadata metadata;
+  final CostmapFrame? frame;
+  final ui.Image? image;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final localMap = frame;
+    final raster = image;
+    if (localMap == null || raster == null) {
+      return;
+    }
+    final scaleX = size.width / metadata.worldWidth;
+    final scaleY = size.height / metadata.worldHeight;
+    final width = localMap.width * localMap.resolution * scaleX;
+    final height = localMap.height * localMap.resolution * scaleY;
+    if (!width.isFinite || !height.isFinite || width <= 0 || height <= 0) {
+      return;
+    }
+    final originX = (localMap.originX - metadata.originX) * scaleX;
+    final originY =
+        size.height - (localMap.originY - metadata.originY) * scaleY;
+    canvas.save();
+    canvas.clipRect(Offset.zero & size);
+    canvas.translate(originX, originY);
+    canvas.rotate(-localMap.originYaw);
+    canvas.drawImageRect(
+      raster,
+      Rect.fromLTWH(0, 0, raster.width.toDouble(), raster.height.toDouble()),
+      Rect.fromLTWH(0, -height, width, height),
+      Paint()..filterQuality = FilterQuality.none,
+    );
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant _CostmapPainter oldDelegate) =>
+      oldDelegate.metadata != metadata ||
+      oldDelegate.frame?.sequence != frame?.sequence ||
+      oldDelegate.image != image;
 }
 
 class _VirtualWallMapLayer extends StatelessWidget {
