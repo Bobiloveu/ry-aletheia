@@ -4,7 +4,9 @@ import shutil
 import threading
 import time
 import re
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
@@ -14,6 +16,7 @@ from .settings import RobotSettings
 from .supervisor import SupervisorClient
 
 DEPENDENCY_STABILITY_TIMEOUT_SECONDS = 300.0
+LOGGER = logging.getLogger("ry_aletheia.robot_gateway")
 
 
 @dataclass
@@ -31,9 +34,15 @@ class PreflightResult:
 class RobotGateway:
     """本机运行网关：节点健康检查与任务文件同步均通过此处完成。"""
 
-    def __init__(self, settings: RobotSettings, status_callback: Callable[[list[dict]], None] | None = None) -> None:
+    def __init__(
+        self,
+        settings: RobotSettings,
+        status_callback: Callable[[list[dict]], None] | None = None,
+        dependency_restart_callback: Callable[[bool], None] | None = None,
+    ) -> None:
         self.settings = settings
         self.status_callback = status_callback
+        self.dependency_restart_callback = dependency_restart_callback
 
     def preflight(self, case: TestCase, cancel_event: threading.Event | None = None) -> PreflightResult:
         if cancel_event and cancel_event.is_set():
@@ -123,18 +132,19 @@ class RobotGateway:
             statuses = {item.name: item.status for item in client.discover()}
         except RuntimeError as exc:
             return False, str(exc)
-        errors = []
-        with ThreadPoolExecutor(max_workers=min(2, len(consumers))) as pool:
-            futures = {
-                pool.submit(getattr(client, "restart" if statuses.get(name) == "RUNNING" else "start"), name): name
-                for name in consumers
-            }
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except RuntimeError as exc:
-                    errors.append(f"{futures[future]}：{exc}")
-        ready, detail = self._wait_stage_running(client, consumers)
+        with self._dependency_restart_activity():
+            errors = []
+            with ThreadPoolExecutor(max_workers=min(2, len(consumers))) as pool:
+                futures = {
+                    pool.submit(getattr(client, "restart" if statuses.get(name) == "RUNNING" else "start"), name): name
+                    for name in consumers
+                }
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except RuntimeError as exc:
+                        errors.append(f"{futures[future]}：{exc}")
+            ready, detail = self._wait_stage_running(client, consumers)
         if not ready:
             return False, f"最小场景依赖未稳定就绪：{detail}"
         if errors:
@@ -186,21 +196,22 @@ class RobotGateway:
                 return {"enabled": True, "stages": stages}, f"依赖编排第 {index} 阶段无法读取节点状态：{exc}"
             actions = {node: "restart" if current_statuses.get(node) == "RUNNING" else "start" for node in nodes}
             stage["actions"] = actions
-            control_errors = []
-            with ThreadPoolExecutor(max_workers=min(8, len(nodes))) as pool:
-                futures = {pool.submit(getattr(client, action), node): node for node, action in actions.items()}
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except RuntimeError as exc:
-                        node = futures[future]
-                        control_errors.append(f"{node}（{actions[node]}）：{exc}")
-            if cancel_event and cancel_event.is_set():
-                return {"enabled": True, "stages": stages}, "测试已取消"
-            # Supervisor 可能在拉起、重试或超时时返回控制命令错误；不据此抢先判失败，仍以实际 status 持续等待。
-            stage["control_errors"] = control_errors
-            stage["restart"] = "accepted_with_feedback" if control_errors else "accepted"
-            ready, detail = self._wait_stage_running(client, nodes, cancel_event)
+            with self._dependency_restart_activity():
+                control_errors = []
+                with ThreadPoolExecutor(max_workers=min(8, len(nodes))) as pool:
+                    futures = {pool.submit(getattr(client, action), node): node for node, action in actions.items()}
+                    for future in as_completed(futures):
+                        try:
+                            future.result()
+                        except RuntimeError as exc:
+                            node = futures[future]
+                            control_errors.append(f"{node}（{actions[node]}）：{exc}")
+                if cancel_event and cancel_event.is_set():
+                    return {"enabled": True, "stages": stages}, "测试已取消"
+                # Supervisor 可能在拉起、重试或超时时返回控制命令错误；不据此抢先判失败，仍以实际 status 持续等待。
+                stage["control_errors"] = control_errors
+                stage["restart"] = "accepted_with_feedback" if control_errors else "accepted"
+                ready, detail = self._wait_stage_running(client, nodes, cancel_event)
             if not ready:
                 stage["restart"] = "timeout"
                 return {"enabled": True, "stages": stages}, f"依赖编排第 {index} 阶段未就绪：{detail}"
@@ -259,6 +270,26 @@ class RobotGateway:
                 for name in step["nodes"]
             ]
         return self.settings.nodes
+
+    @contextmanager
+    def _dependency_restart_activity(self):
+        """Publish activity only around Aletheia's actual supervisor control interval."""
+        callback = self.dependency_restart_callback
+        active = False
+        if callback is not None:
+            try:
+                callback(True)
+                active = True
+            except Exception:
+                LOGGER.exception("发布依赖重启活动状态失败")
+        try:
+            yield
+        finally:
+            if active:
+                try:
+                    callback(False)
+                except Exception:
+                    LOGGER.exception("清除依赖重启活动状态失败")
 
     def _sync_if_missing(self, case: TestCase) -> tuple[bool, str]:
         destination_dir = Path(self.settings.task_directory)

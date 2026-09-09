@@ -65,6 +65,7 @@ class RunManager:
         self._attempt_interrupt_events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
         self._execution_lock = threading.Lock()
+        self._dependency_restart_count = 0
 
     def start(self, case: TestCase, count: int, interval_s: float, prepare_trajectory_maps: bool = True) -> RunRecord:
         if not 1 <= count <= 1000:
@@ -395,7 +396,11 @@ class RunManager:
         if scenario["applied"] or settings.dependency_plan.get("enabled"):
             if progress_callback:
                 progress_callback("restarting_dependencies", "正在恢复已冻结的运行依赖")
-            gateway = RobotGateway(settings, lambda states: self._update_preflight_nodes(run, states))
+            gateway = RobotGateway(
+                settings,
+                lambda states: self._update_preflight_nodes(run, states),
+                self._set_dependency_restart_active,
+            )
             ready, detail = gateway.restart_configured_dependencies()
             scenario["runtime_restart"] = detail
             if not ready:
@@ -419,6 +424,19 @@ class RunManager:
         active = {"queued", "preparing", "running", "cancelling", "awaiting_recovery", "recovering"}
         with self._lock:
             return any(run.status in active for run in self._runs.values())
+
+    def dependency_restart_active(self) -> bool:
+        """Whether this manager is currently controlling configured dependencies."""
+        with self._lock:
+            return self._dependency_restart_count > 0
+
+    def _set_dependency_restart_active(self, active: bool) -> None:
+        """Reference-count nested gateway restart windows under the run lock."""
+        with self._lock:
+            if active:
+                self._dependency_restart_count += 1
+            else:
+                self._dependency_restart_count = max(0, self._dependency_restart_count - 1)
 
     def cancel(self, run_id: str) -> RunRecord | None:
         with self._lock:
@@ -499,7 +517,11 @@ class RunManager:
                         run.status = "cancelled"
                         return
                 run.preflight["task_sync"] = "正在执行运行依赖预检"
-                gateway = RobotGateway(sequence_context["settings"] if sequence_context else self.settings.load(), lambda states: self._update_preflight_nodes(run, states))
+                gateway = RobotGateway(
+                    sequence_context["settings"] if sequence_context else self.settings.load(),
+                    lambda states: self._update_preflight_nodes(run, states),
+                    self._set_dependency_restart_active,
+                )
                 preflight = (
                     gateway.preflight_without_orchestration(run.case, cancel_event=cancel_event)
                     if sequence_context else gateway.preflight(run.case, cancel_event=cancel_event)
@@ -805,7 +827,7 @@ class RunManager:
 
     def _restart_scenario_dependencies(self) -> tuple[bool, str]:
         settings = self.settings.load()
-        gateway = RobotGateway(settings)
+        gateway = RobotGateway(settings, None, self._set_dependency_restart_active)
         return gateway.restart_configured_dependencies()
 
     @staticmethod
@@ -867,7 +889,11 @@ class RunManager:
 
     def _recover_after_manual_intervention(self, run: RunRecord, cancel_event: threading.Event | None = None, *, settings_override=None, skip_orchestration: bool = False) -> tuple[bool, str]:
         """继续前完整重做依赖编排、服务发现与最终节点总闸。"""
-        gateway = RobotGateway(settings_override if settings_override is not None else self.settings.load(), lambda states: self._update_recovery_nodes(run, states))
+        gateway = RobotGateway(
+            settings_override if settings_override is not None else self.settings.load(),
+            lambda states: self._update_recovery_nodes(run, states),
+            self._set_dependency_restart_active,
+        )
         preflight = (
             gateway.preflight_without_orchestration(run.case, cancel_event=cancel_event)
             if skip_orchestration else gateway.preflight(run.case, cancel_event=cancel_event)

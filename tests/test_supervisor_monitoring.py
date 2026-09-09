@@ -51,6 +51,31 @@ class SupervisorMonitoringTests(unittest.TestCase):
         self.assertFalse(ready)
         self.assertEqual(detail, "测试已取消")
 
+    def test_minimal_dependency_restart_signals_only_the_real_control_interval(self):
+        """The status display may announce restart only while Aletheia controls nodes."""
+        activity = []
+        settings = RobotSettings(nodes=[
+            {"id": "localization", "label": "定位", "supervisor": "localizer", "required": True},
+        ])
+        gateway = RobotGateway(settings, dependency_restart_callback=activity.append)
+
+        class FakeClient:
+            @staticmethod
+            def discover():
+                return [SupervisorProcess("localizer", "RUNNING", "")]
+
+            @staticmethod
+            def restart(name):
+                self.assertEqual(name, "localizer")
+
+        with patch("autodrive_console.robot_gateway.SupervisorClient", return_value=FakeClient()), patch.object(
+            gateway, "_wait_stage_running", return_value=(True, "连续 5 次检查均为 RUNNING")
+        ):
+            ok, _message = gateway.restart_configured_dependencies()
+
+        self.assertTrue(ok)
+        self.assertEqual(activity, [True, False])
+
 
 if __name__ == "__main__":
     unittest.main()

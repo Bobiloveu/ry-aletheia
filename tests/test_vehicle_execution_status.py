@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from autodrive_console.vehicle_execution_status.classifier import classify_execution_state
 from autodrive_console.vehicle_execution_status.model import NavigationState, TaskEvent
+from autodrive_console.vehicle_execution_status.monitor import VehicleExecutionStatusMonitor
+from autodrive_console.run_manager import RunManager
 import pytest
 
 
@@ -115,3 +119,61 @@ def test_classifier_surfaces_controlled_restart_before_ros_state() -> None:
     )
 
     assert snapshot.phase == "restarting_nodes"
+
+
+class FakeNavigation:
+    def __init__(self, *, status: str, current_task: str = "", current_waypoint_id: str = "", current_speed_mode: str = "") -> None:
+        self.status = status
+        self.current_task = current_task
+        self.current_waypoint_id = current_waypoint_id
+        self.current_speed_mode = current_speed_mode
+
+
+class FakeTask:
+    def __init__(self, *, status_code: str) -> None:
+        self.status_code = status_code
+
+
+def test_monitor_returns_unavailable_when_navigation_has_expired() -> None:
+    """A recent task event cannot keep a nonterminal robot state alive forever."""
+    monitor = VehicleExecutionStatusMonitor(clock=lambda: 10.0, freshness_s=4.0)
+    monitor.observe_navigation(FakeNavigation(status="running"), received_at=1.0)
+    monitor.observe_task(FakeTask(status_code="200"), received_at=9.0)
+
+    assert monitor.status() == {"phase": "unavailable", "label": "状态暂不可用"}
+
+
+def test_monitor_uses_the_latest_ros_callbacks_without_restarting_subscription() -> None:
+    monitor = VehicleExecutionStatusMonitor(clock=lambda: 5.0, freshness_s=4.0)
+    monitor.observe_navigation(FakeNavigation(status="running", current_task="elevator_in_1.xml"), received_at=4.0)
+    monitor.observe_task(FakeTask(status_code="201"), received_at=5.0)
+
+    assert monitor.status() == {"phase": "entering_elevator", "label": "进梯中"}
+
+
+def test_monitor_allows_only_a_fresh_completed_event_without_navigation() -> None:
+    monitor = VehicleExecutionStatusMonitor(clock=lambda: 10.0, freshness_s=4.0, task_event_freshness_s=15.0)
+    monitor.observe_task(FakeTask(status_code="109"), received_at=9.0)
+
+    assert monitor.status() == {"phase": "completed", "label": "任务完成"}
+
+
+def test_monitor_reports_controlled_restart_without_ros_traffic() -> None:
+    monitor = VehicleExecutionStatusMonitor(clock=lambda: 10.0, restarting_nodes=lambda: True)
+
+    assert monitor.status() == {"phase": "restarting_nodes", "label": "节点重启中"}
+
+
+def test_run_manager_keeps_restart_activity_true_until_nested_control_ends() -> None:
+    """Overlapping dependency stages cannot briefly show a false idle state."""
+    manager = RunManager(Path("unused"), object(), object())
+
+    manager._set_dependency_restart_active(True)
+    manager._set_dependency_restart_active(True)
+    manager._set_dependency_restart_active(False)
+
+    assert manager.dependency_restart_active() is True
+
+    manager._set_dependency_restart_active(False)
+
+    assert manager.dependency_restart_active() is False
