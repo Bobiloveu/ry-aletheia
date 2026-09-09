@@ -88,12 +88,28 @@
     nav.replaceChildren(groups);
     markActive();
   };
+  const createBrandFallback = () => {
+    const namespace = 'http://www.w3.org/2000/svg';
+    const icon = document.createElementNS(namespace, 'svg');
+    icon.setAttribute('viewBox', '0 0 32 32');
+    icon.setAttribute('aria-hidden', 'true');
+    const outer = document.createElementNS(namespace, 'path');
+    outer.setAttribute('d', 'M5 24 16 4l11 20-11 4z');
+    const inner = document.createElementNS(namespace, 'path');
+    inner.setAttribute('d', 'm11 21 5-10 5 10-5 2z');
+    icon.append(outer, inner);
+    return icon;
+  };
   const installBrandThemeControl = () => {
     document.querySelectorAll('.brand .mark').forEach((mark) => {
       if (!mark.querySelector('img[src="/aletheia.svg"]')) {
-        mark.replaceChildren(Object.assign(document.createElement('img'), {
+        const logo = Object.assign(document.createElement('img'), {
           src: '/aletheia.svg', alt: '', draggable: false,
-        }));
+        });
+        logo.addEventListener('error', () => {
+          if (mark.contains(logo)) mark.replaceChildren(createBrandFallback());
+        }, { once: true });
+        mark.replaceChildren(logo);
       }
       mark.tabIndex = 0;
       mark.setAttribute('role', 'button');
