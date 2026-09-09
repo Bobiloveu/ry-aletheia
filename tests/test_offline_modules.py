@@ -179,7 +179,16 @@ class OfflineModuleTests(unittest.TestCase):
             return handler.wfile.getvalue()
 
         desktop = rendered(web_console.WEB_ROOT, "index.html")
-        vue = rendered(web_console.VUE_WEB_ROOT, "dashboard.html")
+        # `web-vue/` is a generated, ignored release artifact. Backend tests
+        # run before the Web build in CI, so exercise the Vue-page injection
+        # boundary with a minimal page instead of depending on a local build.
+        with tempfile.TemporaryDirectory() as directory:
+            vue_root = Path(directory)
+            (vue_root / "dashboard.html").write_text(
+                "<!doctype html><html><body><main id=\"app\"></main></body></html>",
+                encoding="utf-8",
+            )
+            vue = rendered(vue_root, "dashboard.html")
         shell = b'<script src="/app_shell.js"></script>'
         version = b'<script src="/brand_version.js"></script>'
         self.assertEqual(desktop.count(shell), 1)
