@@ -1,0 +1,146 @@
+:root {
+  color-scheme: light;
+  background: #f8fafc;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-height: 100dvh;
+  overflow: hidden;
+  background: #f8fafc;
+  color: #4238f2;
+  font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.vehicle-execution-status {
+  display: flex;
+  min-height: 100dvh;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: clamp(28px, 4vw, 58px);
+  padding: clamp(28px, 6vh, 84px) 24px;
+}
+
+.execution-face {
+  position: relative;
+  width: min(54vw, 510px);
+  aspect-ratio: 1;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #10192c;
+  transform: translateZ(0);
+}
+
+.eye {
+  position: absolute;
+  top: 37%;
+  width: 19%;
+  height: 29%;
+  border-radius: 50%;
+  background: #f8fafc;
+}
+
+.eye-left {
+  left: 23%;
+}
+
+.eye-right {
+  right: 23%;
+}
+
+#vehicleExecutionLabel {
+  max-width: 92vw;
+  margin: 0;
+  color: #4238f2;
+  font-size: clamp(72px, 10vw, 152px);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.035em;
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  body[data-phase="task"] .execution-face,
+  body[data-phase="entering_elevator"] .execution-face,
+  body[data-phase="exiting_elevator"] .execution-face {
+    animation: execution-face-step 1.15s cubic-bezier(0.22, 0.8, 0.36, 1) infinite alternate;
+  }
+
+  body[data-phase="calling_elevator"] .execution-face,
+  body[data-phase="riding_elevator"] .execution-face {
+    animation: execution-face-float 1.9s cubic-bezier(0.22, 0.8, 0.36, 1) infinite alternate;
+  }
+
+  body[data-phase="opening_gate"] .eye,
+  body[data-phase="opening_access_door"] .eye {
+    animation: execution-eye-open 800ms cubic-bezier(0.22, 0.8, 0.36, 1) infinite alternate;
+  }
+
+  body[data-phase="closing_gate"] .eye,
+  body[data-phase="closing_access_door"] .eye,
+  body[data-phase="closing_elevator_door"] .eye {
+    animation: execution-eye-close 800ms cubic-bezier(0.22, 0.8, 0.36, 1) infinite alternate;
+  }
+
+  body[data-phase="draining_or_unloading"] .execution-face,
+  body[data-phase="restarting_nodes"] .execution-face {
+    animation: execution-face-pulse 1.35s cubic-bezier(0.22, 0.8, 0.36, 1) infinite alternate;
+  }
+
+  body[data-phase="completed"] .execution-face {
+    animation: execution-face-complete 1.8s cubic-bezier(0.22, 0.8, 0.36, 1) infinite alternate;
+  }
+}
+
+@keyframes execution-face-step {
+  to { transform: translateY(-2.8%) scale(1.015); }
+}
+
+@keyframes execution-face-float {
+  to { transform: translateY(-3.4%) scale(1.012); }
+}
+
+@keyframes execution-face-pulse {
+  to { transform: scale(1.045); }
+}
+
+@keyframes execution-face-complete {
+  to { transform: translateY(-1.6%) scale(1.035); }
+}
+
+@keyframes execution-eye-open {
+  to { transform: scaleY(1.09); }
+}
+
+@keyframes execution-eye-close {
+  to { transform: scaleY(0.68); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .execution-face {
+    width: min(66vw, 420px);
+  }
+
+  #vehicleExecutionLabel {
+    font-size: clamp(66px, 15vw, 112px);
+  }
+}

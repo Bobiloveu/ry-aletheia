@@ -18,6 +18,9 @@ const close = (server) => new Promise((resolve, reject) => {
 
 test("Vite preview preserves legacy pages, split stylesheets, and the brand asset", async (t) => {
   const expectedAssets = new Map([
+    ["/vehicle-execution-status.html", { type: "text/html", body: "execution-status-page" }],
+    ["/vehicle_execution_status.js", { type: "text/javascript", body: "export {};" }],
+    ["/vehicle_execution_status.css", { type: "text/css", body: ".vehicle-execution-status {}" }],
     ["/robot-logs.html", { type: "text/html", body: "robot-log-page" }],
     ["/robot_logs.css", { type: "text/css", body: ".robot-log { color: green; }" }],
     ["/deployment/tools.css", { type: "text/css", body: ".tool-icon { fill: none; }" }],
