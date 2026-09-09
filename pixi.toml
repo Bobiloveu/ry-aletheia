@@ -22,9 +22,12 @@ frontend-install = { cmd = "npm ci", cwd = "frontend" }
 frontend-check = { cmd = "npm run check", cwd = "frontend" }
 # macOS 将 /var/folders 映射至 /private/var/folders；现有报告路径边界测试
 # 比较字面路径，因此仅在 macOS 固定临时目录的规范前缀。
-test = "bash -c 'if [ \"$(uname -s)\" = Darwin ]; then TMPDIR=/private/tmp; export TMPDIR; fi; python -m pytest -q tests'"
-test-offline = "bash -c 'if [ \"$(uname -s)\" = Darwin ]; then TMPDIR=/private/tmp; export TMPDIR; fi; python -m pytest -q tests/test_offline_modules.py tests/test_trajectory_integrity.py'"
-test-realtime = "python -m pytest -q tests/test_live_observation_realtime.py"
+# 目标车的登录 shell 可能导出系统 ROS Python 路径；pytest 会由此自动
+# 发现系统 launch_testing 插件，而该插件的可选依赖不属于 Pixi 测试环境。
+# 测试使用 Pixi 锁定的解释器和依赖，运行控制台时仍保留原 ROS 环境。
+test = "bash -c 'unset PYTHONPATH; if [ \"$(uname -s)\" = Darwin ]; then TMPDIR=/private/tmp; export TMPDIR; fi; python -m pytest -q tests'"
+test-offline = "bash -c 'unset PYTHONPATH; if [ \"$(uname -s)\" = Darwin ]; then TMPDIR=/private/tmp; export TMPDIR; fi; python -m pytest -q tests/test_offline_modules.py tests/test_trajectory_integrity.py'"
+test-realtime = "bash -c 'unset PYTHONPATH; python -m pytest -q tests/test_live_observation_realtime.py'"
 verify = { depends-on = ["test", "frontend-check"] }
 vue-preview = "./run_vue_preview.sh"
 backend-test = { depends-on = ["test"] }
