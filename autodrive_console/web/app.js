@@ -56,11 +56,6 @@ function supervisorEmptyState() {
   if (monitorNodes.length) return '开始测试后将检查已保存的 Supervisor 监控节点状态。';
   return '未配置 Supervisor 监控节点；常规测试不会因该项阻断。可在“测试依赖编排”中识别并按需保存。';
 }
-function supervisorEmptyState() {
-  if (dependencyPlan?.enabled) return '已启用 Supervisor 依赖编排；开始测试后将按已保存阶段准备节点。';
-  if (monitorNodes.length) return '开始测试后将检查已保存的 Supervisor 监控节点状态。';
-  return '未配置 Supervisor 监控节点；常规测试不会因该项阻断。可在“测试依赖编排”中识别并按需保存。';
-}
 function renderNodes(preflight) {
   const nodes = preflight?.node_states || [];
   const scenario = preflight?.scenario;
