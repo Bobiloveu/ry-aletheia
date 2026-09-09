@@ -42,7 +42,7 @@ assert.equal(formatUnixSeconds("invalid"), "未知时间");
 
 - [ ] **Step 2: Run the unit suite before modules exist**
 
-Run: `cd frontend && node --test`  
+Run: `cd frontend && node --test`
 Expected: FAIL with missing `autodrive_console/web/platform` modules.
 
 - [ ] **Step 3: Implement only the exported interfaces**
