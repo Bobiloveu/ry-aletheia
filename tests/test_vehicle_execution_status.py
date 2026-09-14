@@ -9,28 +9,27 @@ from autodrive_console.run_manager import RunManager
 import pytest
 
 
-def test_classifier_prefers_exact_close_elevator_door_semantics_over_reused_code() -> None:
-    """A reused 203 event must not turn a close-door action into elevator exit."""
+def test_classifier_uses_official_elevator_out_code_over_close_door_filename() -> None:
+    """TaskStatus 203 is the source-defined elevator exit state."""
     snapshot = classify_execution_state(
         NavigationState(status="running", current_task="1_1_close_elevdoor_x.xml"),
         TaskEvent(status_code="203"),
         restarting_nodes=False,
     )
 
-    assert snapshot.phase == "closing_elevator_door"
-    assert snapshot.label == "关电梯门"
+    assert snapshot.phase == "exiting_elevator"
+    assert snapshot.label == "出梯中"
 
 
-def test_classifier_rejects_unknown_behavior_for_ambiguous_code() -> None:
-    """Unapproved task names may not add robot-action semantics by accident."""
+def test_classifier_uses_official_elevator_out_code_without_filename_context() -> None:
     snapshot = classify_execution_state(
         NavigationState(status="running", current_task="unreviewed_elevator_action.xml"),
         TaskEvent(status_code="203"),
         restarting_nodes=False,
     )
 
-    assert snapshot.phase == "unavailable"
-    assert snapshot.label == "状态暂不可用"
+    assert snapshot.phase == "exiting_elevator"
+    assert snapshot.label == "出梯中"
 
 
 def test_classifier_uses_generic_task_only_for_known_active_navigation() -> None:
@@ -45,11 +44,82 @@ def test_classifier_uses_generic_task_only_for_known_active_navigation() -> None
     assert snapshot.label == "任务中"
 
 
+@pytest.mark.parametrize("status", ["", "idle"])
+def test_classifier_represents_a_nonexecuting_vehicle_as_idle(status: str) -> None:
+    snapshot = classify_execution_state(
+        NavigationState(status=status),
+        TaskEvent(),
+        restarting_nodes=False,
+    )
+
+    assert snapshot.phase == "idle"
+    assert snapshot.label == "空闲中"
+
+
+def test_classifier_recognizes_navigating_as_an_active_navigation_state() -> None:
+    snapshot = classify_execution_state(
+        NavigationState(status="navigating"),
+        TaskEvent(),
+        restarting_nodes=False,
+    )
+
+    assert snapshot.phase == "task"
+
+
+def test_classifier_prioritizes_entering_speed_mode_over_next_elevator_behavior() -> None:
+    """The route segment into the car is not yet elevator travel."""
+    snapshot = classify_execution_state(
+        NavigationState(
+            status="navigating",
+            current_speed_mode="elevator_in",
+            current_task="1_1_elevator_out_n_x.xml",
+        ),
+        TaskEvent(status_code="202"),
+        restarting_nodes=False,
+    )
+
+    assert snapshot.phase == "entering_elevator"
+
+
+def test_classifier_uses_backward_exit_segment_before_the_following_door_action() -> None:
+    snapshot = classify_execution_state(
+        NavigationState(
+            status="navigating",
+            current_speed_mode="backward",
+            current_task="1_1_close_elevdoor_x.xml",
+        ),
+        TaskEvent(status_code="203"),
+        restarting_nodes=False,
+    )
+
+    assert snapshot.phase == "exiting_elevator"
+
+
+def test_classifier_treats_elevator_call_behavior_as_calling_until_entry_is_confirmed() -> None:
+    snapshot = classify_execution_state(
+        NavigationState(status="task_executing", current_task="1_1_elevator_in_n_x.xml"),
+        TaskEvent(status_code="209"),
+        restarting_nodes=False,
+    )
+
+    assert snapshot.phase == "riding_elevator"
+
+
+def test_classifier_uses_official_elevator_entry_code_without_filename_context() -> None:
+    snapshot = classify_execution_state(
+        NavigationState(status="task_executing", current_task="unreviewed_action.xml"),
+        TaskEvent(status_code="201"),
+        restarting_nodes=False,
+    )
+
+    assert snapshot.phase == "entering_elevator"
+
+
 @pytest.mark.parametrize(
     ("task_name", "expected_phase"),
     [
-        ("elevator_in_1.xml", "entering_elevator"),
-        ("1_1_elevator_in_x.xml", "entering_elevator"),
+        ("elevator_in_1.xml", "calling_elevator"),
+        ("1_1_elevator_in_x.xml", "calling_elevator"),
         ("elevator_out_1.xml", "riding_elevator"),
         ("close_elevdoor_1.xml", "closing_elevator_door"),
         ("e_guard_open_1.xml", "opening_gate"),
@@ -62,6 +132,23 @@ def test_classifier_accepts_only_documented_behavior_action_tokens(task_name: st
     snapshot = classify_execution_state(
         NavigationState(status="running", current_task=task_name),
         TaskEvent(),
+        restarting_nodes=False,
+    )
+
+    assert snapshot.phase == expected_phase
+
+
+@pytest.mark.parametrize(
+    ("task_name", "expected_phase"),
+    [
+        ("open_door_go.xml", "opening_access_door"),
+        ("5_2_close_door_back.xml", "closing_access_door"),
+    ],
+)
+def test_classifier_accepts_documented_access_door_action_tokens(task_name: str, expected_phase: str) -> None:
+    snapshot = classify_execution_state(
+        NavigationState(status="task_executing", current_task=task_name),
+        TaskEvent(status_code="300"),
         restarting_nodes=False,
     )
 
@@ -81,19 +168,49 @@ def test_classifier_does_not_match_action_words_inside_an_unapproved_name() -> N
 @pytest.mark.parametrize(
     ("status_code", "expected_phase"),
     [
+        ("100", "task"),
+        ("101", "task"),
+        ("102", "task"),
+        ("103", "task"),
         ("109", "completed"),
         ("200", "calling_elevator"),
         ("201", "entering_elevator"),
         ("202", "riding_elevator"),
+        ("203", "exiting_elevator"),
+        ("209", "riding_elevator"),
+        ("600", "task"),
+        ("601", "task"),
+        ("700", "task"),
+        ("701", "task"),
         ("400", "draining_or_unloading"),
         ("401", "draining_or_unloading"),
         ("402", "draining_or_unloading"),
         ("403", "draining_or_unloading"),
+        ("500", "task"),
     ],
 )
 def test_classifier_uses_only_unambiguous_task_status_codes(status_code: str, expected_phase: str) -> None:
     snapshot = classify_execution_state(
         NavigationState(status="running"),
+        TaskEvent(status_code=status_code),
+        restarting_nodes=False,
+    )
+
+    assert snapshot.phase == expected_phase
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_phase"),
+    [
+        ("301", "opening_gate"),
+        ("302", "closing_gate"),
+        ("303", "opening_access_door"),
+        ("304", "closing_access_door"),
+    ],
+)
+def test_classifier_uses_official_door_passage_codes(status_code: str, expected_phase: str) -> None:
+    snapshot = classify_execution_state(
+        NavigationState(status="task_executing"),
         TaskEvent(status_code=status_code),
         restarting_nodes=False,
     )
@@ -130,17 +247,82 @@ class FakeNavigation:
 
 
 class FakeTask:
-    def __init__(self, *, status_code: str) -> None:
+    def __init__(self, *, status_code: str, task_uuid: str = "", message: str = "") -> None:
         self.status_code = status_code
+        self.task_uuid = task_uuid
+        self.message = message
 
 
-def test_monitor_returns_unavailable_when_navigation_has_expired() -> None:
-    """A recent task event cannot keep a nonterminal robot state alive forever."""
+class FakeNavigationHeartbeat:
+    def __init__(self, *, data: str) -> None:
+        self.data = data
+
+
+def test_monitor_uses_fresh_navigation_heartbeat_when_detailed_snapshot_is_old() -> None:
+    """Detailed status is transition data, while the simple topic proves liveness."""
     monitor = VehicleExecutionStatusMonitor(clock=lambda: 10.0, freshness_s=4.0)
-    monitor.observe_navigation(FakeNavigation(status="running"), received_at=1.0)
+    monitor.observe_navigation(
+        FakeNavigation(status="task_executing", current_task="1_1_elevator_in_n_x.xml"),
+        received_at=1.0,
+    )
     monitor.observe_task(FakeTask(status_code="200"), received_at=9.0)
+    monitor.observe_navigation_heartbeat(FakeNavigationHeartbeat(data="执行任务点任务"), received_at=9.0)
+
+    assert monitor.status() == {"phase": "calling_elevator", "label": "呼梯中"}
+
+
+def test_monitor_retains_a_single_task_event_when_navigation_moves_to_a_new_behavior() -> None:
+    """A route transition is not a new TaskStatus event and must not erase it."""
+    monitor = VehicleExecutionStatusMonitor(clock=lambda: 10.0, freshness_s=4.0)
+    monitor.observe_navigation(
+        FakeNavigation(status="task_executing", current_task="1_1_elevator_out_n_x.xml"),
+        received_at=8.0,
+    )
+    monitor.observe_task(FakeTask(status_code="202", task_uuid="task-a"), received_at=9.0)
+    monitor.observe_navigation(
+        FakeNavigation(status="task_executing", current_task="unreviewed_action.xml"),
+        received_at=10.0,
+    )
+
+    assert monitor.status() == {"phase": "riding_elevator", "label": "乘梯中"}
+
+
+def test_monitor_latches_a_single_task_event_beyond_its_old_freshness_window() -> None:
+    """TaskStatus is edge-triggered; a live route heartbeat keeps its phase current."""
+    monitor = VehicleExecutionStatusMonitor(clock=lambda: 20.0, freshness_s=4.0, task_event_freshness_s=15.0)
+    monitor.observe_navigation(FakeNavigation(status="task_executing", current_task="unreviewed_action.xml"), received_at=1.0)
+    monitor.observe_task(FakeTask(status_code="202", task_uuid="task-a"), received_at=1.0)
+    monitor.observe_navigation_heartbeat(FakeNavigationHeartbeat(data="执行任务点任务"), received_at=19.0)
+
+    assert monitor.status() == {"phase": "riding_elevator", "label": "乘梯中"}
+
+
+def test_monitor_retains_task_status_protocol_metadata_internally() -> None:
+    monitor = VehicleExecutionStatusMonitor(clock=lambda: 10.0)
+    monitor.observe_task(
+        FakeTask(status_code="200", task_uuid="a1b2", message="Waiting for elevator"),
+        received_at=9.0,
+    )
+
+    assert monitor._task_event == TaskEvent(
+        status_code="200",
+        task_uuid="a1b2",
+        message="Waiting for elevator",
+    )
+
+
+def test_monitor_returns_unavailable_when_navigation_heartbeat_has_expired() -> None:
+    monitor = VehicleExecutionStatusMonitor(clock=lambda: 10.0, freshness_s=4.0)
+    monitor.observe_navigation(FakeNavigation(status="task_executing"), received_at=1.0)
+    monitor.observe_navigation_heartbeat(FakeNavigationHeartbeat(data="执行任务点任务"), received_at=1.0)
 
     assert monitor.status() == {"phase": "unavailable", "label": "状态暂不可用"}
+
+
+def test_monitor_reports_idle_before_the_first_navigation_message() -> None:
+    monitor = VehicleExecutionStatusMonitor(clock=lambda: 10.0)
+
+    assert monitor.status() == {"phase": "idle", "label": "空闲中"}
 
 
 def test_monitor_uses_the_latest_ros_callbacks_without_restarting_subscription() -> None:
@@ -151,9 +333,19 @@ def test_monitor_uses_the_latest_ros_callbacks_without_restarting_subscription()
     assert monitor.status() == {"phase": "entering_elevator", "label": "进梯中"}
 
 
-def test_monitor_allows_only_a_fresh_completed_event_without_navigation() -> None:
+def test_monitor_ignores_a_completed_event_without_an_observed_task_session() -> None:
+    """控制台刚启动时的孤立 109 不能把空闲车辆误报为任务完成。"""
     monitor = VehicleExecutionStatusMonitor(clock=lambda: 10.0, freshness_s=4.0, task_event_freshness_s=15.0)
-    monitor.observe_task(FakeTask(status_code="109"), received_at=9.0)
+    monitor.observe_task(FakeTask(status_code="109", task_uuid="old-task"), received_at=9.0)
+
+    assert monitor.status() == {"phase": "idle", "label": "空闲中"}
+
+
+def test_monitor_reports_completed_after_the_same_task_session_was_observed() -> None:
+    """同一任务 UUID 先活动再完成时，仍应保留短暂的完成提示。"""
+    monitor = VehicleExecutionStatusMonitor(clock=lambda: 10.0, freshness_s=4.0, task_event_freshness_s=15.0)
+    monitor.observe_task(FakeTask(status_code="100", task_uuid="task-a"), received_at=8.0)
+    monitor.observe_task(FakeTask(status_code="109", task_uuid="task-a"), received_at=9.0)
 
     assert monitor.status() == {"phase": "completed", "label": "任务完成"}
 
@@ -206,7 +398,7 @@ def test_monitor_does_not_infer_manual_control_until_the_vehicle_source_is_confi
     )
     monitor.observe_navigation(FakeNavigation(status="running", current_task="elevator_in_1.xml"), received_at=9.0)
 
-    assert monitor.status() == {"phase": "entering_elevator", "label": "进梯中"}
+    assert monitor.status() == {"phase": "calling_elevator", "label": "呼梯中"}
 
 
 def test_run_manager_keeps_restart_activity_true_until_nested_control_ends() -> None:

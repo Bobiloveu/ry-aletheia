@@ -6,12 +6,10 @@
     <title>执行状态 · RY Aletheia</title>
     <link rel="stylesheet" href="/vehicle_execution_status.css" />
   </head>
-  <body data-phase="unavailable">
+  <body data-phase="idle">
     <main class="vehicle-execution-status" aria-live="polite">
-      <div class="execution-face" aria-hidden="true">
-        <i class="eye eye-left"></i><i class="eye eye-right"></i>
-      </div>
-      <h1 id="vehicleExecutionLabel">状态暂不可用</h1>
+      <div id="vehicleExecutionAvatar" class="execution-avatar-host" aria-hidden="true"></div>
+      <h1 id="vehicleExecutionLabel">空闲中</h1>
     </main>
     <script type="module" src="/vehicle_execution_status.js"></script>
   </body>

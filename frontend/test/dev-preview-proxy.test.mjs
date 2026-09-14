@@ -20,7 +20,10 @@ test("Vite preview preserves legacy pages, split stylesheets, and the brand asse
   const expectedAssets = new Map([
     ["/vehicle-execution-status.html", { type: "text/html", body: "execution-status-page" }],
     ["/vehicle_execution_status.js", { type: "text/javascript", body: "export {};" }],
+    ["/vehicle_execution_avatar.js", { type: "text/javascript", body: "export {};" }],
+    ["/case_library_delete.js", { type: "text/javascript", body: "export {};" }],
     ["/vehicle_execution_status.css", { type: "text/css", body: ".vehicle-execution-status {}" }],
+    ["/vendor/bloub/engine.js", { type: "text/javascript", body: "export {};" }],
     ["/robot-logs.html", { type: "text/html", body: "robot-log-page" }],
     ["/robot_logs.css", { type: "text/css", body: ".robot-log { color: green; }" }],
     ["/deployment/tools.css", { type: "text/css", body: ".tool-icon { fill: none; }" }],

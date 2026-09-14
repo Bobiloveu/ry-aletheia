@@ -100,7 +100,12 @@ class RobotGateway:
         states, error = self._check_supervisor()
         return ready and not error, error or detail, states
 
-    def restart_configured_dependencies(self) -> tuple[bool, str]:
+    def restart_configured_dependencies(
+        self,
+        *,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[dict], None] | None = None,
+    ) -> tuple[bool, str]:
         """重启已配置的测试依赖，使新应用的场景启动参数被重新读取。
 
         该操作只复用操作者已保存的受控依赖编排，绝不猜测或控制未登记的
@@ -108,10 +113,15 @@ class RobotGateway:
         若消费者也无法识别，必须明确失败。恢复常规配置不会调用本方法。
         """
         if self.settings.dependency_plan.get("enabled"):
-            _orchestration, error = self._apply_dependency_plan()
+            _orchestration, error = self._apply_dependency_plan(cancel_event, progress_callback)
             if error:
                 return False, error
-            ready, detail = self._wait_all_dependencies_running()
+            ready, detail = self._wait_all_dependencies_running(
+                cancel_event,
+                progress_callback=lambda statuses: self._update_all_stage_progress(
+                    _orchestration["stages"], statuses, progress_callback,
+                ),
+            )
             if not ready:
                 return False, detail
             _states, status_error = self._check_supervisor()
@@ -176,23 +186,66 @@ class RobotGateway:
         if self.status_callback:
             self.status_callback(states)
 
-    def _apply_dependency_plan(self, cancel_event: threading.Event | None = None) -> tuple[dict, str | None]:
+    @staticmethod
+    def _dependency_progress(stages: list[dict]) -> dict:
+        return {"stages": [
+            {
+                "index": stage["index"],
+                "state": stage["state"],
+                "nodes": [
+                    {"name": name, "status": stage["statuses"].get(name, "PENDING")}
+                    for name in stage["nodes"]
+                ],
+            }
+            for stage in stages
+        ]}
+
+    def _publish_dependency_progress(self, stages: list[dict], callback: Callable[[dict], None] | None) -> None:
+        if callback is None:
+            return
+        try:
+            callback(self._dependency_progress(stages))
+        except Exception:
+            LOGGER.exception("发布依赖编排进度失败")
+
+    def _apply_dependency_plan(
+        self,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[dict], None] | None = None,
+    ) -> tuple[dict, str | None]:
         """按当前状态选择 restart/start，并等待每个阶段稳定就绪。"""
         plan = self.settings.dependency_plan
-        stages = []
+        stages = [
+            {
+                "index": index,
+                "nodes": list(step["nodes"]),
+                "actions": {},
+                "restart": "pending",
+                "ready": False,
+                "wait_seconds": int(step.get("wait_seconds", 0)),
+                "state": "pending",
+                "statuses": {name: "PENDING" for name in step["nodes"]},
+            }
+            for index, step in enumerate(plan.get("steps", []), start=1)
+        ]
         if not plan.get("steps"):
             return {"enabled": True, "stages": stages}, "测试依赖编排已启用，但未配置启动阶段"
         client = SupervisorClient(self.settings.supervisor_command, self.settings.command_timeout_s)
-        for index, step in enumerate(plan["steps"], start=1):
+        for stage in stages:
+            index, nodes = stage["index"], stage["nodes"]
             if cancel_event and cancel_event.is_set():
+                stage["state"] = "cancelled"
+                self._publish_dependency_progress(stages, progress_callback)
                 return {"enabled": True, "stages": stages}, "测试已取消"
-            nodes = list(step["nodes"])
-            stage = {"index": index, "nodes": nodes, "actions": {}, "restart": "pending", "ready": False, "wait_seconds": int(step.get("wait_seconds", 0))}
-            stages.append(stage)
             try:
                 current_statuses = {item.name: item.status for item in client.discover()}
+                stage["statuses"] = {name: current_statuses.get(name, "MISSING") for name in nodes}
+                stage["state"] = "restarting"
                 self._publish_states(self._states_from_parsed(current_statuses))
+                self._publish_dependency_progress(stages, progress_callback)
             except RuntimeError as exc:
+                stage["state"] = "blocked"
+                self._publish_dependency_progress(stages, progress_callback)
                 return {"enabled": True, "stages": stages}, f"依赖编排第 {index} 阶段无法读取节点状态：{exc}"
             actions = {node: "restart" if current_statuses.get(node) == "RUNNING" else "start" for node in nodes}
             stage["actions"] = actions
@@ -207,21 +260,65 @@ class RobotGateway:
                             node = futures[future]
                             control_errors.append(f"{node}（{actions[node]}）：{exc}")
                 if cancel_event and cancel_event.is_set():
+                    stage["state"] = "cancelled"
+                    self._publish_dependency_progress(stages, progress_callback)
                     return {"enabled": True, "stages": stages}, "测试已取消"
                 # Supervisor 可能在拉起、重试或超时时返回控制命令错误；不据此抢先判失败，仍以实际 status 持续等待。
                 stage["control_errors"] = control_errors
                 stage["restart"] = "accepted_with_feedback" if control_errors else "accepted"
-                ready, detail = self._wait_stage_running(client, nodes, cancel_event)
+                stage["state"] = "waiting_stable"
+                self._publish_dependency_progress(stages, progress_callback)
+                ready, detail = self._wait_stage_running(
+                    client,
+                    nodes,
+                    cancel_event,
+                    progress_callback=lambda statuses: self._update_stage_progress(stages, stage, statuses, progress_callback),
+                )
             if not ready:
                 stage["restart"] = "timeout"
+                stage["state"] = "cancelled" if cancel_event and cancel_event.is_set() else "blocked"
+                self._publish_dependency_progress(stages, progress_callback)
                 return {"enabled": True, "stages": stages}, f"依赖编排第 {index} 阶段未就绪：{detail}"
-            stage["ready"] = True
             if stage["wait_seconds"]:
+                stage["state"] = "settling"
+                self._publish_dependency_progress(stages, progress_callback)
                 if cancel_event and cancel_event.wait(stage["wait_seconds"]):
+                    stage["state"] = "cancelled"
+                    self._publish_dependency_progress(stages, progress_callback)
                     return {"enabled": True, "stages": stages}, "测试已取消"
+            stage["ready"] = True
+            stage["state"] = "ready"
+            self._publish_dependency_progress(stages, progress_callback)
         return {"enabled": True, "stages": stages}, None
 
-    def _wait_stage_running(self, client: SupervisorClient, nodes: list[str], cancel_event: threading.Event | None = None, timeout_s: float = DEPENDENCY_STABILITY_TIMEOUT_SECONDS) -> tuple[bool, str]:
+    def _update_stage_progress(
+        self,
+        stages: list[dict],
+        stage: dict,
+        statuses: dict[str, str],
+        callback: Callable[[dict], None] | None,
+    ) -> None:
+        stage["statuses"] = {name: statuses.get(name, "MISSING") for name in stage["nodes"]}
+        self._publish_dependency_progress(stages, callback)
+
+    def _update_all_stage_progress(
+        self,
+        stages: list[dict],
+        statuses: dict[str, str],
+        callback: Callable[[dict], None] | None,
+    ) -> None:
+        for stage in stages:
+            stage["statuses"] = {name: statuses.get(name, "MISSING") for name in stage["nodes"]}
+        self._publish_dependency_progress(stages, callback)
+
+    def _wait_stage_running(
+        self,
+        client: SupervisorClient,
+        nodes: list[str],
+        cancel_event: threading.Event | None = None,
+        timeout_s: float = DEPENDENCY_STABILITY_TIMEOUT_SECONDS,
+        progress_callback: Callable[[dict[str, str]], None] | None = None,
+    ) -> tuple[bool, str]:
         """只有连续 5 次全部 RUNNING 才放行；取消和超时都必须结束等待。"""
         interval_s, required_samples = 1.0, 5
         last_statuses: dict[str, str] = {}
@@ -236,6 +333,8 @@ class RobotGateway:
             try:
                 last_statuses = {item.name: item.status for item in client.discover()}
                 self._publish_states(self._states_from_parsed(last_statuses))
+                if progress_callback is not None:
+                    progress_callback(last_statuses)
             except RuntimeError as exc:
                 return False, str(exc)
             pending = [f"{name}={last_statuses.get(name, 'MISSING')}" for name in nodes if last_statuses.get(name) != "RUNNING"]
@@ -252,11 +351,15 @@ class RobotGateway:
             else:
                 time.sleep(wait_s)
 
-    def _wait_all_dependencies_running(self, cancel_event: threading.Event | None = None) -> tuple[bool, str]:
+    def _wait_all_dependencies_running(
+        self,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[dict[str, str]], None] | None = None,
+    ) -> tuple[bool, str]:
         """最终总闸：页面依赖状态中的每个节点都必须稳定 RUNNING 才可执行。"""
         nodes = [str(item["supervisor"]) for item in self._health_nodes() if item.get("required", True)]
         client = SupervisorClient(self.settings.supervisor_command, self.settings.command_timeout_s)
-        return self._wait_stage_running(client, nodes, cancel_event)
+        return self._wait_stage_running(client, nodes, cancel_event, progress_callback=progress_callback)
 
     def _health_nodes(self) -> list[dict]:
         """优先使用操作者选择的默认监控节点，兼容旧版本配置。"""

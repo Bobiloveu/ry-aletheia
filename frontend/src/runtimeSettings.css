@@ -169,7 +169,7 @@ body.theme-light .page-main .eyebrow {
 @media (min-width: 1100px) {
   .page-main:has(.vehicle-library-panel) .page-grid {
     grid-template-columns: minmax(0, 1fr) 350px;
-    grid-template-rows: auto auto auto minmax(400px, 1fr);
+    grid-template-rows: auto auto minmax(400px, 1fr);
   }
   .page-main:has(.vehicle-library-panel) .page-grid > .panel:nth-child(1) {
     grid-column: 1;

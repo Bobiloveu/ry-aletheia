@@ -64,7 +64,17 @@ function uploadUpgrade() {
 
 $('saveSettings').addEventListener('click', async () => {
   try {
-    await requestJson('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({task_directory:$('taskDirectory').value.trim(), command_timeout_s:Number($('commandTimeout').value), elevator_wait_timeout_s:Number($('elevatorWaitTimeout').value), task_execution_timeout_s:Number($('taskExecutionTimeout').value)})}, { errorMessage: '配置保存失败' }); $('settingsMessage').textContent = '本机运行配置已保存。';
+    await requestJson('/api/settings', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        task_directory: $('taskDirectory').value.trim(),
+        command_timeout_s: Number($('commandTimeout').value),
+        elevator_wait_timeout_s: Number($('elevatorWaitTimeout').value),
+        task_execution_timeout_s: Number($('taskExecutionTimeout').value),
+      }),
+    }, { errorMessage: '配置保存失败' });
+    $('settingsMessage').textContent = '本机运行配置已保存。';
   } catch (error) { $('settingsMessage').textContent = error.message; }
 });
 $('upgradeFile').addEventListener('change', event => selectUpgradeFile(event.target.files[0]));

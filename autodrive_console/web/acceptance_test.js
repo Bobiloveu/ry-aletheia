@@ -1,4 +1,5 @@
 import { requestJson } from "./platform/http.js";
+import { dependencyPreparationView } from "./acceptance_preparation.js";
 
 (() => {
   const DRAFT_KEY = 'ry-aletheia-acceptance-draft-v1';
@@ -92,6 +93,19 @@ import { requestJson } from "./platform/http.js";
     const updated = runtime.updated_at ? ` · 更新于 ${new Date(runtime.updated_at).toLocaleTimeString('zh-CN', { hour12: false })}` : '';
     box.textContent = `${runtime.message || '运行准备状态未知'}${updated}`;
   }
+  function renderDependencyPreparation(plan) {
+    const box = $('dependencyPreparation'); const view = dependencyPreparationView(plan); box.hidden = !view.visible;
+    if (!view.visible) return;
+    box.replaceChildren();
+    const heading = document.createElement('div'); heading.className = 'dependency-preparation-heading';
+    const title = document.createElement('strong'); title.id = 'dependencyPreparationTitle'; title.textContent = 'Supervisor 运行准备';
+    const hint = document.createElement('small'); hint.textContent = '仅显示本次验收已冻结的依赖节点；首项任务将在全部阶段稳定后开始。';
+    heading.append(title, hint); box.append(heading);
+    const stages = document.createElement('div'); stages.className = 'dependency-preparation-stages';
+    for (const stage of view.stages) { const section = document.createElement('section'); section.className = `dependency-stage ${stage.state}`; const stageHeading = document.createElement('div'); stageHeading.className = 'dependency-stage-heading'; const label = document.createElement('strong'); label.textContent = `阶段 ${stage.index}`; const state = document.createElement('span'); state.textContent = stage.stateLabel; stageHeading.append(label, state); const nodes = document.createElement('ul'); for (const node of stage.nodes) { const item = document.createElement('li'); const name = document.createElement('code'); name.textContent = node.name; const status = document.createElement('span'); status.className = `supervisor-node-status ${node.status.toLowerCase()}`; status.textContent = node.status === 'PENDING' ? '待开始' : node.status; item.append(name, status); nodes.append(item); } section.append(stageHeading, nodes); stages.append(section); }
+    if (!view.stages.length) { const empty = document.createElement('p'); empty.className = 'muted'; empty.textContent = '正在读取已冻结的 Supervisor 运行准备状态…'; stages.append(empty); }
+    box.append(stages);
+  }
   function renderFrozenPreflight(plan) {
     const box = $('frozenPreflight'); const preflight = plan?.execution_preflight;
     box.hidden = !preflight;
@@ -108,7 +122,7 @@ import { requestJson } from "./platform/http.js";
     for (const [index, item] of (plan?.items || []).entries()) { const row = document.createElement('tr'); row.innerHTML = `<td>${index + 1}</td><td></td><td></td><td></td>`; row.children[1].textContent = item.filename; row.children[2].textContent = `${item.parameters.building}栋 ${item.parameters.unit}单元 ${item.parameters.floor}层 ${item.parameters.door}`; row.children[3].textContent = item.status; body.append(row); }
     if (!plan) body.innerHTML = '<tr><td colspan="4">尚未生成验收计划。</td></tr>';
     $('planWarnings').replaceChildren(...(plan?.warnings || []).map((item) => Object.assign(document.createElement('p'), { textContent: item })));
-    renderFrozenPreflight(plan); renderRuntimeStatus(plan);
+    renderFrozenPreflight(plan); renderRuntimeStatus(plan); renderDependencyPreparation(plan);
     $('startPlan').disabled = plan?.status !== 'ready'; $('resumePlan').disabled = plan?.status !== 'awaiting_recovery'; $('cancelPlan').disabled = !['preparing', 'running', 'awaiting_recovery', 'recovering'].includes(plan?.status); $('resolvePlan').disabled = plan?.status !== 'interrupted';
     const conclusion = plan?.conclusion; const completed = (plan?.items || []).filter((item) => ['passed', 'failed'].includes(item.status)).length;
     $('resultPassRate').textContent = conclusion?.status ? `${conclusion.pass_rate.toFixed(1)}%` : '—';

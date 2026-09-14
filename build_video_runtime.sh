@@ -80,10 +80,9 @@ printf '%s  %s\n' "$MEDIAMTX_SHA256" "$MEDIAMTX_FILE" | sha256sum -c - >&2
 tar -xzf "$MEDIAMTX_FILE" -C "$RUNTIME/mediamtx" mediamtx LICENSE
 
 # Only expose plugins required by the controlled RGB/BGR -> VAAPI H.264 -> RTSP
-# pipeline. ``rtspclientsink`` builds an internal appsrc/appsink + rtpbin
-# graph, therefore its transport plugins must remain alongside the visible
-# encoder chain. This avoids loading unrelated optional plugins on a minimal
-# robot image.
+# publisher. ``rtspclientsink`` builds an internal appsrc/appsink + rtpbin graph,
+# therefore its transport plugins must remain alongside the visible encoder
+# chain. This avoids loading unrelated optional plugins on a minimal robot image.
 PLUGIN_DIR="$EXTRACTED/usr/lib/x86_64-linux-gnu/gstreamer-1.0"
 for plugin in libgstcoreelements.so libgstrawparse.so libgstvideoconvert.so libgstvideoparsersbad.so libgstrtspclientsink.so libgstvaapi.so libgstapp.so libgsttcp.so libgstudp.so libgstrtp.so libgstrtpmanager.so; do
   [[ -f "$PLUGIN_DIR/$plugin" ]] || { echo "私有 GStreamer 缺少受控插件：$plugin" >&2; exit 1; }
@@ -100,7 +99,6 @@ SCANNER="$EXTRACTED/usr/lib/x86_64-linux-gnu/gstreamer1.0/gstreamer-1.0/gst-plug
 [[ -x "$SCANNER" ]] || { echo "私有 GStreamer 缺少 gst-plugin-scanner。" >&2; exit 1; }
 install -m 0755 "$SCANNER" "$RUNTIME/libexec/gst-plugin-scanner"
 install -m 0755 "$EXTRACTED/usr/bin/gst-launch-1.0" "$RUNTIME/bin/gst-launch-1.0.real"
-
 cat > "$RUNTIME/bin/gst-launch-1.0" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail

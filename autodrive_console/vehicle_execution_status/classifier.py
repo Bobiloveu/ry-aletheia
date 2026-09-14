@@ -6,26 +6,50 @@ from pathlib import PurePath
 from .model import ExecutionSnapshot, NavigationState, TaskEvent, snapshot_for, unavailable_snapshot
 
 
-ACTIVE_NAVIGATION_STATUSES = frozenset({"running", "executing", "task_executing", "task_retrying"})
+ACTIVE_NAVIGATION_STATUSES = frozenset(
+    {"navigating", "running", "executing", "task_executing", "task_retrying", "replanning"}
+)
 COMPLETED_NAVIGATION_STATUSES = frozenset({"completed", "successful"})
-UNAVAILABLE_NAVIGATION_STATUSES = frozenset({"", "idle", "failed", "error"})
-UNAMBIGUOUS_EVENT_PHASES = {
+IDLE_NAVIGATION_STATUSES = frozenset({"", "idle"})
+UNAVAILABLE_NAVIGATION_STATUSES = frozenset({"failed", "error"})
+TERMINAL_EVENT_PHASES = {
     "109": "completed",
+}
+TASK_EVENT_PHASES = {
+    "100": "task",
+    "101": "task",
+    "102": "task",
+    "103": "task",
     "200": "calling_elevator",
     "201": "entering_elevator",
     "202": "riding_elevator",
+    "203": "exiting_elevator",
+    # 电梯到达后仍在跨层切图/出梯衔接，直到物理出梯路段覆盖该状态。
+    "209": "riding_elevator",
+    "301": "opening_gate",
+    "302": "closing_gate",
+    "303": "opening_access_door",
+    "304": "closing_access_door",
+    "500": "task",
+    "600": "task",
+    "601": "task",
+    "700": "task",
+    "701": "task",
+}
+UNAMBIGUOUS_EVENT_PHASES = {
     "400": "draining_or_unloading",
     "401": "draining_or_unloading",
     "402": "draining_or_unloading",
     "403": "draining_or_unloading",
 }
-AMBIGUOUS_EVENT_CODES = frozenset({"203", "209", "300", "301", "302", "303", "304"})
 APPROVED_ACTION_PREFIXES = (
-    ("elevator_in_", "entering_elevator"),
+    ("elevator_in_", "calling_elevator"),
     ("elevator_out_", "riding_elevator"),
     ("close_elevdoor_", "closing_elevator_door"),
     ("e_guard_open_", "opening_gate"),
     ("e_guard_close_", "closing_gate"),
+    ("open_door_", "opening_access_door"),
+    ("close_door_", "closing_access_door"),
     ("clamp_water", "draining_or_unloading"),
     ("place_water", "draining_or_unloading"),
 )
@@ -37,28 +61,61 @@ def classify_execution_state(
     *,
     restarting_nodes: bool,
 ) -> ExecutionSnapshot:
-    """Classify only confirmed state; ambiguous robot actions deliberately hide."""
+    """Classify live vehicle behaviour from route movement, event, and action context."""
     if restarting_nodes:
         return snapshot_for("restarting_nodes")
 
     navigation_status = navigation.status.strip().casefold()
     if navigation_status in COMPLETED_NAVIGATION_STATUSES:
         return snapshot_for("completed")
+    if navigation_status in IDLE_NAVIGATION_STATUSES:
+        return snapshot_for("idle")
     if navigation_status in UNAVAILABLE_NAVIGATION_STATUSES:
         return unavailable_snapshot()
 
     semantic_phase = phase_for_approved_behavior(navigation.current_task)
-    if semantic_phase:
-        return snapshot_for(semantic_phase)
+    movement_phase = phase_for_route_motion(navigation, semantic_phase)
+    if movement_phase:
+        return snapshot_for(movement_phase)
 
-    event_phase = UNAMBIGUOUS_EVENT_PHASES.get(task_event.status_code.strip())
+    event_phase = phase_for_task_event(task_event.status_code, semantic_phase)
     if event_phase:
         return snapshot_for(event_phase)
-    if task_event.status_code.strip() in AMBIGUOUS_EVENT_CODES:
-        return unavailable_snapshot()
+    if semantic_phase:
+        return snapshot_for(semantic_phase)
     if navigation_status in ACTIVE_NAVIGATION_STATUSES:
         return snapshot_for("task")
     return unavailable_snapshot()
+
+
+def phase_for_route_motion(navigation: NavigationState, semantic_phase: str | None) -> str | None:
+    """Classify the physical route segment before the next waypoint action file."""
+    speed_mode = navigation.current_speed_mode.strip().casefold()
+    if speed_mode == "elevator_in":
+        return "entering_elevator"
+    if speed_mode == "backward" and semantic_phase == "closing_elevator_door":
+        return "exiting_elevator"
+    return None
+
+
+def phase_for_task_event(status_code: str, semantic_phase: str | None) -> str | None:
+    """Use the source-defined TaskStatus protocol before filename inference."""
+    code = status_code.strip()
+    terminal_phase = TERMINAL_EVENT_PHASES.get(code)
+    if terminal_phase:
+        return terminal_phase
+
+    task_phase = TASK_EVENT_PHASES.get(code)
+    if task_phase:
+        return task_phase
+
+    event_phase = UNAMBIGUOUS_EVENT_PHASES.get(code)
+    if event_phase:
+        return event_phase
+
+    # Door_Waiting (300) has no direction; the approved behavior filename may
+    # refine it below, otherwise the classifier returns the active generic task.
+    return None
 
 
 def phase_for_approved_behavior(current_task: str) -> str | None:

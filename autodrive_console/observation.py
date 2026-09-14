@@ -487,6 +487,7 @@ class ObservationManager:
         with self._lock:
             if self._idle_timer:
                 self._idle_timer.cancel()
+                self._idle_timer = None
             delay = self._options(settings)["idle_stop_seconds"] + 1
             self._idle_timer = threading.Timer(delay, lambda: self._stop_if_idle(settings))
             self._idle_timer.daemon = True

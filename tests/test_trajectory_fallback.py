@@ -191,6 +191,30 @@ class TrajectoryFallbackTests(unittest.TestCase):
         self.assertEqual([item.case_filename for item in run.attempts], [case.filename for case in cases])
         self.assertEqual([event["type"] for event in events if event["type"] == "item_finished"], ["item_finished", "item_finished"])
 
+    def test_acceptance_sequence_disables_only_the_local_service_deadline(self):
+        """长路线验收等待任务服务完成，但仍由执行器响应人工取消。"""
+        class Executor(_Executor):
+            def __init__(self):
+                super().__init__()
+                self.timeouts = []
+
+            def execute(self, *_args, timeout_s=None, **_kwargs):
+                self.timeouts.append(timeout_s)
+                return super().execute()
+
+        executor = Executor()
+        case = TestCase("case", "long-route.json", "长路线", TaskParameters("园区", 1, 1, 1, 101), "unused.json")
+        with tempfile.TemporaryDirectory() as directory:
+            manager = RunManager(Path(directory), executor, _Settings())
+            with patch("autodrive_console.run_manager.RobotGateway", _Gateway), patch.object(manager, "_write_report"):
+                run = manager.start_sequence([case], prepare_trajectory_maps=False)
+                deadline = time.monotonic() + 2.0
+                while run.status not in {"completed", "cancelled", "blocked", "failed"} and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(executor.timeouts, [0])
+
     def test_bound_scenario_is_applied_before_orchestration_and_restored_after_run(self):
         """启动脚本必须先切换，Supervisor 重启才会读取到该方案的参数。"""
         events = []

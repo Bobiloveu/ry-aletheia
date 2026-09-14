@@ -1,7 +1,9 @@
 import { requestJson } from "./platform/http.js";
+import { VehicleExecutionAvatar } from "./vehicle_execution_avatar.js";
 
 const UNAVAILABLE_STATUS = Object.freeze({ phase: "unavailable", label: "状态暂不可用" });
 const ALLOWED_PHASES = new Set([
+  "idle",
   "emergency_stop",
   "manual_control",
   "task",
@@ -41,6 +43,8 @@ export function startExecutionStatusPolling({
 } = {}) {
   const label = documentRef.getElementById("vehicleExecutionLabel");
   if (!label) return () => {};
+  const avatarHost = documentRef.getElementById("vehicleExecutionAvatar");
+  const avatar = avatarHost ? new VehicleExecutionAvatar(avatarHost) : null;
 
   let rendered = null;
   let requestGeneration = 0;
@@ -49,6 +53,7 @@ export function startExecutionStatusPolling({
     rendered = next;
     documentRef.body.dataset.phase = next.phase;
     label.textContent = next.label;
+    avatar?.setPhase(next.phase);
   };
   const refresh = async () => {
     const thisRequest = ++requestGeneration;
@@ -63,7 +68,10 @@ export function startExecutionStatusPolling({
 
   refresh();
   const timer = globalThis.setInterval(refresh, intervalMs);
-  return () => globalThis.clearInterval(timer);
+  return () => {
+    globalThis.clearInterval(timer);
+    avatar?.destroy();
+  };
 }
 
 if (typeof document !== "undefined") {

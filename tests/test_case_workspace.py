@@ -4,9 +4,12 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import Mock, patch
 
+import web_console
 from autodrive_console.case_store import CaseStore
 from autodrive_console.case_workspace import CasePackageError, CaseWorkspace
+from autodrive_console.settings import SettingsStore
 
 
 class CaseWorkspaceTests(unittest.TestCase):
@@ -30,6 +33,57 @@ class CaseWorkspaceTests(unittest.TestCase):
             saved = workspace.update(case, {"version": "1.2", "lifecycle": "local_verified", "tags": ["电梯", "回环"], "summary": "电梯回环验证"})
             self.assertEqual(saved["version"], "1.2")
             self.assertEqual(workspace.load()["cases"][case.id]["tags"], ["电梯", "回环"])
+
+    def test_removing_case_metadata_keeps_the_registry_valid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_dir, case = self._case(root)
+            workspace = CaseWorkspace(root / "config", task_dir)
+            workspace.describe(case)
+
+            workspace.remove(case)
+
+            self.assertEqual(workspace.load()["cases"], {})
+
+    def test_case_store_deletes_only_a_discovered_task_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_dir, case = self._case(root)
+            store = CaseStore(task_dir)
+
+            removed = store.delete_case(case.id)
+
+            self.assertEqual(removed.id, case.id)
+            self.assertFalse((task_dir / self.filename).exists())
+            with self.assertRaisesRegex(ValueError, "未找到"):
+                store.delete_case("../outside.json")
+
+    def test_console_deletion_removes_task_and_its_local_references(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_dir, case = self._case(root)
+            store = CaseStore(task_dir)
+            workspace = CaseWorkspace(root / "config", task_dir)
+            workspace.describe(case)
+            settings = SettingsStore(root / "config" / "console.json")
+            settings.save({"case_aliases": {case.id: "电梯回环"}})
+            scenario = Mock()
+            handler = object.__new__(web_console.ConsoleHandler)
+
+            with patch.object(web_console, "STORE", store), patch.object(web_console, "CASE_WORKSPACE", workspace), patch.object(web_console, "SETTINGS", settings), patch.object(web_console, "SCENARIO_SETUP", scenario), patch.object(web_console, "RUNS", Mock(has_active_run=Mock(return_value=False))):
+                result = handler._delete_case(case.id)
+
+            self.assertEqual(result, {"id": case.id, "filename": case.filename})
+            self.assertFalse((task_dir / case.filename).exists())
+            self.assertEqual(workspace.load()["cases"], {})
+            self.assertEqual(settings.load().case_aliases, {})
+            scenario.bind_case.assert_called_once_with(case.id, "")
+
+    def test_console_refuses_case_deletion_during_an_active_run(self):
+        handler = object.__new__(web_console.ConsoleHandler)
+        with patch.object(web_console, "RUNS", Mock(has_active_run=Mock(return_value=True))):
+            with self.assertRaisesRegex(CasePackageError, "正在执行"):
+                handler._delete_case(self.filename)
 
     def test_export_import_round_trip_is_portable_but_no_overwrite(self):
         with tempfile.TemporaryDirectory() as source_directory, tempfile.TemporaryDirectory() as target_directory:

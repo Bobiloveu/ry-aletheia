@@ -29,6 +29,18 @@ class CaseStore:
     def get_case(self, case_id: str) -> TestCase | None:
         return next((case for case in self.list_cases()[0] if case.id == case_id), None)
 
+    def delete_case(self, case_id: str) -> TestCase:
+        """Remove one discovered task JSON and never resolve arbitrary paths."""
+        case = self.get_case(case_id)
+        if case is None:
+            raise ValueError("未找到指定测试用例")
+        root = self.case_dir.resolve()
+        target = Path(case.source).resolve()
+        if target.parent != root or target.name != case.filename or not target.is_file():
+            raise ValueError("测试用例文件无效")
+        target.unlink()
+        return case
+
     @classmethod
     def parse_case(cls, filename: str, contents: str, source: str = "") -> TestCase:
         """校验磁盘文件或上传内容，确保两条入口遵循相同的任务资产规则。"""

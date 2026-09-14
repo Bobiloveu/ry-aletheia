@@ -1306,8 +1306,45 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             LOGGER.warning("保存用例管理信息失败：%s", exc)
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
+    def _delete_case(self, case_id: str) -> dict[str, str]:
+        """Delete one inactive local case and retire only its local references."""
+        if RUNS.has_active_run():
+            raise CasePackageError("测试任务正在执行，不能删除用例")
+        case = STORE.get_case(case_id)
+        if not case:
+            raise CasePackageError("未找到指定测试用例")
+
+        # Clear optional local references before the irreversible task deletion.
+        # None of these operations can alter the task payload or robot runtime.
+        SCENARIO_SETUP.bind_case(case.id, "")
+        settings = SETTINGS.load()
+        aliases = dict(settings.case_aliases)
+        aliases.pop(case.id, None)
+        SETTINGS.save({"case_aliases": aliases})
+        CASE_WORKSPACE.remove(case)
+        STORE.delete_case(case.id)
+        LOGGER.info("已删除测试用例：%s", case.filename)
+        return {"id": case.id, "filename": case.filename}
+
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
+        if path.startswith("/api/cases/"):
+            case_id = unquote(path.removeprefix("/api/cases/").rstrip("/"))
+            if not case_id or "/" in case_id or "\\" in case_id:
+                self._json({"error": "用例路径无效"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                case = self._delete_case(case_id)
+                self._json({"message": "用例已删除", "case": case})
+            except CasePackageError as exc:
+                status = HTTPStatus.CONFLICT if "正在执行" in str(exc) else HTTPStatus.NOT_FOUND
+                self._json({"error": str(exc)}, status)
+            except ValueError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            except OSError as exc:
+                LOGGER.error("删除测试用例失败：%s", exc)
+                self._json({"error": f"删除用例失败：{exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
         if path.startswith("/api/deployments/") and "/transitions/" in path:
             try:
                 parts = path.split("/")

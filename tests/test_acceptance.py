@@ -269,7 +269,10 @@ def test_orchestrator_blocks_changed_source_before_start(tmp_path):
 
     with pytest.raises(AcceptanceConflict, match="正式任务文件已变化"):
         orchestrator.start(plan["plan_id"])
-    assert orchestrator.current()["status"] == "blocked"
+    current = orchestrator.current()
+    assert current["status"] == "blocked"
+    assert current["report_filename"]
+    assert (tmp_path / "state" / "reports" / current["report_filename"]).is_file()
 
 
 def test_orchestrator_freezes_selected_plan_preflight_and_passes_it_to_sequence(tmp_path):
@@ -341,6 +344,83 @@ def test_orchestrator_persists_plan_wide_preflight_progress(tmp_path):
     assert status["state"] == "restarting_dependencies"
     assert status["message"] == "正在恢复已冻结的运行依赖"
     assert status["updated_at"]
+
+
+def test_orchestrator_writes_one_partial_report_when_sequence_is_cancelled(tmp_path):
+    task_dir = tmp_path / "origin_tasks"
+    catalog_snapshot_for_plan(task_dir)
+    state_dir = tmp_path / "state"
+    orchestrator = make_orchestrator(task_dir, state_dir)
+    plan = orchestrator.create_plan({"scope_type": "community", "community": "园区_A", "mode": "full"})
+
+    event = {"type": "sequence_finished", "status": "cancelled", "message": "现场安全终止"}
+    orchestrator._on_run_event(plan["plan_id"], event)
+    current = orchestrator.current()
+
+    assert current["status"] == "cancelled"
+    assert current["report_filename"]
+    report = state_dir / "reports" / current["report_filename"]
+    assert report.is_file()
+    assert "已取消" in report.read_text(encoding="utf-8")
+
+    # 重复的终态事件不能生成第二份同一计划的报告。
+    orchestrator._on_run_event(plan["plan_id"], event)
+    assert len(list((state_dir / "reports").glob("*.html"))) == 1
+
+
+def test_orchestrator_persists_only_frozen_dependency_stage_progress(tmp_path):
+    task_dir = tmp_path / "origin_tasks"
+    catalog_snapshot_for_plan(task_dir)
+
+    class Settings:
+        @staticmethod
+        def load():
+            return SimpleNamespace(dependency_plan={
+                "enabled": True,
+                "steps": [
+                    {"nodes": ["MODULES:209-lightning"], "wait_seconds": 0},
+                    {"nodes": ["MODULES:211-navigate_todoor_server"], "wait_seconds": 0},
+                ],
+            })
+
+    orchestrator = AcceptanceOrchestrator(
+        catalog=AcceptanceTaskCatalog(task_dir),
+        plan_store=AcceptancePlanStore(tmp_path / "state" / "acceptance"),
+        run_manager=_NoopRunManager(),
+        report_dir=tmp_path / "state" / "reports",
+        settings=Settings(),
+    )
+    plan = orchestrator.create_plan({
+        "scope_type": "community", "community": "园区_A", "mode": "full",
+        "scenario_profile_id": None, "use_dependency_plan": True,
+    })
+
+    orchestrator._on_run_event(plan["plan_id"], {
+        "type": "preflight_progress",
+        "preflight": {
+            "state": "restarting_dependencies",
+            "message": "正在重启第 1 阶段依赖",
+            "dependency_progress": {"stages": [
+                {"index": 1, "state": "waiting_stable", "nodes": [
+                    {"name": "MODULES:209-lightning", "status": "STARTING"},
+                ]},
+                {"index": 2, "state": "pending", "nodes": [
+                    {"name": "MODULES:211-navigate_todoor_server", "status": "PENDING"},
+                ]},
+            ]},
+        },
+    })
+
+    status = orchestrator.current()["execution_preflight_status"]
+    assert status["dependency_progress"]["stages"][0]["nodes"][0]["status"] == "STARTING"
+    assert status["dependency_progress"]["stages"][1]["state"] == "pending"
+
+    orchestrator._on_run_event(plan["plan_id"], {
+        "type": "preflight_progress",
+        "preflight": {"state": "ready", "message": "运行准备已完成"},
+    })
+
+    assert orchestrator.current()["execution_preflight_status"]["dependency_progress"]["stages"][0]["nodes"][0]["status"] == "STARTING"
 
 
 def test_orchestrator_exposes_physical_buildings_and_rejects_partial_scope(tmp_path):
@@ -508,10 +588,13 @@ def test_acceptance_page_clarifies_optional_preparation_and_retains_draft():
 
     assert "可选运行准备" in page
     assert 'id="preflightRuntimeStatus"' in page
+    assert 'id="dependencyPreparation"' in page
     assert "ry-aletheia-acceptance-draft-v1" in script
     assert "execution_preflight_status" in script
+    assert "renderDependencyPreparation" in script
     assert "box.hidden = !text" in script
     assert ".preflight-runtime-status[hidden]" in stylesheet
+    assert ".dependency-preparation[hidden]" in stylesheet
 
 
 def test_report_center_renders_test_and_acceptance_report_types():

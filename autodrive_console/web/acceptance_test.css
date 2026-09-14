@@ -34,6 +34,25 @@ fieldset label { display: inline-flex; align-items: center; gap: .4rem; font-wei
 .preflight-runtime-status.pending::before, .preflight-runtime-status.applying_scenario::before, .preflight-runtime-status.settling::before, .preflight-runtime-status.restarting_dependencies::before, .preflight-runtime-status.restoring::before { background: var(--warning); }
 .preflight-runtime-status.ready::before, .preflight-runtime-status.restored::before, .preflight-runtime-status.not_selected::before { background: var(--success); }
 .preflight-runtime-status.blocked::before, .preflight-runtime-status.cancelled::before { background: var(--danger); }
+.dependency-preparation { margin-top: .8rem; padding: .85rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-subtle); }
+.dependency-preparation[hidden] { display: none; }
+.dependency-preparation-heading { display: grid; gap: .18rem; }
+.dependency-preparation-heading strong { font-size: .9rem; }
+.dependency-preparation-heading small { color: var(--muted); font-size: .78rem; line-height: 1.45; }
+.dependency-preparation-stages { display: grid; gap: .55rem; margin-top: .75rem; }
+.dependency-stage { padding: .65rem .7rem; border: 1px solid var(--line); border-radius: 8px; }
+.dependency-stage-heading { display: flex; justify-content: space-between; gap: .75rem; align-items: center; font-size: .82rem; }
+.dependency-stage-heading span { color: var(--muted); }
+.dependency-stage.restarting .dependency-stage-heading span, .dependency-stage.waiting_stable .dependency-stage-heading span, .dependency-stage.settling .dependency-stage-heading span { color: var(--warning); }
+.dependency-stage.ready .dependency-stage-heading span { color: var(--success); }
+.dependency-stage.blocked .dependency-stage-heading span, .dependency-stage.cancelled .dependency-stage-heading span { color: var(--danger); }
+.dependency-stage ul { display: grid; gap: .35rem; margin: .55rem 0 0; padding: 0; list-style: none; }
+.dependency-stage li { display: flex; justify-content: space-between; gap: .75rem; align-items: center; min-width: 0; }
+.dependency-stage code { overflow-wrap: anywhere; color: var(--ink); font-size: .78rem; }
+.supervisor-node-status { flex: none; color: var(--muted); font: 700 .72rem/1 ui-monospace, monospace; }
+.supervisor-node-status.running { color: var(--success); }
+.supervisor-node-status.starting, .supervisor-node-status.backoff { color: var(--warning); }
+.supervisor-node-status.stopped, .supervisor-node-status.fatal, .supervisor-node-status.missing { color: var(--danger); }
 .frozen-preflight { margin-top: 1rem; padding: .8rem .95rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-subtle); color: var(--muted); font-size: .88rem; line-height: 1.5; }
 .plan-fact { padding: .75rem; border-radius: 10px; background: var(--surface-subtle); display: grid; gap: .35rem; }
 .plan-fact span, .muted { color: var(--muted); font-size: .86rem; }
@@ -55,4 +74,4 @@ fieldset label { display: inline-flex; align-items: center; gap: .4rem; font-wei
 .conclusion { margin-top: 1rem; padding: 1rem; border: 1px solid var(--line); border-top-width: 3px; background: var(--surface-subtle); }
 .conclusion.sample_pass, .conclusion.full_pass { border-top-color: var(--success); }
 .conclusion.sample_fail, .conclusion.full_fail { border-top-color: var(--danger); }
-@media (max-width: 900px) { .form-grid, .result-facts, .preflight-grid { grid-template-columns: 1fr; } .section-heading { align-items: flex-start; flex-direction: column; } fieldset { flex-wrap: wrap; } .acceptance-page { padding-bottom: 2rem; } }
+@media (max-width: 900px) { .form-grid, .result-facts, .preflight-grid { grid-template-columns: 1fr; } .section-heading { align-items: flex-start; flex-direction: column; } fieldset { flex-wrap: wrap; } .dependency-stage-heading, .dependency-stage li { align-items: flex-start; flex-direction: column; } .acceptance-page { padding-bottom: 2rem; } }

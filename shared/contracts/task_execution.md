@@ -9,6 +9,12 @@ Backend 拥有任务文件、校验、执行状态、报告、取消、恢复和
 
 变更性操作属于受控动作：客户端 UI 必须呈现目标、确认、返回错误和当前状态。Mobile 可以消费这些 API，但不得直接改写机器人任务、执行任意命令或创建离线升级包。
 
+## 用例管理（Desktop Web）
+
+**运行时执行方：** Backend `CaseStore`、`CaseWorkspace` 与既有场景方案/设置存储；**现有消费者：** PC Web `/case-library.html`；**非消费者：** Mobile。
+
+`DELETE /api/cases/{case_id}` 仅删除当前正式任务目录中已扫描、通过基础校验的一个本地 JSON 用例。`case_id` 必须是精确的已发现文件标识，不能包含路径分隔符；Backend 再次确认其解析路径仍位于正式任务目录，绝不接受浏览器提交的文件路径。执行任务存在时必须返回 HTTP 409，不能删除。成功删除后仅清理该用例的本地别名、场景方案绑定和可选管理元数据，不触碰其他用例、机器人运行时或 ROS 控制边界。PC 页面必须在“用例管理与交付”区域以行内二次确认展示完整文件名与不可恢复提示；失败时保留确认状态并展示 Backend 返回的原因。该操作不提供给 Mobile，新增消费者前须更新本文档并完成其定向验证。
+
 ## 部署验收（Desktop Web）
 
 **运行时执行方：** Backend `AcceptanceOrchestrator` 通过既有 `RunManager`；**现有消费者：** PC Web `/acceptance-test.html`；**非消费者：** Mobile。
@@ -19,13 +25,13 @@ Backend 拥有任务文件、校验、执行状态、报告、取消、恢复和
 
 部署验收不要求实施人员填写通过率、覆盖率或允许失败数。系统自动显示计划的实际样本覆盖，并按固定规则判定：计划内**所有**任务通过才通过；任一未通过任务即不通过。抽样计划的结果文案必须明确为“本次抽样通过 / 不通过”，并说明它不代表全小区全量验收。旧本地状态中的阈值字段仅为读取兼容保留，不参与新计划的判定，也不应出现在新的计划公共响应或页面。
 
-部署验收计划可选用已有的受控运行前置条件。`POST /api/acceptance/plans` 只额外接受 `scenario_profile_id: string | null` 与 `use_dependency_plan: boolean`：前者只能引用已保存的场景方案，后者只能请求冻结当前已启用的 Supervisor 编排；浏览器不得提交路径、节点名或阶段内容。响应的 `execution_preflight` 仅公开方案名称以及编排阶段/节点数量，持久化计划保留完整的已验证依赖编排快照；`execution_preflight_status` 只公开固定状态、受控中文说明和更新时间，用于展示“待执行、应用方案、等待生效、恢复依赖、准备完成、恢复常规配置、已恢复、取消或拦截”，不含命令或节点控制数据。开始计划时，Backend 在**整份序列开始前一次性**应用方案并执行冻结的依赖编排；每项任务继续使用既有安全检查、同步、ROS 服务和轨迹链路，但不得再次重启依赖或重应用场景。完成、取消、阻塞或异常后，如已应用方案，Backend 只恢复常规启动脚本，绝不因恢复而启动、停止或重启 Supervisor 节点。PC Web 是该字段的唯一消费者；Mobile 不是消费者，保持不变。
+部署验收计划可选用已有的受控运行前置条件。`POST /api/acceptance/plans` 只额外接受 `scenario_profile_id: string | null` 与 `use_dependency_plan: boolean`：前者只能引用已保存的场景方案，后者只能请求冻结当前已启用的 Supervisor 编排；浏览器不得提交路径、节点名或阶段内容。响应的 `execution_preflight` 仅公开方案名称以及编排阶段/节点数量，持久化计划保留完整的已验证依赖编排快照；`execution_preflight_status` 公开固定状态、受控中文说明、更新时间及只读的 `dependency_progress`。后者在未选择依赖编排时为 `null`；选择后只包含冻结阶段的序号、阶段状态（`pending`、`restarting`、`waiting_stable`、`settling`、`ready`、`blocked`、`cancelled`）及同一冻结节点的受限 Supervisor 状态（`PENDING`、`RUNNING`、`STARTING`、`STOPPED`、`BACKOFF`、`EXITED`、`FATAL`、`MISSING`、`UNKNOWN`）。它不含命令、脚本、节点配置、实时进程详情或任何浏览器控制能力。开始计划时，Backend 在**整份序列开始前一次性**应用方案并执行冻结的依赖编排；每项任务继续使用既有安全检查、同步、ROS 服务和轨迹链路，但不得再次重启依赖或重应用场景。普通测试继续使用 `task_execution_timeout_s` 本地等待上限；验收序列的单项任务不使用这个通用截止时间，而是等待既有任务服务返回真实终态，同时始终响应操作员取消和人工判定失败。计划进入 `completed`、`cancelled`、`blocked` 或 `failed` 的任一终态时，都必须仅生成一份 HTML/CSV 验收报告，保留已经获得的结果、未执行项和轨迹证据。完成、取消、阻塞或异常后，如已应用方案，Backend 只恢复常规启动脚本，绝不因恢复而启动、停止或重启 Supervisor 节点。PC Web `/acceptance-test.html` 是该字段的唯一消费者；Mobile 不是消费者，保持不变。
 
 `GET /api/reports` 继续返回 `filename`、`size`、`modified_at`、`csv_filename`，并增量返回 `report_type: "test" | "acceptance"` 和 `title`。所有现有消费者可忽略新增字段；两类报告均使用既有预览、HTML 下载、CSV 下载与删除路径。验收报告为单文件 HTML，内嵌已验证的轨迹 SVG；删除时只会依据 Aletheia 写入的受限清单删除其专属轨迹目录。
 
 ## 车辆执行状态显示（Desktop Web）
 
-**运行时执行方：** Backend `VehicleExecutionStatusMonitor`；**现有消费者：** PC Web `/vehicle-execution-status.html`；**非消费者：** Mobile 与未来车载屏。本能力只读订阅既有 `/task_status`、`/navigate_todoor_detailed_status`，不创建 ROS 控制通道、不下发任务，也不影响底盘、导航、电梯或 Supervisor 的既有安全边界。
+**运行时执行方：** Backend `VehicleExecutionStatusMonitor`；**现有消费者：** PC Web `/vehicle-execution-status.html`；**非消费者：** Mobile 与未来车载屏。本能力只读订阅既有 `/task_status`、`/navigate_todoor_detailed_status` 和 `/navigate_todoor_status`，不创建 ROS 控制通道、不下发任务，也不影响底盘、导航、电梯或 Supervisor 的既有安全边界。
 
 `GET /api/vehicle-execution-status` 返回不可缓存的 JSON 快照，响应严格只有两个字段：
 
@@ -36,7 +42,16 @@ Backend 拥有任务文件、校验、执行状态、报告、取消、恢复和
 }
 ```
 
-`phase` 是闭集：`emergency_stop`、`manual_control`、`task`、`calling_elevator`、`entering_elevator`、`riding_elevator`、`exiting_elevator`、`closing_elevator_door`、`opening_gate`、`closing_gate`、`opening_access_door`、`closing_access_door`、`draining_or_unloading`、`completed`、`restarting_nodes`、`unavailable`。显示优先级为真实急停、已确认的 `miniapp` 控制源、受控节点重启、车辆任务行为。急停只采纳既有 `VehicleControlController` 对 `/is_emergency_stop=true` 的锁存确认；手动控制只采纳其对 `/control_source_state=miniapp` 的确认，绝不由浏览器会话或点击结果推断。无论 ROS 运行时未启动、消息过期、模板/状态码未知或语义冲突，接口都以 HTTP 200 安全返回：
+`phase` 是闭集：`idle`、`emergency_stop`、`manual_control`、`task`、`calling_elevator`、`entering_elevator`、`riding_elevator`、`exiting_elevator`、`closing_elevator_door`、`opening_gate`、`closing_gate`、`opening_access_door`、`closing_access_door`、`draining_or_unloading`、`completed`、`restarting_nodes`、`unavailable`。显示优先级为真实急停、已确认的 `miniapp` 控制源、受控节点重启、车辆任务行为。急停只采纳既有 `VehicleControlController` 对 `/is_emergency_stop=true` 的锁存确认；手动控制只采纳其对 `/control_source_state=miniapp` 的确认，绝不由浏览器会话或点击结果推断。控制台正常运行但尚未下发任务、尚未收到首条导航上下文，或导航明确为 `idle` 时，接口返回：
+
+```json
+{
+  "phase": "idle",
+  "label": "空闲中"
+}
+```
+
+只有 ROS 运行时明确不可用，或已知活跃任务的导航心跳过期且无法确认安全终态时，接口才以 HTTP 200 安全返回：
 
 ```json
 {
@@ -44,6 +59,8 @@ Backend 拥有任务文件、校验、执行状态、报告、取消、恢复和
   "label": "状态暂不可用"
 }
 ```
+
+`/navigate_todoor_detailed_status` 是路径点/行为切换上下文，不要求持续发布；`/navigate_todoor_status` 是导航存活心跳。只要心跳仍新鲜，后端保留最近详细状态的路点、速度模式和行为树上下文；已知活跃任务的心跳中断后才将非终态降级为 `unavailable`。没有活跃任务或导航上下文本身是正常空闲，必须显示 `idle`，不得降级为 `unavailable`。`/task_status` 的 `status_code`、`task_uuid`、`message` 是任务执行方定义的正式协议，后端内部保留三者但极简 API 不公开它们；它是边沿事件而不是心跳，同一任务的最近阶段码必须锁存到下一阶段码、导航终态/空闲、控制覆盖或活跃任务心跳失联，路径 XML 的普通切换不得清除它。`109` 只有在本监控器已观察到同一非空 `task_uuid` 的非终态任务事件后才表示“任务完成”；孤立、空 UUID 或 UUID 不匹配的 `109` 必须忽略，未下发任务的车辆保持 `idle`。判定优先级是：真实急停、确认的手动控制、受控节点重启、当前物理速度段、正式 `TaskStatus` 阶段码、已批准行为树语义、活跃导航的通用“任务中”。因此 `elevator_in` 速度段优先显示“进梯中”；`200/201/202/203/209` 依次表示呼梯、进梯、乘梯、出梯、电梯到达（继续显示乘梯）；`301/302` 表示开/关闸机，`303/304` 表示开/关门禁；`400`–`403` 表示泄水/卸货；`500` 表示任务内图片上传并显示“任务中”；`300` 仅表示门禁等待，保留已批准行为树语义或“任务中”，不得单独造成“状态暂不可用”。
 
 `restarting_nodes` 仅表示 `RunManager` 正在执行 Aletheia 已配置的 Supervisor 依赖控制与稳定等待，绝不从普通运行状态、进程名或浏览器行为推测。当前 PC 页面只显示 `phase` 与 `label`；未来 Mobile/车载消费者接入前必须在本文档更新消费者清单并运行其定向验证。当前定向验证为 `scripts/test-backend.sh` 和 `scripts/test-web.sh`。
 

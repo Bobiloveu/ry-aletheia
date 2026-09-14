@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 
 PUBLIC_LABELS: dict[str, str] = {
+    "idle": "空闲中",
     "emergency_stop": "急停已触发",
     "manual_control": "手动控制中",
     "task": "任务中",
@@ -35,6 +36,8 @@ class NavigationState:
 @dataclass(frozen=True)
 class TaskEvent:
     status_code: str = ""
+    task_uuid: str = ""
+    message: str = ""
 
 
 @dataclass(frozen=True)

@@ -89,6 +89,51 @@
   color: #6485a0;
   font-size: 10px;
 }
+.case-delete-action {
+  margin-left: auto;
+  border-color: #b84b63;
+  color: #ff9cad;
+}
+.case-delete-action:hover,
+.case-delete-action:focus-visible {
+  border-color: #ef7187;
+  background: #3a1723;
+  color: #ffd4dc;
+}
+.case-delete-confirmation {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid #7e3345;
+  border-radius: 7px;
+  background: #25131b;
+  color: #f2b6c0;
+  font-size: 11px;
+}
+.case-delete-confirmation[hidden] {
+  display: none;
+}
+.case-delete-confirmation > span {
+  flex: 1 1 250px;
+}
+.case-delete-confirmation-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 7px;
+}
+.case-delete-confirm {
+  border-color: #d95a71;
+  background: #c3415b;
+  color: #fff;
+}
+.case-delete-confirm:hover,
+.case-delete-confirm:focus-visible {
+  border-color: #f0788d;
+  background: #dd536d;
+  color: #fff;
+}
 .package-dropzone {
   margin-top: 16px;
 }
@@ -138,6 +183,21 @@ body.theme-light .management-grid label,
 body.theme-light .management-actions small {
   color: #637f96;
 }
+body.theme-light .case-delete-action {
+  border-color: #cf7281;
+  color: #a93249;
+}
+body.theme-light .case-delete-action:hover,
+body.theme-light .case-delete-action:focus-visible {
+  border-color: #b13d54;
+  background: #fff1f3;
+  color: #8e263b;
+}
+body.theme-light .case-delete-confirmation {
+  border-color: #e5a8b2;
+  background: #fff6f7;
+  color: #8a3444;
+}
 @media (max-width: 850px) {
   .asset-header-actions {
     margin-top: 14px;
@@ -161,6 +221,10 @@ body.theme-light .management-actions small {
     grid-column: 1/-1;
   }
   .management-actions {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .case-delete-confirmation {
     align-items: flex-start;
     flex-wrap: wrap;
   }

@@ -110,7 +110,10 @@ class RosTaskExecutor:
                 if interrupt_event and interrupt_event.is_set():
                     future.cancel()
                     return False, "人工判定本轮失败：已取消本地服务等待，等待车辆恢复", round(time.monotonic() - started, 2)
-                if time.monotonic() - started > effective_timeout:
+                # ``0`` is the internal acceptance-sequence sentinel for no
+                # local deadline.  Cancellation and manual interruption are
+                # intentionally checked above on every spin.
+                if effective_timeout > 0 and time.monotonic() - started > effective_timeout:
                     return False, f"服务调用超时（{effective_timeout:.0f}s）", round(time.monotonic() - started, 2)
                 rclpy.spin_once(node, timeout_sec=0.1)
             try:

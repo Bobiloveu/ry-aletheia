@@ -23,6 +23,12 @@ PREFLIGHT_STATUS_STATES = frozenset({
     "not_selected", "legacy", "pending", "applying_scenario", "settling",
     "restarting_dependencies", "ready", "restoring", "restored", "cancelled", "blocked",
 })
+DEPENDENCY_PROGRESS_STATES = frozenset({
+    "pending", "restarting", "waiting_stable", "settling", "ready", "blocked", "cancelled",
+})
+SUPERVISOR_PROGRESS_STATUSES = frozenset({
+    "PENDING", "RUNNING", "STARTING", "STOPPED", "BACKOFF", "EXITED", "FATAL", "MISSING", "UNKNOWN",
+})
 
 
 def default_execution_preflight() -> dict[str, Any]:
@@ -41,6 +47,7 @@ def default_execution_preflight_status(value: object = None) -> dict[str, Any]:
             "state": "legacy",
             "message": "历史验收计划沿用原有逐项运行方式",
             "updated_at": None,
+            "dependency_progress": None,
         }
     normalized = normalize_execution_preflight(value)
     selected = normalized["scenario_profile_id"] or normalized["dependency_plan"]["enabled"]
@@ -48,15 +55,76 @@ def default_execution_preflight_status(value: object = None) -> dict[str, Any]:
         "state": "pending" if selected else "not_selected",
         "message": "已冻结可选运行准备，开始验收时统一执行" if selected else "未启用额外运行准备，按常规验收流程执行",
         "updated_at": None,
+        "dependency_progress": _default_dependency_progress(normalized),
     }
+
+
+def _default_dependency_progress(preflight: dict[str, Any]) -> dict[str, Any] | None:
+    """Expose only frozen names and a pre-start state for dependency plans."""
+    plan = preflight["dependency_plan"]
+    if not plan["enabled"]:
+        return None
+    return {"stages": [
+        {
+            "index": index,
+            "state": "pending",
+            "nodes": [{"name": name, "status": "PENDING"} for name in step["nodes"]],
+        }
+        for index, step in enumerate(plan["steps"], start=1)
+    ]}
+
+
+def _normalize_dependency_progress(value: object, *, preflight: dict[str, Any]) -> dict[str, Any] | None:
+    """Accept only snapshots that exactly match the frozen dependency plan."""
+    expected = _default_dependency_progress(preflight)
+    if expected is None:
+        if value is not None:
+            raise ValueError("未启用依赖编排时不能保存节点准备状态")
+        return None
+    if value is None:
+        return expected
+    if not isinstance(value, dict) or set(value) != {"stages"} or not isinstance(value["stages"], list):
+        raise ValueError("验收计划依赖准备状态格式无效")
+    stages = value["stages"]
+    expected_stages = expected["stages"]
+    if len(stages) != len(expected_stages):
+        raise ValueError("验收计划依赖准备阶段数量无效")
+    normalized_stages: list[dict[str, Any]] = []
+    for source, frozen in zip(stages, expected_stages):
+        if not isinstance(source, dict) or set(source) != {"index", "state", "nodes"}:
+            raise ValueError("验收计划依赖准备阶段格式无效")
+        if (
+            source["index"] != frozen["index"]
+            or not isinstance(source["state"], str)
+            or source["state"] not in DEPENDENCY_PROGRESS_STATES
+        ):
+            raise ValueError("验收计划依赖准备阶段无效")
+        nodes = source["nodes"]
+        frozen_nodes = frozen["nodes"]
+        if not isinstance(nodes, list) or len(nodes) != len(frozen_nodes):
+            raise ValueError("验收计划依赖准备节点数量无效")
+        normalized_nodes: list[dict[str, str]] = []
+        for node, frozen_node in zip(nodes, frozen_nodes):
+            if not isinstance(node, dict) or set(node) != {"name", "status"}:
+                raise ValueError("验收计划依赖准备节点格式无效")
+            if (
+                node["name"] != frozen_node["name"]
+                or not isinstance(node["status"], str)
+                or node["status"] not in SUPERVISOR_PROGRESS_STATUSES
+            ):
+                raise ValueError("验收计划依赖准备节点无效")
+            normalized_nodes.append({"name": node["name"], "status": node["status"]})
+        normalized_stages.append({"index": frozen["index"], "state": source["state"], "nodes": normalized_nodes})
+    return {"stages": normalized_stages}
 
 
 def normalize_execution_preflight_status(value: object, *, preflight: object) -> dict[str, Any]:
     """Keep persisted progress small, explicit and safe to render in a browser."""
     if value is None:
         return default_execution_preflight_status(preflight)
-    if not isinstance(value, dict) or set(value) != {"state", "message", "updated_at"}:
+    if not isinstance(value, dict) or set(value) not in ({"state", "message", "updated_at"}, {"state", "message", "updated_at", "dependency_progress"}):
         raise ValueError("验收计划运行准备状态格式不受支持")
+    normalized_preflight = normalize_execution_preflight(preflight)
     state, message, updated_at = value["state"], value["message"], value["updated_at"]
     if not isinstance(state, str) or state not in PREFLIGHT_STATUS_STATES:
         raise ValueError("验收计划运行准备状态无效")
@@ -64,7 +132,12 @@ def normalize_execution_preflight_status(value: object, *, preflight: object) ->
         raise ValueError("验收计划运行准备说明无效")
     if updated_at is not None and (not isinstance(updated_at, str) or len(updated_at) > 64):
         raise ValueError("验收计划运行准备时间无效")
-    return {"state": state, "message": message, "updated_at": updated_at}
+    return {
+        "state": state,
+        "message": message,
+        "updated_at": updated_at,
+        "dependency_progress": _normalize_dependency_progress(value.get("dependency_progress"), preflight=normalized_preflight),
+    }
 
 
 def normalize_execution_preflight(value: object) -> dict[str, Any]:
@@ -567,6 +640,20 @@ def evaluate_conclusion(plan: AcceptancePlan, criteria: AcceptanceCriteria) -> A
     passed = sum(item.status == "passed" for item in terminal_items)
     failed = sum(item.status == "failed" for item in terminal_items)
     pass_rate = round(passed / len(terminal_items) * 100, 1) if terminal_items else 0.0
+    if plan.status in {"cancelled", "blocked", "failed"}:
+        labels = {
+            "cancelled": "本次验收已取消",
+            "blocked": "本次验收已拦截",
+            "failed": "本次验收异常结束",
+        }
+        not_run = sum(item.status == "planned" for item in plan.items)
+        return AcceptanceResult(
+            plan.status,
+            f"{labels[plan.status]}：已记录 {len(terminal_items)} 项终态任务，{not_run} 项未执行；可依据本报告的已采集结果、反馈与轨迹证据继续分析。",
+            coverage,
+            pass_rate,
+            failed,
+        )
     if plan.status != "completed":
         return AcceptanceResult(None, "计划尚未完成；完成全部计划任务后才会给出本次验收结论", coverage, pass_rate, failed)
 

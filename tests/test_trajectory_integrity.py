@@ -214,7 +214,12 @@ class TrajectoryIntegrityTests(unittest.TestCase):
             image.write_bytes(b"P5\n10 10\n255\n" + bytes([255]) * 100)
             target = root / "result.svg"
             asset = CachedMapAsset("map", "P1", "", "", str(image), 1.0, [0.0, 0.0], 10, 10)
-            render_svg(asset, {"paths": [{"map_epoch": 1, "route_index": 0, "points": [{"x": 1, "y": 1}, {"x": 2, "y": 1}]}, {"map_epoch": 4, "route_index": 1, "points": [{"x": 8, "y": 8}, {"x": 9, "y": 8}]}]}, target)
+            render_svg(
+                asset,
+                {"paths": [{"map_epoch": 1, "route_index": 0, "points": [{"x": 1, "y": 1}, {"x": 2, "y": 1}]}, {"map_epoch": 4, "route_index": 1, "points": [{"x": 8, "y": 8}, {"x": 9, "y": 8}]}]},
+                target,
+                ideal_routes=[{"points": [{"x": 1, "y": 1}, {"x": 9, "y": 8}]}],
+            )
             svg = target.read_text(encoding="utf-8")
             self.assertIn('points="1.00,9.00 2.00,9.00"', svg)
             self.assertIn('points="8.00,2.00 9.00,2.00"', svg)
@@ -223,6 +228,8 @@ class TrajectoryIntegrityTests(unittest.TestCase):
             self.assertIn("轨迹 2 · 任务段 2", svg)
             self.assertIn("#168cff", svg)
             self.assertIn("#9b6dff", svg)
+            self.assertEqual(svg.count('<polyline points="1.00,9.00 2.00,9.00" fill="none" stroke="#168cff" stroke-width="2.5"'), 1)
+            self.assertEqual(svg.count('<polyline points="1.00,9.00 9.00,2.00" fill="none" stroke="#f5c84b" stroke-width="1.35"'), 1)
             self.assertNotIn("marker-end=", svg)
             self.assertNotIn("<marker", svg)
             self.assertIn('<g transform="translate(0 110)">', svg)

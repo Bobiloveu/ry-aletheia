@@ -90,8 +90,6 @@ class RobotSettings:
     # 当前小车本机业务日志目录；只供 Desktop 日志下载页面消费，不能改动
     # Aletheia 自身 ToolLogStore 的受控诊断目录。
     robot_logs: dict = field(default_factory=lambda: {"sources": [dict(item) for item in DEFAULT_ROBOT_LOG_SOURCES]})
-
-
 class SettingsStore:
     """部署在机器人本机的控制台配置。"""
 

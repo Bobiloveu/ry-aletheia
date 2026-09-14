@@ -165,15 +165,19 @@ class RunManager:
         message: str,
         *,
         restoring: bool = False,
+        dependency_progress: dict | None = None,
     ) -> None:
         """Expose a small, human-readable sequence phase without process data."""
+        preflight = {"state": state, "message": message}
+        if dependency_progress is not None:
+            preflight["dependency_progress"] = dependency_progress
         self._emit_sequence_event(
             callback,
             "preflight_restore" if restoring else "preflight_progress",
             run,
             0,
             run.case,
-            preflight={"state": state, "message": message},
+            preflight=preflight,
         )
 
     def _run_sequence(
@@ -219,6 +223,11 @@ class RunManager:
                 # report.  Child runs must not create normal run reports or
                 # overwrite trajectory evidence as attempt 1 each time.
                 child._skip_report = True
+                # A frozen acceptance plan has no safe generic duration limit:
+                # route length, elevator waits and现场人工通行都由任务服务决定。
+                # The executor still polls cancellation and manual-failure
+                # events, so this does not remove an operator's stop path.
+                child._acceptance_sequence = True
                 child._sequence_attempt_index = item_index
                 if sequence_context is not None:
                     child._sequence_execution_context = sequence_context
@@ -249,7 +258,6 @@ class RunManager:
                     break
                 if child.status not in {"completed"}:
                     run.status, run.error = "blocked", child.error or "验收任务前置检查未通过"
-                    self._emit_sequence_event(event_callback, "sequence_finished", run, item_index, case, status=run.status, message=run.error)
                     break
                 if child.attempts and child.attempts[-1].status == "failed":
                     failure_message = f"{case.filename} 执行失败，请将车辆人工恢复至安全起点后继续。"
@@ -401,7 +409,21 @@ class RunManager:
                 lambda states: self._update_preflight_nodes(run, states),
                 self._set_dependency_restart_active,
             )
-            ready, detail = gateway.restart_configured_dependencies()
+            def report_dependency_progress(progress: dict) -> None:
+                active = next((stage for stage in progress.get("stages", []) if stage.get("state") not in {"pending", "ready"}), None)
+                stage_label = f"第 {active['index']} 阶段" if active else "已冻结依赖"
+                self._emit_preflight_progress(
+                    progress_callback,
+                    run,
+                    "restarting_dependencies",
+                    f"正在处理{stage_label} Supervisor 依赖",
+                    dependency_progress=progress,
+                )
+
+            ready, detail = gateway.restart_configured_dependencies(
+                cancel_event=cancel_event,
+                progress_callback=report_dependency_progress,
+            )
             scenario["runtime_restart"] = detail
             if not ready:
                 scenario.update({"ok": False, "state": "activation_restart_failed", "message": f"验收前置依赖未就绪：{detail}"})
@@ -604,9 +626,14 @@ class RunManager:
                             trajectory_start_error = f"轨迹采集未启动：{exc}"
                             LOGGER.exception("轨迹采集启动失败：run=%s attempt=%s", run.id, index)
                             run.live_progress = {"visible": True, "attempt": index, "attempt_total": run.requested_count, "state": "轨迹采集不可用，任务仍将执行", "progress_available": False, "percent": 0, "points": 0, "integrity_warning": trajectory_start_error}
-                    # 服务端会在整条任务完成后才返回；该阈值与“服务发现 300 秒”
-                    # 完全独立，避免长路径或等电梯任务已完成却被本地误判超时。
-                    execution_timeout = getattr(self.settings.load(), "task_execution_timeout_s", 900)
+                    # 普通测试仍使用本机可配置的服务调用上限。验收的每一项则
+                    # 必须等待任务服务的真实终态：路线长度和等梯时间无法由通用
+                    # 阈值安全估算；0 仅禁用本地截止，取消/人工判失败仍实时生效。
+                    execution_timeout = (
+                        0
+                        if getattr(run, "_acceptance_sequence", False)
+                        else getattr(self.settings.load(), "task_execution_timeout_s", 900)
+                    )
                     try:
                         ok, message, duration = self.executor.execute(
                             run.case.parameters,

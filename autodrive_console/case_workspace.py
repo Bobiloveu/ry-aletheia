@@ -176,6 +176,13 @@ class CaseWorkspace:
         self._save(document)
         return current
 
+    def remove(self, case: TestCase) -> None:
+        """Remove only optional local metadata after its task asset is retired."""
+        document = self.load()
+        if case.id in document["cases"]:
+            document["cases"].pop(case.id)
+            self._save(document)
+
     def export_package(self, case: TestCase, alias: str = "") -> tuple[str, bytes]:
         metadata = self.describe(case)
         task = Path(case.source).read_bytes()

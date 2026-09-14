@@ -76,6 +76,35 @@ class SupervisorMonitoringTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(activity, [True, False])
 
+    def test_dependency_restart_reports_frozen_stage_and_node_states(self):
+        updates = []
+        settings = RobotSettings(dependency_plan={
+            "enabled": True,
+            "steps": [{"nodes": ["MODULES:209-lightning"], "wait_seconds": 0}],
+        })
+        gateway = RobotGateway(settings)
+
+        class FakeClient:
+            @staticmethod
+            def discover():
+                return [SupervisorProcess("MODULES:209-lightning", "RUNNING", "")]
+
+            @staticmethod
+            def restart(name):
+                self.assertEqual(name, "MODULES:209-lightning")
+
+        with patch("autodrive_console.robot_gateway.SupervisorClient", return_value=FakeClient()), patch.object(
+            gateway, "_wait_stage_running", return_value=(True, "连续 5 次检查均为 RUNNING")
+        ), patch.object(gateway, "_wait_all_dependencies_running", return_value=(True, "全部节点 RUNNING")):
+            ok, _message = gateway.restart_configured_dependencies(progress_callback=updates.append)
+
+        self.assertTrue(ok)
+        self.assertEqual(updates[0]["stages"][0]["state"], "restarting")
+        self.assertEqual(updates[0]["stages"][0]["nodes"], [
+            {"name": "MODULES:209-lightning", "status": "RUNNING"},
+        ])
+        self.assertEqual(updates[-1]["stages"][0]["state"], "ready")
+
 
 if __name__ == "__main__":
     unittest.main()

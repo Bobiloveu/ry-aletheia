@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from copy import deepcopy
+import logging
 import threading
 from typing import Any
 
@@ -20,6 +21,10 @@ from .acceptance_plan import (
 )
 from .acceptance_report import AcceptanceReportWriter
 from .models import TestCase, now_iso
+
+
+LOGGER = logging.getLogger(__name__)
+_REPORTABLE_TERMINAL_STATUSES = frozenset({"completed", "cancelled", "blocked", "failed"})
 
 
 class AcceptanceConflict(RuntimeError):
@@ -138,6 +143,7 @@ class AcceptanceOrchestrator:
             except Exception as exc:
                 plan.status = "blocked"
                 plan.updated_at = now_iso()
+                self._archive_terminal_report(plan)
                 self.plan_store.save(plan)
                 raise AcceptanceConflict(str(exc)) from exc
             plan.status, plan.run_id = "running", run.id
@@ -204,6 +210,7 @@ class AcceptanceOrchestrator:
             task = live.get(item.filename)
             if task is None or str(task.path) != item.source_path or task.sha256 != item.sha256:
                 plan.status = "blocked"
+                self._archive_terminal_report(plan)
                 self.plan_store.save(plan)
                 raise AcceptanceConflict("正式任务文件已变化或不可用；为保护冻结验收计划，未开始执行")
 
@@ -252,11 +259,16 @@ class AcceptanceOrchestrator:
                 if not isinstance(progress, dict):
                     return
                 try:
+                    dependency_progress = progress.get(
+                        "dependency_progress",
+                        plan.execution_preflight_status.get("dependency_progress"),
+                    )
                     plan.execution_preflight_status = normalize_execution_preflight_status(
                         {
                             "state": progress.get("state"),
                             "message": progress.get("message"),
                             "updated_at": now_iso(),
+                            "dependency_progress": dependency_progress,
                         },
                         preflight=plan.execution_preflight,
                     )
@@ -283,7 +295,17 @@ class AcceptanceOrchestrator:
             elif event_type == "sequence_finished":
                 status = str(event.get("status", "failed"))
                 plan.status = "completed" if status == "completed" else status
-                if plan.status == "completed":
-                    report = self.report_writer.write(plan)
-                    plan.report_filename = report.html_filename
+                self._archive_terminal_report(plan)
             self.plan_store.save(plan)
+
+    def _archive_terminal_report(self, plan: AcceptancePlan) -> None:
+        """Write exactly one report once a plan has reached a final outcome."""
+        if plan.status not in _REPORTABLE_TERMINAL_STATUSES or plan.report_filename:
+            return
+        try:
+            report = self.report_writer.write(plan)
+        except Exception as exc:
+            LOGGER.exception("验收报告写入失败：plan=%s status=%s", plan.plan_id, plan.status)
+            plan.warnings.append(f"验收报告写入失败：{exc}")
+            return
+        plan.report_filename = report.html_filename

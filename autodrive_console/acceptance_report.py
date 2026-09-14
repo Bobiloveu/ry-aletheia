@@ -65,6 +65,7 @@ def _item_status(status: str) -> tuple[str, str]:
         "cancelled": ("已取消", "cancelled"),
         "planned": ("未执行", "planned"),
         "running": ("执行中", "running"),
+        "blocked": ("已拦截", "failed"),
     }
     return labels.get(status, (status or "未知", "unknown"))
 
@@ -145,7 +146,12 @@ class AcceptanceReportWriter:
         with (self.report_dir / manifest_filename).open("w", encoding="utf-8") as handle:
             json.dump({"schema": 1, "trajectory_directories": trajectory_directories}, handle, ensure_ascii=False, separators=(",", ":"))
 
-        status_label, status_class = _item_status("passed" if result.status and result.status.endswith("_pass") else "failed" if result.status else plan.status)
+        report_status = (
+            "passed" if result.status and result.status.endswith("_pass")
+            else "failed" if result.status and result.status.endswith("_fail")
+            else result.status or plan.status
+        )
+        status_label, status_class = _item_status(report_status)
         rows = "".join(
             "<tr>"
             f"<td>#{index:02d}<br><small>{escape(item.filename)}</small></td>"
@@ -156,7 +162,11 @@ class AcceptanceReportWriter:
             for index, item in enumerate(plan.items, start=1)
         ) or '<tr><td colspan="7">验收计划中没有可归档的任务。</td></tr>'
 
-        status_color = "var(--success)" if result.status and result.status.endswith("_pass") else "var(--danger)" if result.status else "var(--muted)"
+        status_color = {
+            "passed": "var(--success)",
+            "failed": "var(--danger)",
+            "cancelled": "var(--warning)",
+        }.get(status_class, "var(--muted)")
         html = f'''<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>部署验收报告 · {escape(_scope_text(plan))}</title>
