@@ -20,6 +20,13 @@ from typing import Any
 from xml.etree import ElementTree
 from xml.sax.saxutils import escape as xml_escape
 
+from .location_manifest import (
+    LocationManifestError,
+    RuntimeLayout,
+    compile_location_manifest,
+    physical_floor_index,
+)
+
 
 PROFILE = "indoor_elevator_v1"
 PROFILE_VERSION = 1
@@ -93,8 +100,8 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
         lobby_elevator, target_elevator, physical_elevator = _shared_elevator_pair(
             project, components, lobby_asset["id"], target_asset["id"]
         )
-        lobby_physical_floor = _shared_physical_floor(physical_elevator, lobby_instance)
-        target_physical_floor = _shared_physical_floor(physical_elevator, target_instance)
+        lobby_physical_floor = _shared_physical_floor(physical_elevator, lobby_elevator)
+        target_physical_floor = _shared_physical_floor(physical_elevator, target_elevator)
     else:
         lobby_elevator, target_elevator = _elevator_pair(components, lobby_asset["id"], target_asset["id"])
         lobby_physical_floor = _physical_floor(lobby_elevator, lobby_instance)
@@ -110,6 +117,21 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
     _validate_point(lobby_asset, lobby_wait, "大厅候梯点")
     _validate_point(target_asset, target_wait, "目标层候梯点")
 
+    try:
+        location_manifest = compile_location_manifest(project, map_root=root)
+        layout = RuntimeLayout(str(project.get("id") or ""), community)
+        target_template = _floor_template_for_asset(
+            project, target_asset["id"], building, unit
+        )
+    except LocationManifestError as exc:
+        raise CompilationError(str(exc)) from exc
+    source_localization = layout.localization_yaml(building, unit, "indoor").installed
+    target_localization = layout.localization_yaml(
+        building, unit, f"floor-{target_template}"
+    ).installed
+    source_map_yaml = layout.map_yaml(building, unit, "indoor").installed
+    target_map_yaml = layout.map_yaml(building, unit, f"floor-{target_template}").installed
+
     input_value = CompilationInput(
         community=community,
         site_id=site_id,
@@ -117,8 +139,8 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
         unit=unit,
         target_floor=target_physical_floor,
         door=door,
-        lobby_map_url=str(lobby_asset["source_path"]),
-        target_map_url=str(target_asset["source_path"]),
+        lobby_map_url=source_map_yaml,
+        target_map_url=target_map_yaml,
     )
     derived = {
         "start": _point_dict(start),
@@ -136,7 +158,8 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
     task_name = f"{community}_{building}_{unit}_{target_instance['floor']}_{door}.json"
     artifacts.append(_artifact(f"tasks/{task_name}", _task_json_bytes(task_json)))
     xml_values = _xml_values(
-        input_value, lobby_asset, target_asset, lobby_physical_floor, target_physical_floor, lobby_elevator, lobby_inward
+        input_value, target_map_yaml, source_localization, target_localization,
+        lobby_physical_floor, target_physical_floor, lobby_elevator, lobby_inward
     )
     xml_names = {
         "start_task.xml": "start_task.xml",
@@ -157,11 +180,26 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
         content = _render_xml(template, values).encode("utf-8")
         artifacts.append(_artifact(f"waypoint_tasks/{site_id}/{output_name}", content))
 
-    for stage, asset in (("lobby", lobby_asset), ("target_floor", target_asset)):
-        base = _template("localization_base.yaml")
-        template_hashes.setdefault("localization_base.yaml", _sha(base.encode("utf-8")))
-        yaml_text = _render_localization(base, asset["source_path"].parent)
-        artifacts.append(_artifact(f"localization/rycx_loc_livox_{building}_{unit}_{stage}.yaml", yaml_text.encode("utf-8")))
+    template_hashes.setdefault("localization_base.yaml", _sha(_template("localization_base.yaml").encode("utf-8")))
+    artifacts.extend(
+        _artifact(item.relative_path, item.content) for item in location_manifest.artifacts
+    )
+    location_artifact_paths = [
+        item.relative_path
+        for item in location_manifest.artifacts
+        if item.relative_path in {"runtime/loc_yaml_path.json", "runtime/lift_id_list.json"}
+    ]
+    lift_artifact = next(
+        (item for item in location_manifest.artifacts if item.relative_path == "runtime/lift_id_list.json"),
+        None,
+    )
+    if lift_artifact is None:
+        raise CompilationError("定位电梯清单缺失")
+    try:
+        lift_document = json.loads(lift_artifact.content)
+        lift_count = len(lift_document["lifts"])
+    except (TypeError, ValueError, KeyError) as exc:
+        raise CompilationError("定位电梯清单无效") from exc
 
     manifest = {
         "compiler_profile": PROFILE,
@@ -171,6 +209,13 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
         "template_sha256": dict(sorted(template_hashes.items())),
         "artifacts": [{"path": item.relative_path, "sha256": item.sha256} for item in artifacts],
         "derived_points": derived,
+        "location_manifest": {
+            "community": community,
+            "binding_count": len(location_manifest.summary),
+            "lift_count": lift_count,
+            "artifacts": location_artifact_paths,
+            "bindings": list(location_manifest.summary),
+        },
         "robot_runtime_changed": False,
         "statement": "实验预览：未写入任何机器人运行时文件。",
     }
@@ -267,6 +312,30 @@ def _same_building_unit(lobby: dict[str, Any], target: dict[str, Any]) -> tuple[
     if values[0] != values[1]:
         raise CompilationError("大厅与目标层必须属于同一楼栋和单元")
     return values[0]
+
+
+def _floor_template_for_asset(
+    project: dict[str, Any], map_asset_id: str, building: str, unit: str
+) -> str:
+    """Resolve the layout template attached to the current target map asset."""
+    bindings = project.get("localization_bindings")
+    if not isinstance(bindings, list):
+        raise CompilationError("缺少定位绑定")
+    matches = [
+        item
+        for item in bindings
+        if isinstance(item, dict)
+        and item.get("map_asset_id") == map_asset_id
+        and item.get("building") == building
+        and item.get("unit") == unit
+        and item.get("type") == "floor"
+    ]
+    if len(matches) != 1:
+        raise CompilationError("目标层地图缺少唯一用户楼层定位绑定")
+    template = matches[0].get("floor_template")
+    if not isinstance(template, str) or not template.strip():
+        raise CompilationError("目标层定位绑定缺少布局模板")
+    return template.strip()
 
 
 def _community(project: dict[str, Any]) -> str:
@@ -414,18 +483,20 @@ def _physical_floor(elevator: dict[str, Any], instance: dict[str, Any]) -> int:
     return floor
 
 
-def _shared_physical_floor(physical_elevator: dict[str, Any], instance: dict[str, Any]) -> int:
+def _shared_physical_floor(physical_elevator: dict[str, Any], landing: dict[str, Any]) -> int:
     try:
-        logical_floor = int(instance.get("floor"))
         minimum = int(physical_elevator.get("min_floor"))
         maximum = int(physical_elevator.get("max_floor"))
+        attributes = landing.get("attributes")
+        button_floor = int(attributes.get("button_floor")) if isinstance(attributes, dict) else None
     except (TypeError, ValueError) as exc:
-        raise CompilationError("物理电梯或地图实例缺少有效楼层") from exc
-    if not -20 <= minimum <= maximum <= 120 or not -20 <= logical_floor <= 120:
+        raise CompilationError("物理电梯或电梯落点缺少有效按钮层") from exc
+    if not -20 <= minimum <= maximum <= 120:
         raise CompilationError("电梯服务楼层范围无效")
-    if not minimum <= logical_floor <= maximum:
-        raise CompilationError("当前地图楼层不在物理电梯服务楼层范围内")
-    return logical_floor + 1
+    try:
+        return physical_floor_index(minimum, maximum, button_floor)
+    except LocationManifestError as exc:
+        raise CompilationError(f"电梯落点按钮层无效：{exc}") from exc
 
 
 def _pose(point: dict[str, float]) -> dict[str, dict[str, float]]:
@@ -468,17 +539,12 @@ def _task_json(value: CompilationInput, points: dict[str, dict[str, float]]) -> 
     }
 
 
-def _xml_values(value: CompilationInput, lobby_asset: dict[str, Any], target_asset: dict[str, Any], lobby_floor: int, target_floor: int, lobby: dict[str, Any], lobby_inward: float) -> dict[str, str]:
-    config_root = f"/opt/ry/config/localization/config/{value.site_id.upper()}"
-    localization = {
-        "lobby": f"{config_root}/rycx_loc_livox_{value.building}_{value.unit}_lobby.yaml",
-        "target": f"{config_root}/rycx_loc_livox_{value.building}_{value.unit}_target_floor.yaml",
-    }
+def _xml_values(value: CompilationInput, target_map_yaml: str, source_localization: str, target_localization: str, lobby_floor: int, target_floor: int, lobby: dict[str, Any], lobby_inward: float) -> dict[str, str]:
     return {
         "ORIGIN_FLOOR": str(lobby_floor),
-        "TARGET_LOCALIZATION_YAML": localization["target"],
-        "TARGET_MAP_YAML": str(target_asset["source_path"]),
-        "SOURCE_LOCALIZATION_YAML": localization["lobby"],
+        "TARGET_LOCALIZATION_YAML": target_localization,
+        "TARGET_MAP_YAML": target_map_yaml,
+        "SOURCE_LOCALIZATION_YAML": source_localization,
         "RELOCALIZE_X": _format_number(_number(lobby.get("x"), "大厅电梯坐标")),
         "RELOCALIZE_Y": _format_number(_number(lobby.get("y"), "大厅电梯坐标")),
         "RELOCALIZE_YAW": _format_number(lobby_inward),
@@ -524,7 +590,7 @@ def _render_localization(template: str, map_directory: Path) -> str:
 
 
 def _input_hash(project: dict[str, Any], value: CompilationInput, derived: dict[str, dict[str, float]]) -> str:
-    payload = {"profile": PROFILE, "input": value.__dict__, "scene_model": project.get("scene_model"), "components": project.get("components"), "physical_elevators": project.get("physical_elevators"), "map_assets": project.get("map_assets"), "map_instances": project.get("map_instances"), "map_stage_assignments": project.get("map_stage_assignments"), "derived": derived}
+    payload = {"profile": PROFILE, "input": value.__dict__, "scene_model": project.get("scene_model"), "components": project.get("components"), "physical_elevators": project.get("physical_elevators"), "map_assets": project.get("map_assets"), "map_instances": project.get("map_instances"), "localization_bindings": project.get("localization_bindings"), "localization_routes": project.get("localization_routes"), "map_stage_assignments": project.get("map_stage_assignments"), "derived": derived}
     return _sha(_json_bytes(payload))
 
 
@@ -535,7 +601,7 @@ def _artifact(relative_path: str, content: bytes) -> Artifact:
 
 def _safe_archive_path(relative_path: str) -> None:
     path = Path(relative_path)
-    if not relative_path or path.is_absolute() or ".." in path.parts or path.parts[0] not in {"tasks", "waypoint_tasks", "localization", "manifest.json"}:
+    if not relative_path or path.is_absolute() or ".." in path.parts or path.parts[0] not in {"tasks", "waypoint_tasks", "localization", "runtime", "manifest.json"}:
         raise CompilationError("导出文件路径无效")
 
 

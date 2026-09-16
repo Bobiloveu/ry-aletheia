@@ -4,6 +4,7 @@ from email.message import Message
 from http import HTTPStatus
 from pathlib import Path
 from unittest.mock import Mock, patch
+from zipfile import ZipFile
 
 import pytest
 
@@ -146,6 +147,39 @@ def test_localization_binding_rejects_legacy_manual_initialization_fields(
     with pytest.raises(DeploymentError, match="未批准字段"):
         store.create_localization_binding(
             project["id"], payload
+        )
+
+
+def test_elevator_landing_rejects_zero_as_a_panel_button(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Catches accepting the skipped zero button as an elevator landing level."""
+    map_root = tmp_path / "maps"
+    source = _map(map_root / "site" / "lobby")
+    source.write_text("image: map.pgm\nresolution: 1.0\norigin: [-1.0, -2.0, 0.0]\n", encoding="utf-8")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", map_root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("电梯按钮")
+    asset = store.import_map(project["id"], source, "大厅", "lobby")
+    elevator = store.add_physical_elevator(
+        project["id"],
+        {"elevator_id": "A", "elevator_protocol": "bluetooth", "min_floor": -2, "max_floor": 25},
+    )
+
+    with pytest.raises(DeploymentError, match="按钮 0"):
+        store.add_component(
+            project["id"],
+            {
+                "map_id": asset["id"],
+                "kind": "elevator",
+                "x": 0.0,
+                "y": -1.0,
+                "attributes": {
+                    "physical_elevator_id": elevator["id"],
+                    "button_floor": 0,
+                },
+            },
         )
 
 
@@ -1162,6 +1196,19 @@ def test_deployment_page_uses_component_task_compiler_routes():
     assert "/task-compiler/config" in source
     assert "/task-compiler/preview" in source
     assert "/task-compiler/download" in source
+
+
+def test_deployment_page_offers_controlled_localization_bindings_without_runtime_path_inputs():
+    """Catches exposing YAML destinations that must be derived by the export package."""
+    root = Path(__file__).resolve().parents[1] / "autodrive_console/web"
+    html = (root / "deployment.html").read_text(encoding="utf-8")
+    source = (root / "deployment.js").read_text(encoding="utf-8")
+
+    assert 'id="localizationBindingDialog"' in html
+    assert 'id="localizationFloorTemplate"' in html
+    assert "/localization-bindings" in source
+    assert "2D_yaml" not in html
+    assert "定位 YAML 路径" not in html
     assert "任务编译预览" in html
     assert 'data-waypoint-kind="map_transition"' not in html
     assert 'data-waypoint-kind="route_link"' not in html
@@ -1224,9 +1271,27 @@ def _compiler_ready_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store.add_map_instance(project["id"], {"map_id": target["id"], "role": "typical_floor", "building": "1", "unit": "1", "floor": 15})
     store.add_component(project["id"], {"map_id": lobby["id"], "kind": "start", "x": -1.0, "y": -1.0})
     elevator = store.add_physical_elevator(project["id"], {"elevator_id": "A", "elevator_protocol": "bluetooth", "min_floor": 1, "max_floor": 15})
-    store.add_component(project["id"], {"map_id": lobby["id"], "kind": "elevator", "x": 0.0, "y": 0.0, "attributes": {"physical_elevator_id": elevator["id"]}})
-    store.add_component(project["id"], {"map_id": target["id"], "kind": "elevator", "x": 0.0, "y": 1.0, "yaw": 3.141592653589793, "attributes": {"physical_elevator_id": elevator["id"]}})
+    lobby_elevator = store.add_component(project["id"], {"map_id": lobby["id"], "kind": "elevator", "x": 0.0, "y": 0.0, "attributes": {"physical_elevator_id": elevator["id"], "button_floor": 1}})
+    store.add_component(project["id"], {"map_id": target["id"], "kind": "elevator", "x": 0.0, "y": 1.0, "yaw": 3.141592653589793, "attributes": {"physical_elevator_id": elevator["id"], "button_floor": 15}})
     target_component = store.add_component(project["id"], {"map_id": target["id"], "kind": "target", "x": 1.0, "y": 1.0})
+    indoor = store.create_localization_binding(project["id"], {
+        "map_asset_id": lobby["id"], "building": "1", "unit": "1", "type": "indoor",
+    })
+    floor = store.create_localization_binding(project["id"], {
+        "map_asset_id": target["id"], "building": "1", "unit": "1", "type": "floor", "floor_template": "2",
+    })
+    start = store.add_waypoint(project["id"], {"map_id": lobby["id"], "kind": "start", "x": -1.0, "y": -1.0})
+    target_waypoint = store.add_waypoint(project["id"], {"map_id": target["id"], "kind": "target", "x": 1.0, "y": 1.0})
+    store.create_localization_route(project["id"], {
+        "building": "1", "unit": "1",
+        "binding_ids": [indoor["id"], floor["id"]],
+        "task_start_waypoint_id": start["id"],
+        "task_target_waypoint_id": target_waypoint["id"],
+        "links": [{
+            "from_binding_id": indoor["id"], "to_binding_id": floor["id"],
+            "anchor": {"kind": "component_center", "component_id": lobby_elevator["id"]},
+        }],
+    })
     return store, project, target_component
 
 
@@ -1264,6 +1329,53 @@ def test_task_compiler_component_attributes_invalidate_preview(tmp_path: Path, m
     assert store.get(project["id"])["task_compiler"]["identity"]["last_preview_input_sha256"] is None
     with pytest.raises(DeploymentError):
         store.update_component(project["id"], target["id"], {"attributes": {"door": "../1509"}})
+
+
+def test_task_compiler_route_change_produces_a_new_preview_fingerprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Catches reusing an export fingerprint after a route anchor changes."""
+    store, project, target = _compiler_ready_store(tmp_path, monkeypatch)
+    store.update_task_compiler_config(project["id"], {"community": "高科一号"})
+    store.update_component(project["id"], target["id"], {"attributes": {"door": "1509"}})
+    first = store.task_compiler_preview(project["id"])["input_sha256"]
+    anchor = store.add_waypoint(
+        project["id"], {"map_id": store.get(project["id"])["map_stage_assignments"][0]["map_asset_id"], "kind": "map_transition", "x": 0.2, "y": 0.0}
+    )
+    document = store.get(project["id"])
+    document["localization_routes"][0]["links"][0]["anchor"] = {
+        "kind": "waypoint", "waypoint_id": anchor["id"],
+    }
+    store._write_json(store._document_path(project["id"]), document)
+    second = store.task_compiler_preview(project["id"])["input_sha256"]
+
+    assert second != first
+
+
+def test_task_compiler_bundle_contains_both_controlled_location_json_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Catches omitting a route-derived controlled JSON artifact from the ZIP."""
+    store, project, target = _compiler_ready_store(tmp_path, monkeypatch)
+    store.update_task_compiler_config(project["id"], {"community": "高科一号"})
+    store.update_component(project["id"], target["id"], {"attributes": {"door": "1509"}})
+
+    preview = store.task_compiler_preview(project["id"])
+    _, body = store.task_compiler_bundle(project["id"])
+
+    with ZipFile(io.BytesIO(body)) as archive:
+        assert "runtime/loc_yaml_path.json" in archive.namelist()
+        assert "runtime/lift_id_list.json" in archive.namelist()
+    assert preview["manifest"]["location_manifest"] == {
+        "community": "高科一号",
+        "binding_count": 2,
+        "lift_count": 1,
+        "artifacts": ["runtime/loc_yaml_path.json", "runtime/lift_id_list.json"],
+        "bindings": [
+            {"building": "1", "unit": "1", "type": "indoor"},
+            {"building": "1", "unit": "1", "type": "floor", "floor_template": "2"},
+        ],
+    }
 
 
 def test_task_compiler_preview_writes_only_project_owned_exports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
