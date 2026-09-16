@@ -11,6 +11,8 @@ export function drawDeploymentCanvas({
   drawMapEdits,
   drawMapRoutes,
   drawComponentSymbol,
+  drawMapOrigin,
+  drawLocalizationMarkers,
   mapPointToCanvas,
 }) {
   context.clearRect(0, 0, canvasBox.width, canvasBox.height);
@@ -43,6 +45,7 @@ export function drawDeploymentCanvas({
   context.rect(view.x, view.y, activeMap.width * pixels, activeMap.height * pixels);
   context.clip();
   drawMapEdits();
+  drawMapOrigin?.();
   context.restore();
   drawMapRoutes();
   for (const point of (project?.waypoints || []).filter((item) => item.map_asset_id === activeMap.id && !item.generated_by)) {
@@ -68,5 +71,6 @@ export function drawDeploymentCanvas({
     const { x, y } = mapPointToCanvas(item, activeMap, view);
     drawComponentSymbol(item, x, y);
   }
+  drawLocalizationMarkers?.();
   context.restore();
 }

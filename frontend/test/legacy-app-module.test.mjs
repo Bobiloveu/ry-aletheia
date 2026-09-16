@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,10 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 const repoRoot = new URL("../..", import.meta.url);
+const deploymentRendererPath = new URL(
+  "autodrive_console/web/deployment/canvas-renderer.js",
+  repoRoot,
+);
 
 test("task dashboard controller parses as an ES module before it reaches the DOM", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ry-aletheia-dashboard-module-"));
@@ -25,4 +30,10 @@ test("task dashboard controller parses as an ES module before it reaches the DOM
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("deployment renderer draws a map-origin callback before localization markers", () => {
+  const source = readFileSync(deploymentRendererPath, "utf8");
+  assert.match(source, /drawMapOrigin\?\.\(\)/);
+  assert.match(source, /drawMapOrigin\?\.\(\)[\s\S]*drawLocalizationMarkers\?\.\(\)/);
 });

@@ -109,7 +109,7 @@
           <div class="panel-title">
             <div>
               <p class="eyebrow">MAP IMPORT</p>
-              <h2>导入现有 Lightning 地图</h2>
+              <h2>导入地图</h2>
             </div>
           </div>
           <p class="page-muted">
@@ -337,7 +337,7 @@
             <div id="mapCanvasEmpty" class="map-canvas-empty">
               <b>等待地图资产</b
               ><small
-                >导入现有 Lightning 地图后，PGM 底图将显示在此工作区。</small
+                >导入地图后，PGM 底图将显示在此工作区。</small
               >
             </div>
             <section
@@ -431,6 +431,28 @@
               </div>
             </section>
           </div>
+            <section
+              id="localizationBindingDialog"
+              class="localization-binding-dialog deployment-hidden"
+              aria-label="配置地图定位绑定"
+            >
+              <header>
+                <div>
+                  <strong>配置定位绑定</strong>
+                  <small>定位和地图路径由部署包自动生成；这里只保存地图角色与物理位置。</small>
+                </div>
+                <button id="cancelLocalizationBinding" class="popover-close" type="button" aria-label="关闭定位绑定">×</button>
+              </header>
+              <div class="localization-binding-fields">
+                <label>地图角色<select id="localizationBindingType"><option value="indoor">室内大厅</option><option value="floor">用户楼层</option><option value="outdoor">户外</option><option value="ferry">摆渡层</option></select></label>
+                <label>楼栋<input id="localizationBuilding" type="text" maxlength="32" /></label>
+                <label>单元<input id="localizationUnit" type="text" maxlength="32" /></label>
+                <label id="localizationFloorTemplateLabel">楼层布局模板<input id="localizationFloorTemplate" type="text" maxlength="32" placeholder="例如：2" /></label>
+              </div>
+              <p id="localizationBindingMessage" class="inline-message">选择当前地图的运行角色。</p>
+              <div class="component-actions"><button id="saveLocalizationBinding" class="page-top-action" type="button">保存绑定</button><button id="deleteLocalizationBinding" class="compact-action danger-action deployment-hidden" type="button">删除</button></div>
+            </section>
+            <div id="localizationRouteDialog" hidden></div>
           <p id="mapToolHint" class="page-muted">
             只需标记地图上的真实组件并填写属性。子任务顺序、跨图衔接点与路线由工具在实验预览中自动推导。
           </p>
@@ -450,6 +472,12 @@
           <p id="stageAssignmentMessage" class="inline-message">选择地图后可检查其阶段归属。</p>
         </article>
         <article class="panel span-6 task-compiler-panel" aria-labelledby="taskCompilerTitle">
+        <article class="panel span-6 localization-binding-panel">
+          <div class="panel-title"><div><h2>定位运行绑定</h2></div></div>
+          <p class="page-muted">为当前项目地图指定户外、大厅、摆渡层或用户楼层模板。导出时自动生成定位清单和受控路径。</p>
+          <button id="openLocalizationBinding" class="compact-action" type="button" disabled>绑定当前地图</button>
+          <div id="localizationBindingList" class="localization-binding-list"><div class="page-empty">选择地图后可添加定位绑定。</div></div>
+        </article>
           <div class="panel-title">
             <div>
               <h2 id="taskCompilerTitle">任务编译预览</h2>

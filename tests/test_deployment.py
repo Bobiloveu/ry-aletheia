@@ -1214,6 +1214,19 @@ def test_deployment_page_offers_controlled_localization_bindings_without_runtime
     assert 'data-waypoint-kind="route_link"' not in html
 
 
+def test_deployment_page_uses_generic_map_import_and_has_no_manual_localization_pose_inputs():
+    """Catches keeping manual init-pose controls after bindings became identity-only."""
+    html = (Path(__file__).resolve().parents[1] / "autodrive_console/web/deployment.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "导入地图" in html
+    assert "Lightning 地图" not in html
+    assert 'id="localizationGoX"' not in html
+    assert 'id="localizationReturnX"' not in html
+    assert 'id="localizationRouteDialog"' in html
+
+
 def test_deployment_empty_states_use_compact_layout_and_svg_brand_mark():
     root = Path(__file__).resolve().parents[1] / "autodrive_console/web"
     deployment_css = (root / "deployment.css").read_text(encoding="utf-8")

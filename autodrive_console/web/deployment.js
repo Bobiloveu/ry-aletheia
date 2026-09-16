@@ -47,6 +47,7 @@ let routeDraft = [];
 let taskCompilerPreview = null;
 let taskCompilerProjectId = null;
 let elevatorLandingDraft = null;
+let localizationBindingDraft = null;
 const mapView = { scale: 40, x: 0, y: 0 };
 const canvas = $("mapCanvas");
 const context = canvas.getContext("2d");
@@ -394,6 +395,7 @@ function renderProject(project) {
         .join("")
     : '<div class="page-empty">尚未导入地图。先选择一个现有 map.yaml 作为项目快照。</div>';
   renderInstances();
+  renderLocalizationBindings();
   renderComponentTemplates();
   renderMapStages();
   renderTopology();
@@ -401,6 +403,64 @@ function renderProject(project) {
   renderMappingStatus();
   if (!activeMap && maps.length) selectMap(maps[0]);
   else drawMap();
+}
+function localizationBindings() {
+  return Array.isArray(selectedProject?.localization_bindings)
+    ? selectedProject.localization_bindings
+    : [];
+}
+function renderLocalizationBindings() {
+  const holder = $("localizationBindingList");
+  const open = $("openLocalizationBinding");
+  open.disabled = !selectedProject || !activeMap;
+  const bindings = localizationBindings().filter(
+    (item) => item.map_asset_id === activeMap?.id,
+  );
+  holder.innerHTML = bindings.length
+    ? bindings.map((item) => `<div class="localization-binding-row active"><div><b>${esc(item.type === "floor" ? `用户楼层 · 模板 ${item.floor_template}` : { outdoor: "户外", indoor: "室内大厅", ferry: "摆渡层" }[item.type] || item.type)}</b><small>${esc(item.building)} 栋 ${esc(item.unit)} 单元 · 当前地图</small></div><button class="compact-action edit-localization-binding" data-binding-id="${esc(item.id)}" type="button">编辑</button></div>`).join("")
+    : '<div class="page-empty">当前地图尚未配置定位绑定。</div>';
+}
+function localizationTypeChanged() {
+  const floor = $("localizationBindingType").value === "floor";
+  $("localizationFloorTemplateLabel").classList.toggle("deployment-hidden", !floor);
+  $("localizationFloorTemplate").required = floor;
+}
+function openLocalizationBinding(binding = null) {
+  if (!selectedProject || !activeMap) return;
+  const instance = mapInstanceFor(activeMap.id) || {};
+  localizationBindingDraft = binding || { map_asset_id: activeMap.id, building: instance.building || "", unit: instance.unit || "", type: "indoor" };
+  $("localizationBindingType").value = localizationBindingDraft.type;
+  $("localizationBuilding").value = localizationBindingDraft.building || "";
+  $("localizationUnit").value = localizationBindingDraft.unit || "";
+  $("localizationFloorTemplate").value = localizationBindingDraft.floor_template || "";
+  $("deleteLocalizationBinding").classList.toggle("deployment-hidden", !binding?.id);
+  $("localizationBindingDialog").classList.remove("deployment-hidden");
+  localizationTypeChanged();
+  $("localizationBindingType").focus();
+}
+function closeLocalizationBinding() {
+  localizationBindingDraft = null;
+  $("localizationBindingDialog").classList.add("deployment-hidden");
+}
+async function saveLocalizationBinding() {
+  if (!selectedProject || !activeMap) return;
+  const payload = { map_asset_id: activeMap.id, building: $("localizationBuilding").value, unit: $("localizationUnit").value, type: $("localizationBindingType").value };
+  if (payload.type === "floor") payload.floor_template = $("localizationFloorTemplate").value;
+  const id = localizationBindingDraft?.id;
+  try {
+    const data = await request(`/api/deployments/${encodeURIComponent(selectedProject.id)}/localization-bindings${id ? `/${encodeURIComponent(id)}` : ""}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    renderProject(data.project);
+    closeLocalizationBinding();
+    note("mapToolHint", "定位绑定已保存；导出时将自动生成受控定位路径。");
+  } catch (error) { note("localizationBindingMessage", error.message, true); }
+}
+async function deleteLocalizationBinding() {
+  if (!selectedProject || !localizationBindingDraft?.id) return;
+  try {
+    await request(`/api/deployments/${encodeURIComponent(selectedProject.id)}/localization-bindings/${encodeURIComponent(localizationBindingDraft.id)}`, { method: "DELETE" });
+    await openProject(selectedProject.id);
+    closeLocalizationBinding();
+  } catch (error) { note("localizationBindingMessage", error.message, true); }
 }
 function renderInstances() {
   const items = selectedProject?.map_instances || [];
@@ -860,8 +920,67 @@ function drawMap() {
     drawMapEdits,
     drawMapRoutes,
     drawComponentSymbol,
+    drawMapOrigin,
+    drawLocalizationMarkers,
     mapPointToCanvas,
   });
+}
+function originPose(map) {
+  const [x, y, yaw] = Array.isArray(map?.origin) ? map.origin : [];
+  return { x: Number(x), y: Number(y), z: 0, yaw: Number(yaw) };
+}
+function drawMapOrigin() {
+  if (!activeMap) return;
+  const origin = originPose(activeMap);
+  const point = mapPointToCanvas(origin, activeMap, mapView);
+  const axisLength = 26;
+  const arrowSize = 5;
+  context.save();
+  context.translate(point.x, point.y);
+  context.rotate(-origin.yaw);
+  context.lineWidth = 1.5;
+  context.strokeStyle = "rgba(10, 132, 255, 0.88)";
+  context.beginPath();
+  context.moveTo(-7, 0);
+  context.lineTo(axisLength, 0);
+  context.moveTo(axisLength, 0);
+  context.lineTo(axisLength - arrowSize, -arrowSize);
+  context.moveTo(axisLength, 0);
+  context.lineTo(axisLength - arrowSize, arrowSize);
+  context.stroke();
+  context.strokeStyle = "rgba(57, 220, 173, 0.88)";
+  context.beginPath();
+  context.moveTo(0, 7);
+  context.lineTo(0, -axisLength);
+  context.moveTo(0, -axisLength);
+  context.lineTo(-arrowSize, -axisLength + arrowSize);
+  context.moveTo(0, -axisLength);
+  context.lineTo(arrowSize, -axisLength + arrowSize);
+  context.stroke();
+  context.fillStyle = "rgba(255, 255, 255, 0.96)";
+  context.beginPath();
+  context.arc(0, 0, 3, 0, Math.PI * 2);
+  context.fill();
+  context.strokeStyle = "#0a84ff";
+  context.lineWidth = 1;
+  context.stroke();
+  context.rotate(origin.yaw);
+  context.fillStyle = "rgba(18, 28, 34, 0.88)";
+  context.font = "600 10px system-ui, sans-serif";
+  context.textAlign = "left";
+  context.fillText("YAML 原点", 9, -10);
+  context.restore();
+}
+function drawLocalizationMarkers() {
+  for (const binding of localizationBindings().filter((item) => item.map_asset_id === activeMap?.id)) {
+    for (const [kind, pose] of [["go", binding.init_go], ["return", binding.init_return]]) {
+      if (!pose) continue;
+      const point = mapPointToCanvas(pose, activeMap, mapView);
+      context.save(); context.fillStyle = kind === "go" ? "#0a84ff" : "#ff9f0a";
+      context.beginPath(); context.arc(point.x, point.y, 7, 0, Math.PI * 2); context.fill();
+      context.fillStyle = "#fff"; context.font = "700 9px system-ui"; context.textAlign = "center"; context.fillText(kind === "go" ? "去" : "返", point.x, point.y + 3); context.restore();
+    }
+  }
 }
 function selectMap(map) {
   if (!selectedProject) return;
@@ -1418,6 +1537,15 @@ $("componentAttributeFields").addEventListener("click", (event) => {
   if (button) openPhysicalElevatorEditor(button.dataset.physicalElevatorId);
 });
 function openComponentPopover(component, event) {
+$("openLocalizationBinding").addEventListener("click", () => openLocalizationBinding());
+$("cancelLocalizationBinding").addEventListener("click", closeLocalizationBinding);
+$("saveLocalizationBinding").addEventListener("click", saveLocalizationBinding);
+$("deleteLocalizationBinding").addEventListener("click", deleteLocalizationBinding);
+$("localizationBindingType").addEventListener("change", localizationTypeChanged);
+document.addEventListener("click", (event) => {
+  const button = event.target.closest(".edit-localization-binding");
+  if (button) openLocalizationBinding(localizationBindings().find((item) => item.id === button.dataset.bindingId));
+});
   selectComponent(component);
   const popover = $("componentPopover");
   const workspace = $("mapWorkspace");

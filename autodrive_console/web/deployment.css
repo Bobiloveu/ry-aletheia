@@ -382,20 +382,24 @@
 .component-popover .component-edit-grid {
   margin-top: 10px;
 }
-.elevator-landing-dialog {
+.elevator-landing-dialog,
+.localization-binding-dialog {
   position: absolute;
   z-index: 9;
   top: 50%;
   left: 50%;
   width: min(390px, calc(100% - 28px));
+  max-height: calc(100% - 28px);
   padding: 16px;
+  overflow: auto;
   transform: translate(-50%, -50%);
   border: 1px solid #5e9fff;
   border-radius: 12px;
   background: rgba(31, 31, 33, 0.98);
   box-shadow: 0 20px 48px rgba(0, 0, 0, 0.38);
 }
-.elevator-landing-dialog header {
+.elevator-landing-dialog header,
+.localization-binding-dialog header {
   display: flex;
   align-items: start;
   justify-content: space-between;
@@ -404,13 +408,17 @@
   color: #dceeff;
 }
 .elevator-landing-dialog header strong,
-.elevator-landing-dialog header small {
+.elevator-landing-dialog header small,
+.localization-binding-dialog header strong,
+.localization-binding-dialog header small {
   display: block;
 }
-.elevator-landing-dialog header strong {
+.elevator-landing-dialog header strong,
+.localization-binding-dialog header strong {
   font-size: 13px;
 }
-.elevator-landing-dialog header small {
+.elevator-landing-dialog header small,
+.localization-binding-dialog header small {
   margin-top: 3px;
   color: var(--muted);
   font-size: 10px;
@@ -468,12 +476,14 @@
   font-size: 10px;
   line-height: 1.5;
 }
-.elevator-landing-dialog .inline-message {
+.elevator-landing-dialog .inline-message,
+.localization-binding-dialog .inline-message {
   min-height: 18px;
   margin: 10px 0 0;
   font-size: 10px;
 }
-.elevator-landing-dialog .component-actions {
+.elevator-landing-dialog .component-actions,
+.localization-binding-dialog .component-actions {
   justify-content: flex-end;
   margin-top: 10px;
 }
@@ -487,6 +497,54 @@
   display: grid;
   gap: 5px;
   min-width: 0;
+}
+.localization-binding-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+.localization-binding-fields > label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+.localization-binding-fields input,
+.localization-binding-fields select {
+  min-width: 0;
+  margin: 0;
+}
+.localization-binding-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+.localization-binding-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.localization-binding-row.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.localization-binding-row b,
+.localization-binding-row small {
+  display: block;
+}
+.localization-binding-row small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.localization-binding-row .compact-action {
+  flex: 0 0 auto;
+  margin: 0;
 }
 .component-attribute-fields select,
 .component-attribute-fields input {
@@ -766,12 +824,14 @@ body.theme-light:has(#mapWorkspace) .component-popover {
   background: rgba(255, 255, 255, 0.97);
   box-shadow: 0 18px 42px rgba(0, 0, 0, 0.16);
 }
-body.theme-light:has(#mapWorkspace) .elevator-landing-dialog {
+body.theme-light:has(#mapWorkspace) .elevator-landing-dialog,
+body.theme-light:has(#mapWorkspace) .localization-binding-dialog {
   border-color: #0071e3;
   background: rgba(255, 255, 255, 0.98);
   box-shadow: 0 20px 48px rgba(0, 0, 0, 0.18);
 }
-body.theme-light:has(#mapWorkspace) .elevator-landing-dialog header {
+body.theme-light:has(#mapWorkspace) .elevator-landing-dialog header,
+body.theme-light:has(#mapWorkspace) .localization-binding-dialog header {
   color: #1d1d1f;
 }
 body.theme-light:has(#mapWorkspace) .component-popover header {
