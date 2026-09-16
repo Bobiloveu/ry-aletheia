@@ -998,6 +998,7 @@ body.deployment-no-project:has(#mapWorkspace) .map-canvas-empty b::after {
     grid-column: 2;
     grid-row: 1;
     min-width: 0;
+  body.deployment-no-project:has(#mapWorkspace) .localization-binding-panel,
   }
   body.deployment-no-project:has(#mapWorkspace) .map-workspace,
   body.deployment-no-project:has(#mapWorkspace) .map-workspace canvas {
@@ -1079,6 +1080,7 @@ body.deployment-no-project:has(#mapWorkspace) .map-canvas-empty b::after {
   }
 }
 
+  body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace) .localization-binding-panel,
 /* Desktop editor: the map stays central while project actions and review
    controls are true rails.  This avoids using the map's height to position
    unrelated cards lower down the page. */

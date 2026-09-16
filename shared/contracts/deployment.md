@@ -32,6 +32,34 @@ Backend 校验具有权威性：客户端展示并提交用户意图，但不得
 `migration_conflict`，实验编译明确拒绝，不能猜测采用其中任一配置。以上路由只修改项目快照，
 不写机器人任务、行为树、定位目录，也不调用 ROS 或 Supervisor。
 
+## 项目级定位运行绑定
+
+**Status: Existing（已实现，实验任务编译输入）**
+**消费者：** `robot_backend` 负责校验与派生，`web_console` 提交和展示项目意图；Mobile 未实现且不是此契约的消费者，不得调用这些路由。
+
+`localization_bindings` 将项目地图绑定为 `outdoor`、`indoor`、`ferry` 或 `floor`。每项只保存
+绑定身份字段只有 `map_asset_id`、`building`、`unit`、`type`；`floor` 另有必填的
+`floor_template`，它是用户楼层布局模板编号，不是电梯物理楼层。一个楼栋/单元最多各有一个
+户外、大厅或摆渡层绑定；用户楼层按布局模板唯一。
+
+| Method | Route | Request | Response |
+| --- | --- | --- | --- |
+| `POST` | `/api/deployments/{project_id}/localization-bindings` | 仅绑定身份字段；`floor` 可附加 `floor_template`，不接受位姿、YAML、地图路径或输出目录 | `{ "localization_binding": { … }, "project": { … } }`，`201 Created` |
+| `POST` | `/api/deployments/{project_id}/localization-bindings/{binding_id}` | 同上 | `{ "localization_binding": { … }, "project": { … } }` |
+| `DELETE` | `/api/deployments/{project_id}/localization-bindings/{binding_id}` | 无 | `{ "deleted": true }` |
+
+后端要求绑定引用当前项目地图。定位位姿由 `localization_routes` 推导，而不是由绑定或浏览器
+提交：首图使用人工选择的任务起点；后续地图使用其 YAML `origin`；每张非末图的返回位使用
+该图出向链接的受控中间锚点；末图使用人工选择的任务目标。链接锚点只能是来源地图的受控
+Waypoint 或组件中心，不能手填位姿覆盖。
+
+新建或更新绑定拒绝 `init_go`、`init_return`、`yaml`、`2D_yaml`、`loc_yaml_path.json`、运行时
+路径及其他未批准字段。旧记录中的 `init_go` / `init_return` 只读兼容，直到迁移为
+`localization_routes`；存在这类旧记录而未迁移时，定位清单导出会被阻断并要求迁移。实验编译
+只从项目受控地图快照读取 `map.yaml` 与图像，并在 ZIP 中生成 `runtime/loc_yaml_path.json`、
+受控地图副本和定位 YAML；这些文件不会被写入 `/opt/ry`，也不会改变机器人当前定位、任务或
+ROS 状态。
+
 ## Planned（规划中）
 
 新的部署数据格式在成为跨客户端输入前，必须在 `shared/schemas` 中说明。Planned 字段在 Backend 暴露并完成校验前，始终保持 Planned 状态。

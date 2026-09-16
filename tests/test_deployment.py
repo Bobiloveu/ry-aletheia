@@ -1227,6 +1227,32 @@ def test_deployment_page_uses_generic_map_import_and_has_no_manual_localization_
     assert 'id="localizationRouteDialog"' in html
 
 
+def test_deployment_contract_documents_identity_only_bindings_and_route_derived_poses():
+    """Catches documenting removed manual poses as a binding API contract."""
+    contract = (Path(__file__).resolve().parents[1] / "shared/contracts/deployment.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "绑定身份字段只有 `map_asset_id`、`building`、`unit`、`type`" in contract
+    assert "定位位姿由 `localization_routes` 推导" in contract
+    assert "首图使用人工选择的任务起点" in contract
+    assert "后续地图使用其 YAML `origin`" in contract
+    assert "旧记录中的 `init_go` / `init_return` 只读兼容" in contract
+
+
+def test_deployment_binding_panel_is_hidden_before_a_map_is_selected():
+    """Catches a newly added panel bypassing the compact first-run states."""
+    css = (Path(__file__).resolve().parents[1] / "autodrive_console/web/deployment.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert "body.deployment-no-project:has(#mapWorkspace) .localization-binding-panel" in css
+    assert (
+        "body:not(.deployment-no-project).deployment-no-map:has(#mapWorkspace) .localization-binding-panel"
+        in css
+    )
+
+
 def test_deployment_empty_states_use_compact_layout_and_svg_brand_mark():
     root = Path(__file__).resolve().parents[1] / "autodrive_console/web"
     deployment_css = (root / "deployment.css").read_text(encoding="utf-8")
