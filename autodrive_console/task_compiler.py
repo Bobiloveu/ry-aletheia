@@ -131,6 +131,16 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
     ).installed
     source_map_yaml = layout.map_yaml(building, unit, "indoor").installed
     target_map_yaml = layout.map_yaml(building, unit, f"floor-{target_template}").installed
+    _assert_selected_localization_artifacts(
+        project,
+        location_manifest,
+        layout,
+        building,
+        unit,
+        target_template,
+        lobby_asset["id"],
+        target_asset["id"],
+    )
 
     input_value = CompilationInput(
         community=community,
@@ -590,8 +600,91 @@ def _render_localization(template: str, map_directory: Path) -> str:
 
 
 def _input_hash(project: dict[str, Any], value: CompilationInput, derived: dict[str, dict[str, float]]) -> str:
-    payload = {"profile": PROFILE, "input": value.__dict__, "scene_model": project.get("scene_model"), "components": project.get("components"), "physical_elevators": project.get("physical_elevators"), "map_assets": project.get("map_assets"), "map_instances": project.get("map_instances"), "localization_bindings": project.get("localization_bindings"), "localization_routes": project.get("localization_routes"), "map_stage_assignments": project.get("map_stage_assignments"), "derived": derived}
+    payload = {"profile": PROFILE, "input": value.__dict__, "scene_model": project.get("scene_model"), "components": project.get("components"), "physical_elevators": project.get("physical_elevators"), "map_assets": project.get("map_assets"), "map_instances": project.get("map_instances"), "localization_bindings": project.get("localization_bindings"), "localization_routes": project.get("localization_routes"), "route_waypoints": _route_waypoint_facts(project), "map_stage_assignments": project.get("map_stage_assignments"), "derived": derived}
     return _sha(_json_bytes(payload))
+
+
+def _assert_selected_localization_artifacts(
+    project: dict[str, Any],
+    location_manifest: Any,
+    layout: RuntimeLayout,
+    building: str,
+    unit: str,
+    target_template: str,
+    lobby_asset_id: str,
+    target_asset_id: str,
+) -> None:
+    """Require the approved indoor maps to be covered by the resolved route export."""
+    bindings = project.get("localization_bindings")
+    routes = project.get("localization_routes")
+    bindings_by_id = {
+        item.get("id"): item
+        for item in bindings
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    } if isinstance(bindings, list) else {}
+    selected_route = any(
+        isinstance(route, dict)
+        and route.get("building") == building
+        and route.get("unit") == unit
+        and {lobby_asset_id, target_asset_id} <= {
+            binding.get("map_asset_id")
+            for binding_id in route.get("binding_ids", [])
+            if isinstance(binding_id, str)
+            for binding in [bindings_by_id.get(binding_id)]
+            if isinstance(binding, dict)
+        }
+        for route in routes if isinstance(routes, list)
+    )
+    if not selected_route:
+        raise CompilationError("定位路线未包含室内编译所选大厅或目标层地图")
+    expected = {
+        layout.localization_yaml(building, unit, "indoor").relative,
+        layout.localization_yaml(building, unit, f"floor-{target_template}").relative,
+        layout.map_yaml(building, unit, "indoor").relative,
+        layout.map_yaml(building, unit, f"floor-{target_template}").relative,
+    }
+    exported = {item.relative_path for item in location_manifest.artifacts}
+    if not expected <= exported:
+        raise CompilationError("定位路线未包含室内编译所选大厅或目标层地图")
+
+
+def _route_waypoint_facts(project: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return only geometry read while resolving persisted localization routes."""
+    routes = project.get("localization_routes")
+    waypoints = project.get("waypoints")
+    if not isinstance(routes, list) or not isinstance(waypoints, list):
+        return []
+    by_id = {
+        item.get("id"): item
+        for item in waypoints
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    identifiers: list[str] = []
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        for value in (route.get("task_start_waypoint_id"), route.get("task_target_waypoint_id")):
+            if isinstance(value, str) and value not in identifiers:
+                identifiers.append(value)
+        for link in route.get("links", []):
+            anchor = link.get("anchor") if isinstance(link, dict) else None
+            value = anchor.get("waypoint_id") if isinstance(anchor, dict) and anchor.get("kind") == "waypoint" else None
+            if isinstance(value, str) and value not in identifiers:
+                identifiers.append(value)
+    facts = []
+    for identifier in identifiers:
+        waypoint = by_id.get(identifier)
+        if waypoint is None:
+            facts.append({"id": identifier, "missing": True})
+        else:
+            facts.append({
+                "id": identifier,
+                "map_asset_id": waypoint.get("map_asset_id"),
+                "x": waypoint.get("x"),
+                "y": waypoint.get("y"),
+                "yaw": waypoint.get("yaw"),
+            })
+    return facts
 
 
 def _artifact(relative_path: str, content: bytes) -> Artifact:
