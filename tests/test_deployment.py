@@ -71,6 +71,84 @@ def test_map_import_rejects_paths_outside_robot_map_root(tmp_path: Path, monkeyp
         store.import_map(project["id"], outside, "外部", "outdoor")
 
 
+def _localization_binding_payload(
+    map_asset_id: str,
+    *,
+    building: str = "1",
+    unit: str = "1",
+    binding_type: str = "indoor",
+    floor_template: str | None = None,
+) -> dict:
+    payload = {
+        "map_asset_id": map_asset_id,
+        "building": building,
+        "unit": unit,
+        "type": binding_type,
+    }
+    if floor_template is not None:
+        payload["floor_template"] = floor_template
+    return payload
+
+
+def test_localization_binding_allows_distinct_floor_templates_but_not_duplicate_indoor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Catches collapsing independently deployable floor templates into one binding."""
+    map_root = tmp_path / "maps"
+    first, second = _map(map_root / "site" / "first"), _map(map_root / "site" / "second")
+    second.write_text(second.read_text(encoding="utf-8") + "# distinct fixture\n", encoding="utf-8")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", map_root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("定位绑定")
+    first_asset = store.import_map(project["id"], first, "大厅", "lobby")
+    second_asset = store.import_map(project["id"], second, "用户层", "typical_floor")
+
+    store.create_localization_binding(
+        project["id"], _localization_binding_payload(first_asset["id"])
+    )
+    with pytest.raises(DeploymentError, match="indoor"):
+        store.create_localization_binding(
+            project["id"], _localization_binding_payload(second_asset["id"])
+        )
+
+    first_floor = store.create_localization_binding(
+        project["id"],
+        _localization_binding_payload(
+            first_asset["id"], binding_type="floor", floor_template="2"
+        ),
+    )
+    second_floor = store.create_localization_binding(
+        project["id"],
+        _localization_binding_payload(
+            second_asset["id"], binding_type="floor", floor_template="3"
+        ),
+    )
+
+    assert first_floor["floor_template"] == "2"
+    assert second_floor["floor_template"] == "3"
+
+
+def test_localization_binding_rejects_legacy_manual_initialization_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Catches accepting route-owned initialization data on a new binding."""
+    map_root = tmp_path / "maps"
+    source = _map(map_root / "site" / "first")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", map_root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("定位边界")
+    asset = store.import_map(project["id"], source, "大厅", "lobby")
+
+    payload = _localization_binding_payload(asset["id"])
+    payload["init_go"] = {"x": 9999, "y": -1.95, "z": 0.0, "yaw": 0.0}
+    with pytest.raises(DeploymentError, match="未批准字段"):
+        store.create_localization_binding(
+            project["id"], payload
+        )
+
+
 def test_uploaded_client_map_is_snapshotted_without_requiring_robot_map_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Prevents browser-selected maps from being rejected as robot-local files."""
     robot_root = tmp_path / "robot-maps"
@@ -497,6 +575,159 @@ def _project_with_distinct_maps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     return store, project, assets
 
 
+def _project_with_four_maps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Build one project with four independent map snapshots for route tests."""
+    return _project_with_distinct_maps(tmp_path, monkeypatch, 4)
+
+
+def _persisted_localization_binding(
+    store: DeploymentStore,
+    project: dict,
+    asset: dict,
+    binding_type: str,
+) -> dict:
+    """Persist a controlled binding fixture without testing the binding endpoint here."""
+    binding = {
+        "id": f"localization-{len(store.get(project['id'])['localization_bindings']) + 1}",
+        "map_asset_id": asset["id"],
+        "building": "1",
+        "unit": "1",
+        "type": binding_type,
+    }
+    if binding_type == "floor":
+        binding["floor_template"] = "2"
+    document = store.get(project["id"])
+    document["localization_bindings"].append(binding)
+    store._write_json(store._document_path(project["id"]), document)
+    return binding
+
+
+def _route_fixture(store: DeploymentStore, project: dict, assets: list[dict]) -> tuple[dict, list[dict], dict]:
+    bindings = [
+        _persisted_localization_binding(store, project, asset, binding_type)
+        for asset, binding_type in zip(assets, ("ferry", "outdoor", "indoor", "floor"))
+    ]
+    start = store.add_waypoint(
+        project["id"], {"map_id": assets[0]["id"], "kind": "start", "x": -0.95, "y": -1.95}
+    )
+    target = store.add_waypoint(
+        project["id"], {"map_id": assets[-1]["id"], "kind": "target", "x": -0.95, "y": -1.95}
+    )
+    ferry_anchor = store.add_waypoint(
+        project["id"], {"map_id": assets[0]["id"], "kind": "map_transition", "x": -0.95, "y": -1.95}
+    )
+    outdoor_anchor = store.add_waypoint(
+        project["id"], {"map_id": assets[1]["id"], "kind": "map_transition", "x": -0.95, "y": -1.95}
+    )
+    lobby_elevator = {"id": "component-route-elevator", "map_asset_id": assets[2]["id"], "kind": "elevator"}
+    document = store.get(project["id"])
+    document["components"].append(lobby_elevator)
+    store._write_json(store._document_path(project["id"]), document)
+    payload = {
+        "building": "1", "unit": "1", "binding_ids": [item["id"] for item in bindings],
+        "task_start_waypoint_id": start["id"], "task_target_waypoint_id": target["id"],
+        "links": [
+            {"from_binding_id": bindings[0]["id"], "to_binding_id": bindings[1]["id"], "anchor": {"kind": "waypoint", "waypoint_id": ferry_anchor["id"]}},
+            {"from_binding_id": bindings[1]["id"], "to_binding_id": bindings[2]["id"], "anchor": {"kind": "waypoint", "waypoint_id": outdoor_anchor["id"]}},
+            {"from_binding_id": bindings[2]["id"], "to_binding_id": bindings[3]["id"], "anchor": {"kind": "component_center", "component_id": lobby_elevator["id"]}},
+        ],
+    }
+    return payload, bindings, {"outdoor_anchor": outdoor_anchor, "lobby_elevator": lobby_elevator}
+
+
+def test_localization_route_allows_ferry_anywhere_and_derives_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Catches rejecting a valid ferry-to-floor localization chain."""
+    store, project, assets = _project_with_four_maps(tmp_path, monkeypatch)
+    payload, bindings, _ = _route_fixture(store, project, assets)
+
+    route = store.create_localization_route(project["id"], payload)
+
+    assert route["binding_ids"] == [item["id"] for item in bindings]
+
+
+def test_localization_route_rejects_non_floor_tail_and_mismatched_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Catches accepting a chain without a floor tail or a foreign cut-over anchor."""
+    store, project, assets = _project_with_four_maps(tmp_path, monkeypatch)
+    bad_tail, bindings, _ = _route_fixture(store, project, assets)
+    bad_tail["binding_ids"] = [item["id"] for item in bindings[:3]]
+    bad_tail["links"] = bad_tail["links"][:2]
+    bad_tail["task_target_waypoint_id"] = store.add_waypoint(
+        project["id"], {"map_id": assets[2]["id"], "kind": "target", "x": -0.95, "y": -1.95}
+    )["id"]
+    with pytest.raises(DeploymentError, match="最后"):
+        store.create_localization_route(project["id"], bad_tail)
+
+    foreign, _, references = _route_fixture(store, project, assets)
+    foreign["links"][0]["anchor"]["waypoint_id"] = references["outdoor_anchor"]["id"]
+    with pytest.raises(DeploymentError, match="切图锚点"):
+        store.create_localization_route(project["id"], foreign)
+
+
+def test_legacy_manual_localization_binding_remains_readable_but_is_marked_for_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Catches normalizing legacy manual initialization fields away during reads."""
+    store, project, assets = _project_with_four_maps(tmp_path, monkeypatch)
+    legacy = {
+        "id": "localization-legacy", "map_asset_id": assets[0]["id"], "building": "1", "unit": "1", "type": "ferry",
+        "init_go": {"x": -0.95, "y": -1.95, "z": 0.0, "yaw": 0.0},
+        "init_return": {"x": -0.95, "y": -1.95, "z": 0.0, "yaw": 0.0},
+    }
+    store._write_json(store._document_path(project["id"]), {**project, "localization_bindings": [legacy]})
+
+    saved = store.get(project["id"])
+
+    assert saved["localization_bindings"][0]["init_go"] == legacy["init_go"]
+    assert saved["localization_routes"] == []
+
+
+def test_localization_route_rejects_updates_to_referenced_bindings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Catches mutating a route tail so its saved target no longer matches."""
+    store, project, assets = _project_with_four_maps(tmp_path, monkeypatch)
+    payload, bindings, _ = _route_fixture(store, project, assets)
+    store.create_localization_route(project["id"], payload)
+
+    with pytest.raises(DeploymentError, match="定位路线"):
+        store.update_localization_binding(
+            project["id"],
+            bindings[-1]["id"],
+            {
+                "map_asset_id": assets[0]["id"], "building": "1", "unit": "1",
+                "type": "floor", "floor_template": "2",
+            },
+        )
+
+
+def test_localization_route_protects_component_generated_waypoints_from_cascade_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Catches a component delete cascading through a route endpoint it generated."""
+    store, project, assets = _project_with_four_maps(tmp_path, monkeypatch)
+    payload, _, _ = _route_fixture(store, project, assets)
+    generated_component = {
+        "id": "component-route-start", "map_asset_id": assets[0]["id"], "kind": "start",
+    }
+    generated_waypoint = {
+        "id": "waypoint-route-start", "map_asset_id": assets[0]["id"], "kind": "start",
+        "generated_by": generated_component["id"],
+    }
+    document = store.get(project["id"])
+    document["components"].append(generated_component)
+    document["waypoints"].append(generated_waypoint)
+    store._write_json(store._document_path(project["id"]), document)
+    payload["task_start_waypoint_id"] = generated_waypoint["id"]
+    store.create_localization_route(project["id"], payload)
+
+    with pytest.raises(DeploymentError, match="Waypoint"):
+        store.delete_component(project["id"], generated_component["id"])
+
+
 def test_stage_plan_assigns_maps_in_scene_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Fails if the project cannot represent its required map-stage order."""
     store, project, assets = _project_with_distinct_maps(tmp_path, monkeypatch, 3)
@@ -720,6 +951,44 @@ def test_physical_elevator_http_creates_project_owned_shared_entity():
         {"physical_elevator": entity, "project": {"id": "site", "physical_elevators": [entity]}},
         HTTPStatus.CREATED,
     )
+
+
+def test_localization_binding_http_persists_only_project_owned_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Catches routing a binding request around the Store ownership checks."""
+    map_root = tmp_path / "maps"
+    source = _map(map_root / "site" / "lobby")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", map_root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("HTTP 定位")
+    asset = store.import_map(project["id"], source, "大厅", "lobby")
+    payload = _localization_binding_payload(asset["id"])
+    handler = _deployment_handler(f"/api/deployments/{project['id']}/localization-bindings", payload)
+
+    with patch.object(web_console, "DEPLOYMENTS", store):
+        handler.do_POST()
+
+    body, status = handler._json.call_args.args
+    assert status == HTTPStatus.CREATED
+    assert body["localization_binding"]["map_asset_id"] == asset["id"]
+    assert store.get(project["id"])["localization_bindings"] == [body["localization_binding"]]
+
+
+def test_localization_route_http_forwards_only_project_owned_payload():
+    """Catches a route collection URL falling through to the generic deployment routes."""
+    payload = {
+        "building": "1", "unit": "1", "binding_ids": ["a"],
+        "task_start_waypoint_id": "s", "task_target_waypoint_id": "t", "links": [],
+    }
+    handler = _deployment_handler("/api/deployments/site/localization-routes", payload)
+
+    with patch.object(web_console.DEPLOYMENTS, "create_localization_route", return_value={"id": "route-a"}) as create:
+        handler.do_POST()
+
+    create.assert_called_once_with("site", payload)
+    assert handler._json.call_args.args[0]["localization_route"] == {"id": "route-a"}
 
 
 def test_task_compiler_http_preview_returns_store_preview():

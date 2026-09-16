@@ -339,7 +339,7 @@ class DeploymentStore:
         while self._project_dir(project_id).exists():
             project_id = f"{base[:58]}-{index}"; index += 1
         now = self._now()
-        document = {"schema": self.SCHEMA, "type": "ry-aletheia.site-project", "id": project_id, "name": cleaned, "created_at": now, "updated_at": now, "scene_model": None, "map_assets": [], "map_stage_assignments": [], "buildings": [], "map_instances": [], "physical_elevators": [], "components": [], "waypoints": [], "routes": [], "map_transitions": [], "virtual_walls": [], "map_edits": [], "behavior_templates": [], "component_templates": self._default_component_templates(), "task_compiler": self._normalise_task_compiler(None), "deployment_config": {"state": "draft", "robot_target": None}, "mapping": {"mode": "import_or_robot", "recording": "not_started"}}
+        document = {"schema": self.SCHEMA, "type": "ry-aletheia.site-project", "id": project_id, "name": cleaned, "created_at": now, "updated_at": now, "scene_model": None, "map_assets": [], "map_stage_assignments": [], "buildings": [], "map_instances": [], "localization_bindings": [], "localization_routes": [], "physical_elevators": [], "components": [], "waypoints": [], "routes": [], "map_transitions": [], "virtual_walls": [], "map_edits": [], "behavior_templates": [], "component_templates": self._default_component_templates(), "task_compiler": self._normalise_task_compiler(None), "deployment_config": {"state": "draft", "robot_target": None}, "mapping": {"mode": "import_or_robot", "recording": "not_started"}}
         self._write_json(self._document_path(project_id), document)
         return document
 
@@ -349,7 +349,7 @@ class DeploymentStore:
         except (OSError, json.JSONDecodeError) as exc: raise DeploymentError("部署项目不存在或文件损坏") from exc
         if not isinstance(document, dict) or document.get("schema") != self.SCHEMA or document.get("id") != project_id or not isinstance(document.get("map_assets"), list):
             raise DeploymentError("部署项目格式不受支持")
-        for key in ("buildings", "map_instances", "components", "waypoints", "routes", "map_transitions", "virtual_walls", "map_edits", "behavior_templates"):
+        for key in ("buildings", "map_instances", "localization_bindings", "localization_routes", "components", "waypoints", "routes", "map_transitions", "virtual_walls", "map_edits", "behavior_templates"):
             if not isinstance(document.get(key), list): document[key] = []
         if not isinstance(document.get("map_stage_assignments"), list): document["map_stage_assignments"] = []
         if not isinstance(document.get("deployment_config"), dict): document["deployment_config"] = {"state": "draft", "robot_target": None}
@@ -493,6 +493,300 @@ class DeploymentStore:
         self._invalidate_task_compiler_preview(document)
         document["updated_at"] = self._now()
         self._write_json(self._document_path(project_id), document)
+
+    def create_localization_binding(self, project_id: str, data: object) -> dict[str, Any]:
+        """Persist one project-owned localization role without runtime paths."""
+        document = self.get(project_id)
+        binding = self._normalise_localization_binding(document, data)
+        self._assert_localization_binding_unique(document, binding)
+        document["localization_bindings"].append(binding)
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
+        return binding
+
+    def update_localization_binding(
+        self, project_id: str, binding_id: str, data: object
+    ) -> dict[str, Any]:
+        document = self.get(project_id)
+        current = next(
+            (item for item in document["localization_bindings"] if item.get("id") == binding_id),
+            None,
+        )
+        if current is None:
+            raise DeploymentError("定位绑定不存在")
+        if any(
+            isinstance(route, dict) and binding_id in route.get("binding_ids", [])
+            for route in document["localization_routes"]
+        ):
+            raise DeploymentError("定位绑定仍被定位路线引用；请先更新或删除该路线")
+        binding = self._normalise_localization_binding(document, data, identifier=binding_id)
+        self._assert_localization_binding_unique(document, binding, exclude_id=binding_id)
+        current.clear()
+        current.update(binding)
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
+        return current
+
+    def delete_localization_binding(self, project_id: str, binding_id: str) -> None:
+        document = self.get(project_id)
+        if any(
+            isinstance(route, dict) and binding_id in route.get("binding_ids", [])
+            for route in document["localization_routes"]
+        ):
+            raise DeploymentError("定位绑定仍被定位路线引用；请先删除或更新该路线")
+        remaining = [
+            item for item in document["localization_bindings"] if item.get("id") != binding_id
+        ]
+        if len(remaining) == len(document["localization_bindings"]):
+            raise DeploymentError("定位绑定不存在")
+        document["localization_bindings"] = remaining
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
+
+    def create_localization_route(self, project_id: str, data: object) -> dict[str, Any]:
+        """Persist one ordered, project-owned localization route."""
+        document = self.get(project_id)
+        route = self._normalise_localization_route(document, data)
+        self._assert_localization_route_unique(document, route)
+        document["localization_routes"].append(route)
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
+        return route
+
+    def update_localization_route(
+        self, project_id: str, route_id: str, data: object
+    ) -> dict[str, Any]:
+        document = self.get(project_id)
+        current = next(
+            (item for item in document["localization_routes"] if item.get("id") == route_id),
+            None,
+        )
+        if current is None:
+            raise DeploymentError("定位路线不存在")
+        route = self._normalise_localization_route(document, data, identifier=route_id)
+        self._assert_localization_route_unique(document, route, exclude_id=route_id)
+        current.clear()
+        current.update(route)
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
+        return current
+
+    def delete_localization_route(self, project_id: str, route_id: str) -> None:
+        document = self.get(project_id)
+        routes = [item for item in document["localization_routes"] if item.get("id") != route_id]
+        if len(routes) == len(document["localization_routes"]):
+            raise DeploymentError("定位路线不存在")
+        document["localization_routes"] = routes
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
+
+    def _normalise_localization_route(
+        self, document: dict[str, Any], data: object, *, identifier: str | None = None
+    ) -> dict[str, Any]:
+        if not isinstance(data, dict) or set(data) != {
+            "building", "unit", "binding_ids", "task_start_waypoint_id",
+            "task_target_waypoint_id", "links",
+        }:
+            raise DeploymentError("定位路线仅接受楼栋、单元、绑定、任务起终点和链接")
+        building = self._normalise_localization_identifier(data["building"], "楼栋")
+        unit = self._normalise_localization_identifier(data["unit"], "单元")
+        raw_binding_ids = data["binding_ids"]
+        if not isinstance(raw_binding_ids, list) or not raw_binding_ids:
+            raise DeploymentError("定位路线至少需要一个定位绑定")
+        binding_ids = [str(item or "").strip() for item in raw_binding_ids]
+        if any(not item for item in binding_ids) or len(set(binding_ids)) != len(binding_ids):
+            raise DeploymentError("定位路线绑定不能为空或重复；请按经过顺序选择")
+        bindings_by_id = {
+            item.get("id"): item for item in document["localization_bindings"]
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        try:
+            bindings = [bindings_by_id[item] for item in binding_ids]
+        except KeyError as exc:
+            raise DeploymentError("定位路线引用了未知绑定；请先保存该定位绑定") from exc
+        if any(
+            item.get("building") != building or item.get("unit") != unit
+            for item in bindings
+        ):
+            raise DeploymentError("定位路线内所有绑定必须属于同一楼栋和单元")
+        if bindings[-1].get("type") != "floor":
+            raise DeploymentError("定位路线最后一项必须是 floor 绑定；请将用户楼层放在末尾")
+        start_id = str(data["task_start_waypoint_id"] or "").strip()
+        target_id = str(data["task_target_waypoint_id"] or "").strip()
+        if not start_id or not target_id:
+            raise DeploymentError("定位路线必须指定任务起点和目标 Waypoint")
+        start = self._localization_route_waypoint(document, start_id)
+        target = self._localization_route_waypoint(document, target_id)
+        if start.get("map_asset_id") != bindings[0].get("map_asset_id"):
+            raise DeploymentError("任务起点必须位于首个定位绑定地图")
+        if target.get("map_asset_id") != bindings[-1].get("map_asset_id"):
+            raise DeploymentError("任务目标必须位于末个定位绑定地图")
+        links = self._normalise_localization_route_links(document, data["links"], bindings)
+        return {
+            "id": identifier or f"localization-route-{uuid.uuid4().hex[:12]}",
+            "building": building,
+            "unit": unit,
+            "binding_ids": binding_ids,
+            "task_start_waypoint_id": start_id,
+            "task_target_waypoint_id": target_id,
+            "links": links,
+        }
+
+    @staticmethod
+    def _localization_route_waypoint(document: dict[str, Any], waypoint_id: str) -> dict[str, Any]:
+        waypoint = next(
+            (item for item in document["waypoints"] if isinstance(item, dict) and item.get("id") == waypoint_id),
+            None,
+        )
+        if waypoint is None:
+            raise DeploymentError("定位路线任务 Waypoint 不存在；请先在对应地图创建")
+        return waypoint
+
+    def _normalise_localization_route_links(
+        self, document: dict[str, Any], source: object, bindings: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        if not isinstance(source, list) or len(source) != len(bindings) - 1:
+            raise DeploymentError("定位路线每对相邻绑定必须恰有一条链接")
+        expected_pairs = list(zip(bindings, bindings[1:]))
+        links: list[dict[str, Any]] = []
+        seen_pairs: set[tuple[str, str]] = set()
+        for raw_link in source:
+            if not isinstance(raw_link, dict) or set(raw_link) != {
+                "from_binding_id", "to_binding_id", "anchor"
+            }:
+                raise DeploymentError("定位路线链接字段无效；请为每次切图指定锚点")
+            from_id = str(raw_link["from_binding_id"] or "").strip()
+            to_id = str(raw_link["to_binding_id"] or "").strip()
+            pair = (from_id, to_id)
+            if pair in seen_pairs:
+                raise DeploymentError("定位路线不能为同一对绑定重复链接")
+            seen_pairs.add(pair)
+            if not any(
+                pair == (str(left.get("id")), str(right.get("id")))
+                for left, right in expected_pairs
+            ):
+                raise DeploymentError("定位路线链接不能跳过、分支或成环；请按绑定顺序连接")
+            binding = next(item for item in bindings if item.get("id") == from_id)
+            anchor = self._normalise_localization_route_anchor(document, raw_link["anchor"], binding)
+            links.append({"from_binding_id": from_id, "to_binding_id": to_id, "anchor": anchor})
+        expected_ids = {(str(left.get("id")), str(right.get("id"))) for left, right in expected_pairs}
+        if seen_pairs != expected_ids:
+            raise DeploymentError("定位路线每对相邻绑定必须恰有一条链接")
+        return links
+
+    def _normalise_localization_route_anchor(
+        self, document: dict[str, Any], source: object, binding: dict[str, Any]
+    ) -> dict[str, str]:
+        if not isinstance(source, dict):
+            raise DeploymentError("切图锚点无效；请使用该地图的 Waypoint 或电梯组件")
+        kind = str(source.get("kind") or "").strip()
+        if kind == "waypoint" and set(source) == {"kind", "waypoint_id"}:
+            waypoint_id = str(source["waypoint_id"] or "").strip()
+            waypoint = self._localization_route_waypoint(document, waypoint_id)
+            if waypoint.get("map_asset_id") != binding.get("map_asset_id"):
+                raise DeploymentError("切图锚点 Waypoint 必须位于来源绑定地图")
+            return {"kind": kind, "waypoint_id": waypoint_id}
+        if kind == "component_center" and set(source) == {"kind", "component_id"}:
+            component_id = str(source["component_id"] or "").strip()
+            component = next(
+                (item for item in document["components"] if isinstance(item, dict) and item.get("id") == component_id),
+                None,
+            )
+            if component is None or component.get("map_asset_id") != binding.get("map_asset_id"):
+                raise DeploymentError("切图锚点组件必须位于来源绑定地图")
+            if component.get("kind") != "elevator":
+                raise DeploymentError("切图锚点组件必须是 elevator；请改选电梯组件")
+            return {"kind": kind, "component_id": component_id}
+        raise DeploymentError("切图锚点无效；请使用该地图的 Waypoint 或电梯组件")
+
+    @staticmethod
+    def _assert_localization_route_unique(
+        document: dict[str, Any], route: dict[str, Any], *, exclude_id: str | None = None
+    ) -> None:
+        if any(
+            isinstance(item, dict)
+            and item.get("id") != exclude_id
+            and (item.get("building"), item.get("unit")) == (route["building"], route["unit"])
+            for item in document["localization_routes"]
+        ):
+            raise DeploymentError("该楼栋和单元已有定位路线；请更新已有路线")
+
+    @staticmethod
+    def _localization_route_references_waypoint(route: dict[str, Any], waypoint_id: str) -> bool:
+        return (
+            waypoint_id in {route.get("task_start_waypoint_id"), route.get("task_target_waypoint_id")}
+            or any(
+                isinstance(link, dict)
+                and isinstance(link.get("anchor"), dict)
+                and link["anchor"].get("kind") == "waypoint"
+                and link["anchor"].get("waypoint_id") == waypoint_id
+                for link in route.get("links", [])
+            )
+        )
+
+    @staticmethod
+    def _normalise_localization_identifier(value: object, label: str) -> str:
+        cleaned = " ".join(str(value or "").split())
+        if not cleaned or cleaned in {".", ".."}:
+            raise DeploymentError(f"定位绑定标识无效：{label}不能为空")
+        if "/" in cleaned or "\\" in cleaned or any(ord(char) < 32 for char in cleaned):
+            raise DeploymentError(f"定位绑定标识无效：{label}不能包含路径字符")
+        return cleaned
+
+    def _normalise_localization_binding(
+        self, document: dict[str, Any], data: object, *, identifier: str | None = None
+    ) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            raise DeploymentError("定位绑定属性无效")
+        allowed = {"map_asset_id", "building", "unit", "type", "floor_template"}
+        if set(data) - allowed:
+            raise DeploymentError("定位绑定包含未批准字段")
+        map_asset_id = str(data.get("map_asset_id") or "").strip()
+        asset = next(
+            (item for item in document["map_assets"] if item.get("id") == map_asset_id), None
+        )
+        if asset is None:
+            raise DeploymentError("定位绑定只能引用当前项目地图")
+        binding_type = str(data.get("type") or "").strip()
+        if binding_type not in {"outdoor", "indoor", "ferry", "floor"}:
+            raise DeploymentError("定位绑定类型无效")
+        floor_template = " ".join(str(data.get("floor_template") or "").split())
+        if binding_type == "floor" and not floor_template:
+            raise DeploymentError("用户楼层定位绑定必须填写布局模板")
+        if binding_type != "floor" and "floor_template" in data:
+            raise DeploymentError("仅用户楼层定位绑定可填写布局模板")
+        building = self._normalise_localization_identifier(data.get("building"), "楼栋")
+        unit = self._normalise_localization_identifier(data.get("unit"), "单元")
+        if floor_template:
+            floor_template = self._normalise_localization_identifier(floor_template, "布局模板")
+        return {
+            "id": identifier or f"localization-{uuid.uuid4().hex[:12]}",
+            "map_asset_id": map_asset_id,
+            "building": building,
+            "unit": unit,
+            "type": binding_type,
+            **({"floor_template": floor_template} if binding_type == "floor" else {}),
+        }
+
+    @staticmethod
+    def _assert_localization_binding_unique(
+        document: dict[str, Any], binding: dict[str, Any], *, exclude_id: str | None = None
+    ) -> None:
+        for item in document.get("localization_bindings", []):
+            if not isinstance(item, dict) or item.get("id") == exclude_id:
+                continue
+            if (item.get("building"), item.get("unit"), item.get("type")) != (
+                binding["building"], binding["unit"], binding["type"]
+            ):
+                continue
+            if binding["type"] != "floor" or item.get("floor_template") == binding.get("floor_template"):
+                raise DeploymentError(f"{binding['type']} 定位绑定已存在")
 
     def update_task_compiler_config(self, project_id: str, data: dict[str, Any]) -> dict[str, Any]:
         document = self.get(project_id)
@@ -946,6 +1240,12 @@ class DeploymentStore:
 
     def delete_waypoint(self, project_id: str, waypoint_id: str) -> None:
         document = self.get(project_id)
+        if any(
+            isinstance(route, dict)
+            and self._localization_route_references_waypoint(route, waypoint_id)
+            for route in document["localization_routes"]
+        ):
+            raise DeploymentError("Waypoint 仍被定位路线引用；请先删除或更新该路线")
         previous = len(document["waypoints"])
         document["waypoints"] = [item for item in document["waypoints"] if item.get("id") != waypoint_id]
         if len(document["waypoints"]) == previous: raise DeploymentError("Waypoint 不存在")
@@ -1154,6 +1454,32 @@ class DeploymentStore:
     def delete_component(self, project_id: str, component_id: str) -> None:
         document = self.get(project_id)
         if not any(item.get("id") == component_id for item in document["components"]): raise DeploymentError("组件不存在")
+        if any(
+            isinstance(route, dict)
+            and any(
+                isinstance(link, dict)
+                and isinstance(link.get("anchor"), dict)
+                and link["anchor"].get("kind") == "component_center"
+                and link["anchor"].get("component_id") == component_id
+                for link in route.get("links", [])
+            )
+            for route in document["localization_routes"]
+        ):
+            raise DeploymentError("组件仍被定位路线引用；请先删除或更新该路线")
+        generated_waypoint_ids = {
+            item.get("id") for item in document["waypoints"]
+            if isinstance(item, dict) and item.get("generated_by") == component_id
+        }
+        if any(
+            isinstance(route, dict)
+            and any(
+                isinstance(waypoint_id, str)
+                and self._localization_route_references_waypoint(route, waypoint_id)
+                for waypoint_id in generated_waypoint_ids
+            )
+            for route in document["localization_routes"]
+        ):
+            raise DeploymentError("组件生成的 Waypoint 仍被定位路线引用；请先删除或更新该路线")
         document["components"] = [item for item in document["components"] if item.get("id") != component_id]
         document["waypoints"] = [item for item in document["waypoints"] if item.get("generated_by") != component_id]
         self._invalidate_task_compiler_preview(document)

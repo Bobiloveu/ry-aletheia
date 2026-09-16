@@ -555,6 +555,59 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
+        if path.startswith("/api/deployments/") and path.endswith("/localization-routes"):
+            try:
+                parts = path.split("/")
+                if len(parts) != 5 or parts[:3] != ["", "api", "deployments"] or not parts[3] or parts[4] != "localization-routes":
+                    raise DeploymentError("定位路线路径无效")
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(parts[3])
+                route = DEPLOYMENTS.create_localization_route(project_id, data)
+                self._json(
+                    {"localization_route": route, "project": DEPLOYMENTS.get(project_id)},
+                    HTTPStatus.CREATED,
+                )
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/localization-routes/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[:3] != ["", "api", "deployments"] or not parts[3] or parts[4] != "localization-routes" or not parts[5]:
+                    raise DeploymentError("定位路线路径无效")
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(parts[3])
+                route = DEPLOYMENTS.update_localization_route(project_id, unquote(parts[5]), data)
+                self._json({"localization_route": route, "project": DEPLOYMENTS.get(project_id)})
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/localization-bindings"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(
+                    path.removeprefix("/api/deployments/").removesuffix("/localization-bindings").strip("/")
+                )
+                binding = DEPLOYMENTS.create_localization_binding(project_id, data)
+                self._json(
+                    {"localization_binding": binding, "project": DEPLOYMENTS.get(project_id)},
+                    HTTPStatus.CREATED,
+                )
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/localization-bindings/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "localization-bindings":
+                    raise DeploymentError("定位绑定路径无效")
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(parts[3])
+                binding = DEPLOYMENTS.update_localization_binding(project_id, unquote(parts[5]), data)
+                self._json({"localization_binding": binding, "project": DEPLOYMENTS.get(project_id)})
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         if path.startswith("/api/deployments/") and path.endswith("/maps/import"):
             try:
                 data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
@@ -1380,6 +1433,26 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 if len(parts) != 6 or parts[4] != "physical-elevators":
                     raise DeploymentError("物理电梯路径无效")
                 DEPLOYMENTS.delete_physical_elevator(unquote(parts[3]), unquote(parts[5]))
+                self._json({"deleted": True})
+            except DeploymentError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/localization-bindings/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "localization-bindings":
+                    raise DeploymentError("定位绑定路径无效")
+                DEPLOYMENTS.delete_localization_binding(unquote(parts[3]), unquote(parts[5]))
+                self._json({"deleted": True})
+            except DeploymentError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/localization-routes/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[:3] != ["", "api", "deployments"] or not parts[3] or parts[4] != "localization-routes" or not parts[5]:
+                    raise DeploymentError("定位路线路径无效")
+                DEPLOYMENTS.delete_localization_route(unquote(parts[3]), unquote(parts[5]))
                 self._json({"deleted": True})
             except DeploymentError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
