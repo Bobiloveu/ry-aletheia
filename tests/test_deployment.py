@@ -667,6 +667,39 @@ def test_localization_route_rejects_non_floor_tail_and_mismatched_anchor(
         store.create_localization_route(project["id"], foreign)
 
 
+def test_localization_route_allows_auto_door_component_center(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Catches rejecting a map-owned automatic-door cut-over center as non-elevator."""
+    store, project, assets = _project_with_four_maps(tmp_path, monkeypatch)
+    payload, _, _ = _route_fixture(store, project, assets)
+    auto_door = {
+        "id": "component-route-auto-door", "map_asset_id": assets[2]["id"], "kind": "auto_door",
+    }
+    document = store.get(project["id"])
+    document["components"].append(auto_door)
+    store._write_json(store._document_path(project["id"]), document)
+    payload["links"][-1]["anchor"] = {"kind": "component_center", "component_id": auto_door["id"]}
+
+    route = store.create_localization_route(project["id"], payload)
+
+    assert route["links"][-1]["anchor"] == {
+        "kind": "component_center", "component_id": "component-route-auto-door",
+    }
+
+
+def test_localization_route_rejects_missing_component_center(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Catches accepting a component-center anchor that does not exist on the source map."""
+    store, project, assets = _project_with_four_maps(tmp_path, monkeypatch)
+    payload, _, _ = _route_fixture(store, project, assets)
+    payload["links"][-1]["anchor"] = {"kind": "component_center", "component_id": "component-missing"}
+
+    with pytest.raises(DeploymentError, match="切图锚点组件"):
+        store.create_localization_route(project["id"], payload)
+
+
 def test_legacy_manual_localization_binding_remains_readable_but_is_marked_for_migration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

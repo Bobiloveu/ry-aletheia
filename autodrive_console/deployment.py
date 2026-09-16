@@ -700,10 +700,10 @@ class DeploymentStore:
             )
             if component is None or component.get("map_asset_id") != binding.get("map_asset_id"):
                 raise DeploymentError("切图锚点组件必须位于来源绑定地图")
-            if component.get("kind") != "elevator":
-                raise DeploymentError("切图锚点组件必须是 elevator；请改选电梯组件")
+            if component.get("kind") not in self.COMPONENT_LABELS:
+                raise DeploymentError("切图锚点组件类型无效；请重新选择地图组件")
             return {"kind": kind, "component_id": component_id}
-        raise DeploymentError("切图锚点无效；请使用该地图的 Waypoint 或电梯组件")
+        raise DeploymentError("切图锚点无效；请使用该地图的 Waypoint 或组件中心")
 
     @staticmethod
     def _assert_localization_route_unique(
