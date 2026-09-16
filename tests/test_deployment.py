@@ -1227,6 +1227,18 @@ def test_deployment_page_uses_generic_map_import_and_has_no_manual_localization_
     assert 'id="localizationRouteDialog"' in html
 
 
+def test_route_editor_markup_exposes_derived_sources_and_not_raw_runtime_paths():
+    """Catches hiding derived pose provenance or restoring a runtime-path input."""
+    html = (Path(__file__).resolve().parents[1] / "autodrive_console/web/deployment.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'id="localizationRouteDialog"' in html
+    assert 'id="localizationRouteLinks"' in html
+    assert "YAML 原点" in html
+    assert "定位 YAML 路径" not in html
+
+
 def test_deployment_contract_documents_identity_only_bindings_and_route_derived_poses():
     """Catches documenting removed manual poses as a binding API contract."""
     contract = (Path(__file__).resolve().parents[1] / "shared/contracts/deployment.md").read_text(

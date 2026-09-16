@@ -48,6 +48,7 @@ let taskCompilerPreview = null;
 let taskCompilerProjectId = null;
 let elevatorLandingDraft = null;
 let localizationBindingDraft = null;
+let localizationRouteDraft = null;
 const mapView = { scale: 40, x: 0, y: 0 };
 const canvas = $("mapCanvas");
 const context = canvas.getContext("2d");
@@ -396,6 +397,7 @@ function renderProject(project) {
     : '<div class="page-empty">尚未导入地图。先选择一个现有 map.yaml 作为项目快照。</div>';
   renderInstances();
   renderLocalizationBindings();
+  renderLocalizationRoutes();
   renderComponentTemplates();
   renderMapStages();
   renderTopology();
@@ -409,6 +411,212 @@ function localizationBindings() {
     ? selectedProject.localization_bindings
     : [];
 }
+function localizationRoutes() {
+  return Array.isArray(selectedProject?.localization_routes)
+    ? selectedProject.localization_routes
+    : [];
+}
+function bindingsForIdentity(building, unit) {
+  return localizationBindings().filter(
+    (item) => item.building === building && item.unit === unit,
+  );
+}
+function mapForId(mapAssetId) {
+  return (selectedProject?.map_assets || []).find((item) => item.id === mapAssetId);
+}
+function routeAnchorOptions(mapAssetId) {
+  const waypointOptions = (selectedProject?.waypoints || [])
+    .filter((item) => item.map_asset_id === mapAssetId)
+    .map((item) => ({
+      value: `waypoint:${item.id}`,
+      label: `航点 · ${item.label || item.kind || item.id}`,
+      anchor: { kind: "waypoint", waypoint_id: item.id },
+    }));
+  const componentOptions = (selectedProject?.components || [])
+    .filter((item) => item.map_asset_id === mapAssetId)
+    .map((item) => ({
+      value: `component:${item.id}`,
+      label: `${item.kind === "elevator" ? "电梯组件中心" : "组件中心"} · ${componentName(item) || item.id}`,
+      anchor: { kind: "component_center", component_id: item.id },
+    }));
+  return [...waypointOptions, ...componentOptions];
+}
+function routeAnchorValue(anchor) {
+  if (anchor?.kind === "waypoint") return `waypoint:${anchor.waypoint_id}`;
+  if (anchor?.kind === "component_center") return `component:${anchor.component_id}`;
+  return "";
+}
+function routeAnchorForValue(value) {
+  const [kind, id] = String(value || "").split(":");
+  if (!id) return null;
+  return kind === "component"
+    ? { kind: "component_center", component_id: id }
+    : kind === "waypoint"
+      ? { kind: "waypoint", waypoint_id: id }
+      : null;
+}
+function routeForIdentity(building, unit) {
+  return localizationRoutes().find(
+    (item) => item.building === building && item.unit === unit,
+  );
+}
+function routeBindings() {
+  const bindings = bindingsForIdentity(
+    localizationRouteDraft?.building,
+    localizationRouteDraft?.unit,
+  );
+  return (localizationRouteDraft?.binding_ids || [])
+    .map((id) => bindings.find((item) => item.id === id))
+    .filter(Boolean);
+}
+function ensureRouteLinks() {
+  const bindings = routeBindings();
+  const retained = new Map(
+    (localizationRouteDraft?.links || []).map((item) => [
+      `${item.from_binding_id}:${item.to_binding_id}`,
+      item.anchor,
+    ]),
+  );
+  localizationRouteDraft.links = bindings.slice(0, -1).map((item, index) => {
+    const next = bindings[index + 1];
+    const key = `${item.id}:${next.id}`;
+    const elevators = (selectedProject?.components || []).filter(
+      (component) => component.map_asset_id === item.map_asset_id && component.kind === "elevator",
+    );
+    return {
+      from_binding_id: item.id,
+      to_binding_id: next.id,
+      anchor: retained.get(key) || (elevators.length === 1
+        ? { kind: "component_center", component_id: elevators[0].id }
+        : null),
+    };
+  });
+}
+function localizationRoutePayload() {
+  if (!localizationRouteDraft) return null;
+  ensureRouteLinks();
+  return {
+    building: localizationRouteDraft.building,
+    unit: localizationRouteDraft.unit,
+    binding_ids: [...localizationRouteDraft.binding_ids],
+    task_start_waypoint_id: localizationRouteDraft.task_start_waypoint_id || "",
+    task_target_waypoint_id: localizationRouteDraft.task_target_waypoint_id || "",
+    links: localizationRouteDraft.links.map((item) => ({
+      from_binding_id: item.from_binding_id,
+      to_binding_id: item.to_binding_id,
+      anchor: item.anchor,
+    })),
+  };
+}
+function routeEndpointOptions(mapAssetId, kind) {
+  return (selectedProject?.waypoints || []).filter(
+    (item) => item.map_asset_id === mapAssetId && item.kind === kind,
+  );
+}
+function openLocalizationRoute(building, unit) {
+  const existing = routeForIdentity(building, unit);
+  const bindings = bindingsForIdentity(building, unit);
+  localizationRouteDraft = {
+    id: existing?.id || null,
+    building,
+    unit,
+    binding_ids: existing?.binding_ids?.length
+      ? [...existing.binding_ids]
+      : bindings.map((item) => item.id),
+    task_start_waypoint_id: existing?.task_start_waypoint_id || "",
+    task_target_waypoint_id: existing?.task_target_waypoint_id || "",
+    links: existing?.links ? [...existing.links] : [],
+  };
+  ensureRouteLinks();
+  $("localizationRouteDialog").classList.remove("deployment-hidden");
+  renderLocalizationRouteDialog();
+  $("localizationRouteLinks").querySelector("select, button")?.focus();
+}
+function closeLocalizationRoute() {
+  localizationRouteDraft = null;
+  $("localizationRouteDialog").classList.add("deployment-hidden");
+}
+function derivedRouteSource(binding, index, bindings) {
+  const go = index === 0 ? "人工任务起点" : "YAML 原点";
+  if (index === bindings.length - 1) return { go, back: "人工任务终点" };
+  const anchor = localizationRouteDraft.links[index]?.anchor;
+  return { go, back: anchor?.kind === "component_center" ? "组件中心自动派生" : "人工切图点" };
+}
+function renderLocalizationRouteDialog() {
+  if (!localizationRouteDraft) return;
+  ensureRouteLinks();
+  const bindings = routeBindings();
+  const holder = $("localizationRouteLinks");
+  $("localizationRouteIdentity").textContent = `${localizationRouteDraft.building} 栋 ${localizationRouteDraft.unit} 单元 · 只提交绑定、航点和组件锚点。`;
+  if (!bindings.length) {
+    holder.innerHTML = '<div class="page-empty">先为同一楼栋和单元保存定位绑定。</div>';
+    $("localizationRouteSummary").textContent = "尚不能生成派生定位文件。";
+    return;
+  }
+  holder.innerHTML = bindings.map((binding, index) => {
+    const map = mapForId(binding.map_asset_id) || {};
+    const first = index === 0;
+    const last = index === bindings.length - 1;
+    const sources = derivedRouteSource(binding, index, bindings);
+    const starts = routeEndpointOptions(binding.map_asset_id, "start");
+    const targets = routeEndpointOptions(binding.map_asset_id, "target");
+    const link = localizationRouteDraft.links[index];
+    const anchorOptions = !last ? routeAnchorOptions(binding.map_asset_id) : [];
+    const elevators = (selectedProject?.components || []).filter(
+      (item) => item.map_asset_id === binding.map_asset_id && item.kind === "elevator",
+    );
+    const endpoint = first
+      ? `<label>人工任务起点<select data-route-start><option value="">选择首图 start 航点</option>${starts.map((item) => `<option value="${esc(item.id)}" ${item.id === localizationRouteDraft.task_start_waypoint_id ? "selected" : ""}>${esc(item.label || item.id)}</option>`).join("")}</select></label>`
+      : last
+        ? `<label>人工任务终点<select data-route-target><option value="">选择末图 target 航点</option>${targets.map((item) => `<option value="${esc(item.id)}" ${item.id === localizationRouteDraft.task_target_waypoint_id ? "selected" : ""}>${esc(item.label || item.id)}</option>`).join("")}</select></label>`
+        : "";
+    const anchor = !last
+      ? `<label>出向切图锚点<select data-route-anchor="${index}"><option value="">选择受控锚点</option>${anchorOptions.map((item) => `<option value="${esc(item.value)}" ${routeAnchorValue(link?.anchor) === item.value ? "selected" : ""}>${esc(item.label)}</option>`).join("")}</select></label>${elevators.length > 1 ? `<p class="route-blocker">本图有 ${elevators.length} 个电梯组件：请明确选择一个切图锚点。</p>` : ""}`
+      : "";
+    return `<article class="localization-route-card"><header><div><b>${index + 1}. ${esc(map.label || binding.map_asset_id)}</b><small>${esc(binding.type === "floor" ? `用户楼层 · 模板 ${binding.floor_template}` : binding.type)}</small></div><div class="route-order-actions"><button class="compact-action" data-route-move="up" data-route-index="${index}" type="button" ${first ? "disabled" : ""}>上移</button><button class="compact-action" data-route-move="down" data-route-index="${index}" type="button" ${last ? "disabled" : ""}>下移</button></div></header><div class="route-derived"><span>进入：${esc(sources.go)}</span><span>返回：${esc(sources.back)}</span></div>${endpoint}${anchor}${last ? '<p class="route-last-note">末项必须为“用户楼层”。</p>' : ""}</article>`;
+  }).join("");
+  const lastIsFloor = bindings.at(-1)?.type === "floor";
+  const complete = lastIsFloor && localizationRouteDraft.task_start_waypoint_id && localizationRouteDraft.task_target_waypoint_id && localizationRouteDraft.links.every((item) => item.anchor);
+  $("localizationRouteMessage").textContent = complete
+    ? "路线完整：位姿将由受控地图事实派生。"
+    : lastIsFloor
+      ? "请补齐首图起点、末图终点和每次切图锚点。"
+      : "末项必须为“用户楼层”；请用上移/下移调整顺序。";
+  $("localizationRouteMessage").style.color = complete ? "#35d69c" : "#ffc05a";
+  $("localizationRouteSummary").innerHTML = `<b>${complete ? "派生状态已完整" : "派生状态待补齐"}</b><span>将生成 <code>loc_yaml_path.json</code> 与 <code>lift_id_list.json</code>；仅显示相对文件名。</span>`;
+}
+async function saveLocalizationRoute() {
+  if (!selectedProject || !localizationRouteDraft) return;
+  const payload = localizationRoutePayload();
+  const bindings = routeBindings();
+  const complete = bindings.at(-1)?.type === "floor" && payload.task_start_waypoint_id && payload.task_target_waypoint_id && payload.links.every((item) => item.anchor);
+  if (!complete) {
+    note("localizationRouteMessage", "请先补齐受控起终点、切图锚点，并将用户楼层置于末项。", true);
+    return;
+  }
+  try {
+    const id = localizationRouteDraft.id;
+    const data = await request(
+      `/api/deployments/${encodeURIComponent(selectedProject.id)}/localization-routes${id ? `/${encodeURIComponent(id)}` : ""}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+    );
+    renderProject(data.project);
+    closeLocalizationRoute();
+  } catch (error) {
+    note("localizationRouteMessage", error.message, true);
+  }
+}
+function renderLocalizationRoutes() {
+  const holder = $("localizationRouteList");
+  const routes = localizationRoutes();
+  holder.innerHTML = routes.length
+    ? routes.map((route) => {
+      const bindings = route.binding_ids.map((id) => localizationBindings().find((item) => item.id === id)).filter(Boolean);
+      const labels = bindings.map((binding, index) => `${mapForId(binding.map_asset_id)?.label || binding.map_asset_id}：${index === 0 ? "人工任务起点" : "YAML 原点"}${index === bindings.length - 1 ? " / 人工任务终点" : ` / ${route.links[index]?.anchor?.kind === "component_center" ? "组件中心自动派生" : "人工切图点"}`}`);
+      return `<div class="localization-route-row"><div><b>${esc(route.building)} 栋 ${esc(route.unit)} 单元 · ${bindings.length} 图路线</b><small>${labels.map(esc).join(" · ")}</small></div><button class="compact-action edit-localization-route" data-route-building="${esc(route.building)}" data-route-unit="${esc(route.unit)}" type="button">编辑定位路线</button></div>`;
+    }).join("")
+    : '<div class="page-empty">保存同一楼栋/单元的多个绑定后，可在此编辑定位路线。</div>';
+}
 function renderLocalizationBindings() {
   const holder = $("localizationBindingList");
   const open = $("openLocalizationBinding");
@@ -417,7 +625,7 @@ function renderLocalizationBindings() {
     (item) => item.map_asset_id === activeMap?.id,
   );
   holder.innerHTML = bindings.length
-    ? bindings.map((item) => `<div class="localization-binding-row active"><div><b>${esc(item.type === "floor" ? `用户楼层 · 模板 ${item.floor_template}` : { outdoor: "户外", indoor: "室内大厅", ferry: "摆渡层" }[item.type] || item.type)}</b><small>${esc(item.building)} 栋 ${esc(item.unit)} 单元 · 当前地图</small></div><button class="compact-action edit-localization-binding" data-binding-id="${esc(item.id)}" type="button">编辑</button></div>`).join("")
+    ? bindings.map((item) => `<div class="localization-binding-row active"><div><b>${esc(item.type === "floor" ? `用户楼层 · 模板 ${item.floor_template}` : { outdoor: "户外", indoor: "室内大厅", ferry: "摆渡层" }[item.type] || item.type)}</b><small>${esc(item.building)} 栋 ${esc(item.unit)} 单元 · 当前地图</small></div><div class="localization-binding-actions"><button class="compact-action edit-localization-binding" data-binding-id="${esc(item.id)}" type="button">编辑</button><button class="compact-action edit-localization-route" data-route-building="${esc(item.building)}" data-route-unit="${esc(item.unit)}" type="button">编辑定位路线</button></div></div>`).join("")
     : '<div class="page-empty">当前地图尚未配置定位绑定。</div>';
 }
 function localizationTypeChanged() {
@@ -1532,20 +1740,48 @@ $("existingPhysicalElevator").addEventListener("change", renderElevatorLandingDi
 $("confirmElevatorLanding").addEventListener("click", confirmElevatorLanding);
 $("cancelElevatorLanding").addEventListener("click", closeElevatorLandingDialog);
 $("cancelElevatorLandingSecondary").addEventListener("click", closeElevatorLandingDialog);
-$("componentAttributeFields").addEventListener("click", (event) => {
-  const button = event.target.closest(".edit-shared-elevator");
-  if (button) openPhysicalElevatorEditor(button.dataset.physicalElevatorId);
-});
-function openComponentPopover(component, event) {
 $("openLocalizationBinding").addEventListener("click", () => openLocalizationBinding());
 $("cancelLocalizationBinding").addEventListener("click", closeLocalizationBinding);
 $("saveLocalizationBinding").addEventListener("click", saveLocalizationBinding);
 $("deleteLocalizationBinding").addEventListener("click", deleteLocalizationBinding);
 $("localizationBindingType").addEventListener("change", localizationTypeChanged);
+$("cancelLocalizationRoute").addEventListener("click", closeLocalizationRoute);
+$("saveLocalizationRoute").addEventListener("click", saveLocalizationRoute);
+$("localizationRouteLinks").addEventListener("change", (event) => {
+  if (!localizationRouteDraft) return;
+  if (event.target.matches("[data-route-start]")) {
+    localizationRouteDraft.task_start_waypoint_id = event.target.value;
+  } else if (event.target.matches("[data-route-target]")) {
+    localizationRouteDraft.task_target_waypoint_id = event.target.value;
+  } else if (event.target.matches("[data-route-anchor]")) {
+    localizationRouteDraft.links[Number(event.target.dataset.routeAnchor)].anchor = routeAnchorForValue(event.target.value);
+  } else return;
+  renderLocalizationRouteDialog();
+});
+$("localizationRouteLinks").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-route-move]");
+  if (!button || !localizationRouteDraft) return;
+  const index = Number(button.dataset.routeIndex);
+  const other = button.dataset.routeMove === "up" ? index - 1 : index + 1;
+  if (other < 0 || other >= localizationRouteDraft.binding_ids.length) return;
+  [localizationRouteDraft.binding_ids[index], localizationRouteDraft.binding_ids[other]] = [
+    localizationRouteDraft.binding_ids[other],
+    localizationRouteDraft.binding_ids[index],
+  ];
+  ensureRouteLinks();
+  renderLocalizationRouteDialog();
+});
 document.addEventListener("click", (event) => {
   const button = event.target.closest(".edit-localization-binding");
   if (button) openLocalizationBinding(localizationBindings().find((item) => item.id === button.dataset.bindingId));
+  const routeButton = event.target.closest(".edit-localization-route");
+  if (routeButton) openLocalizationRoute(routeButton.dataset.routeBuilding, routeButton.dataset.routeUnit);
 });
+$("componentAttributeFields").addEventListener("click", (event) => {
+  const button = event.target.closest(".edit-shared-elevator");
+  if (button) openPhysicalElevatorEditor(button.dataset.physicalElevatorId);
+});
+function openComponentPopover(component, event) {
   selectComponent(component);
   const popover = $("componentPopover");
   const workspace = $("mapWorkspace");

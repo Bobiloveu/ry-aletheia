@@ -37,3 +37,12 @@ test("deployment renderer draws a map-origin callback before localization marker
   assert.match(source, /drawMapOrigin\?\.\(\)/);
   assert.match(source, /drawMapOrigin\?\.\(\)[\s\S]*drawLocalizationMarkers\?\.\(\)/);
 });
+
+test("deployment route editor uses controlled route endpoints and no raw pose fields", () => {
+  const deploymentPath = new URL("autodrive_console/web/deployment.js", repoRoot);
+  const source = readFileSync(deploymentPath, "utf8");
+  assert.match(source, /\/localization-routes/);
+  assert.match(source, /component_center/);
+  assert.match(source, /task_start_waypoint_id/);
+  assert.doesNotMatch(source, /localizationGoX|localizationReturnX/);
+});

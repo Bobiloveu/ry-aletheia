@@ -487,17 +487,6 @@
   justify-content: flex-end;
   margin-top: 10px;
 }
-.component-attribute-fields {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 10px;
-}
-.component-attribute-fields > label {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-}
 .localization-binding-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -545,6 +534,160 @@
 .localization-binding-row .compact-action {
   flex: 0 0 auto;
   margin: 0;
+}
+.localization-binding-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.localization-route-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.localization-route-row {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.localization-route-row b,
+.localization-route-row small {
+  display: block;
+}
+.localization-route-row small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.localization-route-row .compact-action {
+  flex: 0 0 auto;
+  margin: 0;
+}
+.localization-route-dialog {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-strong);
+}
+.localization-route-dialog > header,
+.localization-route-card > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.localization-route-dialog > header strong,
+.localization-route-dialog > header small,
+.localization-route-card b,
+.localization-route-card small {
+  display: block;
+}
+.localization-route-dialog > header strong {
+  color: #dceeff;
+  font-size: 13px;
+}
+.localization-route-dialog > header small,
+.localization-route-card small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.localization-route-dialog .inline-message {
+  min-height: 18px;
+  margin: 0;
+  font-size: 10px;
+}
+.localization-route-links {
+  display: grid;
+  gap: 8px;
+}
+.localization-route-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-raised);
+}
+.localization-route-card label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.localization-route-card select {
+  min-width: 0;
+  margin: 0;
+}
+.route-order-actions {
+  display: flex;
+  gap: 5px;
+}
+.route-order-actions .compact-action {
+  min-height: 28px;
+  margin: 0;
+  padding: 4px 7px;
+  font-size: 10px;
+}
+.route-derived {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.route-derived span {
+  padding: 6px 7px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+}
+.route-blocker,
+.route-last-note {
+  margin: 0;
+  color: #ffc05a;
+  font-size: 10px;
+  line-height: 1.45;
+}
+.localization-route-summary {
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.localization-route-summary b {
+  color: var(--text);
+}
+.localization-route-summary code {
+  color: #dceeff;
+  font-size: inherit;
+}
+.localization-route-dialog .component-actions {
+  justify-content: flex-end;
+  margin: 0;
+}
+.component-attribute-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.component-attribute-fields > label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
 }
 .component-attribute-fields select,
 .component-attribute-fields input {
@@ -615,6 +758,19 @@
   .map-workspace canvas {
     min-height: 420px;
     height: 420px;
+  }
+  .localization-binding-row,
+  .localization-route-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .localization-binding-actions,
+  .localization-route-row .compact-action,
+  .localization-route-dialog .page-top-action {
+    width: 100%;
+  }
+  .route-derived {
+    grid-template-columns: 1fr;
   }
 }
 

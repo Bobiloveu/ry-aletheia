@@ -430,7 +430,6 @@
                 <button id="cancelElevatorLandingSecondary" class="compact-action" type="button">取消</button>
               </div>
             </section>
-          </div>
             <section
               id="localizationBindingDialog"
               class="localization-binding-dialog deployment-hidden"
@@ -452,7 +451,7 @@
               <p id="localizationBindingMessage" class="inline-message">选择当前地图的运行角色。</p>
               <div class="component-actions"><button id="saveLocalizationBinding" class="page-top-action" type="button">保存绑定</button><button id="deleteLocalizationBinding" class="compact-action danger-action deployment-hidden" type="button">删除</button></div>
             </section>
-            <div id="localizationRouteDialog" hidden></div>
+          </div>
           <p id="mapToolHint" class="page-muted">
             只需标记地图上的真实组件并填写属性。子任务顺序、跨图衔接点与路线由工具在实验预览中自动推导。
           </p>
@@ -471,13 +470,24 @@
           </div>
           <p id="stageAssignmentMessage" class="inline-message">选择地图后可检查其阶段归属。</p>
         </article>
-        <article class="panel span-6 task-compiler-panel" aria-labelledby="taskCompilerTitle">
         <article class="panel span-6 localization-binding-panel">
           <div class="panel-title"><div><h2>定位运行绑定</h2></div></div>
           <p class="page-muted">为当前项目地图指定户外、大厅、摆渡层或用户楼层模板。导出时自动生成定位清单和受控路径。</p>
           <button id="openLocalizationBinding" class="compact-action" type="button" disabled>绑定当前地图</button>
           <div id="localizationBindingList" class="localization-binding-list"><div class="page-empty">选择地图后可添加定位绑定。</div></div>
+          <div id="localizationRouteList" class="localization-route-list"></div>
+          <section id="localizationRouteDialog" class="localization-route-dialog deployment-hidden" aria-label="编辑定位路线">
+            <header>
+              <div><strong>编辑定位路线</strong><small id="localizationRouteIdentity">按地图经过顺序选择受控锚点；后续地图使用 YAML 原点，位姿和文件路径始终由部署包派生。</small></div>
+              <button id="cancelLocalizationRoute" class="popover-close" type="button" aria-label="关闭定位路线">×</button>
+            </header>
+            <p id="localizationRouteMessage" class="inline-message" role="status">末项必须为“用户楼层”。</p>
+            <div id="localizationRouteLinks" class="localization-route-links"></div>
+            <div id="localizationRouteSummary" class="localization-route-summary"></div>
+            <div class="component-actions"><button id="saveLocalizationRoute" class="page-top-action" type="button">保存定位路线</button></div>
+          </section>
         </article>
+        <article class="panel span-6 task-compiler-panel" aria-labelledby="taskCompilerTitle">
           <div class="panel-title">
             <div>
               <h2 id="taskCompilerTitle">任务编译预览</h2>
