@@ -46,3 +46,29 @@ test("deployment route editor uses controlled route endpoints and no raw pose fi
   assert.match(source, /task_start_waypoint_id/);
   assert.doesNotMatch(source, /localizationGoX|localizationReturnX/);
 });
+
+test("route editor appends a later eligible binding without crossing identities", async () => {
+  const { orderedRouteBindingIds } = await import(
+    new URL("autodrive_console/web/deployment/localization-route.js", repoRoot),
+  );
+  const bindings = [
+    { id: "A", building: "1", unit: "1" },
+    { id: "B", building: "1", unit: "1" },
+    { id: "C", building: "1", unit: "1" },
+    { id: "D", building: "2", unit: "1" },
+  ];
+
+  assert.deepEqual(orderedRouteBindingIds(["A", "B"], bindings, "1", "1"), [
+    "A",
+    "B",
+    "C",
+  ]);
+});
+
+test("single-map route exposes both controlled task endpoints", async () => {
+  const { routeEndpointFields } = await import(
+    new URL("autodrive_console/web/deployment/localization-route.js", repoRoot),
+  );
+
+  assert.deepEqual(routeEndpointFields(true, true), ["start", "target"]);
+});

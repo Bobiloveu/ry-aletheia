@@ -16,6 +16,10 @@ import {
   zoomAt,
 } from "./deployment/canvas-geometry.js";
 import { drawDeploymentCanvas } from "./deployment/canvas-renderer.js";
+import {
+  orderedRouteBindingIds,
+  routeEndpointFields,
+} from "./deployment/localization-route.js";
 import { requestJson } from "./platform/http.js";
 
 const $ = (id) => document.getElementById(id);
@@ -520,9 +524,12 @@ function openLocalizationRoute(building, unit) {
     id: existing?.id || null,
     building,
     unit,
-    binding_ids: existing?.binding_ids?.length
-      ? [...existing.binding_ids]
-      : bindings.map((item) => item.id),
+    binding_ids: orderedRouteBindingIds(
+      existing?.binding_ids,
+      bindings,
+      building,
+      unit,
+    ),
     task_start_waypoint_id: existing?.task_start_waypoint_id || "",
     task_target_waypoint_id: existing?.task_target_waypoint_id || "",
     links: existing?.links ? [...existing.links] : [],
@@ -565,11 +572,15 @@ function renderLocalizationRouteDialog() {
     const elevators = (selectedProject?.components || []).filter(
       (item) => item.map_asset_id === binding.map_asset_id && item.kind === "elevator",
     );
-    const endpoint = first
-      ? `<label>人工任务起点<select data-route-start><option value="">选择首图 start 航点</option>${starts.map((item) => `<option value="${esc(item.id)}" ${item.id === localizationRouteDraft.task_start_waypoint_id ? "selected" : ""}>${esc(item.label || item.id)}</option>`).join("")}</select></label>`
-      : last
+    const endpointFields = routeEndpointFields(first, last);
+    const endpoint = [
+      endpointFields.includes("start")
+        ? `<label>人工任务起点<select data-route-start><option value="">选择首图 start 航点</option>${starts.map((item) => `<option value="${esc(item.id)}" ${item.id === localizationRouteDraft.task_start_waypoint_id ? "selected" : ""}>${esc(item.label || item.id)}</option>`).join("")}</select></label>`
+        : "",
+      endpointFields.includes("target")
         ? `<label>人工任务终点<select data-route-target><option value="">选择末图 target 航点</option>${targets.map((item) => `<option value="${esc(item.id)}" ${item.id === localizationRouteDraft.task_target_waypoint_id ? "selected" : ""}>${esc(item.label || item.id)}</option>`).join("")}</select></label>`
-        : "";
+        : "",
+    ].join("");
     const anchor = !last
       ? `<label>出向切图锚点<select data-route-anchor="${index}"><option value="">选择受控锚点</option>${anchorOptions.map((item) => `<option value="${esc(item.value)}" ${routeAnchorValue(link?.anchor) === item.value ? "selected" : ""}>${esc(item.label)}</option>`).join("")}</select></label>${elevators.length > 1 ? `<p class="route-blocker">本图有 ${elevators.length} 个电梯组件：请明确选择一个切图锚点。</p>` : ""}`
       : "";
