@@ -1253,26 +1253,39 @@ def test_deployment_contract_documents_identity_only_bindings_and_route_derived_
 
 
 def test_deployment_contract_documents_route_derived_init_poses_and_lift_list():
-    """Catches omitting route-owned localization artifacts from the shared contract."""
+    """Catches a contract that weakens route payload or export safety boundaries."""
     contract = (Path(__file__).resolve().parents[1] / "shared/contracts/deployment.md").read_text(
         encoding="utf-8"
     )
 
-    assert '"task_start_waypoint_id"' in contract
-    assert '"task_target_waypoint_id"' in contract
+    assert "| `POST` | `/api/deployments/{project_id}/localization-routes` |" in contract
+    assert "| `POST` | `/api/deployments/{project_id}/localization-routes/{route_id}` |" in contract
+    assert "| `DELETE` | `/api/deployments/{project_id}/localization-routes/{route_id}` |" in contract
+    assert '''{
+  "building": "1",
+  "unit": "1",
+  "binding_ids": ["localization-a", "localization-b"],
+  "task_start_waypoint_id": "waypoint-start",
+  "task_target_waypoint_id": "waypoint-target",
+  "links": [''' in contract
     assert "除上述六个键外不接受其他键" in contract
-    assert "首项（包括唯一项）使用人工选择的任务起点" in contract
-    assert "只有非首项使用其 YAML `origin`" in contract
-    assert "最终项使用人工选择的任务目标" in contract
-    assert "runtime/loc_yaml_path.json" in contract
-    assert "runtime/lift_id_list.json" in contract
+    assert "| 首项（包括唯一项） | `init_go` | 首项（包括唯一项）使用人工选择的任务起点 `task_start_waypoint_id`" in contract
+    assert "| 仅非首项 | `init_go` | 只有非首项使用其 YAML `origin` 的 `x`、`y`、`yaw`（`z: 0.0`）" in contract
+    assert "| 非最终项 | `init_return` | 该图出向链接的受控锚点 |" in contract
+    assert "| 最终项 | `init_return` | 最终项使用人工选择的任务目标 `task_target_waypoint_id` |" in contract
+    assert '`{ "community": "…", "loc_yaml": [{ "building": "…", "unit": "…", "yaml_index": [ … ] }] }`' in contract
+    assert "每个 `yaml_index` 条目包含 `type`、`yaml`、`2D_yaml`、`init_go` 和 `init_return`" in contract
+    assert "包含 `floor`，其值等于绑定的 `floor_template`" in contract
     assert '"lifts": [{ "lift_id": "…", "building": "…", "unit": "…" }]' in contract
     assert "排序并去重" in contract
+    assert (
+        "后端在绑定仍被路线引用时阻止更新或删除；在 Waypoint、组件中心或组件生成的 Waypoint 仍被路线\n"
+        "引用时也阻止删除，必须先更新或删除路线。"
+    ) in contract
     assert "旧记录中的 `init_go` / `init_return` 只读兼容" in contract
-    assert "必须先迁移为路线" in contract
-    assert "组件生成的 Waypoint" in contract
+    assert "旧手填位姿而没有 `localization_routes` 的项目不能导出新的定位\n清单，必须先迁移为路线" in contract
+    assert "`robot_backend` 校验、派生并生成清单；PC `web_console` 仅提交和编辑项目意图。Mobile 不是消费者" in contract
     assert "不写机器人运行时目录、不调用 ROS 或 Supervisor" in contract
-    assert "Mobile 不是消费者" in contract
 
 
 def test_deployment_binding_panel_is_hidden_before_a_map_is_selected():
