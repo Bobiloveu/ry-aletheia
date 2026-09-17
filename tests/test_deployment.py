@@ -1252,6 +1252,18 @@ def test_deployment_contract_documents_identity_only_bindings_and_route_derived_
     assert "旧记录中的 `init_go` / `init_return` 只读兼容" in contract
 
 
+def test_deployment_contract_documents_route_derived_init_poses_and_lift_list():
+    """Catches omitting route-owned localization artifacts from the shared contract."""
+    contract = (Path(__file__).resolve().parents[1] / "shared/contracts/deployment.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "localization_routes" in contract
+    assert "lift_id_list.json" in contract
+    assert "YAML `origin`" in contract
+    assert "Mobile" in contract
+
+
 def test_deployment_binding_panel_is_hidden_before_a_map_is_selected():
     """Catches a newly added panel bypassing the compact first-run states."""
     css = (Path(__file__).resolve().parents[1] / "autodrive_console/web/deployment.css").read_text(
