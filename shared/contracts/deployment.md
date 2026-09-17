@@ -96,11 +96,12 @@ Backend 校验具有权威性：客户端展示并提交用户意图，但不得
 地图副本和定位 YAML；它不写机器人运行时目录、不调用 ROS 或 Supervisor，也不改变机器人当前
 定位、任务或 ROS 状态。
 
-| 路线位置 | `init_go` | `init_return` |
+| 路线条目条件 | 字段 | 派生来源 |
 | --- | --- | --- |
-| 首图 | 首图使用人工选择的任务起点 `task_start_waypoint_id` | 该图出向链接的受控锚点（单图路线则为任务目标） |
-| 中间图 | 后续地图使用其 YAML `origin` 的 `x`、`y`、`yaw`（`z: 0.0`） | 该图出向链接的受控锚点 |
-| 末图 | 后续地图使用其 YAML `origin` 的 `x`、`y`、`yaw`（`z: 0.0`） | 人工选择的 `task_target_waypoint_id` |
+| 首项（包括唯一项） | `init_go` | 首项（包括唯一项）使用人工选择的任务起点 `task_start_waypoint_id`；首图使用人工选择的任务起点 |
+| 仅非首项 | `init_go` | 只有非首项使用其 YAML `origin` 的 `x`、`y`、`yaw`（`z: 0.0`）；后续地图使用其 YAML `origin` |
+| 非最终项 | `init_return` | 该图出向链接的受控锚点 |
+| 最终项 | `init_return` | 最终项使用人工选择的任务目标 `task_target_waypoint_id` |
 
 `runtime/loc_yaml_path.json` 的精确顶层结构为
 `{ "community": "…", "loc_yaml": [{ "building": "…", "unit": "…", "yaml_index": [ … ] }] }`。

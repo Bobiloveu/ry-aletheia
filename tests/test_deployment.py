@@ -1258,10 +1258,21 @@ def test_deployment_contract_documents_route_derived_init_poses_and_lift_list():
         encoding="utf-8"
     )
 
-    assert "localization_routes" in contract
-    assert "lift_id_list.json" in contract
-    assert "YAML `origin`" in contract
-    assert "Mobile" in contract
+    assert '"task_start_waypoint_id"' in contract
+    assert '"task_target_waypoint_id"' in contract
+    assert "除上述六个键外不接受其他键" in contract
+    assert "首项（包括唯一项）使用人工选择的任务起点" in contract
+    assert "只有非首项使用其 YAML `origin`" in contract
+    assert "最终项使用人工选择的任务目标" in contract
+    assert "runtime/loc_yaml_path.json" in contract
+    assert "runtime/lift_id_list.json" in contract
+    assert '"lifts": [{ "lift_id": "…", "building": "…", "unit": "…" }]' in contract
+    assert "排序并去重" in contract
+    assert "旧记录中的 `init_go` / `init_return` 只读兼容" in contract
+    assert "必须先迁移为路线" in contract
+    assert "组件生成的 Waypoint" in contract
+    assert "不写机器人运行时目录、不调用 ROS 或 Supervisor" in contract
+    assert "Mobile 不是消费者" in contract
 
 
 def test_deployment_binding_panel_is_hidden_before_a_map_is_selected():

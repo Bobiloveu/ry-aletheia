@@ -111,7 +111,12 @@ def _route_project(tmp_path: Path, *, kinds: tuple[str, ...] = ("outdoor", "indo
         source = map_root / f"map-{index}" / "map.yaml"
         source.parent.mkdir(parents=True)
         source.with_name("map.pgm").write_bytes(b"P5\n100 100\n255\n" + bytes(100 * 100))
-        origins = ((-10.0, -10.0, 0.1), (-5.0, -30.0, 0.3), (0.0, 0.0, 0.0))
+        origins = (
+            (-10.0, -10.0, 0.1),
+            (-5.0, -30.0, 0.3),
+            (0.0, 0.0, 0.0),
+            (10.0, 10.0, 0.0),
+        )
         origin = origins[index]
         source.write_text(
             f"image: map.pgm\nresolution: 1.0\norigin: [{origin[0]}, {origin[1]}, {origin[2]}]\n",
@@ -201,6 +206,17 @@ def test_manifest_uses_manual_start_then_yaml_origins_and_route_return_anchors(t
     assert entries[2]["init_return"] == {"x": 20.0, "y": 21.0, "z": 0.0, "yaw": 0.0}
 
 
+def test_single_map_floor_route_uses_manual_start_and_target_poses(tmp_path: Path):
+    """Catches treating the sole route entry as a YAML-origin-only final map."""
+    project, map_root = _route_project(tmp_path, kinds=("floor",))
+
+    rendered = compile_location_manifest(project, map_root=map_root)
+
+    entry = json.loads(rendered.json_bytes)["loc_yaml"][0]["yaml_index"][0]
+    assert entry["init_go"] == {"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.1}
+    assert entry["init_return"] == {"x": 20.0, "y": 21.0, "z": 0.0, "yaw": 0.0}
+
+
 def test_manifest_emits_deduplicated_route_elevator_id_list(tmp_path: Path):
     """Catches exporting all elevator landings instead of route-referenced IDs."""
     project, map_root = _route_project(tmp_path, with_elevator_anchor=True)
@@ -213,6 +229,39 @@ def test_manifest_emits_deduplicated_route_elevator_id_list(tmp_path: Path):
         "lifts": [{"lift_id": "10044", "building": "1", "unit": "1"}],
     }
     assert lifts.content.endswith(b"\n")
+
+
+def test_manifest_sorts_multiple_route_lifts_and_deduplicates_repeated_physical_lift(tmp_path: Path):
+    """Catches emitting route elevator anchors in traversal order or duplicating one lift."""
+    project, map_root = _route_project(
+        tmp_path, kinds=("outdoor", "indoor", "ferry", "floor"), with_elevator_anchor=True
+    )
+    project["components"].extend([
+        {
+            "id": "first-lift", "map_asset_id": "asset-0", "kind": "elevator",
+            "x": 3.0, "y": 4.0, "yaw": 0.0,
+            "attributes": {"physical_elevator_id": "second-physical-lift"},
+        },
+        {
+            "id": "repeat-lift", "map_asset_id": "asset-2", "kind": "elevator",
+            "x": 12.0, "y": 13.0, "yaw": 0.0,
+            "attributes": {"physical_elevator_id": "physical-elevator"},
+        },
+    ])
+    project["physical_elevators"].append(
+        {"id": "second-physical-lift", "elevator_id": "10001"}
+    )
+    links = project["localization_routes"][0]["links"]
+    links[0]["anchor"] = {"kind": "component_center", "component_id": "first-lift"}
+    links[2]["anchor"] = {"kind": "component_center", "component_id": "repeat-lift"}
+
+    rendered = compile_location_manifest(project, map_root=map_root)
+
+    lifts = next(item for item in rendered.artifacts if item.relative_path == "runtime/lift_id_list.json")
+    assert json.loads(lifts.content)["lifts"] == [
+        {"lift_id": "10001", "building": "1", "unit": "1"},
+        {"lift_id": "10044", "building": "1", "unit": "1"},
+    ]
 
 
 def test_manifest_rejects_legacy_binding_missing_route_and_conflicting_lift_identity(tmp_path: Path):
