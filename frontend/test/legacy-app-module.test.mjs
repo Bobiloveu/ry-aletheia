@@ -47,7 +47,7 @@ test("deployment route editor uses controlled route endpoints and no raw pose fi
   assert.doesNotMatch(source, /localizationGoX|localizationReturnX/);
 });
 
-test("route editor appends a later eligible binding without crossing identities", async () => {
+test("route editor preserves saved membership and exposes new same-identity choices", async () => {
   const { orderedRouteBindingIds } = await import(
     new URL("autodrive_console/web/deployment/localization-route.js", repoRoot),
   );
@@ -61,8 +61,8 @@ test("route editor appends a later eligible binding without crossing identities"
   assert.deepEqual(orderedRouteBindingIds(["A", "B"], bindings, "1", "1"), [
     "A",
     "B",
-    "C",
   ]);
+  assert.deepEqual(orderedRouteBindingIds(undefined, bindings, "1", "1"), ["A", "B", "C"]);
 });
 
 test("single-map route exposes both controlled task endpoints", async () => {

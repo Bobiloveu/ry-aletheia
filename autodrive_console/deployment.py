@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .map_assets import MapAssetCache, MapAssetError
+from .localization_assets import LocalizationMapError, read_localization_map
 from .task_compiler import CompilationPreview, bundle_zip, compile_indoor_elevator
 
 
@@ -617,6 +618,8 @@ class DeploymentStore:
             raise DeploymentError("定位路线内所有绑定必须属于同一楼栋和单元")
         if bindings[-1].get("type") != "floor":
             raise DeploymentError("定位路线最后一项必须是 floor 绑定；请将用户楼层放在末尾")
+        if any(item.get("type") == "floor" for item in bindings[:-1]):
+            raise DeploymentError("用户楼层只能位于定位路线末尾；请排除其他楼层模板")
         start_id = str(data["task_start_waypoint_id"] or "").strip()
         target_id = str(data["task_target_waypoint_id"] or "").strip()
         if not start_id or not target_id:
@@ -678,7 +681,8 @@ class DeploymentStore:
         expected_ids = {(str(left.get("id")), str(right.get("id"))) for left, right in expected_pairs}
         if seen_pairs != expected_ids:
             raise DeploymentError("定位路线每对相邻绑定必须恰有一条链接")
-        return links
+        links_by_pair = {(item["from_binding_id"], item["to_binding_id"]): item for item in links}
+        return [links_by_pair[(str(left["id"]), str(right["id"]))] for left, right in expected_pairs]
 
     def _normalise_localization_route_anchor(
         self, document: dict[str, Any], source: object, binding: dict[str, Any]
@@ -873,7 +877,16 @@ class DeploymentStore:
         walls = source.with_name("map_walls.yaml")
         if walls.is_file(): members.append(walls)
         pcd = [item for item in source.parent.glob("*.pcd") if item.is_file()]
+        if any(not item.resolve().is_relative_to(source.parent.resolve()) for item in pcd):
+            raise DeploymentError("地图 PCD 必须位于所选地图文件夹内")
         members.extend(pcd)
+        index = source.with_name("index.txt")
+        if index.exists() or index.is_symlink():
+            try:
+                localization = read_localization_map(source.parent, root=allowed_root)
+            except LocalizationMapError as exc:
+                raise DeploymentError(str(exc)) from exc
+            members.append(localization.index_path)
         total = sum(item.stat().st_size for item in members)
         if total > self.MAX_MAP_BYTES: raise DeploymentError("地图资产超过 2 GiB 导入上限")
         digest = self._sha256(source)[:12]
@@ -892,7 +905,7 @@ class DeploymentStore:
         map_kind = str(kind or "custom")
         if map_kind not in {"outdoor", "lobby", "typical_floor", "custom"}: raise DeploymentError("地图类型无效")
         snapshot_yaml = (target / source.name).resolve()
-        asset = {"id": map_id, "label": cleaned_label, "kind": map_kind, "source_yaml": str(snapshot_yaml), "site_id": self._site_id_for_source(project_id, source), "files": {"yaml": f"maps/{map_id}/{source.name}", "image": f"maps/{map_id}/{image.name}", "walls": f"maps/{map_id}/{walls.name}" if walls in members else None, "pcd_count": len(pcd)}, "resolution_m": resolution, "origin": origin, "width": width, "height": height, "sha256": {item.name: self._sha256(item) for item in members}}
+        asset = {"id": map_id, "label": cleaned_label, "kind": map_kind, "source_yaml": str(snapshot_yaml), "site_id": self._site_id_for_source(project_id, source), "files": {"yaml": f"maps/{map_id}/{source.name}", "image": f"maps/{map_id}/{image.name}", "walls": f"maps/{map_id}/{walls.name}" if walls in members else None, "index": f"maps/{map_id}/index.txt" if index.is_file() else None, "pcd_count": len(pcd)}, "resolution_m": resolution, "origin": origin, "width": width, "height": height, "sha256": {item.name: self._sha256(item) for item in members}}
         document["map_assets"].append(asset)
         self._assign_next_stage(document, map_id)
         self._invalidate_task_compiler_preview(document)

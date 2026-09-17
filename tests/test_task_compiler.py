@@ -22,6 +22,8 @@ def two_map_project(tmp_path: Path) -> dict:
         source.parent.mkdir(parents=True)
         source.with_name("map.pgm").write_bytes(b"P5\n2 2\n255\n\x00\x00\x00\x00")
         source.write_text("image: map.pgm\nresolution: 1.0\norigin: [-10.0, -10.0, 0.0]\n", encoding="utf-8")
+        source.with_name("index.txt").write_text("0 0 0\n0 0 0 0.pcd\n", encoding="utf-8")
+        source.with_name("0.pcd").write_bytes(b"# controlled cloud fixture\n")
 
     assets = [
         {"id": "lobby-map", "source_yaml": str(lobby_yaml), "origin": [-10.0, -10.0, 0.0], "width": 40, "height": 40, "resolution_m": 1.0},
@@ -159,6 +161,57 @@ def test_door_normals_cover_all_yaw_quadrants(two_map_project, yaw, expected):
     waiting = _compile(two_map_project).derived_points["lobby_wait"]
     assert isclose(waiting["x"], expected[0], abs_tol=1e-9)
     assert isclose(waiting["y"], expected[1], abs_tol=1e-9)
+
+
+@pytest.mark.parametrize("yaw, expected", [
+    (0.0, -pi / 2), (pi / 2, 0.0), (pi, pi / 2), (-pi / 2, -pi),
+])
+def test_manifest_task_center_and_return_xml_share_the_inward_heading(two_map_project, yaw, expected):
+    """Catches the manifest and actual return relocalization disagreeing by 90°."""
+    two_map_project["components"][1]["yaw"] = yaw
+    preview = _compile(two_map_project)
+    manifest = json.loads(next(
+        item.content for item in preview.artifacts if item.relative_path == "runtime/loc_yaml_path.json"
+    ))
+    assert manifest["loc_yaml"][0]["yaml_index"][0]["init_return"]["yaw"] == pytest.approx(expected)
+    assert preview.derived_points["lobby_elevator_center"]["yaw"] == pytest.approx(expected)
+    returned = next(item.content for item in preview.artifacts if item.relative_path.endswith("elevator_out_x_n.xml"))
+    node = next(node for node in ElementTree.fromstring(returned).iter() if node.tag == "SetUseWheelOdom" and "yaw" in node.attrib)
+    assert float(node.attrib["yaw"]) == pytest.approx(expected, abs=1e-8)
+
+
+def test_compiler_rejects_the_lobby_asset_hidden_under_an_outdoor_binding(two_map_project):
+    """Catches approved map paths silently pointing to a different indoor asset."""
+    project = two_map_project
+    project["localization_bindings"][0]["type"] = "outdoor"
+    extra_asset = dict(project["map_assets"][0], id="unrelated-map")
+    project["map_assets"].append(extra_asset)
+    project["localization_bindings"].append({
+        "id": "unrelated-indoor", "map_asset_id": "unrelated-map", "building": "1", "unit": "1", "type": "indoor",
+    })
+    project["waypoints"].append({
+        "id": "unrelated-anchor", "map_asset_id": "unrelated-map", "x": 1.0, "y": 0.0, "yaw": 0.0,
+    })
+    project["localization_routes"][0].update({
+        "binding_ids": ["lobby-binding", "unrelated-indoor", "floor-binding"],
+        "links": [
+            {"from_binding_id": "lobby-binding", "to_binding_id": "unrelated-indoor", "anchor": {"kind": "waypoint", "waypoint_id": "route-start"}},
+            {"from_binding_id": "unrelated-indoor", "to_binding_id": "floor-binding", "anchor": {"kind": "waypoint", "waypoint_id": "unrelated-anchor"}},
+        ],
+    })
+
+    with pytest.raises(CompilationError, match="所选大厅|室内编译"):
+        _compile(project)
+
+
+def test_compiler_rejects_a_waypoint_for_the_indoor_elevator_transfer(two_map_project):
+    """Catches compiling elevator tasks with an empty runtime lift list."""
+    two_map_project["localization_routes"][0]["links"][0]["anchor"] = {
+        "kind": "waypoint", "waypoint_id": "route-start",
+    }
+
+    with pytest.raises(CompilationError, match="电梯组件"):
+        _compile(two_map_project)
 
 
 def test_compiler_rejects_missing_elevator_pair(two_map_project):
@@ -331,6 +384,8 @@ def test_gk1_store_preview_and_download_have_the_approved_indoor_structure(
         source.parent.mkdir(parents=True)
         source.with_name("map.pgm").write_bytes(b"P5\n40 40\n255\n" + bytes(40 * 40))
         source.write_text(f"image: map.pgm\nresolution: 0.2\norigin: [-2.0, -2.0, 0.0]\n# controlled {floor} fixture\n", encoding="utf-8")
+        source.with_name("index.txt").write_text("0 0 0\n0 0 0 0.pcd\n", encoding="utf-8")
+        source.with_name("0.pcd").write_bytes(b"# controlled cloud fixture\n")
         sources.append(source)
 
     lobby = store.import_map(project["id"], sources[0], "大厅", "lobby")
@@ -370,6 +425,10 @@ def test_gk1_store_preview_and_download_have_the_approved_indoor_structure(
                 "runtime/maps/高科一号/1_1/indoor/map.pgm",
                 "runtime/maps/高科一号/1_1/floor-2/map.yaml",
                 "runtime/maps/高科一号/1_1/floor-2/map.pgm",
+                "runtime/maps/高科一号/1_1/indoor/index.txt",
+                "runtime/maps/高科一号/1_1/indoor/0.pcd",
+                "runtime/maps/高科一号/1_1/floor-2/index.txt",
+                "runtime/maps/高科一号/1_1/floor-2/0.pcd",
         }
 
     subtasks = preview["task_json"]["subtasks"]
@@ -417,6 +476,8 @@ def test_store_compiles_browser_uploaded_map_snapshots_after_upload_staging_is_g
             f"image: map.pgm\nresolution: 0.2\norigin: [-2.0, -2.0, 0.0]\n# {floor}\n",
             encoding="utf-8",
         )
+        source.with_name("index.txt").write_text("0 0 0\n0 0 0 0.pcd\n", encoding="utf-8")
+        source.with_name("0.pcd").write_bytes(b"# controlled cloud fixture\n")
         uploaded.append(source)
 
     lobby = store.import_uploaded_map(project["id"], uploaded[0], "大厅", "lobby", upload_root)
@@ -424,6 +485,8 @@ def test_store_compiles_browser_uploaded_map_snapshots_after_upload_staging_is_g
     for source in uploaded:
         source.unlink()
         source.with_name("map.pgm").unlink()
+        source.with_name("index.txt").unlink()
+        source.with_name("0.pcd").unlink()
     store.add_map_instance(project["id"], {"map_id": lobby["id"], "role": "lobby", "building": "1", "unit": "1", "floor": 1})
     store.add_map_instance(project["id"], {"map_id": target["id"], "role": "typical_floor", "building": "1", "unit": "1", "floor": 15})
     shared = store.add_physical_elevator(project["id"], {"elevator_id": "10014", "elevator_protocol": "bluetooth", "min_floor": 1, "max_floor": 15})

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from math import pi
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,8 @@ def test_location_manifest_groups_bindings_by_building_unit_and_preserves_floor_
         source.parent.mkdir(parents=True)
         source.with_name("map.pgm").write_bytes(b"P5\n1 1\n255\n\x00")
         source.write_text("image: map.pgm\nresolution: 1.0\norigin: [0.0, 0.0, 0.0]\n", encoding="utf-8")
+        source.with_name("index.txt").write_text("0 0 0\n0 0 0 0.pcd\n", encoding="utf-8")
+        source.with_name("0.pcd").write_bytes(b"# controlled cloud fixture\n")
     project = {
         "id": "site-a",
         "task_compiler": {"identity": {"community": "数创大厦"}},
@@ -122,6 +125,8 @@ def _route_project(tmp_path: Path, *, kinds: tuple[str, ...] = ("outdoor", "indo
             f"image: map.pgm\nresolution: 1.0\norigin: [{origin[0]}, {origin[1]}, {origin[2]}]\n",
             encoding="utf-8",
         )
+        source.with_name("index.txt").write_text("0 0 0\n0 0 0 0.pcd\n", encoding="utf-8")
+        source.with_name("0.pcd").write_bytes(b"# controlled cloud fixture\n")
         asset_id = f"asset-{index}"
         binding_id = f"binding-{index}"
         assets.append({
@@ -217,6 +222,49 @@ def test_single_map_floor_route_uses_manual_start_and_target_poses(tmp_path: Pat
     assert entry["init_return"] == {"x": 20.0, "y": 21.0, "z": 0.0, "yaw": 0.0}
 
 
+def test_manifest_packages_the_localization_index_and_its_numbered_cloud_chunks(tmp_path: Path):
+    """Catches generating system.map_path that contains only a 2D map."""
+    project, root = _route_project(tmp_path, kinds=("floor",))
+    source = Path(project["map_assets"][0]["source_yaml"])
+    source.with_name("index.txt").write_text(
+        "0 0 0\n7 -1 2 /original/robot/location/7.pcd\n# functional points\nstart 1 2 0 0 0 0 1\n",
+        encoding="utf-8",
+    )
+    source.with_name("7.pcd").write_bytes(b"# indexed static point cloud\n")
+    source.with_name("7_dyn.pcd").write_bytes(b"# optional dynamic point cloud\n")
+    source.with_name("unrelated.pcd").write_bytes(b"# unindexed file\n")
+
+    rendered = compile_location_manifest(project, map_root=root)
+    files = {artifact.relative_path: artifact.content for artifact in rendered.artifacts}
+    prefix = "runtime/maps/高科一号/1_1/floor-2/"
+    assert files[prefix + "index.txt"] == (
+        b"0 0 0\n7 -1 2 7.pcd\n# functional points\nstart 1 2 0 0 0 0 1\n"
+    )
+    assert files[prefix + "7.pcd"] == b"# indexed static point cloud\n"
+    assert files[prefix + "7_dyn.pcd"] == b"# optional dynamic point cloud\n"
+    assert prefix + "unrelated.pcd" not in files
+
+
+def test_manifest_blocks_localization_output_without_a_map_index(tmp_path: Path):
+    """Catches exporting localization-ready YAML without the loader's index."""
+    project, root = _route_project(tmp_path, kinds=("floor",))
+    source = Path(project["map_assets"][0]["source_yaml"])
+    source.with_name("index.txt").unlink(missing_ok=True)
+
+    with pytest.raises(LocationManifestError, match="index.txt"):
+        compile_location_manifest(project, map_root=root)
+
+
+def test_manifest_blocks_localization_output_when_an_indexed_chunk_is_missing(tmp_path: Path):
+    """Catches silently packaging an index that refers to an absent chunk."""
+    project, root = _route_project(tmp_path, kinds=("floor",))
+    source = Path(project["map_assets"][0]["source_yaml"])
+    source.with_name("index.txt").write_text("0 0 0\n7 -1 2 /original/7.pcd\n", encoding="utf-8")
+
+    with pytest.raises(LocationManifestError, match="7.pcd"):
+        compile_location_manifest(project, map_root=root)
+
+
 def test_manifest_emits_deduplicated_route_elevator_id_list(tmp_path: Path):
     """Catches exporting all elevator landings instead of route-referenced IDs."""
     project, map_root = _route_project(tmp_path, with_elevator_anchor=True)
@@ -229,6 +277,24 @@ def test_manifest_emits_deduplicated_route_elevator_id_list(tmp_path: Path):
         "lifts": [{"lift_id": "10044", "building": "1", "unit": "1"}],
     }
     assert lifts.content.endswith(b"\n")
+
+
+@pytest.mark.parametrize("component_yaw, vehicle_yaw", [
+    (0.0, -pi / 2), (pi / 2, 0.0), (pi, pi / 2), (-pi / 2, -pi),
+])
+def test_elevator_return_pose_faces_inward_in_each_door_orientation(
+    tmp_path: Path, component_yaw: float, vehicle_yaw: float
+):
+    """Catches treating the cabin's local X axis as the vehicle heading."""
+    project, root = _route_project(tmp_path, with_elevator_anchor=True)
+    project["components"][0]["yaw"] = component_yaw
+
+    manifest = compile_location_manifest(project, map_root=root)
+
+    returned = json.loads(manifest.json_bytes)["loc_yaml"][0]["yaml_index"][1]["init_return"]
+    assert returned["x"] == 8.0
+    assert returned["y"] == 9.0
+    assert returned["yaw"] == pytest.approx(vehicle_yaw, abs=1e-9)
 
 
 def test_manifest_sorts_multiple_route_lifts_and_deduplicates_repeated_physical_lift(tmp_path: Path):

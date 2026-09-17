@@ -9,15 +9,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from math import isfinite
+from math import atan2, cos, isfinite, sin
 from pathlib import PurePosixPath
 from pathlib import Path
 import re
 from typing import Any
 
+from .localization_assets import LocalizationMapError, read_localization_map
+
 
 class LocationManifestError(ValueError):
     """Raised when a deployment identity or elevator button is unsafe."""
+
+
+def elevator_inward_yaw(component_yaw: float) -> float:
+    """Face into the cabin, opposite its local +Y door normal.
+
+    Component yaw rotates the cabin's local X axis; it is not the robot
+    heading. This convention is shared with task waypoints and return XML.
+    """
+    return atan2(-cos(component_yaw), sin(component_yaw))
 
 
 def button_sequence(min_floor: int, max_floor: int) -> tuple[int, ...]:
@@ -412,6 +423,8 @@ def _controlled_pose(source: dict[str, Any], label: str) -> dict[str, float]:
         raise LocationManifestError(f"{label}位姿无效") from exc
     if not all(isfinite(value) for value in (x, y, yaw)):
         raise LocationManifestError(f"{label}位姿无效")
+    if source.get("kind") == "elevator":
+        yaw = elevator_inward_yaw(yaw)
     return {"x": x, "y": y, "z": 0.0, "yaw": yaw}
 
 
@@ -497,9 +510,15 @@ def _map_members(asset: dict[str, Any], root: Path, target_yaml: str) -> list[Lo
     if not image.is_file() or not image.is_relative_to(root):
         raise LocationManifestError("地图 YAML 的 image 指向无效")
     target = PurePosixPath(target_yaml).parent
+    try:
+        localization = read_localization_map(source.parent, root=root)
+    except (LocalizationMapError, OSError) as exc:
+        raise LocationManifestError(str(exc)) from exc
     return [
         LocationArtifact((target / "map.yaml").as_posix(), yaml_text.encode("utf-8")),
         LocationArtifact((target / image.name).as_posix(), image.read_bytes()),
+        LocationArtifact((target / "index.txt").as_posix(), localization.index_bytes),
+        *[LocationArtifact((target / cloud.name).as_posix(), cloud.read_bytes()) for cloud in localization.clouds],
     ]
 
 

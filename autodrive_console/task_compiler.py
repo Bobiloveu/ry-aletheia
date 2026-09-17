@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
-from math import atan2, cos, isfinite, sin
+from math import cos, isfinite, sin
 from pathlib import Path
 import io
 import json
@@ -24,6 +24,7 @@ from .location_manifest import (
     LocationManifestError,
     RuntimeLayout,
     compile_location_manifest,
+    elevator_inward_yaw,
     physical_floor_index,
 )
 
@@ -140,6 +141,7 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
         target_template,
         lobby_asset["id"],
         target_asset["id"],
+        lobby_elevator["id"],
     )
 
     input_value = CompilationInput(
@@ -471,7 +473,7 @@ def _wait_point(elevator: dict[str, Any]) -> tuple[dict[str, float], float]:
     if not 0 < height <= 20 or not 0.5 <= wait_distance <= 5:
         raise CompilationError("电梯尺寸或候梯距离超出允许范围")
     door_out_x, door_out_y = -sin(center["yaw"]), cos(center["yaw"])
-    inward_yaw = atan2(-door_out_y, -door_out_x)
+    inward_yaw = elevator_inward_yaw(center["yaw"])
     distance = height / 2 + wait_distance
     return {"x": center["x"] + door_out_x * distance, "y": center["y"] + door_out_y * distance, "yaw": inward_yaw}, inward_yaw
 
@@ -613,6 +615,7 @@ def _assert_selected_localization_artifacts(
     target_template: str,
     lobby_asset_id: str,
     target_asset_id: str,
+    lobby_elevator_id: str,
 ) -> None:
     """Require the approved indoor maps to be covered by the resolved route export."""
     bindings = project.get("localization_bindings")
@@ -622,21 +625,27 @@ def _assert_selected_localization_artifacts(
         for item in bindings
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     } if isinstance(bindings, list) else {}
-    selected_route = any(
-        isinstance(route, dict)
-        and route.get("building") == building
-        and route.get("unit") == unit
-        and {lobby_asset_id, target_asset_id} <= {
-            binding.get("map_asset_id")
-            for binding_id in route.get("binding_ids", [])
-            if isinstance(binding_id, str)
-            for binding in [bindings_by_id.get(binding_id)]
-            if isinstance(binding, dict)
-        }
-        for route in routes if isinstance(routes, list)
-    )
-    if not selected_route:
+    selected_route = next((route for route in routes
+        if isinstance(route, dict) and route.get("building") == building and route.get("unit") == unit
+    ), None) if isinstance(routes, list) else None
+    selected_bindings = [bindings_by_id.get(identifier) for identifier in selected_route.get("binding_ids", [])] if selected_route else []
+    lobby_binding = next((binding for binding in selected_bindings if isinstance(binding, dict)
+        and binding.get("type") == "indoor" and binding.get("map_asset_id") == lobby_asset_id
+    ), None)
+    floor_binding = next((binding for binding in selected_bindings if isinstance(binding, dict)
+        and binding.get("type") == "floor" and binding.get("map_asset_id") == target_asset_id
+        and binding.get("floor_template") == target_template
+    ), None)
+    if lobby_binding is None or floor_binding is None:
         raise CompilationError("定位路线未包含室内编译所选大厅或目标层地图")
+    elevator_link = next((link for link in selected_route.get("links", [])
+        if isinstance(link, dict) and link.get("from_binding_id") == lobby_binding["id"]
+        and link.get("to_binding_id") == floor_binding["id"]
+    ), None)
+    if elevator_link is None or elevator_link.get("anchor") != {
+        "kind": "component_center", "component_id": lobby_elevator_id,
+    }:
+        raise CompilationError("室内编译的大厅到用户楼层切图必须关联所选电梯组件中心")
     expected = {
         layout.localization_yaml(building, unit, "indoor").relative,
         layout.localization_yaml(building, unit, f"floor-{target_template}").relative,

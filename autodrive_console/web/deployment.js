@@ -18,7 +18,11 @@ import {
 import { drawDeploymentCanvas } from "./deployment/canvas-renderer.js";
 import {
   orderedRouteBindingIds,
+  moveRouteBinding,
+  resetRouteDraft,
+  routeBindingChoices,
   routeEndpointFields,
+  setRouteBindingIncluded,
 } from "./deployment/localization-route.js";
 import { requestJson } from "./platform/http.js";
 
@@ -554,9 +558,13 @@ function renderLocalizationRouteDialog() {
   ensureRouteLinks();
   const bindings = routeBindings();
   const holder = $("localizationRouteLinks");
+  const choices = routeBindingChoices(localizationBindings(), localizationRouteDraft.building, localizationRouteDraft.unit, localizationRouteDraft.binding_ids);
+  $("localizationRouteMembership").innerHTML = choices.map((binding) => `<label><input type="checkbox" data-route-include="${esc(binding.id)}" ${binding.included ? "checked" : ""}><span>${esc(mapForId(binding.map_asset_id)?.label || binding.map_asset_id)} · ${esc(binding.type === "floor" ? `用户楼层模板 ${binding.floor_template}` : { outdoor: "户外", indoor: "室内大厅", ferry: "摆渡层" }[binding.type] || binding.type)}</span></label>`).join("");
+  $("deleteLocalizationRoute").classList.toggle("deployment-hidden", !localizationRouteDraft.id);
   $("localizationRouteIdentity").textContent = `${localizationRouteDraft.building} 栋 ${localizationRouteDraft.unit} 单元 · 只提交绑定、航点和组件锚点。`;
   if (!bindings.length) {
-    holder.innerHTML = '<div class="page-empty">先为同一楼栋和单元保存定位绑定。</div>';
+    holder.innerHTML = '<div class="page-empty">勾选本次路线需要的地图，然后配置起终点和切图锚点。</div>';
+    $("localizationRouteMessage").textContent = "尚未选择路线地图。";
     $("localizationRouteSummary").textContent = "尚不能生成派生定位文件。";
     return;
   }
@@ -586,13 +594,13 @@ function renderLocalizationRouteDialog() {
       : "";
     return `<article class="localization-route-card"><header><div><b>${index + 1}. ${esc(map.label || binding.map_asset_id)}</b><small>${esc(binding.type === "floor" ? `用户楼层 · 模板 ${binding.floor_template}` : binding.type)}</small></div><div class="route-order-actions"><button class="compact-action" data-route-move="up" data-route-index="${index}" type="button" ${first ? "disabled" : ""}>上移</button><button class="compact-action" data-route-move="down" data-route-index="${index}" type="button" ${last ? "disabled" : ""}>下移</button></div></header><div class="route-derived"><span>进入：${esc(sources.go)}</span><span>返回：${esc(sources.back)}</span></div>${endpoint}${anchor}${last ? '<p class="route-last-note">末项必须为“用户楼层”。</p>' : ""}</article>`;
   }).join("");
-  const lastIsFloor = bindings.at(-1)?.type === "floor";
+  const lastIsFloor = bindings.at(-1)?.type === "floor" && bindings.slice(0, -1).every((binding) => binding.type !== "floor");
   const complete = lastIsFloor && localizationRouteDraft.task_start_waypoint_id && localizationRouteDraft.task_target_waypoint_id && localizationRouteDraft.links.every((item) => item.anchor);
   $("localizationRouteMessage").textContent = complete
     ? "路线完整：位姿将由受控地图事实派生。"
     : lastIsFloor
       ? "请补齐首图起点、末图终点和每次切图锚点。"
-      : "末项必须为“用户楼层”；请用上移/下移调整顺序。";
+      : "用户楼层只能在末项；请排除其他模板并调整顺序。";
   $("localizationRouteMessage").style.color = complete ? "#35d69c" : "#ffc05a";
   $("localizationRouteSummary").innerHTML = `<b>${complete ? "派生状态已完整" : "派生状态待补齐"}</b><span>将生成 <code>loc_yaml_path.json</code> 与 <code>lift_id_list.json</code>；仅显示相对文件名。</span>`;
 }
@@ -600,7 +608,7 @@ async function saveLocalizationRoute() {
   if (!selectedProject || !localizationRouteDraft) return;
   const payload = localizationRoutePayload();
   const bindings = routeBindings();
-  const complete = bindings.at(-1)?.type === "floor" && payload.task_start_waypoint_id && payload.task_target_waypoint_id && payload.links.every((item) => item.anchor);
+  const complete = bindings.at(-1)?.type === "floor" && bindings.slice(0, -1).every((binding) => binding.type !== "floor") && payload.task_start_waypoint_id && payload.task_target_waypoint_id && payload.links.every((item) => item.anchor);
   if (!complete) {
     note("localizationRouteMessage", "请先补齐受控起终点、切图锚点，并将用户楼层置于末项。", true);
     return;
@@ -615,6 +623,27 @@ async function saveLocalizationRoute() {
     closeLocalizationRoute();
   } catch (error) {
     note("localizationRouteMessage", error.message, true);
+  }
+}
+function resetLocalizationRoute() {
+  if (!localizationRouteDraft || !window.confirm("清空当前定位路线草稿？已保存的路线保留，只有再次保存才会替换。")) return;
+  localizationRouteDraft = resetRouteDraft(localizationRouteDraft);
+  renderLocalizationRouteDialog();
+}
+async function deleteLocalizationRoute() {
+  const route = localizationRouteDraft;
+  if (!selectedProject || !route?.id || !window.confirm(`删除 ${route.building} 栋 ${route.unit} 单元的定位路线？地图和定位绑定会保留，删除后可重新编辑绑定。`)) return;
+  const button = $("deleteLocalizationRoute");
+  button.disabled = true;
+  try {
+    await request(`/api/deployments/${encodeURIComponent(selectedProject.id)}/localization-routes/${encodeURIComponent(route.id)}`, { method: "DELETE" });
+    const data = await request(`/api/deployments/${encodeURIComponent(selectedProject.id)}`);
+    renderProject(data.project);
+    closeLocalizationRoute();
+  } catch (error) {
+    note("localizationRouteMessage", error.message, true);
+  } finally {
+    button.disabled = false;
   }
 }
 function renderLocalizationRoutes() {
@@ -1188,6 +1217,8 @@ function drawMapOrigin() {
   context.font = "600 10px system-ui, sans-serif";
   context.textAlign = "left";
   context.fillText("YAML 原点", 9, -10);
+  context.font = "500 9px ui-monospace, SFMono-Regular, Menlo, monospace";
+  context.fillText(`X ${origin.x.toFixed(2)} · Y ${origin.y.toFixed(2)} · θ ${origin.yaw.toFixed(2)}`, 9, 3);
   context.restore();
 }
 function drawLocalizationMarkers() {
@@ -1758,6 +1789,13 @@ $("deleteLocalizationBinding").addEventListener("click", deleteLocalizationBindi
 $("localizationBindingType").addEventListener("change", localizationTypeChanged);
 $("cancelLocalizationRoute").addEventListener("click", closeLocalizationRoute);
 $("saveLocalizationRoute").addEventListener("click", saveLocalizationRoute);
+$("resetLocalizationRoute").addEventListener("click", resetLocalizationRoute);
+$("deleteLocalizationRoute").addEventListener("click", deleteLocalizationRoute);
+$("localizationRouteMembership").addEventListener("change", (event) => {
+  if (!localizationRouteDraft || !event.target.matches("[data-route-include]")) return;
+  localizationRouteDraft = setRouteBindingIncluded(localizationRouteDraft, localizationBindings(), event.target.dataset.routeInclude, event.target.checked);
+  renderLocalizationRouteDialog();
+});
 $("localizationRouteLinks").addEventListener("change", (event) => {
   if (!localizationRouteDraft) return;
   if (event.target.matches("[data-route-start]")) {
@@ -1773,12 +1811,7 @@ $("localizationRouteLinks").addEventListener("click", (event) => {
   const button = event.target.closest("[data-route-move]");
   if (!button || !localizationRouteDraft) return;
   const index = Number(button.dataset.routeIndex);
-  const other = button.dataset.routeMove === "up" ? index - 1 : index + 1;
-  if (other < 0 || other >= localizationRouteDraft.binding_ids.length) return;
-  [localizationRouteDraft.binding_ids[index], localizationRouteDraft.binding_ids[other]] = [
-    localizationRouteDraft.binding_ids[other],
-    localizationRouteDraft.binding_ids[index],
-  ];
+  localizationRouteDraft = moveRouteBinding(localizationRouteDraft, index, button.dataset.routeMove === "up" ? -1 : 1);
   ensureRouteLinks();
   renderLocalizationRouteDialog();
 });

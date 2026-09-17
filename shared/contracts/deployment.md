@@ -11,6 +11,12 @@ Backend 校验具有权威性：客户端展示并提交用户意图，但不得
 
 导入地图后，项目内 `maps/` 快照是后续预览与实验编译的唯一地图来源；浏览器上传的临时目录和原始外部路径都不能成为编译依赖。旧项目读取时会在快照完整的前提下自动迁移该来源记录。
 
+地图快照保留提供的 `index.txt`、编号静态 PCD 和可选动态 PCD；资产的 `files.index` 是项目内
+索引相对路径，未提供时为 `null`。普通 2D 地图仍可导入编辑，但定位清单/定位 YAML 导出要求
+有效 `index.txt` 及其全部 `<id>.pcd`；缺失时明确阻断，要求重新导入完整定位地图文件夹。
+导出的索引将区块路径改为包内编号文件名，并只携带索引引用的静态及可选 `<id>_dyn.pcd`；
+不将原机器人路径或未索引文件变成运行时依赖。Backend/Web 受此约束，Mobile 无影响。
+
 ## 项目级物理电梯
 
 **Status: Existing（已实现，实验任务编译输入）**
@@ -83,6 +89,10 @@ Backend 校验具有权威性：客户端展示并提交用户意图，但不得
 `{ "kind": "waypoint", "waypoint_id": "…" }`，或
 `{ "kind": "component_center", "component_id": "…" }`；不接受手填 pose。
 
+`floor` 不能出现在路线中间；保存时后端按 `binding_ids` 顺序归一化链接。PC 编辑器可明确
+包含/排除同身份绑定、清空未保存草稿或确认删除路线。新绑定不会自动加入已保存路线；所有
+成员、顺序和锚点变更只在显式保存/删除后生效。
+
 | Method | Route | Request | Response |
 | --- | --- | --- | --- |
 | `POST` | `/api/deployments/{project_id}/localization-routes` | 上述严格路线对象 | `{ "localization_route": { … }, "project": { … } }`，`201 Created` |
@@ -102,6 +112,12 @@ Backend 校验具有权威性：客户端展示并提交用户意图，但不得
 | 仅非首项 | `init_go` | 只有非首项使用其 YAML `origin` 的 `x`、`y`、`yaw`（`z: 0.0`）；后续地图使用其 YAML `origin` |
 | 非最终项 | `init_return` | 该图出向链接的受控锚点 |
 | 最终项 | `init_return` | 最终项使用人工选择的任务目标 `task_target_waypoint_id` |
+
+电梯中心锚点的机器人朝向为电梯门外法线的反方向；组件 `yaw` 表示局部 X 轴，因此门外
+法线为 `(-sin(yaw), cos(yaw))`。此朝向与任务电梯中心点及返程 XML 重定位一致。
+一般切图仍可使用航点或其他组件中心；`indoor_elevator_v1` 室内编译额外要求所选大厅资产
+准确绑定 `indoor`、目标层资产准确绑定对应 `floor` 模板，并且大厅到楼层直接通过所选的
+物理电梯组件中心衔接，以确保任务路径、定位清单和电梯 ID 清单一致。
 
 `runtime/loc_yaml_path.json` 的精确顶层结构为
 `{ "community": "…", "loc_yaml": [{ "building": "…", "unit": "…", "yaml_index": [ … ] }] }`。

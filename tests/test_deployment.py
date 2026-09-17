@@ -19,6 +19,7 @@ def _map(directory: Path) -> Path:
     (directory / "map.yaml").write_text("image: map.pgm\nresolution: 0.05\norigin: [-1.0, -2.0, 0.0]\n", encoding="utf-8")
     (directory / "map_walls.yaml").write_text("virtual_walls:\n  coordinate_mode: world\n", encoding="utf-8")
     (directory / "0.pcd").write_text("# pcd fixture\n", encoding="utf-8")
+    (directory / "index.txt").write_text("0 0 0\n0 0 0 0.pcd\n", encoding="utf-8")
     return directory / "map.yaml"
 
 
@@ -70,6 +71,42 @@ def test_map_import_rejects_paths_outside_robot_map_root(tmp_path: Path, monkeyp
     project = store.create("项目")
     with pytest.raises(DeploymentError, match="/opt/ry/data/maps"):
         store.import_map(project["id"], outside, "外部", "outdoor")
+
+
+def test_map_snapshot_keeps_localization_dependencies_for_export_after_source_is_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Catches preserving PCD but dropping index.txt during controlled import."""
+    from autodrive_console.location_manifest import compile_location_manifest
+
+    source_root = tmp_path / "robot-maps"
+    source = _map(source_root / "site" / "floor")
+    index = source.with_name("index.txt")
+    index.write_text("0 0 0\n0 1 2 /old/site/0.pcd\n", encoding="utf-8")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", source_root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("点云快照")
+    asset = store.import_map(project["id"], source, "楼层", "typical_floor")
+    snapshot = Path(asset["source_yaml"]).parent
+    assert (snapshot / "index.txt").read_text(encoding="utf-8") == "0 0 0\n0 1 2 /old/site/0.pcd\n"
+    assert asset["files"]["index"] == f"maps/{asset['id']}/index.txt"
+    index.unlink()
+    source.with_name("0.pcd").unlink()
+    floor = store.create_localization_binding(project["id"], {
+        "map_asset_id": asset["id"], "building": "1", "unit": "1", "type": "floor", "floor_template": "2",
+    })
+    start = store.add_waypoint(project["id"], {"map_id": asset["id"], "kind": "start", "x": -0.95, "y": -1.95})
+    target = store.add_waypoint(project["id"], {"map_id": asset["id"], "kind": "target", "x": -0.95, "y": -1.95})
+    store.create_localization_route(project["id"], {
+        "building": "1", "unit": "1", "binding_ids": [floor["id"]],
+        "task_start_waypoint_id": start["id"], "task_target_waypoint_id": target["id"], "links": [],
+    })
+    store.update_task_compiler_config(project["id"], {"community": "点云快照"})
+
+    exported = compile_location_manifest(store.get(project["id"]), map_root=store._project_dir(project["id"]) / "maps")
+    files = {item.relative_path: item.content for item in exported.artifacts}
+    assert files["runtime/maps/点云快照/1_1/floor-2/index.txt"] == b"0 0 0\n0 1 2 0.pcd\n"
+    assert files["runtime/maps/点云快照/1_1/floor-2/0.pcd"] == b"# pcd fixture\n"
 
 
 def _localization_binding_payload(
@@ -679,6 +716,50 @@ def test_localization_route_allows_ferry_anywhere_and_derives_references(
     route = store.create_localization_route(project["id"], payload)
 
     assert route["binding_ids"] == [item["id"] for item in bindings]
+
+
+def test_localization_route_rejects_a_user_floor_before_the_final_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Catches saving a chain that the location resolver cannot export."""
+    store, project, assets = _project_with_four_maps(tmp_path, monkeypatch)
+    payload, bindings, _ = _route_fixture(store, project, assets)
+    document = store.get(project["id"])
+    document["localization_bindings"][1].update({"type": "floor", "floor_template": "3"})
+    store._write_json(store._document_path(project["id"]), document)
+
+    with pytest.raises(DeploymentError, match="末尾|最后"):
+        store.create_localization_route(project["id"], payload)
+
+
+def test_localization_route_canonicalizes_links_so_saved_chain_can_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Catches accepting out-of-order links that later block export."""
+    from autodrive_console.location_manifest import compile_location_manifest
+
+    store, project, assets = _project_with_four_maps(tmp_path, monkeypatch)
+    payload, bindings, _ = _route_fixture(store, project, assets)
+    last_anchor = store.add_waypoint(project["id"], {
+        "map_id": assets[2]["id"], "kind": "map_transition", "x": -0.95, "y": -1.95,
+    })
+    payload["links"][2]["anchor"] = {"kind": "waypoint", "waypoint_id": last_anchor["id"]}
+    payload["links"].reverse()
+    store.update_task_compiler_config(project["id"], {"community": "路线一致性"})
+
+    saved = store.create_localization_route(project["id"], payload)
+
+    assert [(link["from_binding_id"], link["to_binding_id"]) for link in saved["links"]] == [
+        (bindings[0]["id"], bindings[1]["id"]),
+        (bindings[1]["id"], bindings[2]["id"]),
+        (bindings[2]["id"], bindings[3]["id"]),
+    ]
+    rendered = compile_location_manifest(
+        store.get(project["id"]), map_root=store._project_dir(project["id"]) / "maps"
+    )
+    assert [entry["type"] for entry in json.loads(rendered.json_bytes)["loc_yaml"][0]["yaml_index"]] == [
+        "ferry", "outdoor", "indoor", "floor",
+    ]
 
 
 def test_localization_route_rejects_non_floor_tail_and_mismatched_anchor(
@@ -1421,18 +1502,14 @@ def test_task_compiler_component_attributes_invalidate_preview(tmp_path: Path, m
 def test_task_compiler_route_change_produces_a_new_preview_fingerprint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Catches reusing an export fingerprint after a route anchor changes."""
+    """Catches reusing an export fingerprint after its manual route start changes."""
     store, project, target = _compiler_ready_store(tmp_path, monkeypatch)
     store.update_task_compiler_config(project["id"], {"community": "高科一号"})
     store.update_component(project["id"], target["id"], {"attributes": {"door": "1509"}})
     first = store.task_compiler_preview(project["id"])["input_sha256"]
-    anchor = store.add_waypoint(
-        project["id"], {"map_id": store.get(project["id"])["map_stage_assignments"][0]["map_asset_id"], "kind": "map_transition", "x": 0.2, "y": 0.0}
-    )
     document = store.get(project["id"])
-    document["localization_routes"][0]["links"][0]["anchor"] = {
-        "kind": "waypoint", "waypoint_id": anchor["id"],
-    }
+    start_id = document["localization_routes"][0]["task_start_waypoint_id"]
+    next(point for point in document["waypoints"] if point["id"] == start_id)["x"] = -0.8
     store._write_json(store._document_path(project["id"]), document)
     second = store.task_compiler_preview(project["id"])["input_sha256"]
 

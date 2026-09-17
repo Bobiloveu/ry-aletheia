@@ -481,10 +481,19 @@
               <div><strong>编辑定位路线</strong><small id="localizationRouteIdentity">按地图经过顺序选择受控锚点；后续地图使用 YAML 原点，位姿和文件路径始终由部署包派生。</small></div>
               <button id="cancelLocalizationRoute" class="popover-close" type="button" aria-label="关闭定位路线">×</button>
             </header>
+            <fieldset class="localization-route-membership">
+              <legend>选择路线地图</legend>
+              <p class="page-muted">只勾选本次经过的地图；多个楼层模板只选一个。更改在保存后生效。</p>
+              <div id="localizationRouteMembership"></div>
+            </fieldset>
             <p id="localizationRouteMessage" class="inline-message" role="status">末项必须为“用户楼层”。</p>
             <div id="localizationRouteLinks" class="localization-route-links"></div>
             <div id="localizationRouteSummary" class="localization-route-summary"></div>
-            <div class="component-actions"><button id="saveLocalizationRoute" class="page-top-action" type="button">保存定位路线</button></div>
+            <div class="component-actions">
+              <button id="deleteLocalizationRoute" class="compact-action deployment-hidden" type="button">删除路线</button>
+              <button id="resetLocalizationRoute" class="compact-action" type="button">清空草稿</button>
+              <button id="saveLocalizationRoute" class="page-top-action" type="button">保存定位路线</button>
+            </div>
           </section>
         </article>
         <article class="panel span-6 task-compiler-panel" aria-labelledby="taskCompilerTitle">
