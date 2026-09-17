@@ -114,12 +114,12 @@
           </div>
           <p class="page-muted">
             从打开此网页的电脑选择地图文件。请同时选择 <code>map.yaml</code>
-            与对应 PGM；可选虚拟墙与 PCD 会一并上传并复制到项目快照。
+            与对应 PGM；定位地图还需选择 <code>index.txt</code> 及其引用的 PCD，普通 2D 地图可不含点云。
           </p>
           <div id="importControls" class="settings-form deployment-hidden">
             <div id="mapStageSummary" class="map-stage-summary"></div>
             <label class="map-folder-picker"
-              >选择地图文件<input id="mapFolder" type="file" multiple accept=".yaml,.yml,.pgm,.pcd" aria-describedby="mapFolderMessage" /></label
+              >选择地图文件<input id="mapFolder" type="file" multiple accept=".yaml,.yml,.pgm,.pcd,.txt,text/plain" aria-describedby="mapFolderMessage" /></label
             ><p id="mapFolderMessage" class="inline-message map-folder-message">尚未选择地图文件。</p>
             ><label
               >显示名称<input
