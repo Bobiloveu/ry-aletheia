@@ -90,6 +90,9 @@ class RobotSettings:
     # 当前小车本机业务日志目录；只供 Desktop 日志下载页面消费，不能改动
     # Aletheia 自身 ToolLogStore 的受控诊断目录。
     robot_logs: dict = field(default_factory=lambda: {"sources": [dict(item) for item in DEFAULT_ROBOT_LOG_SOURCES]})
+    # 仅控制 Aletheia 自身的用户级启动入口，不会启动或重启机器人节点。
+    # 放在末尾以保持历史位置参数调用的兼容性。
+    autostart_enabled: bool = False
 class SettingsStore:
     """部署在机器人本机的控制台配置。"""
 
@@ -116,6 +119,8 @@ class SettingsStore:
                 raw["supervisor_command"] = "sudo -n supervisorctl status"
             defaults = asdict(RobotSettings())
             defaults.update({key: value for key, value in raw.items() if key in defaults})
+            if not isinstance(defaults.get("autostart_enabled"), bool):
+                defaults["autostart_enabled"] = False
             # 仅迁移历史硬编码模板。与模板不同的节点列表是现场已保存的
             # 本车配置，必须原样保留。
             if raw.get("nodes") == LEGACY_DEFAULT_NODES:
@@ -185,6 +190,8 @@ class SettingsStore:
             raise ValueError("任务目录必须是安全的绝对路径")
         if not isinstance(settings.supervisor_command, str) or not settings.supervisor_command.strip():
             raise ValueError("Supervisor 状态命令不能为空")
+        if not isinstance(settings.autostart_enabled, bool):
+            raise ValueError("开机自启开关格式错误")
         if not 1 <= int(settings.command_timeout_s) <= 120:
             raise ValueError("状态命令超时必须介于 1 和 120 秒")
         if not 60 <= int(settings.elevator_wait_timeout_s) <= 1800:

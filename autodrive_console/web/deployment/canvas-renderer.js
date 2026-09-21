@@ -45,12 +45,15 @@ export function drawDeploymentCanvas({
   context.rect(view.x, view.y, activeMap.width * pixels, activeMap.height * pixels);
   context.clip();
   drawMapEdits();
-  drawMapOrigin?.();
   context.restore();
+  // The world coordinate (0, 0) can sit just outside the raster bounds when
+  // a YAML origin is negative. Draw it after the map clip so the operator can
+  // still see the reference cross whenever it falls inside the canvas.
+  drawMapOrigin?.();
   drawMapRoutes();
   for (const point of (project?.waypoints || []).filter((item) => item.map_asset_id === activeMap.id && !item.generated_by)) {
     const { x, y } = mapPointToCanvas(point, activeMap, view);
-    const palette = { start: "#39dcad", target: "#ffbd61", map_transition: "#b995ef" };
+    const palette = { start: "#39dcad", target: "#ffbd61", return: "#ff6b9d", map_transition: "#b995ef" };
     context.fillStyle = palette[point.kind] || "#5bb8ff";
     context.beginPath();
     context.arc(x, y, point.kind === "map_transition" ? 7 : 5, 0, Math.PI * 2);

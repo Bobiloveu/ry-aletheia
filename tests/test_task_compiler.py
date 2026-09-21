@@ -64,11 +64,12 @@ def two_map_project(tmp_path: Path) -> dict:
         "waypoints": [
             {"id": "route-start", "map_asset_id": "lobby-map", "x": 0.0, "y": -2.0, "yaw": 0.0},
             {"id": "route-target", "map_asset_id": "target-map", "x": 5.0, "y": 3.0, "yaw": 0.25},
+            {"id": "route-return", "map_asset_id": "target-map", "x": 4.0, "y": 2.0, "yaw": -0.25},
         ],
         "localization_routes": [{
             "id": "route-1", "building": "1", "unit": "1",
             "binding_ids": ["lobby-binding", "floor-binding"],
-            "task_start_waypoint_id": "route-start", "task_target_waypoint_id": "route-target",
+            "task_start_waypoint_id": "route-start", "task_target_waypoint_id": "route-target", "task_return_waypoint_id": "route-return",
             "links": [{
                 "from_binding_id": "lobby-binding", "to_binding_id": "floor-binding",
                 "anchor": {"kind": "component_center", "component_id": "lobby-elevator"},
@@ -98,11 +99,15 @@ def _add_store_localization_route(
     task_target = store.add_waypoint(project["id"], {
         "map_id": target["id"], "kind": "target", "x": 1.0, "y": 1.0,
     })
+    task_return = store.add_waypoint(project["id"], {
+        "map_id": target["id"], "kind": "return", "x": 1.5, "y": 1.0,
+    })
     store.create_localization_route(project["id"], {
         "building": "1", "unit": "1",
         "binding_ids": [indoor["id"], floor["id"]],
         "task_start_waypoint_id": start["id"],
         "task_target_waypoint_id": task_target["id"],
+        "task_return_waypoint_id": task_return["id"],
         "links": [{
             "from_binding_id": indoor["id"], "to_binding_id": floor["id"],
             "anchor": {"kind": "component_center", "component_id": lobby_elevator["id"]},
@@ -116,9 +121,19 @@ def test_compiler_emits_four_subtasks_and_approved_speed_sequence(two_map_projec
     assert [[point["speed_mode"] for point in item["waypoints"]] for item in payload["subtasks"]] == [
         ["task_point", "single_point", "elevator_in"],
         ["backward", "single_point"],
-        ["single_point", "task_point", "elevator_in"],
+        ["task_point", "elevator_in"],
         ["backward", "single_point"],
     ]
+
+
+def test_compiler_keeps_outbound_target_and_return_handoff_distinct(two_map_project):
+    subtasks = _compile(two_map_project).task_json["subtasks"]
+    outbound = subtasks[1]["waypoints"][-1]["pose"]["position"]
+    return_origin = subtasks[2]["waypoints"][0]["pose"]["position"]
+    assert (outbound["x"], outbound["y"]) == (5.0, 3.0)
+    assert isclose(return_origin["x"], 2.0, abs_tol=1e-9)
+    assert isclose(return_origin["y"], -2.5, abs_tol=1e-9)
+    assert (return_origin["x"], return_origin["y"]) != (outbound["x"], outbound["y"])
 
 
 def test_exported_task_json_keeps_the_approved_readable_field_order(two_map_project):
@@ -337,6 +352,24 @@ def test_compiler_fingerprint_includes_route_referenced_waypoint_geometry(two_ma
     assert second != first
 
 
+def test_compiler_fingerprint_includes_saved_map_edits(two_map_project):
+    """Catches reusing a preview generated before the map was erased."""
+    two_map_project["map_edits"] = [{
+        "id": "edit-1",
+        "map_asset_id": two_map_project["map_assets"][0]["id"],
+        "kind": "brush_erase",
+        "radius_m": 0.2,
+        "shape": "circle",
+        "points": [{"x": -9.0, "y": -9.0}],
+    }]
+    first = _compile(two_map_project).input_sha256
+    two_map_project["map_edits"][0]["points"][0]["x"] = -8.0
+
+    second = _compile(two_map_project).input_sha256
+
+    assert second != first
+
+
 def test_compiler_rejects_when_route_export_omits_the_selected_lobby_map(two_map_project):
     alternate = dict(two_map_project["map_assets"][0], id="alternate-lobby-map")
     two_map_project["map_assets"].append(alternate)
@@ -444,13 +477,13 @@ def test_gk1_store_preview_and_download_have_the_approved_indoor_structure(
     assert [[point["speed_mode"] for point in item["waypoints"]] for item in subtasks] == [
         ["task_point", "single_point", "elevator_in"],
         ["backward", "single_point"],
-        ["single_point", "task_point", "elevator_in"],
+        ["task_point", "elevator_in"],
         ["backward", "single_point"],
     ]
     assert [[point["waypoint_task_id"] for point in item["waypoints"]] for item in subtasks] == [
         ["start_task", "1_1_elevator_in_n_x", "1_1_elevator_out_n_x"],
         ["1_1_close_elevdoor_x", "place_water"],
-        ["", "1_1_elevator_in_x_n", "1_1_elevator_out_x_n"],
+        ["1_1_elevator_in_x_n", "1_1_elevator_out_x_n"],
         ["1_1_close_elevdoor_n", "task_complete"],
     ]
 

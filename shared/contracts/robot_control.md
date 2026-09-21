@@ -8,8 +8,14 @@
 | HTTP 适配层 | `web_console.py` 拥有 `/api/vehicle-control/*` 请求校验和 HTTP 状态映射。 |
 | 当前消费者 | `web_console` 的手动控制与建图工作台页面；`mobile/` 的“工具 / 手动控制”受控 HMI。 |
 | Mobile 影响 | Mobile 是 Existing HTTP 消费者：使用 `/vector` 提交连续的前后与转向比例，不直接访问 ROS、不会发送 Twist，也不提供导航、地点或横向平移命令。进入控制必须由操作员二次确认；摇杆只会在本地持有 `enter` 返回的会话 ID、车端 `manual_ready=true` 且真实急停为 `normal` 时解锁。多个 Web / Mobile 客户端可以同时持有各自会话，Backend 仍是唯一速度发布者和最终安全边界。 |
-| PC Web 影响 | PC Web 手动控制保持 Existing 四方向 `/command` 消费者，不调用 `/vector`，无需修改其页面或操作方式。 |
+| PC Web 影响 | PC Web 手动控制是 Existing `/vector` 消费者：默认键盘 `I/J/K/L` 与方向按钮可组合为前后速度加转向的弧线行驶，不提供横向平移。操作员可在当前浏览器本机将四个方向改绑为互不重复的字母、数字、方向键或数字键盘按键；该偏好不进入 HTTP、ROS 或跨端共享状态，打开设置会先走既有 STOP 路径。它携带会话内递增的 `input_sequence`，避免延迟的旧行驶请求覆盖较新的松键 STOP。既有 `/command` 保留给兼容页面，不作为 PC 手动操作台的连续输入入口。 |
 | 兼容性 | 优先增量变更。任何破坏性变更必须同步修改 Backend、Web、受影响的 Mobile 工作、本文档和定向验证。 |
+
+## 控制台启动与 ROS 域
+
+“运行配置”中的开机自启是可选的用户级控制台启动，不是机器人节点自启。启用后 Backend 为当前普通用户写入 `ry-aletheia.service`（`systemd --user`；无用户 bus 时回退为 XDG 桌面自启），服务设置 `Restart=on-failure`，不会安装 root system unit、不会调用 sudo，也不会启动、停止或重启车端 Supervisor 节点。关闭开关会撤销该用户级入口。
+
+自启服务显式继承 `config/video.json` 的 `ros_domain_id`，没有有效配置时使用目标车默认域 `66`；开发环境仍可通过 `ROS_DOMAIN_ID` 覆盖。点云、视频等链路正常而控制源状态为空时，应先用 `ROS_DOMAIN_ID=66 ros2 topic info -v /control_source_state` 对照检查控制台与车端是否在同一 DDS 域，再检查车端节点是否已经发布状态。状态 Topic 使用 `TRANSIENT_LOCAL` 时，控制台启动早于车端节点也必须保持 `pending/unknown`，待收到实际发布或受控服务补齐后再确认，不能把启动时的空读数当作 `navigation` 或 `miniapp`。
 
 ## ROS 所有权
 
@@ -31,7 +37,7 @@
 1. 自动运行未占有车辆时，任意 Web / Mobile 客户端都可 `POST /api/vehicle-control/enter` 获取自己的会话。当前来源可以是 `navigation`、`miniapp`、`remote` 或尚未确认的值；同一轮 `miniapp` 切换允许其他客户端加入等待，且请求本身不输出非零 Twist。
 2. 首个 `POST /api/vehicle-control/enter` 请求 `/control_source_cmd=miniapp` 并进入 `switching`，最多等待 **4.0 s** 取得 `/control_source_state=miniapp`。`POST /api/vehicle-control/navigation` 是全局动作：严格先 STOP、清空全部会话，再请求 `/control_source_cmd=navigation`。
 3. 只有收到实际状态确认后，会话才成为 `active`；任一 active 会话均可接受非零命令或速度变更，**最后一条有效输入**更新 Backend 唯一的运动目标。
-4. `stop` 立即产生 Backend 生成的零 Twist。`release` 只删除调用方会话；若它拥有当前运动目标则立即 STOP，但绝不请求切源。`exit` 是全局动作，执行 **STOP → 清空全部会话 → 请求 `navigation` → 等待实际状态确认**。切换失败时不能猜测控制已切换。
+4. `stop` 立即产生 Backend 生成的三帧有界零 Twist（首帧立即、后两帧按 20 Hz），以容忍单帧丢失；完成后不再占用速度 Topic。`release` 只删除调用方会话；若它拥有当前运动目标则立即 STOP，但绝不请求切源。`exit` 是全局动作，执行 **STOP → 清空全部会话 → 请求 `navigation` → 等待实际状态确认**。切换失败时不能猜测控制已切换。
 5. 若其他控制源接管、控制源确认超时或 ROS2 控制器不可用，Backend 必须清除运动并拒绝后续移动。
 6. 只有 `/is_emergency_stop=false` 且控制源已实际确认 `miniapp` 时，手动会话才允许输出非零 Twist。`true` 或 `unknown` 会立即停止并拒绝后续运动。
 7. 软件解除急停只发布固定 `/command` 报文，随后最多等待 4.0 s；仅在收到 `/is_emergency_stop=false` 后才可显示成功。该动作不请求也不改变控制源。
@@ -46,8 +52,8 @@
 | `POST /api/vehicle-control/enter` | `{}` | 请求 `miniapp` 并启动等待确认的会话；当前 `remote` 或急停/未知状态不阻止该请求，但不会解锁运动。 |
 | `POST /api/vehicle-control/navigation` | `{}` | 请求切换至 `navigation`；没有手动会话时也可请求。仅在 Aletheia 当前拥有 miniapp 会话/来源时先发布 STOP。 |
 | `POST /api/vehicle-control/heartbeat` | `{ "session_id": "…" }` | 保持有效活动会话。 |
-| `POST /api/vehicle-control/command` | `{ "session_id": "…", "command": "forward\|backward\|left\|right\|stop" }` | Existing PC 四方向入口；更新保持方向，`stop` 时发送 STOP。 |
-| `POST /api/vehicle-control/vector` | `{ "session_id": "…", "linear_ratio": number, "angular_ratio": number }` | Existing Mobile 连续输入入口。两个比例均须为有限 `[-1.0, 1.0]` 数值；Backend 以当前速度档换算目标。`(0,0)` 立即清除运动并走 STOP 路径，但保留会话。 |
+| `POST /api/vehicle-control/command` | `{ "session_id": "…", "command": "forward\|backward\|left\|right\|stop" }` | Existing 兼容方向入口；更新保持方向，`stop` 时发送 STOP。 |
+| `POST /api/vehicle-control/vector` | `{ "session_id": "…", "linear_ratio": number, "angular_ratio": number, "input_sequence"?: positive integer }` | Existing Mobile 与 PC Web 连续输入入口。两个比例均须为有限 `[-1.0, 1.0]` 数值；Backend 以当前速度档换算目标。`(0,0)` 立即清除运动并走三帧 STOP 路径，但保留会话。`input_sequence` 可选；带该字段的同一会话必须单调递增（重复相同输入用于保活），较小序号或相同序号但不同向量会被忽略，防止网络延迟旧输入复活运动。 |
 | `POST /api/vehicle-control/speed` | `{ "session_id": "…", "linear_speed": number, "angular_speed": number }` | 更新经过校验的线速度和角速度。 |
 | `POST /api/vehicle-control/stop` | `{ "session_id": "…" }` | 保留会话的同时立即发送 STOP。 |
 | `POST /api/vehicle-control/release` | `{ "session_id": "…" }` | 仅释放调用方会话；若其拥有当前运动目标则 STOP，但保留其他端会话和已确认的 `miniapp` 控制源。供 App 后台、离页或断开连接使用。 |
@@ -107,7 +113,7 @@ Desktop Web 的车辆执行状态页通过 Backend 内部 `VehicleExecutionStatu
 
 `can_begin_manual` 表示当前客户端可以加入或发起 `miniapp` 会话，不表示可运动；`can_request_navigation` 表示可以发起全局 `navigation` 切换请求。两者在 `remote`、急停或急停未知时仍可为真。`manual_ready` 才是唯一的非零速度许可，仍要求至少一个有效会话、`miniapp` 实际确认及 `/is_emergency_stop=false`。`shared_sessions.active_count` 与 `switching_count` 只用于展示当前参与数，绝不泄露其他客户端的会话 ID。
 
-`/vector` 不是直接 ROS 速度接口：`target_linear = linear_ratio × linear_mps`，`target_angular = angular_ratio × angular_radps`。移动端以车头向上为视觉坐标：上/下分别为正/负 `linear_ratio`，左/右分别为正/负 `angular_ratio`；因此右上为正线速度与负角速度，即前进并右转的弧线。它不是横向右前平移。新的向量目标与旧的 `/command` 目标互斥；多个客户端中最后一条有效 `/command` 或 `/vector` 更新该唯一目标。任一后续 `/speed` 更新必须按保存的比例重新换算。急停、未知急停、外部切源、拥有当前目标的会话输入/心跳超时、任一 `stop`、`release`、`exit` 和 `(0,0)` 均清除两类目标并使用 `stop_acc`。
+`/vector` 不是直接 ROS 速度接口：`target_linear = linear_ratio × linear_mps`，`target_angular = angular_ratio × angular_radps`。移动端和 PC Web 都以车头向上为视觉坐标：上/下分别为正/负 `linear_ratio`，左/右分别为正/负 `angular_ratio`；因此右上为正线速度与负角速度，即前进并右转的弧线。它不是横向右前平移。新的向量目标与旧的 `/command` 目标互斥；多个客户端中最后一条有效 `/command` 或 `/vector` 更新该唯一目标。任一后续 `/speed` 更新必须按保存的比例重新换算。急停、未知急停、外部切源、拥有当前目标的会话输入/心跳超时、任一 `stop`、`release`、`exit` 和 `(0,0)` 均清除两类目标并使用 `stop_acc`。每次实际清除运动都发布固定三帧零 Twist，之后停止发布；这不是持续制动流。
 
 `emergency_stop.state` 只能为 `normal`、`triggered` 或 `unknown`；unknown 不等价于 normal。`release` 为 `idle`、`waiting_confirmation`、`confirmed`、`failed` 或 `unconfirmable`，只能由实际 Bool 回调或超时变更。非零 Twist 使用持久化的 `movement_acc`，任何零 Twist（主动停止、输入/心跳超时、退出或外部控制源接管）使用 `stop_acc`。解除急停的固定 `acc=2000`、`press=1400` 与这些手动驾驶参数保持分离。
 
@@ -118,7 +124,7 @@ Desktop Web 的车辆执行状态页通过 Backend 内部 `VehicleExecutionStatu
 | 变更 | 必需的受影响检查 |
 | --- | --- |
 | ROS Topic、控制源枚举、Twist 映射、超时或速度策略 | Backend 测试、安全审查、本文档和 Web 行为验证；未来任何 Mobile 控制消费者也必须验证。 |
-| HTTP 字段、端点或响应变更 | Backend 测试、Web 测试、本文档和每个 Existing 消费者。`/vector` 变更必须验证 PC `/command` 回归、Mobile 向量映射和本表安全规则。 |
+| HTTP 字段、端点或响应变更 | Backend 测试、Web 测试、本文档和每个 Existing 消费者。`/vector` 变更必须验证 PC 组合输入、Mobile 向量映射和本表安全规则。 |
 | Mobile 手动 HMI 的交互或生命周期变更 | Mobile 单元/组件测试、`scripts/test-mobile.sh`，并手工确认二次进入、松手 STOP、后台/离页仅 RELEASE、显式退出才 EXIT、急停 `unknown` 锁定和横竖屏布局。 |
 | 不改变请求语义的仅 Web 展示变更 | 仅 Web 检查；不编辑本文档。 |
 | 未来 Mobile 控制 UI | 先建立独立的权限/审计/确认契约，再更新本文档并运行 Mobile 检查。 |

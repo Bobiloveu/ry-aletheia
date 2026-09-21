@@ -10,6 +10,7 @@ import pytest
 import web_console
 from autodrive_console.acceptance_catalog import AcceptanceTaskCatalog
 from autodrive_console.acceptance_plan import (
+    AcceptancePlan,
     AcceptanceCriteria,
     AcceptancePlanFactory,
     AcceptancePlanStore,
@@ -222,6 +223,42 @@ def test_plan_store_preserves_frozen_plan_and_marks_inflight_run_interrupted(tmp
     assert not list((tmp_path / "state").rglob("*.tmp"))
 
 
+def test_power_loss_while_cancelling_requires_reconciliation_without_stale_running_state(tmp_path):
+    """A shutdown during cancellation must never unlock or mislabel the unknown robot state."""
+    snapshot = catalog_snapshot_for_plan(tmp_path / "tasks")
+    plan = AcceptancePlanFactory.create(
+        snapshot,
+        scope_type="building",
+        community="园区_A",
+        building=6,
+        unit=1,
+        mode="full",
+        sample_size=None,
+        random_seed=9,
+        criteria=AcceptanceCriteria.empty(),
+    )
+    plan.status = "cancelling"
+    plan.current_index = 0
+    plan.run_id = "lost-worker"
+    plan.items[0].status = "running"
+    plan.execution_preflight_status = {
+        "state": "ready",
+        "message": "运行准备已完成，正在开始第一项验收任务",
+        "updated_at": "2026-09-15T10:27:10+08:00",
+        "dependency_progress": None,
+    }
+    store = AcceptancePlanStore(tmp_path / "state")
+    store.save(plan)
+
+    recovered = store.mark_interrupted_runs()[0]
+
+    assert recovered.status == "interrupted"
+    assert recovered.run_id is None
+    assert recovered.items[0].status == "unknown_after_restart"
+    assert recovered.execution_preflight_status["state"] == "not_selected"
+    assert "正在开始" not in recovered.execution_preflight_status["message"]
+
+
 def test_schema_one_plan_keeps_legacy_per_case_execution_behavior(tmp_path):
     """Existing frozen plans must not silently gain a new execution policy."""
     plan = AcceptancePlanFactory.create(
@@ -275,6 +312,22 @@ def test_orchestrator_blocks_changed_source_before_start(tmp_path):
     assert (tmp_path / "state" / "reports" / current["report_filename"]).is_file()
 
 
+def test_orchestrator_replaces_a_ready_plan_before_any_task_starts(tmp_path):
+    """A mistaken generated scope is an editable draft, not an active run."""
+    task_dir = tmp_path / "origin_tasks"
+    catalog_snapshot_for_plan(task_dir)
+    orchestrator = make_orchestrator(task_dir, tmp_path / "state")
+    first = orchestrator.create_plan({"scope_type": "community", "community": "园区_A", "mode": "full"})
+
+    replacement = orchestrator.create_plan({
+        "scope_type": "building", "community": "园区_A", "building": 6, "unit": 1, "mode": "full",
+    })
+
+    assert replacement["status"] == "ready"
+    assert replacement["plan_id"] != first["plan_id"]
+    assert orchestrator.current()["plan_id"] == replacement["plan_id"]
+
+
 def test_orchestrator_freezes_selected_plan_preflight_and_passes_it_to_sequence(tmp_path):
     """Deployment acceptance must prepare saved runtime inputs once per whole plan."""
     task_dir = tmp_path / "origin_tasks"
@@ -319,6 +372,7 @@ def test_orchestrator_freezes_selected_plan_preflight_and_passes_it_to_sequence(
         "dependency_plan_enabled": True,
         "dependency_stage_count": 1,
         "dependency_node_count": 1,
+        "automatic_return_enabled": False,
     }
     orchestrator.start(plan["plan_id"])
     _cases, kwargs = manager.calls[0]
@@ -327,6 +381,53 @@ def test_orchestrator_freezes_selected_plan_preflight_and_passes_it_to_sequence(
         "enabled": True,
         "steps": [{"nodes": ["MODULES:209-lightning"], "wait_seconds": 3}],
     }
+
+
+def test_orchestrator_freezes_automatic_return_for_the_acceptance_sequence(tmp_path):
+    """Changing a browser draft after creation must not alter a frozen return policy."""
+    task_dir = tmp_path / "origin_tasks"
+    catalog_snapshot_for_plan(task_dir)
+
+    class CapturingRunManager:
+        def __init__(self):
+            self.calls = []
+
+        def start_sequence(self, cases, **kwargs):
+            self.calls.append((cases, kwargs))
+            return SimpleNamespace(id="acceptance-run")
+
+    manager = CapturingRunManager()
+    orchestrator = AcceptanceOrchestrator(
+        catalog=AcceptanceTaskCatalog(task_dir),
+        plan_store=AcceptancePlanStore(tmp_path / "state" / "acceptance"),
+        run_manager=manager,
+        report_dir=tmp_path / "state" / "reports",
+    )
+
+    plan = orchestrator.create_plan({
+        "scope_type": "community", "community": "园区_A", "mode": "full",
+        "use_automatic_return": True,
+    })
+
+    assert plan["execution_preflight"]["automatic_return_enabled"] is True
+    orchestrator.start(plan["plan_id"])
+    _cases, kwargs = manager.calls[0]
+    assert kwargs["execution_preflight"]["automatic_return"] is True
+
+
+def test_schema_three_acceptance_plan_defaults_automatic_return_to_off(tmp_path):
+    """A historical plan must never gain a ROS control policy after an upgrade."""
+    legacy = AcceptancePlanFactory.create(
+        catalog_snapshot_for_plan(tmp_path / "tasks"),
+        scope_type="community", community="园区_A", building=None, unit=None,
+        mode="full", sample_size=None, random_seed=1, criteria=AcceptanceCriteria.empty(),
+    ).to_storage_dict()
+    legacy["schema"] = 3
+    legacy["execution_preflight"].pop("automatic_return", None)
+
+    restored = AcceptancePlan.from_storage_dict(legacy)
+
+    assert restored.execution_preflight["automatic_return"] is False
 
 
 def test_orchestrator_persists_plan_wide_preflight_progress(tmp_path):
@@ -366,6 +467,48 @@ def test_orchestrator_writes_one_partial_report_when_sequence_is_cancelled(tmp_p
     # 重复的终态事件不能生成第二份同一计划的报告。
     orchestrator._on_run_event(plan["plan_id"], event)
     assert len(list((state_dir / "reports").glob("*.html"))) == 1
+
+
+def test_acceptance_cancel_waits_for_worker_confirmation_before_unlocking_next_plan(tmp_path):
+    """A fast cancel request must not falsely free the single robot execution slot."""
+    task_dir = tmp_path / "origin_tasks"
+    catalog_snapshot_for_plan(task_dir)
+
+    class ActiveRunManager:
+        def __init__(self):
+            self.run = SimpleNamespace(id="acceptance-run", status="running")
+
+        def start_sequence(self, *_args, **_kwargs):
+            return self.run
+
+        def cancel(self, run_id):
+            assert run_id == self.run.id
+            self.run.status = "cancelling"
+            return self.run
+
+    state_dir = tmp_path / "state"
+    orchestrator = make_orchestrator(task_dir, state_dir, ActiveRunManager())
+    plan = orchestrator.create_plan({"scope_type": "community", "community": "园区_A", "mode": "full"})
+    orchestrator.start(plan["plan_id"])
+
+    cancelling = orchestrator.cancel(plan["plan_id"])
+
+    assert cancelling["status"] == "cancelling"
+    assert cancelling["report_filename"] is None
+    with pytest.raises(AcceptanceConflict, match="正在执行"):
+        orchestrator.create_plan({"scope_type": "community", "community": "园区_A", "mode": "full"})
+
+    orchestrator._on_run_event(plan["plan_id"], {
+        "type": "preflight_progress",
+        "preflight": {"state": "cancelled", "message": "测试已取消"},
+    })
+    assert orchestrator.current()["status"] == "cancelling"
+
+    orchestrator._on_run_event(plan["plan_id"], {"type": "sequence_finished", "status": "cancelled"})
+    cancelled = orchestrator.current()
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["report_filename"]
+    assert orchestrator.create_plan({"scope_type": "community", "community": "园区_A", "mode": "full"})["status"] == "ready"
 
 
 def test_orchestrator_persists_only_frozen_dependency_stage_progress(tmp_path):
@@ -461,6 +604,74 @@ def test_orchestrator_marks_inflight_plan_interrupted_when_recreated(tmp_path):
     assert restarted.current()["plan_id"] == plan["plan_id"]
 
 
+def test_orchestrator_does_not_replace_an_unresolved_interrupted_plan(tmp_path):
+    """A rebooted plan needs an explicit operator resolution before replacement."""
+    task_dir = tmp_path / "origin_tasks"
+    catalog_snapshot_for_plan(task_dir)
+    state_dir = tmp_path / "state"
+    first = make_orchestrator(task_dir, state_dir)
+    first.create_plan({"scope_type": "community", "community": "园区_A", "mode": "full"})
+    stored = AcceptancePlanStore(state_dir / "acceptance").load_current()
+    stored.status, stored.current_index = "running", 0
+    AcceptancePlanStore(state_dir / "acceptance").save(stored)
+
+    restarted = make_orchestrator(task_dir, state_dir)
+
+    with pytest.raises(AcceptanceConflict, match="现场核对"):
+        restarted.create_plan({"scope_type": "community", "community": "园区_A", "mode": "full"})
+
+
+def test_resolving_the_only_restart_interruption_finalizes_failure_and_archives_report(tmp_path):
+    """A restart must not leave an all-terminal plan falsely startable or UI-locking."""
+    task_dir = tmp_path / "origin_tasks"
+    task_dir.mkdir()
+    write_task(task_dir / "园区_A_6_1_1_601.json")
+    state_dir = tmp_path / "state"
+    first = make_orchestrator(task_dir, state_dir)
+    plan = first.create_plan({
+        "scope_type": "building", "community": "园区_A", "building": 6, "unit": 1, "mode": "full",
+    })
+    stored = AcceptancePlanStore(state_dir / "acceptance").load_current()
+    stored.status, stored.current_index = "running", 0
+    AcceptancePlanStore(state_dir / "acceptance").save(stored)
+
+    restarted = make_orchestrator(task_dir, state_dir)
+    resolved = restarted.resolve_interruption(plan["plan_id"], "mark_failed")
+
+    assert resolved["items"][0]["status"] == "failed"
+    assert resolved["status"] == "failed"
+    assert resolved["conclusion"]["status"] == "failed"
+    assert resolved["report_filename"]
+    assert (state_dir / "reports" / resolved["report_filename"]).is_file()
+
+
+def test_current_repairs_a_legacy_ready_plan_with_only_terminal_failures(tmp_path):
+    """An old interrupted plan must unlock after upgrade instead of masquerading as ready."""
+    task_dir = tmp_path / "origin_tasks"
+    task_dir.mkdir()
+    write_task(task_dir / "园区_A_6_1_1_601.json")
+    state_dir = tmp_path / "state"
+    first = make_orchestrator(task_dir, state_dir)
+    first.create_plan({
+        "scope_type": "building", "community": "园区_A", "building": 6, "unit": 1, "mode": "full",
+    })
+    store = AcceptancePlanStore(state_dir / "acceptance")
+    stale = store.load_current()
+    stale.items[0].status = "failed"
+    stale.items[0].message = "后端重启前任务结果未知；操作员已核对现场并按失败记录"
+    stale.items[0].finished_at = "2026-09-15T10:27:10+08:00"
+    stale.current_index = 0
+    store.save(stale)
+
+    restarted = make_orchestrator(task_dir, state_dir)
+    repaired = restarted.current()
+
+    assert repaired["status"] == "failed"
+    assert repaired["current_index"] is None
+    assert repaired["report_filename"]
+    assert (state_dir / "reports" / repaired["report_filename"]).is_file()
+
+
 def test_acceptance_report_escapes_task_content_and_records_full_pass(tmp_path):
     snapshot = catalog_snapshot_for_plan(tmp_path / "tasks")
     plan = AcceptancePlanFactory.create(
@@ -512,7 +723,7 @@ def test_acceptance_report_inlines_trajectory_times_and_hides_random_seed(tmp_pa
     trajectory_dir.mkdir(parents=True)
     svg = trajectory_dir / "T-001_地图.svg"
     svg.write_text('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>', encoding="utf-8")
-    item.trajectory = {"visualizations": [{"map_id": "map", "label": "首层地图", "file": str(svg)}]}
+    item.trajectory = {"visualizations": [{"map_id": "map", "label": "首层地图", "file": str(svg)}], "segments": [{"map_id": "map", "map": {"resolution": 1, "width": 10, "height": 10, "origin": [0, 0]}, "points": [{"x": 1, "y": 2, "timestamp_ns": 1755046800000000000}]}]}
 
     reference = AcceptanceReportWriter(report_dir).write(plan)
     text = (report_dir / reference.html_filename).read_text(encoding="utf-8")
@@ -527,6 +738,9 @@ def test_acceptance_report_inlines_trajectory_times_and_hides_random_seed(tmp_pa
     assert str(svg) not in text
     assert reference.asset_manifest_filename
     assert (report_dir / reference.asset_manifest_filename).is_file()
+    assert "trajectory-report-tooltip" in text
+    assert "data-trajectory-points" in text
+    assert "偏差" not in text
 
 
 def test_report_archive_classifies_and_deletes_acceptance_evidence_safely(tmp_path):

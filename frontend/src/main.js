@@ -48,6 +48,8 @@ createApp({
     const taskDirectory = ref("");
     const commandTimeout = ref(8);
     const taskExecutionTimeout = ref(900);
+    const autostartEnabled = ref(false);
+    const autostartHint = ref("未启用开机自启");
     const observationEnabled = ref(false);
     const vehicleModels = ref([]);
     const activeVehicleModel = ref("");
@@ -87,6 +89,8 @@ createApp({
       taskDirectory.value = data.task_directory;
       commandTimeout.value = data.command_timeout_s;
       taskExecutionTimeout.value = Number(data.task_execution_timeout_s || 900);
+      autostartEnabled.value = Boolean(data.autostart_enabled);
+      autostartHint.value = data.autostart?.message || (autostartEnabled.value ? "已启用" : "未启用开机自启");
       observationEnabled.value = Boolean(data.live_observation?.enabled);
       vehicleModels.value = Array.isArray(data.live_observation?.vehicle_models)
         ? data.live_observation.vehicle_models.map((model) => ({ ...model }))
@@ -126,6 +130,9 @@ createApp({
         active_vehicle_model: activeVehicleModel.value,
       };
     }
+    function markAutostartDirty() {
+      autostartHint.value = "更改尚未保存";
+    }
     async function saveSettings() {
       saving.value = true;
       settingsMessage.value = "";
@@ -138,6 +145,7 @@ createApp({
               task_directory: taskDirectory.value.trim(),
               command_timeout_s: Number(commandTimeout.value),
               task_execution_timeout_s: Number(taskExecutionTimeout.value),
+              autostart_enabled: autostartEnabled.value,
               live_observation: observationPayload(),
             }),
           }),
@@ -275,6 +283,8 @@ createApp({
       taskDirectory,
       commandTimeout,
       taskExecutionTimeout,
+      autostartEnabled,
+      autostartHint,
       observationEnabled,
       vehicleModels,
       activeVehicleModel,
@@ -292,6 +302,7 @@ createApp({
       canUpgrade,
       navigate,
       saveSettings,
+      markAutostartDirty,
       addVehicleModel,
       removeVehicleModel,
       repairActiveVehicle,
@@ -302,7 +313,7 @@ createApp({
   template: `
     <aside><div class="brand"><div class="mark"><svg viewBox="0 0 32 32"><path d="M5 24 16 4l11 20-11 4z"/><path d="m11 21 5-10 5 10-5 2z"/></svg></div><div><b>RY <span>Aletheia</span></b><small>AUTOMATED TEST SYSTEM</small><span class="brand-version">{{ consoleVersion }}</span></div></div><nav><a href="/" @click.prevent="navigate('/')"><span>⌘</span>任务指挥台</a><a href="/deployment.html" @click.prevent="navigate('/deployment.html')"><span>◇</span>部署建图</a><a href="/live-observation.html" @click.prevent="navigate('/live-observation.html')"><span>◉</span>实时运行观测</a><a href="/case-library.html" @click.prevent="navigate('/case-library.html')"><span>▤</span>用例资产库</a><a href="/reports.html" @click.prevent="navigate('/reports.html')"><span>◫</span>报告中心</a><a class="active" href="/runtime-settings.html"><span>⚙</span>运行配置</a></nav><div class="side-status"><span class="pulse"></span> LOCAL RUNTIME<br><strong>受控本机配置</strong><a class="side-diagnostic-link" href="/tool-logs.html" @click.prevent="navigate('/tool-logs.html')">诊断日志</a></div></aside>
     <main class="page-main"><header class="page-header"><div><p class="eyebrow">LOCAL RUNTIME / GOVERNED SETTINGS</p><h1>运行配置</h1><p class="sub">本机运行、实时观测与离线升级配置。</p></div></header><section class="page-grid">
-      <article class="panel span-7"><div class="panel-title"><div><p class="eyebrow">CONSOLE SETTINGS</p><h2>本机运行参数</h2></div><button class="page-top-action" type="button" :disabled="saving" @click="saveSettings">{{ saving ? '正在保存' : '保存配置' }}</button></div><div class="settings-form"><label>任务目标目录<input v-model="taskDirectory"></label><label>Supervisor 查询超时（秒）<input v-model.number="commandTimeout" type="number" min="1" max="120"></label><label>单轮任务服务超时（秒）<input v-model.number="taskExecutionTimeout" type="number" min="60" max="3600"></label></div><p class="inline-message">{{ settingsMessage }}</p></article>
+          <article class="panel span-7"><div class="panel-title"><div><p class="eyebrow">CONSOLE SETTINGS</p><h2>本机运行参数</h2></div><button class="page-top-action" type="button" :disabled="saving" @click="saveSettings">{{ saving ? '正在保存' : '保存配置' }}</button></div><div class="settings-form"><label>任务目标目录<input v-model="taskDirectory"></label><label>Supervisor 查询超时（秒）<input v-model.number="commandTimeout" type="number" min="1" max="120"></label><label>单轮任务服务超时（秒）<input v-model.number="taskExecutionTimeout" type="number" min="60" max="3600"></label></div><section class="autostart-setting" aria-labelledby="autostartTitle"><div><p class="eyebrow">STARTUP BEHAVIOUR</p><h3 id="autostartTitle">开机自启 · 用户登录后运行</h3></div><div class="autostart-setting-control"><label class="rocker autostart-rocker" aria-label="开机自启控制台"><input id="autostartEnabled" type="checkbox" v-model="autostartEnabled" @change="markAutostartDirty"><span class="switch-left">开</span><span class="switch-right">关</span></label><span class="autostart-status">{{ autostartHint }}</span></div></section><p class="inline-message">{{ settingsMessage }}</p></article>
       <article class="panel span-5"><p class="eyebrow">DEPENDENCY ORCHESTRATION</p><h2>测试依赖编排</h2><p class="config-note">在任务指挥台配置测试依赖节点与启动顺序。</p></article>
       <article class="panel span-7"><p class="eyebrow">LIVE OBSERVATION / LOCAL TELEMETRY</p><h2>实时运行观测</h2><div class="settings-form"><label class="checkbox-setting"><input v-model="observationEnabled" type="checkbox"> 启用按需实时观测</label></div></article>
       <article class="panel span-5"><p class="eyebrow">OBSERVATION CONNECTION</p><h2>专用遥测边界</h2><p class="config-note">实时观测页仅接收当前小车的专用点云与位姿遥测；地图缓存和 WebRTC 视频维持各自独立链路。</p></article>

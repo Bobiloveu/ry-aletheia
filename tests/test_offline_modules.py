@@ -308,6 +308,19 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertEqual(handler._json.call_args.args[1], HTTPStatus.CONFLICT)
         handler.server.shutdown.assert_not_called()
 
+    def test_resume_refuses_active_manual_control_session(self):
+        """恢复验收前必须退出手控会话，避免自动任务抢占手控。"""
+        handler = object.__new__(web_console.ConsoleHandler)
+        handler.path = "/api/runs/recovery123456/resume"
+        handler._json = Mock()
+        with patch.object(web_console.VEHICLE_CONTROL, "has_control_session", return_value=True), patch.object(web_console.RUNS, "resume") as resume:
+            handler.do_POST()
+        resume.assert_not_called()
+        handler._json.assert_called_once()
+        payload, status = handler._json.call_args.args
+        self.assertEqual(status, HTTPStatus.CONFLICT)
+        self.assertIn("退出手动控制", payload["error"])
+
     def test_mobile_console_uses_separate_known_routes_without_changing_desktop_routes(self):
         self.assertTrue(web_console.is_mobile_console_client({"Sec-CH-UA-Mobile": "?1"}))
         self.assertTrue(web_console.is_mobile_console_client({"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)"}))
@@ -1124,6 +1137,13 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("正在读取车端状态", script)
         self.assertIn("已由车端确认切换至", script)
 
+    def test_failed_round_recovery_exposes_manual_control_entry(self):
+        """现场必须能从等待人工恢复状态直接进入手动控制页面。"""
+        page = (web_console.WEB_ROOT / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="recoveryAction"', page)
+        self.assertIn('href="/manual-control.html"', page)
+        self.assertIn("退出手动控制，再点击继续", page)
+
     def test_console_prewarms_vehicle_control_before_listening_for_http_requests(self):
         """首个浏览器请求不应承担控制源和急停订阅节点的创建延迟。"""
         source = Path("web_console.py").read_text(encoding="utf-8")
@@ -1255,7 +1275,7 @@ class OfflineModuleTests(unittest.TestCase):
             svg.write_text('<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/png;base64,AA=="/></svg>', encoding="utf-8")
             case = TestCase("园区_1_2_3_4.json", "园区_1_2_3_4.json", "测试", TaskParameters("园区", 1, 2, 3, 4), "unused.json")
             run = RunRecord("123456789abc", case, 1, 0, status="completed", started_at="2026-08-13T09:00:00+08:00", finished_at="2026-08-13T09:01:00+08:00")
-            run.attempts.append(AttemptResult(1, "passed", "服务成功", 60.0, run.started_at, {"visualizations": [{"map_id": "map", "label": "测试地图", "file": str(svg)}]}))
+            run.attempts.append(AttemptResult(1, "passed", "服务成功", 60.0, run.started_at, {"visualizations": [{"map_id": "map", "label": "测试地图", "file": str(svg)}], "segments": [{"map_id": "map", "map": {"resolution": 1, "width": 10, "height": 10, "origin": [0, 0]}, "points": [{"x": 1, "y": 2, "timestamp_ns": 1755046800000000000}]}]}))
             settings = SettingsStore(root / "console.json")
             settings.save({"case_aliases": {case.id: "电梯往返验证"}})
             manager = RunManager(report_dir, object(), settings)
@@ -1272,6 +1292,9 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn('class="report-shell"', contents)
         self.assertIn('class="report-summary"', contents)
         self.assertIn('class="status-badge completed"', contents)
+        self.assertIn('trajectory-report-tooltip', contents)
+        self.assertIn('data-trajectory-points', contents)
+        self.assertNotIn('偏差', contents)
         self.assertIn("@media print", contents)
         self.assertIn("print-color-adjust: exact", contents)
         self.assertNotIn("https://", contents)
@@ -1302,6 +1325,23 @@ class OfflineModuleTests(unittest.TestCase):
         run.live_progress = {"visible": True, "attempt": 2, "attempt_total": 2, "progress_available": False, "percent": 0}
         RunManager._update_live_progress(run, 2, {"progress_available": True, "percent": 0})
         self.assertEqual(run.live_progress["percent"], 0)
+
+    def test_manual_control_is_available_only_during_acceptance_recovery(self):
+        """A failed round must let the operator drive back, but active execution stays locked."""
+        case = TestCase("case", "case.json", "测试", TaskParameters("园区", 1, 1, 1, 1), "unused.json")
+        manager = RunManager(Path("unused"), object(), object())
+        run = RunRecord("run", case, 1, 0, status="running")
+        manager._runs[run.id] = run
+
+        self.assertTrue(manager.has_active_run())
+        self.assertTrue(manager.manual_control_blocked())
+
+        run.status = "awaiting_recovery"
+        self.assertTrue(manager.has_active_run())
+        self.assertFalse(manager.manual_control_blocked())
+
+        run.status = "recovering"
+        self.assertTrue(manager.manual_control_blocked())
 
     def test_live_progress_rejects_late_attempt_callbacks_and_unknown_zero_percent(self):
         case = TestCase("case", "case.json", "测试", TaskParameters("园区", 1, 1, 1, 1), "unused.json")

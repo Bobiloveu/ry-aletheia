@@ -23,6 +23,8 @@ from .settings import SettingsStore
 from .scenario_setup import ScenarioSetupError, ScenarioSetupStore
 from .trajectory import TrajectorySession
 from .trajectory_render import TrajectoryRenderError, render_svg
+from .return_signal import RosReturnSignalBridge
+from .report_trajectory import REPORT_TRAJECTORY_CSS, REPORT_TRAJECTORY_SCRIPT, trajectory_figure
 
 
 LOGGER = logging.getLogger("ry_aletheia.run")
@@ -53,11 +55,19 @@ def _format_report_time(value: object) -> str:
 
 
 class RunManager:
-    def __init__(self, report_dir: Path, executor: RosTaskExecutor, settings: SettingsStore, scenario_setup: ScenarioSetupStore | None = None) -> None:
+    def __init__(
+        self,
+        report_dir: Path,
+        executor: RosTaskExecutor,
+        settings: SettingsStore,
+        scenario_setup: ScenarioSetupStore | None = None,
+        return_signal_factory: Callable[[], object] | None = None,
+    ) -> None:
         self.report_dir = report_dir
         self.executor = executor
         self.settings = settings
         self.scenario_setup = scenario_setup
+        self._return_signal_factory = return_signal_factory or RosReturnSignalBridge
         self._scenario_apply_settle_seconds = SCENARIO_APPLY_SETTLE_SECONDS
         self._runs: dict[str, RunRecord] = {}
         self._cancel_events: dict[str, threading.Event] = {}
@@ -108,6 +118,7 @@ class RunManager:
         if not 0 <= interval_s <= 3600:
             raise ValueError("执行间隔必须介于 0 和 3600 秒之间")
         normalized_preflight = self._normalize_sequence_preflight(execution_preflight)
+        automatic_return = bool(normalized_preflight and normalized_preflight["automatic_return"])
         run = RunRecord(
             id=uuid.uuid4().hex[:12],
             case=cases[0],
@@ -122,9 +133,26 @@ class RunManager:
             self._cancel_events[run.id] = threading.Event()
             self._resume_events[run.id] = threading.Event()
             self._attempt_interrupt_events[run.id] = threading.Event()
+        return_signal = None
+        if automatic_return:
+            try:
+                return_signal = self._return_signal_factory()
+                return_signal.start()
+            except Exception:
+                if return_signal is not None:
+                    try:
+                        return_signal.close()
+                    except Exception:
+                        LOGGER.exception("清理自动返程 ROS bridge 失败：run=%s", run.id)
+                with self._lock:
+                    self._runs.pop(run.id, None)
+                    self._cancel_events.pop(run.id, None)
+                    self._resume_events.pop(run.id, None)
+                    self._attempt_interrupt_events.pop(run.id, None)
+                raise
         threading.Thread(
             target=self._run_sequence,
-            args=(run, tuple(cases), event_callback, normalized_preflight),
+            args=(run, tuple(cases), event_callback, normalized_preflight, return_signal),
             daemon=True,
             name=f"acceptance-run-{run.id}",
         ).start()
@@ -186,6 +214,7 @@ class RunManager:
         cases: tuple[TestCase, ...],
         event_callback: Callable[[dict], None] | None,
         execution_preflight: dict | None,
+        return_signal: object | None = None,
     ) -> None:
         cancel_event = self._cancel_events[run.id]
         resume_event = self._resume_events[run.id]
@@ -194,14 +223,28 @@ class RunManager:
         try:
             if execution_preflight is not None:
                 self._emit_preflight_progress(event_callback, run, "pending", "正在确认验收运行准备")
+                def publish_preflight(
+                    state: str,
+                    message: str,
+                    dependency_progress: dict | None = None,
+                ) -> None:
+                    self._emit_preflight_progress(
+                        event_callback,
+                        run,
+                        state,
+                        message,
+                        dependency_progress=dependency_progress,
+                    )
+
                 sequence_context = self._prepare_sequence_execution(
                     run,
                     execution_preflight,
                     cancel_event,
-                    progress_callback=lambda state, message: self._emit_preflight_progress(event_callback, run, state, message),
+                    progress_callback=publish_preflight,
                 )
                 if not sequence_context["ok"]:
-                    run.status, run.error = "blocked", sequence_context["message"]
+                    run.status = "cancelled" if cancel_event.is_set() else "blocked"
+                    run.error = sequence_context["message"]
                     state = "cancelled" if cancel_event.is_set() else "blocked"
                     self._emit_preflight_progress(event_callback, run, state, sequence_context["message"])
                     return
@@ -229,6 +272,7 @@ class RunManager:
                 # events, so this does not remove an operator's stop path.
                 child._acceptance_sequence = True
                 child._sequence_attempt_index = item_index
+                child._return_signal_bridge = return_signal
                 if sequence_context is not None:
                     child._sequence_execution_context = sequence_context
                 self._run(child)
@@ -301,6 +345,11 @@ class RunManager:
             run.status, run.error = "failed", f"验收序列中断：{exc}"
             LOGGER.exception("验收执行序列异常：run=%s", run.id)
         finally:
+            if return_signal is not None:
+                try:
+                    return_signal.close()
+                except Exception:
+                    LOGGER.exception("关闭自动返程 ROS bridge 失败：run=%s", run.id)
             if sequence_context and sequence_context.get("scenario_applied"):
                 self._emit_preflight_progress(event_callback, run, "restoring", "验收结束，正在恢复常规启动配置", restoring=True)
                 self._restore_case_scenario(run)
@@ -332,7 +381,11 @@ class RunManager:
         """Accept only the narrow, already-frozen acceptance context."""
         if value is None:
             return None
-        if not isinstance(value, dict) or set(value) != {"scenario_profile_id", "scenario_profile_name", "dependency_plan"}:
+        allowed_fields = {
+            frozenset({"scenario_profile_id", "scenario_profile_name", "dependency_plan"}),
+            frozenset({"scenario_profile_id", "scenario_profile_name", "dependency_plan", "automatic_return"}),
+        }
+        if not isinstance(value, dict) or frozenset(value) not in allowed_fields:
             raise ValueError("验收计划前置配置格式无效")
         profile_id, profile_name, dependency_plan = value["scenario_profile_id"], value["scenario_profile_name"], value["dependency_plan"]
         if profile_id is not None and (not isinstance(profile_id, str) or not profile_id or not isinstance(profile_name, str) or not profile_name):
@@ -343,7 +396,12 @@ class RunManager:
             raise ValueError("验收计划依赖编排格式无效")
         if dependency_plan["enabled"] and not dependency_plan["steps"]:
             raise ValueError("验收计划依赖编排缺少启动阶段")
-        return deepcopy(value)
+        automatic_return = value.get("automatic_return", False)
+        if not isinstance(automatic_return, bool):
+            raise ValueError("验收计划自动返程配置无效")
+        normalized = deepcopy(value)
+        normalized["automatic_return"] = automatic_return
+        return normalized
 
     def _prepare_sequence_execution(
         self,
@@ -351,7 +409,7 @@ class RunManager:
         execution_preflight: dict | None,
         cancel_event: threading.Event,
         *,
-        progress_callback: Callable[[str, str], None] | None = None,
+        progress_callback: Callable[[str, str, dict | None], None] | None = None,
     ) -> dict:
         """Apply plan-scoped setup once; no case-specific setup occurs later."""
         settings = deepcopy(self.settings.load())
@@ -412,13 +470,12 @@ class RunManager:
             def report_dependency_progress(progress: dict) -> None:
                 active = next((stage for stage in progress.get("stages", []) if stage.get("state") not in {"pending", "ready"}), None)
                 stage_label = f"第 {active['index']} 阶段" if active else "已冻结依赖"
-                self._emit_preflight_progress(
-                    progress_callback,
-                    run,
-                    "restarting_dependencies",
-                    f"正在处理{stage_label} Supervisor 依赖",
-                    dependency_progress=progress,
-                )
+                if progress_callback:
+                    progress_callback(
+                        "restarting_dependencies",
+                        f"正在处理{stage_label} Supervisor 依赖",
+                        progress,
+                    )
 
             ready, detail = gateway.restart_configured_dependencies(
                 cancel_event=cancel_event,
@@ -446,6 +503,19 @@ class RunManager:
         active = {"queued", "preparing", "running", "cancelling", "awaiting_recovery", "recovering"}
         with self._lock:
             return any(run.status in active for run in self._runs.values())
+
+    def manual_control_blocked(self) -> bool:
+        """Whether an automatic run currently owns the vehicle motion path.
+
+        ``awaiting_recovery`` is deliberately excluded: the failed round has
+        stopped its task worker and is waiting for the operator to drive the
+        vehicle back to its start pose. The acceptance run remains active for
+        reporting and resume/cancel coordination, so ``has_active_run`` must
+        continue to include it for every other interlock.
+        """
+        motion_owner_statuses = {"queued", "preparing", "running", "cancelling", "recovering"}
+        with self._lock:
+            return any(run.status in motion_owner_statuses for run in self._runs.values())
 
     def dependency_restart_active(self) -> bool:
         """Whether this manager is currently controlling configured dependencies."""
@@ -634,7 +704,15 @@ class RunManager:
                         if getattr(run, "_acceptance_sequence", False)
                         else getattr(self.settings.load(), "task_execution_timeout_s", 900)
                     )
+                    return_signal = getattr(run, "_return_signal_bridge", None)
+                    return_signal_item = getattr(run, "_sequence_attempt_index", index)
+                    return_signal_armed = False
                     try:
+                        # 只在全部预检完成、即将真正下发当前任务时武装。这样上
+                        # 一项任务迟到的 103 不会在下一项预检期间误触发返程。
+                        if return_signal is not None:
+                            return_signal.arm(return_signal_item)
+                            return_signal_armed = True
                         ok, message, duration = self.executor.execute(
                             run.case.parameters,
                             lambda _msg: None,
@@ -646,6 +724,12 @@ class RunManager:
                         # ROS 环境、接口包缺失等基础设施错误不能靠重试恢复。
                         ok, message, duration = False, f"执行器异常：{exc}", 0.0
                         LOGGER.exception("任务服务调用异常：run=%s attempt=%s", run.id, index)
+                    finally:
+                        if return_signal is not None and return_signal_armed:
+                            try:
+                                return_signal.disarm(return_signal_item)
+                            except Exception:
+                                LOGGER.exception("撤销自动返程监听失败：run=%s attempt=%s", run.id, index)
                     trajectory = None
                     if trajectory_session:
                         try:
@@ -1011,7 +1095,7 @@ class RunManager:
                 if not svg_target.is_relative_to(report_root) or svg_target.suffix != ".svg" or not svg_target.is_file():
                     continue
                 # SVG 本身已以内嵌 PNG 保存 PGM 底图；直接嵌入后，下载的 HTML 不再依赖旁路图片文件。
-                cards.append(f"<figure><figcaption>{esc(view.get('label', view.get('map_id')))}</figcaption>{svg_target.read_text(encoding='utf-8')}</figure>")
+                cards.append(trajectory_figure(view, svg_target.read_text(encoding="utf-8"), item.trajectory))
             integrity_warning = (item.trajectory or {}).get("integrity_warning")
             warning = f"<p class=\"notice\">{esc(integrity_warning)}</p>" if integrity_warning else ""
             body = warning + ("".join(cards) or "<p class=\"notice\">未采集到可验证的地图坐标轨迹；该轮证据不完整。</p>")
@@ -1114,6 +1198,7 @@ class RunManager:
       tr {{ break-inside: avoid; }}
       .table-scroll {{ overflow: visible; }}
     }}
+    {REPORT_TRAJECTORY_CSS}
   </style>
 </head>
 <body>
@@ -1168,6 +1253,7 @@ class RunManager:
     </section>
     <footer class="report-footer">由 RY Aletheia 自动生成。该文件可与 CSV 伴随文件一起离线归档。</footer>
   </main>
+<script>{REPORT_TRAJECTORY_SCRIPT}</script>
 </body>
 </html>''', encoding="utf-8")
 

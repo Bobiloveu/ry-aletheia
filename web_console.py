@@ -23,6 +23,7 @@ from autodrive_console.case_store import CaseStore
 from autodrive_console.acceptance_catalog import AcceptanceTaskCatalog
 from autodrive_console.acceptance_orchestrator import AcceptanceConflict, AcceptanceOrchestrator, AcceptanceValidationError
 from autodrive_console.acceptance_plan import AcceptancePlanStore
+from autodrive_console.autostart import AutostartError, AutostartManager
 from autodrive_console.case_workspace import CasePackageError, CaseWorkspace
 from autodrive_console.deployment import DeploymentError, DeploymentStore
 from autodrive_console.mapping import MappingError, MappingSessionController, MappingUnavailable
@@ -97,6 +98,19 @@ STORE = CaseStore(TASK_DIR)
 CASE_WORKSPACE = CaseWorkspace(CONFIG_DIR, TASK_DIR)
 DEPLOYMENTS = DeploymentStore(WORKSPACE / "deployments")
 SETTINGS = SettingsStore(CONFIG_DIR / "console.json")
+
+
+def _autostart_launcher() -> list[str]:
+    """Resolve the operator-owned launcher without trusting request data."""
+    packaged_launcher = Path("/usr/bin/ry-aletheia")
+    if packaged_launcher.is_file():
+        return [str(packaged_launcher)]
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, str(Path(__file__).resolve())]
+
+
+AUTOSTART = AutostartManager(WORKSPACE, launcher=_autostart_launcher())
 ROBOT_LOGS = RobotLogStore(SETTINGS)
 ROBOT_LOG_DOWNLOADS = RobotLogDownloadTracker()
 SCENARIO_SETUP = ScenarioSetupStore(CONFIG_DIR)
@@ -112,7 +126,7 @@ ACCEPTANCE = AcceptanceOrchestrator(
 # 不复用运行测试的 ROS service client：手动控制有自己的 node/executor/timer，
 # 但与现有模块共用同一进程内 rclpy runtime，避免创建任何转发层。
 VEHICLE_CONTROL = VehicleControlController(
-    active_run_guard=RUNS.has_active_run,
+    active_run_guard=RUNS.manual_control_blocked,
     twist_profile=MiniappTwistProfile(**SETTINGS.load().vehicle_control),
 )
 # 执行状态是只读的全局车辆事实，不附着到按轮创建/停止的 TrajectorySession。
@@ -625,6 +639,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/mapping-template").strip("/"))
             self._upload_mapping_template(project_id)
             return
+        if path.startswith("/api/deployments/") and path.endswith("/localization-template"):
+            project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/localization-template").strip("/"))
+            self._upload_localization_template(project_id)
+            return
         if path.startswith("/api/deployments/") and path.endswith("/map-stages"):
             try:
                 data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
@@ -657,6 +675,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                 project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/scene-model").strip("/"))
                 self._json({"project": DEPLOYMENTS.set_scene_model(project_id, data.get("scene_model"))})
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and path.endswith("/deployment-flow"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/deployment-flow").strip("/"))
+                project = DEPLOYMENTS.set_deployment_flow(project_id, data.get("flow"))
+                self._json({"project": project, "stage_plan": DEPLOYMENTS.stage_plan(project_id)})
             except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
@@ -771,9 +798,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                 if isinstance(data, dict) and "vehicle_control" in data:
                     raise ValueError("底盘控制参数只能通过手动控制页的受控接口保存")
+                if not isinstance(data, dict):
+                    raise ValueError("配置请求必须是 JSON 对象")
+                requested_autostart = data.pop("autostart_enabled", None)
+                if requested_autostart is not None:
+                    autostart = AUTOSTART.apply(requested_autostart)
+                    data["autostart_enabled"] = bool(autostart["enabled"])
                 settings = SETTINGS.save(data)
                 self._json(self._settings(settings))
-            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            except (AutostartError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 LOGGER.warning("保存运行配置失败：%s", exc)
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
@@ -788,6 +821,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._json({"run": run.to_dict()}, HTTPStatus.ACCEPTED)
             return
         if path.startswith("/api/runs/") and path.endswith("/resume"):
+            if VEHICLE_CONTROL.has_control_session():
+                self._json({"error": "请先退出手动控制，再继续验收"}, HTTPStatus.CONFLICT)
+                return
             run = RUNS.resume(path.split("/")[-2])
             if not run:
                 self._json({"error": "该运行当前不处于等待人工恢复状态"}, HTTPStatus.CONFLICT)
@@ -1076,6 +1112,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     str(data.get("session_id", "")),
                     data.get("linear_ratio"),
                     data.get("angular_ratio"),
+                    data.get("input_sequence"),
                 )
             elif path == "/api/vehicle-control/speed":
                 payload = VEHICLE_CONTROL.set_speed(
@@ -1258,6 +1295,35 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         except (DeploymentError, MappingError, OSError, ValueError, KeyError) as exc:
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
+    def _upload_localization_template(self, project_id: str) -> None:
+        """Store one operator-selected localization YAML in the project workspace."""
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+        content_type = self.headers.get("Content-Type", "")
+        if not 1 <= content_length <= 2 * 1024 * 1024:
+            self._json({"error": "定位配置模板大小无效或超过 2 MiB 限制"}, HTTPStatus.BAD_REQUEST)
+            return
+        if not content_type.startswith("multipart/form-data"):
+            self._json({"error": "定位配置模板必须从浏览器本机文件选择器上传"}, HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            DEPLOYMENTS.get(project_id)
+            form = cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": content_type, "CONTENT_LENGTH": str(content_length)},
+            )
+            item = form["template"] if "template" in form else None
+            if item is None or isinstance(item, list) or not getattr(item, "filename", None) or not getattr(item, "file", None):
+                raise DeploymentError("请选择一个定位配置 YAML 模板文件")
+            contents = item.file.read(2 * 1024 * 1024 + 1)
+            template = DEPLOYMENTS.upload_localization_template(project_id, str(item.filename), contents)
+            self._json({"template": template, "project": DEPLOYMENTS.get(project_id)}, HTTPStatus.CREATED)
+        except (DeploymentError, OSError, ValueError, KeyError) as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
     def _upload_case(self) -> None:
         """接收资产库拖入的单个 JSON；只允许新文件，绝不覆盖已有任务。"""
         try:
@@ -1398,6 +1464,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 LOGGER.error("删除测试用例失败：%s", exc)
                 self._json({"error": f"删除用例失败：{exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
+        if path.startswith("/api/deployments/"):
+            parts = path.split("/")
+            if len(parts) == 4 and parts[:3] == ["", "api", "deployments"] and parts[3]:
+                try:
+                    DEPLOYMENTS.delete_project(unquote(parts[3]))
+                    self._json({"deleted": True})
+                except DeploymentError as exc:
+                    self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+                return
         if path.startswith("/api/deployments/") and "/transitions/" in path:
             try:
                 parts = path.split("/")
@@ -1490,7 +1565,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def _settings(self, settings=None):
         item = settings or SETTINGS.load()
         monitor_nodes = item.monitor_nodes or [str(node["supervisor"]) for node in item.nodes if node.get("required", True)]
-        return {"task_directory": item.task_directory, "command_timeout_s": item.command_timeout_s, "elevator_wait_timeout_s": item.elevator_wait_timeout_s, "task_execution_timeout_s": item.task_execution_timeout_s, "case_aliases": item.case_aliases, "ui_preferences": item.ui_preferences, "dependency_plan": item.dependency_plan, "monitor_nodes": monitor_nodes, "live_observation": item.live_observation, "vehicle_control": item.vehicle_control}
+        autostart = AUTOSTART.status()
+        autostart["enabled"] = bool(item.autostart_enabled and autostart["enabled"])
+        if not autostart["enabled"]:
+            autostart["mode"] = "none"
+            autostart["message"] = "未启用开机自启"
+        return {"task_directory": item.task_directory, "command_timeout_s": item.command_timeout_s, "elevator_wait_timeout_s": item.elevator_wait_timeout_s, "task_execution_timeout_s": item.task_execution_timeout_s, "case_aliases": item.case_aliases, "ui_preferences": item.ui_preferences, "dependency_plan": item.dependency_plan, "monitor_nodes": monitor_nodes, "live_observation": item.live_observation, "vehicle_control": item.vehicle_control, "autostart_enabled": bool(autostart["enabled"]), "autostart": autostart}
 
     @staticmethod
     def _reports() -> list[dict]:

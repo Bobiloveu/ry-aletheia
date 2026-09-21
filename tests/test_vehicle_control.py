@@ -411,14 +411,15 @@ class VehicleControlTests(unittest.TestCase):
         controller.release_emergency_stop.assert_called_once_with()
         self.assertEqual(handler._json.call_args.args[1], HTTPStatus.ACCEPTED)
 
-    def test_vector_action_forwards_session_and_ratios(self):
-        """HTTP 层只能把 Mobile 向量转交给受控 Controller，不接触 ROS。"""
+    def test_vector_action_forwards_session_ratios_and_optional_input_sequence(self):
+        """HTTP 层只能把客户端向量与顺序号转交给受控 Controller。"""
         handler = _vehicle_control_handler(
             "/api/vehicle-control/vector",
             {
                 "session_id": "manual-session",
                 "linear_ratio": 0.8,
                 "angular_ratio": -0.6,
+                "input_sequence": 42,
             },
         )
         controller = Mock()
@@ -429,7 +430,7 @@ class VehicleControlTests(unittest.TestCase):
         with patch.object(web_console, "VEHICLE_CONTROL", controller):
             handler._vehicle_control_action(handler.path)
 
-        controller.set_vector.assert_called_once_with("manual-session", 0.8, -0.6)
+        controller.set_vector.assert_called_once_with("manual-session", 0.8, -0.6, 42)
         self.assertEqual(handler._json.call_args.args[1], HTTPStatus.OK)
 
     def test_release_action_only_forwards_the_calling_session(self):
@@ -463,7 +464,10 @@ class VehicleControlTests(unittest.TestCase):
         self.assertIn("输入超时", self.control.status()["transition_error"])
         published = len(self.control._velocity_publisher.messages)
         self.control._on_publish_tick()
-        self.assertEqual(len(self.control._velocity_publisher.messages), published)
+        self.control._on_publish_tick()
+        self.assertEqual(len(self.control._velocity_publisher.messages), published + 2)
+        self.control._on_publish_tick()
+        self.assertEqual(len(self.control._velocity_publisher.messages), published + 2)
 
     def test_idle_manual_session_does_not_publish_velocity_frames(self):
         self._confirm_emergency_normal()
@@ -479,7 +483,10 @@ class VehicleControlTests(unittest.TestCase):
         self.control.stop(session_id)
         published = len(self.control._velocity_publisher.messages)
         self.control._on_publish_tick()
-        self.assertEqual(len(self.control._velocity_publisher.messages), published)
+        self.control._on_publish_tick()
+        self.assertEqual(len(self.control._velocity_publisher.messages), published + 2)
+        self.control._on_publish_tick()
+        self.assertEqual(len(self.control._velocity_publisher.messages), published + 2)
 
     def test_existing_confirmed_miniapp_is_adopted_as_a_new_safe_session(self):
         self._confirm_emergency_normal()
@@ -542,10 +549,55 @@ class VehicleControlTests(unittest.TestCase):
             self.control.set_vector(session_id, float("nan"), 0.0)
         with self.assertRaises(VehicleControlError):
             self.control.set_vector(session_id, 1.01, 0.0)
+        with self.assertRaises(VehicleControlError):
+            self.control.set_vector(session_id, 0.0, 0.0, input_sequence=0)
 
         self.control._on_emergency_stop(SimpleNamespace(data=True))
         with self.assertRaises(VehicleControlConflict):
             self.control.set_vector(session_id, 0.5, 0.5)
+
+    def test_newer_vector_stop_rejects_a_delayed_nonzero_input_from_the_same_session(self):
+        """A late HTTP movement packet must never revive motion after a newer STOP."""
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        session_id = self.control.begin_manual_session()["session"]["id"]
+
+        self.control.set_vector(session_id, 1.0, 0.0, input_sequence=10)
+        self.control.set_vector(session_id, 0.0, 0.0, input_sequence=11)
+        self.control.set_vector(session_id, 1.0, 0.0, input_sequence=10)
+
+        self.assertEqual((self.control._target_linear, self.control._target_angular), (0.0, 0.0))
+
+    def test_repeated_current_vector_sequence_can_refresh_the_same_client_after_other_input(self):
+        """A periodic PC input remains valid even if another session moved the shared target."""
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        first = self.control.begin_manual_session()["session"]["id"]
+        second = self.control.begin_manual_session()["session"]["id"]
+
+        self.control.set_vector(first, 1.0, 0.0, input_sequence=7)
+        self.control.set_vector(second, 0.0, -1.0)
+        self.control.set_vector(first, 1.0, 0.0, input_sequence=7)
+
+        self.assertEqual((self.control._target_linear, self.control._target_angular), (0.2, 0.0))
+
+    def test_stop_publishes_three_zero_twist_frames_without_leaving_idle_output_active(self):
+        """A release must tolerate a dropped frame without publishing zero Twist forever."""
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        session_id = self.control.begin_manual_session()["session"]["id"]
+        self.control.set_vector(session_id, 1.0, -1.0)
+        self.control._velocity_publisher.messages.clear()
+
+        self.control.stop(session_id)
+        self.control._on_publish_tick()
+        self.control._on_publish_tick()
+        published = list(self.control._velocity_publisher.messages)
+        self.control._on_publish_tick()
+
+        self.assertEqual(len(published), 3)
+        self.assertTrue(all(message.linear.x == 0.0 and message.angular.z == 0.0 for message in published))
+        self.assertEqual(len(self.control._velocity_publisher.messages), 3)
 
     def test_exit_stops_before_requesting_navigation_and_waits_for_state(self):
         self._confirm_emergency_normal()

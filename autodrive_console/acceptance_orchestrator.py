@@ -70,6 +70,8 @@ class AcceptanceOrchestrator:
     def current(self) -> dict[str, Any] | None:
         with self._lock:
             plan = self.plan_store.load_current()
+            if plan is not None:
+                self._repair_legacy_terminal_ready_plan(plan)
             return plan.to_public_dict() if plan else None
 
     def criteria(self) -> dict[str, Any]:
@@ -83,7 +85,10 @@ class AcceptanceOrchestrator:
         return self.plan_store.save_criteria(criteria).to_dict()
 
     def create_plan(self, document: dict[str, object]) -> dict[str, Any]:
-        expected = {"scope_type", "community", "building", "unit", "mode", "sample_size", "scenario_profile_id", "use_dependency_plan"}
+        expected = {
+            "scope_type", "community", "building", "unit", "mode", "sample_size",
+            "scenario_profile_id", "use_dependency_plan", "use_automatic_return",
+        }
         unexpected = set(document) - expected
         if unexpected:
             raise AcceptanceValidationError(f"创建计划包含未知字段：{', '.join(sorted(unexpected))}")
@@ -107,6 +112,8 @@ class AcceptanceOrchestrator:
         execution_preflight = self._freeze_execution_preflight(document)
         with self._lock:
             current = self.plan_store.load_current()
+            if current and current.status == "interrupted":
+                raise AcceptanceConflict("当前验收计划因重启中断，请先完成现场核对后再创建新计划")
             if current and current.status in ACTIVE_PLAN_STATUSES:
                 raise AcceptanceConflict("当前验收计划正在执行，不能覆盖")
             try:
@@ -167,7 +174,10 @@ class AcceptanceOrchestrator:
             plan = self._require_plan(plan_id)
             if not plan.run_id or self.run_manager.cancel(plan.run_id) is None:
                 raise AcceptanceConflict("当前计划不可取消")
-            plan.status = "cancelled"
+            # Cancellation is immediately requested, but a ROS call or
+            # recovery preflight may still be unwinding.  Keep the execution
+            # slot reserved until the worker sends its terminal callback.
+            plan.status = "cancelling"
             self.plan_store.save(plan)
             return plan.to_public_dict()
 
@@ -192,9 +202,19 @@ class AcceptanceOrchestrator:
             item.message = "后端重启前任务结果未知；操作员已核对现场并按失败记录"
             item.finished_at = now_iso()
             plan.manual_interventions += 1
-            plan.status = "ready"
             plan.run_id = None
+            plan.current_index = None
+            plan.execution_preflight_status = default_execution_preflight_status(plan.execution_preflight)
             plan.warnings.append("中断任务未被自动重发；已由操作员核对后按失败记录")
+            if any(candidate.status == "planned" for candidate in plan.items):
+                plan.status = "ready"
+            else:
+                # There is no remaining work to restart.  Leaving the plan
+                # "ready" would lock every browser to a dead frozen scope,
+                # falsely imply a new task is about to start, and skip the
+                # required terminal report.
+                plan.status = "failed"
+                self._archive_terminal_report(plan)
             self.plan_store.save(plan)
             return plan.to_public_dict()
 
@@ -203,6 +223,30 @@ class AcceptanceOrchestrator:
         if plan is None or plan.plan_id != plan_id:
             raise AcceptanceConflict("验收计划不存在")
         return plan
+
+    def _repair_legacy_terminal_ready_plan(self, plan: AcceptancePlan) -> None:
+        """Finalize only the old, impossible state left by pre-fix restart recovery.
+
+        Older versions marked an interrupted task failed but still persisted the
+        whole plan as ``ready``.  A ready plan that contains *only* terminal
+        items cannot be started safely, so it must be converted into the
+        corresponding terminal result when first read after an upgrade.
+        """
+        terminal_items = {"passed", "failed", "cancelled"}
+        if plan.status != "ready" or not plan.items or any(item.status not in terminal_items for item in plan.items):
+            return
+        if all(item.status == "passed" for item in plan.items):
+            plan.status = "completed"
+        elif any(item.status == "failed" for item in plan.items):
+            plan.status = "failed"
+        else:
+            plan.status = "cancelled"
+        plan.run_id = None
+        plan.current_index = None
+        plan.execution_preflight_status = default_execution_preflight_status(plan.execution_preflight)
+        plan.warnings.append("已归档旧版本遗留的终态验收计划，未重新下发任何任务")
+        self._archive_terminal_report(plan)
+        self.plan_store.save(plan)
 
     def _verify_sources(self, plan: AcceptancePlan) -> None:
         live = {task.filename: task for task in self.catalog.scan().valid_tasks}
@@ -226,7 +270,11 @@ class AcceptanceOrchestrator:
         use_dependencies = document.get("use_dependency_plan", False)
         if not isinstance(use_dependencies, bool):
             raise AcceptanceValidationError("是否执行 Supervisor 依赖编排必须为布尔值")
+        automatic_return = document.get("use_automatic_return", False)
+        if not isinstance(automatic_return, bool):
+            raise AcceptanceValidationError("是否自动返程必须为布尔值")
         frozen = default_execution_preflight()
+        frozen["automatic_return"] = automatic_return
         if profile_id:
             if self.scenario_setup is None:
                 raise AcceptanceValidationError("场景前置模块不可用，不能选择场景方案")
@@ -254,6 +302,7 @@ class AcceptanceOrchestrator:
             if 0 <= index < len(plan.items):
                 plan.current_index = index
             event_type = event.get("type")
+            lifecycle_locked = plan.status == "cancelling" or plan.status in _REPORTABLE_TERMINAL_STATUSES
             if event_type in {"preflight_progress", "preflight_restore"}:
                 progress = event.get("preflight")
                 if not isinstance(progress, dict):
@@ -274,10 +323,12 @@ class AcceptanceOrchestrator:
                     )
                 except ValueError:
                     return
-                plan.status = "preparing" if event_type == "preflight_progress" else plan.status
+                if event_type == "preflight_progress" and not lifecycle_locked:
+                    plan.status = "preparing"
             elif event_type == "item_preparing":
-                plan.status = "preparing"
-                if 0 <= index < len(plan.items):
+                if not lifecycle_locked:
+                    plan.status = "preparing"
+                if not lifecycle_locked and 0 <= index < len(plan.items):
                     plan.items[index].status, plan.items[index].started_at = "running", now_iso()
             elif event_type == "item_finished" and 0 <= index < len(plan.items):
                 attempt = dict(event.get("attempt") or {})
@@ -287,14 +338,19 @@ class AcceptanceOrchestrator:
                 item.duration_s = float(attempt.get("duration_s", 0.0))
                 item.trajectory = attempt.get("trajectory") if isinstance(attempt.get("trajectory"), dict) else None
                 item.finished_at = now_iso()
-                plan.status = "running"
+                if not lifecycle_locked:
+                    plan.status = "running"
             elif event_type == "awaiting_recovery":
-                plan.status = "awaiting_recovery"
+                if not lifecycle_locked:
+                    plan.status = "awaiting_recovery"
             elif event_type == "recovered":
-                plan.status = "running"
+                if not lifecycle_locked:
+                    plan.status = "running"
             elif event_type == "sequence_finished":
                 status = str(event.get("status", "failed"))
                 plan.status = "completed" if status == "completed" else status
+                plan.run_id = None
+                plan.current_index = None
                 self._archive_terminal_report(plan)
             self.plan_store.save(plan)
 

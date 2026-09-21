@@ -51,9 +51,18 @@
           <a class="dependency-button execution-status-link" href="/vehicle-execution-status.html">执行状态</a>
           <button id="dependencyButton" class="dependency-button" type="button">
             ▦&ensp;测试依赖编排</button
-          ><button id="shutdownButton" class="shutdown-button" type="button">
-            ⏻&ensp;安全退出
-          </button>
+          ><div class="shutdown-control" data-shutdown-control>
+            <span class="shutdown-control-label">安全退出</span>
+            <input id="shutdownToggle" class="shutdown-toggle-input" type="checkbox" aria-describedby="shutdownToggleHint" />
+            <span id="shutdownToggleState" class="shutdown-control-state">运行中</span>
+            <label for="shutdownToggle" class="pinball-track" aria-label="拨到右侧关闭程序">
+              <span class="pinball-rail" aria-hidden="true"></span>
+              <span class="forge-spring spring-left" aria-hidden="true"></span>
+              <span class="forge-spring spring-right" aria-hidden="true"></span>
+              <span class="pinball-core" aria-hidden="true"></span>
+            </label>
+            <span id="shutdownToggleHint" class="shutdown-control-hint">右拨关闭</span>
+          </div>
         </div>
       </header>
       <section class="metrics">
@@ -162,8 +171,10 @@
           <section id="recoveryAction" class="recovery-action" hidden>
             <b>本轮失败，等待人工恢复</b
             ><small
-              >请确认小车已回到测试起点；继续后将按当前依赖编排重新控制节点、等待
+              >请先打开手动控制把小车驶回测试起点；回到起点后退出手动控制，再点击继续。继续后将按当前依赖编排重新控制节点、等待
               ROS2 服务和节点稳定就绪，再执行下一轮。</small
+            ><a class="recovery-manual-link" href="/manual-control.html">打开手动控制</a
+            ><small class="recovery-manual-note">等待人工恢复期间自动验收已暂停，手动控制不会启动新的验收任务。</small
             ><button id="resumeButton" type="button">
               ✓&ensp;已恢复到起点，继续剩余轮次
             </button>
@@ -200,13 +211,12 @@
         </div>
       </section>
       <section class="panel results">
-        <div class="panel-title">
-          <div>
-            <p class="eyebrow">03 / EXECUTION LEDGER</p>
-            <h2>执行记录</h2>
+          <div class="panel-title">
+            <div>
+              <p class="eyebrow">03 / EXECUTION LEDGER</p>
+              <h2>执行记录</h2>
+            </div>
           </div>
-          <span id="runId"></span>
-        </div>
         <div class="table-wrap">
           <table>
             <thead>
@@ -344,7 +354,7 @@
         </div>
         <div class="trajectory-tools">
           <select id="trajectoryMapSelect" aria-label="选择地图"></select
-          ><span>滚轮缩放 · 左键拖动</span>
+          ><span>滚轮缩放 · 左键拖动 · 悬停轨迹吸附采样点</span>
           <div>
             <button
               id="trajectoryZoomOut"
@@ -372,6 +382,19 @@
           aria-label="可拖拽缩放的地图轨迹画布"
         >
           <img id="trajectoryImage" alt="地图运行轨迹" />
+          <div id="trajectoryCursor" class="trajectory-cursor" aria-hidden="true" hidden>
+            <span class="trajectory-cursor-line"></span>
+            <span class="trajectory-cursor-dot"></span>
+          </div>
+          <div id="trajectoryTooltip" class="trajectory-tooltip" role="status" aria-live="polite" hidden>
+            <div class="trajectory-tooltip-kicker">磁吸采样点 <span data-trajectory-counter="index">—</span></div>
+            <strong data-trajectory-counter="timestamp">时间未知</strong>
+            <div class="trajectory-tooltip-route" data-trajectory-counter="route">轨迹采样</div>
+            <div class="trajectory-tooltip-grid">
+              <span>x <b data-trajectory-counter="x">—</b></span>
+              <span>y <b data-trajectory-counter="y">—</b></span>
+            </div>
+          </div>
         </div>
       </section>
     </div>

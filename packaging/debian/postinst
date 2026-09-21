@@ -44,7 +44,6 @@ fi
 
 ROOT="$RUN_HOME/ry_aletheia"
 DEFAULTS=/usr/lib/ry-aletheia/defaults
-PRIVATE_VIDEO=/usr/lib/ry-aletheia/video_runtime
 SUPERVISORCTL="$(command -v supervisorctl || true)"
 TEMP_SUDOERS=""
 trap 'rm -f "$TEMP_SUDOERS"' EXIT
@@ -63,11 +62,8 @@ fi
 if [[ -f "$DEFAULTS/config/video.json" ]]; then
   [[ -e "$ROOT/config/video.json" ]] || install -o "$RUN_USER" -g "$RUN_GROUP" -m 0644 "$DEFAULTS/config/video.json" "$ROOT/config/video.json"
 fi
-if [[ -x "$PRIVATE_VIDEO/mediamtx/mediamtx" && -x "$PRIVATE_VIDEO/bin/gst-launch-1.0" ]]; then
-  # 视频运行时是 DEB 的私有负载。升级时更新二进制和锁定库，但配置仍留在
-  # $ROOT/config/video.json，生成的 MediaMTX 配置会由运行器按当前配置重建。
-  cp -a "$PRIVATE_VIDEO/." "$ROOT/runtime/video/"
-fi
+# 视频运行时已内嵌在 dist/ry-aletheia。首次启用视频时由 onefile 进程将
+# 已校验的 runtime 原子刷新到 $ROOT/runtime/video/；DEB 本身不重复携带依赖。
 chown -R "$RUN_USER:$RUN_GROUP" "$ROOT"
 
 # Versions through 2.0.3 registered only the optional video process group in

@@ -132,6 +132,36 @@ _MAP_PATH = re.compile(r"(?m)^\s*map_path\s*:\s*.*$")
 _LOCALIZATION_TEMPLATE = Path(__file__).with_name("task_templates") / "indoor_elevator_v1" / "localization_base.yaml"
 
 
+def localization_template_text(project: dict[str, Any], *, map_root: Path) -> str:
+    """Read the project-selected localization YAML template.
+
+    A project may carry a browser-uploaded template beside its map snapshots.
+    The fallback remains the approved profile template so legacy projects keep
+    compiling, while every generated YAML still goes through the same strict
+    ``map_path``/``init_pose`` validation.
+    """
+    metadata = project.get("localization_template") if isinstance(project, dict) else None
+    candidate = _LOCALIZATION_TEMPLATE
+    if isinstance(metadata, dict) and metadata.get("path"):
+        relative = Path(str(metadata["path"]))
+        project_root = Path(map_root).resolve().parent
+        candidate = (project_root / relative).resolve()
+        if not candidate.is_relative_to(project_root) or not candidate.is_file():
+            raise LocationManifestError("项目定位配置模板不存在，请重新导入模板")
+    try:
+        text = candidate.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise LocationManifestError("定位配置模板不可用") from exc
+    if len(text.encode("utf-8")) > 2 * 1024 * 1024:
+        raise LocationManifestError("定位配置模板超过 2 MiB 限制")
+    if len(_MAP_PATH.findall(text)) != 1:
+        raise LocationManifestError("定位配置模板必须包含唯一 system.map_path")
+    for field in ("x", "y", "yaw"):
+        if len(re.compile(rf"(?m)^    {field}:\s*.*$").findall(text)) != 1:
+            raise LocationManifestError(f"定位配置模板必须包含唯一 init_pose.{field}")
+    return text
+
+
 def compile_location_manifest(
     project: dict[str, Any], *, map_root: Path
 ) -> RenderedLocationManifest:
@@ -164,13 +194,18 @@ def compile_location_manifest(
         ):
             raise LocationManifestError("定位绑定需要迁移为定位路线")
         raise LocationManifestError("缺少定位路线")
-    try:
-        localization_template = _LOCALIZATION_TEMPLATE.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise LocationManifestError("定位基线模板不可用") from exc
+    localization_template = localization_template_text(project, map_root=root)
 
     normalized = [_binding(item, assets) for item in bindings]
     _assert_unique(normalized)
+    edits_by_map: dict[str, list[dict[str, Any]]] = {}
+    for edit in project.get("map_edits", []):
+        if not isinstance(edit, dict):
+            raise LocationManifestError("地图擦除记录无效")
+        map_asset_id = str(edit.get("map_asset_id") or "").strip()
+        if map_asset_id not in assets:
+            raise LocationManifestError("地图擦除记录引用的地图不存在")
+        edits_by_map.setdefault(map_asset_id, []).append(edit)
     resolved_routes = [_resolve_route(project, route, assets) for route in routes]
     if len({(route["building"], route["unit"]) for route in resolved_routes}) != len(resolved_routes):
         raise LocationManifestError("同一楼栋和单元的定位路线重复")
@@ -185,11 +220,15 @@ def compile_location_manifest(
             key = _runtime_key(binding)
             localization = layout.localization_yaml(building, unit, key)
             map_yaml = layout.map_yaml(building, unit, key)
-            artifacts.extend(_map_members(asset, root, map_yaml.relative))
+            artifacts.extend(_map_members(asset, root, map_yaml.relative, edits_by_map.get(binding["map_asset_id"], [])))
             artifacts.append(
                 LocationArtifact(
                     localization.relative,
-                    _render_localization(localization_template, str(PurePosixPath(map_yaml.installed).parent)).encode("utf-8"),
+                    _render_localization(
+                        localization_template,
+                        str(PurePosixPath(map_yaml.installed).parent),
+                        resolved["init_go"],
+                    ).encode("utf-8"),
                 )
             )
             entry: dict[str, Any] = {
@@ -246,6 +285,7 @@ def _assets(project: dict[str, Any], root: Path) -> dict[str, dict[str, Any]]:
         if not source.is_file() or source.suffix.lower() not in {".yaml", ".yml"} or not source.is_relative_to(root):
             raise LocationManifestError("地图源 YAML 必须位于受控地图目录")
         result[identifier] = {
+            "id": identifier,
             "source": source,
             "origin": asset.get("origin"),
             "resolution_m": asset.get("resolution_m"),
@@ -298,6 +338,16 @@ def _origin_pose(asset: dict[str, Any]) -> dict[str, float]:
     return {"x": x, "y": y, "z": 0.0, "yaw": yaw}
 
 
+def _elevator_center_pose() -> dict[str, float]:
+    """Return the capture-frame origin used by every map after the first.
+
+    Field mapping is performed with the elevator centre as the physical
+    coordinate origin.  The map YAML ``origin`` is only the raster's lower
+    left corner; it is not a task start pose for a subsequent floor map.
+    """
+    return {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
+
+
 def _resolve_route(
     project: dict[str, Any], route: object, assets: dict[str, dict[str, Any]]
 ) -> dict[str, Any]:
@@ -329,6 +379,10 @@ def _resolve_route(
     components = _indexed_items(project.get("components"), "组件")
     start = _route_waypoint(route.get("task_start_waypoint_id"), waypoints, bindings[0], "任务起点")
     target = _route_waypoint(route.get("task_target_waypoint_id"), waypoints, bindings[-1], "任务目标")
+    return_point = _final_elevator_call_pose(
+        project, bindings[-1], waypoints, components,
+        legacy_id=route.get("task_return_waypoint_id"),
+    )
     links = route.get("links")
     if not isinstance(links, list) or len(links) != len(bindings) - 1:
         raise LocationManifestError("定位路线链接无效")
@@ -337,10 +391,10 @@ def _resolve_route(
     elevator_anchors: list[dict[str, Any]] = []
     for index, binding in enumerate(bindings):
         asset = assets[binding["map_asset_id"]]
-        init_go = start if index == 0 else _origin_pose(asset)
+        init_go = start if index == 0 else _elevator_center_pose()
         _validate_pose(asset, init_go, "定位初始化位")
         if index == len(bindings) - 1:
-            init_return = target
+            init_return = return_point
         else:
             init_return, elevator = _route_anchor(
                 links[index], binding, bindings[index + 1], assets, waypoints, components
@@ -381,6 +435,51 @@ def _route_waypoint(
     if waypoint is None or waypoint.get("map_asset_id") != binding["map_asset_id"]:
         raise LocationManifestError(f"{label}必须位于对应定位地图")
     return _controlled_pose(waypoint, label)
+
+
+def _final_elevator_call_pose(
+    project: dict[str, Any],
+    binding: dict[str, Any],
+    waypoints: dict[str, dict[str, Any]],
+    components: dict[str, dict[str, Any]],
+    *,
+    legacy_id: object = None,
+) -> dict[str, float]:
+    """Resolve the final floor's return target from the elevator call point.
+
+    A return task starts at the target floor's elevator door call position. The
+    operator therefore only marks the delivery target; a legacy manually
+    selected return waypoint is retained as a migration fallback for projects
+    that do not yet contain an elevator landing component.
+    """
+    elevator = next(
+        (
+            item for item in components.values()
+            if item.get("map_asset_id") == binding["map_asset_id"]
+            and item.get("kind") == "elevator"
+        ),
+        None,
+    )
+    if elevator is not None:
+        attributes = elevator.get("attributes") if isinstance(elevator.get("attributes"), dict) else {}
+        try:
+            x = float(elevator["x"])
+            y = float(elevator["y"])
+            yaw = float(elevator.get("yaw", 0.0))
+            height = float(attributes.get("height_m", 1.2))
+            wait_distance = float(attributes.get("wait_distance_m", 1.5))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise LocationManifestError("目标层电梯缺少有效门前呼梯参数") from exc
+        distance = height / 2.0 + wait_distance
+        return {
+            "x": x - sin(yaw) * distance,
+            "y": y + cos(yaw) * distance,
+            "z": 0.0,
+            "yaw": elevator_inward_yaw(yaw),
+        }
+    if legacy_id:
+        return _route_waypoint(legacy_id, waypoints, binding, "兼容返程点")
+    raise LocationManifestError("目标层缺少电梯组件，无法自动派生楼上返程呼梯点")
 
 
 def _route_anchor(
@@ -440,6 +539,11 @@ def _validate_pose(asset: dict[str, Any], pose: dict[str, float], label: str) ->
         raise LocationManifestError("地图尺寸或分辨率无效")
     if not all(isfinite(value) for value in pose.values()):
         raise LocationManifestError(f"{label}无效")
+    # Subsequent maps are captured in the elevator-centre frame.  Their
+    # semantic origin is (0, 0), even when the raster's lower-left YAML origin
+    # does not include that point due to a cropped/legacy map export.
+    if pose["x"] == 0.0 and pose["y"] == 0.0:
+        return
     maximum_x = origin["x"] + width * resolution
     maximum_y = origin["y"] + height * resolution
     if not origin["x"] <= pose["x"] <= maximum_x or not origin["y"] <= pose["y"] <= maximum_y:
@@ -492,7 +596,12 @@ def _runtime_key(binding: dict[str, Any]) -> str:
     return f"floor-{binding['floor_template']}" if binding["type"] == "floor" else binding["type"]
 
 
-def _map_members(asset: dict[str, Any], root: Path, target_yaml: str) -> list[LocationArtifact]:
+def _map_members(
+    asset: dict[str, Any],
+    root: Path,
+    target_yaml: str,
+    edits: list[dict[str, Any]] | None = None,
+) -> list[LocationArtifact]:
     source = asset["source"]
     try:
         yaml_text = source.read_text(encoding="utf-8")
@@ -514,18 +623,175 @@ def _map_members(asset: dict[str, Any], root: Path, target_yaml: str) -> list[Lo
         localization = read_localization_map(source.parent, root=root)
     except (LocalizationMapError, OSError) as exc:
         raise LocationManifestError(str(exc)) from exc
-    return [
+    image_bytes = image.read_bytes()
+    if edits:
+        image_bytes = _rasterize_map_edits(image_bytes, asset, edits)
+    artifacts = [
         LocationArtifact((target / "map.yaml").as_posix(), yaml_text.encode("utf-8")),
-        LocationArtifact((target / image.name).as_posix(), image.read_bytes()),
-        LocationArtifact((target / "index.txt").as_posix(), localization.index_bytes),
+        LocationArtifact((target / image.name).as_posix(), image_bytes),
         *[LocationArtifact((target / cloud.name).as_posix(), cloud.read_bytes()) for cloud in localization.clouds],
     ]
+    if localization.index_bytes is not None:
+        artifacts.insert(2, LocationArtifact((target / "index.txt").as_posix(), localization.index_bytes))
+    return artifacts
 
 
-def _render_localization(template: str, map_directory: str) -> str:
+def _pgm_token(data: bytes, index: int) -> tuple[bytes, int]:
+    length = len(data)
+    while index < length:
+        if data[index] in b" \t\r\n":
+            index += 1
+            continue
+        if data[index] == ord("#"):
+            while index < length and data[index] not in b"\r\n":
+                index += 1
+            continue
+        break
+    start = index
+    while index < length and data[index] not in b" \t\r\n#":
+        index += 1
+    return data[start:index], index
+
+
+def _read_pgm_bytes(data: bytes) -> tuple[int, int, bytearray]:
+    index = 0
+    magic, index = _pgm_token(data, index)
+    raw_width, index = _pgm_token(data, index)
+    raw_height, index = _pgm_token(data, index)
+    raw_max, index = _pgm_token(data, index)
+    try:
+        width, height, maximum = int(raw_width), int(raw_height), int(raw_max)
+    except (TypeError, ValueError) as exc:
+        raise LocationManifestError("地图 PGM 头无效") from exc
+    if magic not in {b"P2", b"P5"} or width <= 0 or height <= 0 or maximum != 255:
+        raise LocationManifestError("仅支持 8 位 P2/P5 PGM 地图")
+    expected = width * height
+    if magic == b"P5":
+        if index < len(data) and data[index] in b" \t\r\n":
+            index += 1
+        pixels = bytearray(data[index:index + expected])
+    else:
+        values: list[int] = []
+        while len(values) < expected:
+            value, index = _pgm_token(data, index)
+            if not value:
+                break
+            try:
+                parsed = int(value)
+            except ValueError as exc:
+                raise LocationManifestError("地图 PGM 像素无效") from exc
+            if not 0 <= parsed <= 255:
+                raise LocationManifestError("地图 PGM 像素超出范围")
+            values.append(parsed)
+        pixels = bytearray(values)
+    if len(pixels) != expected:
+        raise LocationManifestError("地图 PGM 像素数据不完整")
+    return width, height, pixels
+
+
+def _rasterize_map_edits(data: bytes, asset: dict[str, Any], edits: list[dict[str, Any]]) -> bytes:
+    width, height, pixels = _read_pgm_bytes(data)
+    try:
+        resolution = float(asset["resolution_m"])
+        origin = asset["origin"]
+        origin_x, origin_y = float(origin[0]), float(origin[1])
+    except (KeyError, TypeError, ValueError, IndexError) as exc:
+        raise LocationManifestError("地图擦除缺少有效栅格元数据") from exc
+    if not isfinite(resolution) or resolution <= 0 or not all(isfinite(value) for value in (origin_x, origin_y)):
+        raise LocationManifestError("地图擦除缺少有效栅格元数据")
+
+    def image_point(point: object) -> tuple[float, float]:
+        if not isinstance(point, dict):
+            raise LocationManifestError("地图擦除坐标无效")
+        try:
+            x, y = float(point["x"]), float(point["y"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise LocationManifestError("地图擦除坐标无效") from exc
+        if not all(isfinite(value) for value in (x, y)):
+            raise LocationManifestError("地图擦除坐标无效")
+        return (x - origin_x) / resolution, (height - 1) - (y - origin_y) / resolution
+
+    def free_pixel(column: int, row: int) -> None:
+        if 0 <= column < width and 0 <= row < height:
+            pixels[row * width + column] = 254
+
+    def stamp(center_x: float, center_y: float, radius_px: float, shape: str) -> None:
+        if not isfinite(radius_px) or radius_px <= 0:
+            raise LocationManifestError("橡皮擦半径无效")
+        left = max(0, int(center_x - radius_px - 1))
+        right = min(width - 1, int(center_x + radius_px + 1))
+        top = max(0, int(center_y - radius_px - 1))
+        bottom = min(height - 1, int(center_y + radius_px + 1))
+        for row in range(top, bottom + 1):
+            for column in range(left, right + 1):
+                if shape == "square" or (column - center_x) ** 2 + (row - center_y) ** 2 <= radius_px ** 2:
+                    free_pixel(column, row)
+
+    def brush(points: list[tuple[float, float]], radius_px: float, shape: str) -> None:
+        if shape not in {"circle", "square"}:
+            raise LocationManifestError("橡皮擦形状无效")
+        previous = None
+        for current in points:
+            if previous is None:
+                stamp(*current, radius_px, shape)
+            else:
+                distance = ((current[0] - previous[0]) ** 2 + (current[1] - previous[1]) ** 2) ** 0.5
+                steps = max(1, int(distance / max(0.5, radius_px * 0.5)) + 1)
+                for index in range(steps + 1):
+                    ratio = index / steps
+                    stamp(previous[0] + (current[0] - previous[0]) * ratio, previous[1] + (current[1] - previous[1]) * ratio, radius_px, shape)
+            previous = current
+
+    def polygon(points: list[tuple[float, float]]) -> None:
+        if len(points) < 3:
+            raise LocationManifestError("框选擦除至少需要三个顶点")
+        left = max(0, int(min(point[0] for point in points) - 1))
+        right = min(width - 1, int(max(point[0] for point in points) + 1))
+        top = max(0, int(min(point[1] for point in points) - 1))
+        bottom = min(height - 1, int(max(point[1] for point in points) + 1))
+        for row in range(top, bottom + 1):
+            for column in range(left, right + 1):
+                inside = False
+                for index, (x1, y1) in enumerate(points):
+                    x2, y2 = points[(index + 1) % len(points)]
+                    if (y1 > row) != (y2 > row) and column < (x2 - x1) * (row - y1) / (y2 - y1) + x1:
+                        inside = not inside
+                if inside:
+                    free_pixel(column, row)
+
+    for edit in edits:
+        kind = edit.get("kind")
+        raw_points = edit.get("points")
+        if kind not in {"brush_erase", "polygon_erase"} or not isinstance(raw_points, list):
+            raise LocationManifestError("地图擦除记录无效")
+        points = [image_point(point) for point in raw_points]
+        if kind == "brush_erase":
+            try:
+                radius_px = float(edit["radius_m"]) / resolution
+            except (KeyError, TypeError, ValueError) as exc:
+                raise LocationManifestError("橡皮擦半径无效") from exc
+            brush(points, radius_px, str(edit.get("shape") or "circle"))
+        else:
+            polygon(points)
+    return b"P5\n%d %d\n255\n" % (width, height) + bytes(pixels)
+
+
+def _render_localization(
+    template: str, map_directory: str, init_pose: dict[str, float]
+) -> str:
     if len(_MAP_PATH.findall(template)) != 1:
         raise LocationManifestError("定位基线缺少唯一 system.map_path")
     rendered, count = _MAP_PATH.subn(lambda match: f"  map_path: {map_directory}", template, count=1)
     if count != 1:
         raise LocationManifestError("定位基线缺少唯一 system.map_path")
+    for field in ("x", "y", "yaw"):
+        pattern = re.compile(rf"(?m)^    {field}:\s*.*$")
+        if len(pattern.findall(rendered)) != 1:
+            raise LocationManifestError(f"定位基线缺少唯一 init_pose.{field}")
+        value = init_pose.get(field)
+        if not isinstance(value, (int, float)) or not isfinite(float(value)):
+            raise LocationManifestError(f"定位初始化位 {field} 无效")
+        rendered, count = pattern.subn(f"    {field}: {value}", rendered, count=1)
+        if count != 1:
+            raise LocationManifestError(f"定位基线缺少唯一 init_pose.{field}")
     return rendered

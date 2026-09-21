@@ -121,22 +121,29 @@
             <p id="chassisParameterMessage" class="parameter-message" role="status"></p>
           </section>
 
+          <section class="keyboard-settings" aria-labelledby="keyboardSettingsTitle">
+            <div>
+              <h3 id="keyboardSettingsTitle">键盘操作</h3>
+              <p>按住方向键可组合转向；按键设置仅保存在当前浏览器。</p>
+            </div>
+            <button id="editKeyBindings" class="manual-secondary key-binding-trigger" type="button">设置按键</button>
+          </section>
           <div class="drive-area" id="driveArea" aria-disabled="true">
-            <div class="drive-pad" aria-label="方向控制，按住移动，松开立即停止">
+            <div class="drive-pad" aria-label="方向控制，可组合按住移动，松开立即停止">
               <button class="drive-button forward" data-command="forward" type="button" disabled aria-label="前进">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 13 6-6 6 6M12 7v11" /></svg><span>前进</span>
-                <kbd>I</kbd></button>
+                <kbd data-key-binding-display="forward">I</kbd></button>
               <button class="drive-button left" data-command="left" type="button" disabled aria-label="左转">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13 6-6 6 6 6M7 12h11" /></svg><span>左转</span><kbd>J</kbd></button>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13 6-6 6 6 6M7 12h11" /></svg><span>左转</span><kbd data-key-binding-display="left">J</kbd></button>
               <button class="drive-button stop" id="stopButton" type="button" disabled aria-label="停止">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1" /></svg><span>停止</span>
               </button>
               <button class="drive-button right" data-command="right" type="button" disabled aria-label="右转">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m11 6 6 6-6 6M17 12H6" /></svg><span>右转</span><kbd>L</kbd></button>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m11 6 6 6-6 6M17 12H6" /></svg><span>右转</span><kbd data-key-binding-display="right">L</kbd></button>
               <button class="drive-button backward" data-command="backward" type="button" disabled aria-label="后退">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 11 6 6 6-6M12 17V6" /></svg><span>后退</span><kbd>K</kbd></button>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 11 6 6 6-6M12 17V6" /></svg><span>后退</span><kbd data-key-binding-display="backward">K</kbd></button>
             </div>
-            <p class="hold-note"><span></span>按住 <kbd>I</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd> 或方向按钮移动；车端以约 20 Hz 持续发布。松开、失焦或输入超时都会立即 STOP。</p>
+            <p class="hold-note"><span></span>可组合按住 <kbd data-key-binding-display="forward">I</kbd><kbd data-key-binding-display="left">J</kbd><kbd data-key-binding-display="backward">K</kbd><kbd data-key-binding-display="right">L</kbd> 进行前后转向弧线行驶；车端以约 20 Hz 持续发布。松开、失焦或输入超时都会立即 STOP。</p>
           </div>
         </section>
 
@@ -163,6 +170,23 @@
         </section>
       </section>
     </main>
+    <dialog id="keyBindingDialog" class="key-binding-dialog" aria-labelledby="keyBindingTitle">
+      <div class="key-binding-dialog__header">
+        <div><h2 id="keyBindingTitle">设置按键</h2><p>点击方向后按下一个键。仅支持字母、数字、方向键和数字键盘按键。</p></div>
+        <button id="closeKeyBindings" class="key-binding-close" type="button" aria-label="关闭按键设置">关闭</button>
+      </div>
+      <div class="key-binding-list" aria-label="方向按键绑定">
+        <button class="key-binding-row" type="button" data-key-binding-command="forward"><span>前进</span><kbd data-key-binding-display="forward">I</kbd></button>
+        <button class="key-binding-row" type="button" data-key-binding-command="backward"><span>后退</span><kbd data-key-binding-display="backward">K</kbd></button>
+        <button class="key-binding-row" type="button" data-key-binding-command="left"><span>左转</span><kbd data-key-binding-display="left">J</kbd></button>
+        <button class="key-binding-row" type="button" data-key-binding-command="right"><span>右转</span><kbd data-key-binding-display="right">L</kbd></button>
+      </div>
+      <p id="keyBindingMessage" class="key-binding-message" role="status">选择一个方向后按下新按键。</p>
+      <div class="key-binding-dialog__actions">
+        <button id="resetKeyBindings" class="manual-secondary key-binding-reset" type="button">恢复默认</button>
+        <button id="doneKeyBindings" class="manual-primary key-binding-done" type="button">完成</button>
+      </div>
+    </dialog>
     <script type="module" src="/manual_control.js"></script>
     <script src="/app_shell.js"></script>
   </body>

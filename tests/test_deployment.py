@@ -59,8 +59,30 @@ def test_project_imports_a_snapshot_without_modifying_source(tmp_path: Path, mon
     )
     assert edited["map_edits"][0]["kind"] == "brush_erase"
     assert edited["map_edits"][0]["shape"] == "square"
+    persisted = store.get(project["id"])
+    persisted["task_compiler"]["identity"]["last_preview_input_sha256"] = "a" * 64
+    store._write_json(store._document_path(project["id"]), persisted)
+    store.update_map_edits(project["id"], {"action": "add", "map_id": asset["id"], "kind": "polygon_erase", "points": [{"x": -0.98, "y": -1.98}, {"x": -0.9, "y": -1.98}, {"x": -0.9, "y": -1.9}]})
+    assert store.get(project["id"])["task_compiler"]["identity"]["last_preview_input_sha256"] is None
+    edited = store.update_map_edits(project["id"], {"action": "undo", "map_id": asset["id"]})
+    assert len(edited["map_edits"]) == 1
     edited = store.update_map_edits(project["id"], {"action": "undo", "map_id": asset["id"]})
     assert edited["map_edits"] == []
+
+
+def test_delete_project_removes_only_the_validated_project_directory(tmp_path: Path):
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("可删除项目")
+    project_dir = store._project_dir(project["id"])
+    (project_dir / "exports").mkdir()
+    (project_dir / "exports" / "artifact.txt").write_text("fixture", encoding="utf-8")
+
+    store.delete_project(project["id"])
+
+    assert not project_dir.exists()
+    assert store.list_projects() == []
+    with pytest.raises(DeploymentError, match="不存在"):
+        store.delete_project(project["id"])
 
 
 def test_map_import_rejects_paths_outside_robot_map_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -97,16 +119,36 @@ def test_map_snapshot_keeps_localization_dependencies_for_export_after_source_is
     })
     start = store.add_waypoint(project["id"], {"map_id": asset["id"], "kind": "start", "x": -0.95, "y": -1.95})
     target = store.add_waypoint(project["id"], {"map_id": asset["id"], "kind": "target", "x": -0.95, "y": -1.95})
+    return_point = store.add_waypoint(project["id"], {"map_id": asset["id"], "kind": "return", "x": -0.92, "y": -1.95})
     store.create_localization_route(project["id"], {
         "building": "1", "unit": "1", "binding_ids": [floor["id"]],
-        "task_start_waypoint_id": start["id"], "task_target_waypoint_id": target["id"], "links": [],
+        "task_start_waypoint_id": start["id"], "task_target_waypoint_id": target["id"], "task_return_waypoint_id": return_point["id"], "links": [],
     })
     store.update_task_compiler_config(project["id"], {"community": "点云快照"})
 
     exported = compile_location_manifest(store.get(project["id"]), map_root=store._project_dir(project["id"]) / "maps")
     files = {item.relative_path: item.content for item in exported.artifacts}
-    assert files["runtime/maps/点云快照/1_1/floor-2/index.txt"] == b"0 0 0\n0 1 2 0.pcd\n"
+    assert files["runtime/maps/点云快照/1_1/floor-2/index.txt"] == b"0 0 0\n0 1 2 /old/site/0.pcd\n"
     assert files["runtime/maps/点云快照/1_1/floor-2/0.pcd"] == b"# pcd fixture\n"
+
+
+def test_uploaded_map_accepts_compatibility_index_with_one_pcd(tmp_path: Path):
+    """Browser uploads must not require every stale index chunk file."""
+    upload_root = tmp_path / "uploads"
+    source = _map(upload_root / "site" / "P1")
+    source.with_name("index.txt").write_text(
+        "0 0 0\n0 0 0 /legacy/0.pcd\n1 1 0 /legacy/1.pcd\n2 -1 0 /legacy/2.pcd\n",
+        encoding="utf-8",
+    )
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("上传兼容索引")
+
+    asset = store.import_uploaded_map(project["id"], source, "大厅", "lobby", upload_root)
+    snapshot = Path(asset["source_yaml"]).parent
+    assert (snapshot / "0.pcd").read_text(encoding="utf-8") == "# pcd fixture\n"
+    assert (snapshot / "index.txt").read_text(encoding="utf-8") == (
+        "0 0 0\n0 0 0 /legacy/0.pcd\n1 1 0 /legacy/1.pcd\n2 -1 0 /legacy/2.pcd\n"
+    )
 
 
 def _localization_binding_payload(
@@ -684,6 +726,9 @@ def _route_fixture(store: DeploymentStore, project: dict, assets: list[dict]) ->
     target = store.add_waypoint(
         project["id"], {"map_id": assets[-1]["id"], "kind": "target", "x": -0.95, "y": -1.95}
     )
+    return_point = store.add_waypoint(
+        project["id"], {"map_id": assets[-1]["id"], "kind": "return", "x": -0.92, "y": -1.95}
+    )
     ferry_anchor = store.add_waypoint(
         project["id"], {"map_id": assets[0]["id"], "kind": "map_transition", "x": -0.95, "y": -1.95}
     )
@@ -696,7 +741,7 @@ def _route_fixture(store: DeploymentStore, project: dict, assets: list[dict]) ->
     store._write_json(store._document_path(project["id"]), document)
     payload = {
         "building": "1", "unit": "1", "binding_ids": [item["id"] for item in bindings],
-        "task_start_waypoint_id": start["id"], "task_target_waypoint_id": target["id"],
+        "task_start_waypoint_id": start["id"], "task_target_waypoint_id": target["id"], "task_return_waypoint_id": return_point["id"],
         "links": [
             {"from_binding_id": bindings[0]["id"], "to_binding_id": bindings[1]["id"], "anchor": {"kind": "waypoint", "waypoint_id": ferry_anchor["id"]}},
             {"from_binding_id": bindings[1]["id"], "to_binding_id": bindings[2]["id"], "anchor": {"kind": "waypoint", "waypoint_id": outdoor_anchor["id"]}},
@@ -908,6 +953,50 @@ def test_stage_assignment_rejects_duplicate_map_and_invalid_stage(
         store.assign_map_stage(project["id"], assets[1]["id"], "outdoor")
 
 
+def test_deployment_flow_migrates_legacy_scene_and_accepts_ferry_before_outdoor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store, project, _ = _project_with_distinct_maps(tmp_path, monkeypatch, 0)
+
+    store.set_scene_model(project["id"], "indoor_outdoor")
+    migrated = store.get(project["id"])
+    assert [node["type"] for node in migrated["deployment_flow"]] == [
+        "outdoor", "lobby", "target_floor",
+    ]
+
+    flow = [
+        {"id": "ferry-1", "type": "ferry", "label": "摆渡层"},
+        {"id": "outdoor", "type": "outdoor", "label": "户外图"},
+        {"id": "lobby", "type": "lobby", "label": "电梯大厅"},
+        {"id": "target_floor", "type": "target_floor", "label": "用户楼层"},
+    ]
+    saved = store.set_deployment_flow(project["id"], flow)
+    assert [node["id"] for node in saved["deployment_flow"]] == [
+        "ferry-1", "outdoor", "lobby", "target_floor",
+    ]
+    assert [item["stage"] for item in store.stage_plan(project["id"])["stages"]] == [
+        "ferry-1", "outdoor", "lobby", "target_floor",
+    ]
+
+
+def test_deployment_flow_requires_lobby_and_terminal_target_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store, project, _ = _project_with_distinct_maps(tmp_path, monkeypatch, 0)
+
+    with pytest.raises(DeploymentError, match="电梯大厅"):
+        store.set_deployment_flow(project["id"], [
+            {"id": "outdoor", "type": "outdoor"},
+            {"id": "target_floor", "type": "target_floor"},
+        ])
+    with pytest.raises(DeploymentError, match="末节点"):
+        store.set_deployment_flow(project["id"], [
+            {"id": "lobby", "type": "lobby"},
+            {"id": "target_floor", "type": "target_floor"},
+            {"id": "ferry-1", "type": "ferry"},
+        ])
+
+
 def _three_stage_project_with_transition_points(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store, project, maps = _project_with_distinct_maps(tmp_path, monkeypatch, 3)
     store.set_scene_model(project["id"], "indoor_outdoor")
@@ -1006,7 +1095,7 @@ def test_topology_reports_broken_chain_then_accepts_complete_three_map_project(
 
     broken = store.validate_topology(project["id"])
     assert not broken["valid"]
-    assert any("Transition" in error for error in broken["errors"])
+    assert any("起点" in error or "目标" in error for error in broken["errors"])
 
     store.add_waypoint(
         project["id"],
@@ -1040,6 +1129,27 @@ def test_topology_reports_broken_chain_then_accepts_complete_three_map_project(
     assert all(stage["status"] == "complete" for stage in topology["stages"])
 
 
+def test_topology_accepts_stage_chain_without_manual_transition_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Behavior-tree map switching must not depend on hand-authored Transition rows."""
+    store, project, maps, _points = _three_stage_project_with_transition_points(tmp_path, monkeypatch)
+    store.add_waypoint(
+        project["id"],
+        {"map_id": maps[0]["id"], "kind": "start", "label": "配送起点", "x": -0.98, "y": -1.98},
+    )
+    store.add_waypoint(
+        project["id"],
+        {"map_id": maps[2]["id"], "kind": "target", "label": "配送目标", "x": -0.92, "y": -1.92},
+    )
+
+    topology = store.validate_topology(project["id"])
+
+    assert topology["valid"]
+    assert topology["transitions"] == []
+    assert all(stage["status"] == "complete" for stage in topology["stages"])
+
+
 def _deployment_handler(path: str, payload: dict | None = None):
     handler = object.__new__(web_console.ConsoleHandler)
     handler.path = path
@@ -1060,6 +1170,32 @@ def test_topology_http_request_uses_store_without_ros():
 
     validate.assert_called_once_with("site")
     assert handler._json.call_args.args == ({"topology": expected},)
+
+
+def test_project_delete_http_removes_the_requested_project_only():
+    handler = _deployment_handler("/api/deployments/site-demo")
+
+    with patch.object(web_console.DEPLOYMENTS, "delete_project") as delete:
+        handler.do_DELETE()
+
+    delete.assert_called_once_with("site-demo")
+    assert handler._json.call_args.args == ({"deleted": True},)
+
+
+def test_project_delete_http_reports_missing_project():
+    handler = _deployment_handler("/api/deployments/site-demo")
+
+    with patch.object(
+        web_console.DEPLOYMENTS,
+        "delete_project",
+        side_effect=DeploymentError("部署项目不存在"),
+    ):
+        handler.do_DELETE()
+
+    assert handler._json.call_args.args == (
+        {"error": "部署项目不存在"},
+        HTTPStatus.NOT_FOUND,
+    )
 
 
 def test_transition_http_rejects_invalid_store_input():
@@ -1132,7 +1268,9 @@ def test_localization_route_http_forwards_only_project_owned_payload():
     }
     handler = _deployment_handler("/api/deployments/site/localization-routes", payload)
 
-    with patch.object(web_console.DEPLOYMENTS, "create_localization_route", return_value={"id": "route-a"}) as create:
+    with patch.object(web_console.DEPLOYMENTS, "create_localization_route", return_value={"id": "route-a"}) as create, patch.object(
+        web_console.DEPLOYMENTS, "get", return_value={"id": "site"}
+    ):
         handler.do_POST()
 
     create.assert_called_once_with("site", payload)
@@ -1316,7 +1454,7 @@ def test_route_editor_markup_exposes_derived_sources_and_not_raw_runtime_paths()
 
     assert 'id="localizationRouteDialog"' in html
     assert 'id="localizationRouteLinks"' in html
-    assert "YAML 原点" in html
+    assert "电梯中心 0,0" in html
     assert "定位 YAML 路径" not in html
 
 
@@ -1329,7 +1467,7 @@ def test_deployment_contract_documents_identity_only_bindings_and_route_derived_
     assert "绑定身份字段只有 `map_asset_id`、`building`、`unit`、`type`" in contract
     assert "定位位姿由 `localization_routes` 推导" in contract
     assert "首图使用人工选择的任务起点" in contract
-    assert "后续地图使用其 YAML `origin`" in contract
+    assert "后续地图使用电梯中心坐标系原点" in contract
     assert "旧记录中的 `init_go` / `init_return` 只读兼容" in contract
 
 
@@ -1351,9 +1489,11 @@ def test_deployment_contract_documents_route_derived_init_poses_and_lift_list():
   "links": [''' in contract
     assert "除上述六个键外不接受其他键" in contract
     assert "| 首项（包括唯一项） | `init_go` | 首项（包括唯一项）使用人工选择的任务起点 `task_start_waypoint_id`" in contract
-    assert "| 仅非首项 | `init_go` | 只有非首项使用其 YAML `origin` 的 `x`、`y`、`yaw`（`z: 0.0`）" in contract
+    assert "| 仅非首项 | `init_go` | 后续地图统一使用采图电梯中心坐标系原点" in contract
     assert "| 非最终项 | `init_return` | 该图出向链接的受控锚点 |" in contract
-    assert "| 最终项 | `init_return` | 最终项使用人工选择的任务目标 `task_target_waypoint_id` |" in contract
+    assert "| 最终项 | `init_return` | 最终项自动使用目标层电梯门前呼梯点；不要求人工选择返程点 |" in contract
+    assert "定位 YAML 的 `system.init_pose.x`、`system.init_pose.y`、" in contract
+    assert "必须与该路线条目的 `init_go` 完全一致" in contract
     assert '`{ "community": "…", "loc_yaml": [{ "building": "…", "unit": "…", "yaml_index": [ … ] }] }`' in contract
     assert "每个 `yaml_index` 条目包含 `type`、`yaml`、`2D_yaml`、`init_go` 和 `init_return`" in contract
     assert "包含 `floor`，其值等于绑定的 `floor_template`" in contract
@@ -1450,11 +1590,13 @@ def _compiler_ready_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     })
     start = store.add_waypoint(project["id"], {"map_id": lobby["id"], "kind": "start", "x": -1.0, "y": -1.0})
     target_waypoint = store.add_waypoint(project["id"], {"map_id": target["id"], "kind": "target", "x": 1.0, "y": 1.0})
+    return_waypoint = store.add_waypoint(project["id"], {"map_id": target["id"], "kind": "return", "x": 1.5, "y": 1.0})
     store.create_localization_route(project["id"], {
         "building": "1", "unit": "1",
         "binding_ids": [indoor["id"], floor["id"]],
         "task_start_waypoint_id": start["id"],
         "task_target_waypoint_id": target_waypoint["id"],
+        "task_return_waypoint_id": return_waypoint["id"],
         "links": [{
             "from_binding_id": indoor["id"], "to_binding_id": floor["id"],
             "anchor": {"kind": "component_center", "component_id": lobby_elevator["id"]},

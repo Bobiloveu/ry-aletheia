@@ -104,6 +104,10 @@ class VehicleControlController:
     EMERGENCY_RELEASE_COMMAND = '{"speed":0.0,"angle":0.0,"acc":2000,"press":1400,"place":-1,"ulock":0}'
     SOURCE_NAVIGATION = "navigation"
     SOURCE_MINIAPP = "miniapp"
+    # A release needs more than one zero frame: a single dropped UDP/serial
+    # frame must not leave the chassis driving.  This remains bounded so an
+    # idle session never owns the velocity topic indefinitely.
+    STOP_BURST_FRAMES = 3
 
     def __init__(
         self,
@@ -163,8 +167,9 @@ class VehicleControlController:
         self._target_vector: tuple[float, float] | None = None
         self._linear_speed = self.config.linear_speed_mps
         self._angular_speed = self.config.angular_speed_radps
-        # STOP 是一次性边沿事件。空闲会话不应持续占用 /cmd_vel_miniapp。
+        # STOP 是有界边沿事件。空闲会话不应持续占用 /cmd_vel_miniapp。
         self._stop_pending = False
+        self._stop_frames_remaining = 0
         self._manual_stop_latched = False
 
     # ---- Public control contract -------------------------------------------------
@@ -281,11 +286,13 @@ class VehicleControlController:
         session_id: str,
         linear_ratio: object,
         angular_ratio: object,
+        input_sequence: object = None,
     ) -> dict[str, Any]:
         """以归一化前后/转向比例更新当前会话的连续运动目标。"""
         self._ensure_started()
         linear = self._validated_ratio(linear_ratio, "线速度比例")
         angular = self._validated_ratio(angular_ratio, "转向速度比例")
+        sequence = self._validated_input_sequence(input_sequence)
         now = self._clock()
         publish_stop = False
         with self._lock:
@@ -297,6 +304,12 @@ class VehicleControlController:
                 raise VehicleControlConflict("尚未收到 /control_source_state=miniapp 的实际确认，禁止发送运动指令")
             if session["state"] != "active":
                 raise VehicleControlConflict("手动控制会话无效，禁止发送运动指令")
+            # Browser requests can race on the network.  A delayed movement
+            # packet must not be able to revive a newer STOP from the same
+            # controller session.  Older clients omit this optional field and
+            # retain the existing Mobile-compatible behavior.
+            if not self._accept_vector_sequence_locked(session, sequence, linear, angular):
+                return self._snapshot_locked(session_id=session_id)
             if linear == 0.0 and angular == 0.0:
                 was_moving = bool(self._target_linear or self._target_angular)
                 self._clear_motion_locked()
@@ -307,6 +320,8 @@ class VehicleControlController:
                 self._target_vector = (linear, angular)
                 self._motion_session_id = session_id
                 self._apply_target_vector_locked()
+                self._stop_pending = False
+                self._stop_frames_remaining = 0
                 self._manual_stop_latched = False
             session["last_input_at"] = now
             session["last_heartbeat_at"] = now
@@ -704,7 +719,7 @@ class VehicleControlController:
                 linear = self._target_linear if ready_for_motion else 0.0
                 angular = self._target_angular if ready_for_motion else 0.0
                 should_publish = bool(linear or angular)
-                should_stop = self._stop_pending
+                should_stop = self._stop_pending or self._stop_frames_remaining > 0
             if should_publish:
                 self._publish_twist(linear, angular)
             elif should_stop:
@@ -817,6 +832,9 @@ class VehicleControlController:
             "right": (0.0, -self._angular_speed),
         }.get(self._target_command)
         self._target_linear, self._target_angular = direction or (0.0, 0.0)
+        if self._target_linear or self._target_angular:
+            self._stop_pending = False
+            self._stop_frames_remaining = 0
 
     def _apply_target_vector_locked(self) -> None:
         linear_ratio, angular_ratio = self._target_vector or (0.0, 0.0)
@@ -839,6 +857,8 @@ class VehicleControlController:
             "created_at": now,
             "last_heartbeat_at": now,
             "last_input_at": now,
+            "last_vector_sequence": None,
+            "last_vector_payload": None,
         }
         self._sessions[session["id"]] = session
         return session
@@ -867,6 +887,32 @@ class VehicleControlController:
         if not math.isfinite(numeric) or not -1.0 <= numeric <= 1.0:
             raise VehicleControlError(f"{label}必须在 -1.0–1.0 之间")
         return numeric
+
+    @staticmethod
+    def _validated_input_sequence(value: object) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 2**53 - 1:
+            raise VehicleControlError("控制输入序号必须是正整数")
+        return value
+
+    def _accept_vector_sequence_locked(
+        self,
+        session: dict[str, Any],
+        sequence: int | None,
+        linear: float,
+        angular: float,
+    ) -> bool:
+        if sequence is None:
+            return True
+        previous = session.get("last_vector_sequence")
+        if previous is not None and sequence < previous:
+            return False
+        if previous == sequence:
+            return session.get("last_vector_payload") == (linear, angular)
+        session["last_vector_sequence"] = sequence
+        session["last_vector_payload"] = (linear, angular)
+        return True
 
     def _require_session_locked(self, session_id: str, *, allow_inactive: bool) -> dict[str, Any]:
         if not isinstance(session_id, str) or not session_id or session_id not in self._sessions:
@@ -913,7 +959,14 @@ class VehicleControlController:
             try:
                 self._publish_twist(0.0, 0.0)
                 with self._lock:
-                    self._stop_pending = False
+                    if self._stop_pending:
+                        self._stop_pending = False
+                        self._stop_frames_remaining = max(
+                            self._stop_frames_remaining,
+                            self.STOP_BURST_FRAMES - 1,
+                        )
+                    elif self._stop_frames_remaining:
+                        self._stop_frames_remaining -= 1
             except Exception:
                 LOGGER.exception("无法立即发布 miniapp STOP")
 

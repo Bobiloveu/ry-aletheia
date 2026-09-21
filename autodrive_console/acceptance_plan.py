@@ -17,7 +17,7 @@ from .acceptance_catalog import AcceptanceTask, CatalogSnapshot
 from .models import TaskParameters, now_iso
 
 
-ACTIVE_PLAN_STATUSES = frozenset({"preparing", "running", "awaiting_recovery", "recovering"})
+ACTIVE_PLAN_STATUSES = frozenset({"preparing", "running", "awaiting_recovery", "recovering", "cancelling"})
 TERMINAL_ITEM_STATUSES = frozenset({"passed", "failed", "cancelled"})
 PREFLIGHT_STATUS_STATES = frozenset({
     "not_selected", "legacy", "pending", "applying_scenario", "settling",
@@ -37,6 +37,7 @@ def default_execution_preflight() -> dict[str, Any]:
         "scenario_profile_id": None,
         "scenario_profile_name": None,
         "dependency_plan": {"enabled": False, "steps": []},
+        "automatic_return": False,
     }
 
 
@@ -50,7 +51,11 @@ def default_execution_preflight_status(value: object = None) -> dict[str, Any]:
             "dependency_progress": None,
         }
     normalized = normalize_execution_preflight(value)
-    selected = normalized["scenario_profile_id"] or normalized["dependency_plan"]["enabled"]
+    selected = (
+        normalized["scenario_profile_id"]
+        or normalized["dependency_plan"]["enabled"]
+        or normalized["automatic_return"]
+    )
     return {
         "state": "pending" if selected else "not_selected",
         "message": "已冻结可选运行准备，开始验收时统一执行" if selected else "未启用额外运行准备，按常规验收流程执行",
@@ -149,7 +154,11 @@ def normalize_execution_preflight(value: object) -> dict[str, Any]:
     """
     if value is None:
         return default_execution_preflight()
-    if not isinstance(value, dict) or set(value) != {"scenario_profile_id", "scenario_profile_name", "dependency_plan"}:
+    allowed_keys = {
+        frozenset({"scenario_profile_id", "scenario_profile_name", "dependency_plan"}),
+        frozenset({"scenario_profile_id", "scenario_profile_name", "dependency_plan", "automatic_return"}),
+    }
+    if not isinstance(value, dict) or frozenset(value) not in allowed_keys:
         raise ValueError("验收计划前置配置格式不受支持")
     profile_id, profile_name = value["scenario_profile_id"], value["scenario_profile_name"]
     if profile_id is not None and (not isinstance(profile_id, str) or not profile_id or len(profile_id) > 64 or "\x00" in profile_id):
@@ -159,6 +168,9 @@ def normalize_execution_preflight(value: object) -> dict[str, Any]:
     if (profile_id is None) != (profile_name is None):
         raise ValueError("验收计划场景方案信息不完整")
     dependency_plan = value["dependency_plan"]
+    automatic_return = value.get("automatic_return", False)
+    if not isinstance(automatic_return, bool):
+        raise ValueError("验收计划自动返程配置无效")
     if not isinstance(dependency_plan, dict) or set(dependency_plan) != {"enabled", "steps"} or not isinstance(dependency_plan["enabled"], bool) or not isinstance(dependency_plan["steps"], list):
         raise ValueError("验收计划依赖编排格式无效")
     steps: list[dict[str, Any]] = []
@@ -184,6 +196,7 @@ def normalize_execution_preflight(value: object) -> dict[str, Any]:
         "scenario_profile_id": profile_id,
         "scenario_profile_name": profile_name,
         "dependency_plan": {"enabled": dependency_plan["enabled"], "steps": steps},
+        "automatic_return": automatic_return,
     }
 
 
@@ -196,6 +209,7 @@ def public_execution_preflight(value: dict[str, Any]) -> dict[str, Any]:
         "dependency_plan_enabled": plan["enabled"],
         "dependency_stage_count": len(plan["steps"]),
         "dependency_node_count": sum(len(step["nodes"]) for step in plan["steps"]),
+        "automatic_return_enabled": normalized["automatic_return"],
     }
 
 
@@ -404,7 +418,7 @@ class AcceptancePlan:
 
     def to_storage_dict(self) -> dict[str, Any]:
         return {
-            "schema": 3,
+            "schema": 4,
             "plan_id": self.plan_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -432,7 +446,7 @@ class AcceptancePlan:
 
     @classmethod
     def from_storage_dict(cls, document: dict[str, Any]) -> "AcceptancePlan":
-        if document.get("schema") not in {1, 2, 3} or not isinstance(document.get("items"), list):
+        if document.get("schema") not in {1, 2, 3, 4} or not isinstance(document.get("items"), list):
             raise ValueError("验收计划文件格式不受支持")
         criteria = AcceptanceCriteria.from_dict(dict(document.get("criteria_snapshot") or {}))
         stored_preflight = None if document.get("schema") == 1 else document.get("execution_preflight")
@@ -709,6 +723,10 @@ class AcceptancePlanStore:
         if plan is None or plan.status not in ACTIVE_PLAN_STATUSES:
             return []
         plan.status = "interrupted"
+        # A process restart invalidates its in-memory run ID and every live
+        # preflight message.  Do not present either as active robot work.
+        plan.run_id = None
+        plan.execution_preflight_status = default_execution_preflight_status(plan.execution_preflight)
         if plan.current_index is not None and 0 <= plan.current_index < len(plan.items):
             item = plan.items[plan.current_index]
             if item.status not in TERMINAL_ITEM_STATUSES:

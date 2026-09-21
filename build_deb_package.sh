@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 生成首次离线部署用的 Debian 安装包。包内不包含源码、ROS install 或构建工具。
+# 生成首次离线部署用的 Debian 安装包。包内不包含源码、ROS install、构建工具
+# 或重复的视频依赖目录；视频运行时已随 dist/ry-aletheia 的 PyInstaller 负载内嵌。
 # 用法：./build_deb_package.sh <版本号> [--output-dir <目录>]
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 VIDEO_CONFIG_DEFAULT="${RY_ALETHEIA_VIDEO_CONFIG:-$ROOT/config/video.ros.json}"
@@ -49,10 +50,6 @@ PKG="$STAGE/ry-aletheia"
 OUT="$OUTPUT_DIR/ry-aletheia_${VERSION}_${ARCH}.deb"
 mkdir -p "$PKG/DEBIAN" "$PKG/usr/lib/ry-aletheia/defaults/tasks" "$PKG/usr/lib/ry-aletheia/defaults/config" "$PKG/usr/lib/ry-aletheia" "$PKG/usr/bin" "$PKG/usr/share/doc/ry-aletheia/docs/images"
 
-echo "正在组装锁定的私有视频运行时（开发机下载，目标小车无需 apt）..."
-VIDEO_RUNTIME="$STAGE/video-runtime"
-RY_ALETHEIA_VIDEO_ARCH="$ARCH" "$ROOT/build_video_runtime.sh" --output-dir "$VIDEO_RUNTIME"
-
 DESCRIPTION="Offline first-install package for the RY Aletheia robot QA console."
 
 {
@@ -81,7 +78,6 @@ install -m 0644 "$ROOT/USER_GUIDE.md" "$PKG/usr/lib/ry-aletheia/README.md"
 install -m 0644 "$ROOT/USER_GUIDE.md" "$PKG/usr/share/doc/ry-aletheia/USER_GUIDE.md"
 install -m 0644 "$ROOT/PROJECT_OVERVIEW.md" "$PKG/usr/share/doc/ry-aletheia/PROJECT_OVERVIEW.md"
 install -m 0644 "$VIDEO_CONFIG_DEFAULT" "$PKG/usr/lib/ry-aletheia/defaults/config/video.json"
-cp -a "$VIDEO_RUNTIME" "$PKG/usr/lib/ry-aletheia/video_runtime"
 if [[ -d "$ROOT/docs/images" ]]; then
   while IFS= read -r -d '' guide_image; do
     install -m 0644 "$guide_image" "$PKG/usr/share/doc/ry-aletheia/docs/images/$(basename -- "$guide_image")"
@@ -92,6 +88,14 @@ printf '%s\n' "$VERSION" > "$PKG/usr/lib/ry-aletheia/VERSION"
 while IFS= read -r -d '' task; do
   install -m 0644 "$task" "$PKG/usr/lib/ry-aletheia/defaults/tasks/$(basename -- "$task")"
 done < <(find "$ROOT/tasks" -maxdepth 1 -type f -name '*.json' -print0)
+
+# The binary already carries the validated runtime.  Keep the DEB payload
+# source-only and fail closed if a future packaging change tries to add static
+# archives or the old duplicate runtime directory.
+if find "$PKG" -type f \( -name '*.a' -o -path '*/video_runtime/*' \) -print -quit | grep -q .; then
+  echo "DEB 负载包含不允许的静态库或重复视频依赖目录，拒绝生成。" >&2
+  exit 1
+fi
 
 mkdir -p "$(dirname -- "$OUT")"
 rm -f "$OUT"

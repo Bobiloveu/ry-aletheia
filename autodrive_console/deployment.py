@@ -17,8 +17,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .map_assets import MapAssetCache, MapAssetError
+from .location_manifest import (
+    LocationManifestError,
+    physical_floor_index,
+    validate_path_component,
+)
 from .localization_assets import LocalizationMapError, read_localization_map
+from .map_assets import MapAssetCache, MapAssetError
 from .task_compiler import CompilationPreview, bundle_zip, compile_indoor_elevator
 
 
@@ -42,6 +47,17 @@ class DeploymentStore:
         "outdoor": "室外 / 起点",
         "lobby": "大厅 / 首层",
         "target_floor": "目标楼层",
+    }
+    FLOW_NODE_TYPES = {
+        "outdoor": {"label": "户外图", "description": "从园区或室外起点进入"},
+        "ferry": {"label": "摆渡层", "description": "中间摆渡或换乘地图"},
+        "lobby": {"label": "电梯大厅", "description": "电梯首层候梯地图"},
+        "target_floor": {"label": "用户楼层", "description": "最终配送目标地图"},
+    }
+    LEGACY_STAGE_ORDERS = {
+        "outdoor": ("outdoor",),
+        "indoor": ("lobby", "target_floor"),
+        "indoor_outdoor": ("outdoor", "lobby", "target_floor"),
     }
     PROJECT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
     MAP_ID = re.compile(r"map-[a-z0-9][a-z0-9-]{0,63}\Z")
@@ -340,9 +356,88 @@ class DeploymentStore:
         while self._project_dir(project_id).exists():
             project_id = f"{base[:58]}-{index}"; index += 1
         now = self._now()
-        document = {"schema": self.SCHEMA, "type": "ry-aletheia.site-project", "id": project_id, "name": cleaned, "created_at": now, "updated_at": now, "scene_model": None, "map_assets": [], "map_stage_assignments": [], "buildings": [], "map_instances": [], "localization_bindings": [], "localization_routes": [], "physical_elevators": [], "components": [], "waypoints": [], "routes": [], "map_transitions": [], "virtual_walls": [], "map_edits": [], "behavior_templates": [], "component_templates": self._default_component_templates(), "task_compiler": self._normalise_task_compiler(None), "deployment_config": {"state": "draft", "robot_target": None}, "mapping": {"mode": "import_or_robot", "recording": "not_started"}}
+        document = {"schema": self.SCHEMA, "type": "ry-aletheia.site-project", "id": project_id, "name": cleaned, "created_at": now, "updated_at": now, "scene_model": None, "deployment_flow": [], "map_assets": [], "map_stage_assignments": [], "buildings": [], "map_instances": [], "localization_bindings": [], "localization_routes": [], "physical_elevators": [], "components": [], "waypoints": [], "routes": [], "map_transitions": [], "virtual_walls": [], "map_edits": [], "behavior_templates": [], "component_templates": self._default_component_templates(), "localization_template": None, "task_compiler": self._normalise_task_compiler(None), "deployment_config": {"state": "draft", "robot_target": None}, "mapping": {"mode": "import_or_robot", "recording": "not_started"}}
         self._write_json(self._document_path(project_id), document)
         return document
+
+    def delete_project(self, project_id: str) -> None:
+        """Remove one validated deployment project and all of its snapshots."""
+        project_dir = self._project_dir(project_id)
+        if project_dir.is_symlink() or not project_dir.is_dir():
+            raise DeploymentError("部署项目不存在")
+        # Validate the project document before deleting any user-owned data.
+        self.get(project_id)
+        try:
+            shutil.rmtree(project_dir)
+        except OSError as exc:
+            raise DeploymentError(f"删除部署项目失败：{exc}") from exc
+
+    @classmethod
+    def _legacy_flow(cls, scene_model: object) -> list[dict[str, str]]:
+        order = cls.LEGACY_STAGE_ORDERS.get(str(scene_model or ""), ())
+        return [
+            {
+                "id": stage,
+                "type": stage,
+                "label": cls.FLOW_NODE_TYPES[stage]["label"],
+            }
+            for stage in order
+        ]
+
+    @classmethod
+    def _normalise_deployment_flow(cls, raw: object) -> list[dict[str, str]]:
+        if not isinstance(raw, list):
+            raise DeploymentError("部署流程格式无效")
+        nodes: list[dict[str, str]] = []
+        seen_ids: set[str] = set()
+        counts: dict[str, int] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                raise DeploymentError("部署流程节点格式无效")
+            node_type = str(entry.get("type") or "").strip()
+            if node_type not in cls.FLOW_NODE_TYPES:
+                raise DeploymentError("部署流程包含未知地图阶段")
+            counts[node_type] = counts.get(node_type, 0) + 1
+            if node_type in {"outdoor", "lobby", "target_floor"} and counts[node_type] > 1:
+                raise DeploymentError(f"{cls.FLOW_NODE_TYPES[node_type]['label']}只能配置一个")
+            raw_id = str(entry.get("id") or "").strip()
+            node_id = raw_id or (node_type if node_type != "ferry" else f"ferry-{counts[node_type]}")
+            if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", node_id) or node_id in seen_ids:
+                raise DeploymentError("部署流程节点标识无效或重复")
+            seen_ids.add(node_id)
+            label = " ".join(str(entry.get("label") or cls.FLOW_NODE_TYPES[node_type]["label"]).split())[:80]
+            nodes.append({"id": node_id, "type": node_type, "label": label or cls.FLOW_NODE_TYPES[node_type]["label"]})
+        if not nodes:
+            raise DeploymentError("部署流程不能为空")
+        if counts.get("lobby", 0) != 1:
+            raise DeploymentError("部署流程必须包含一个电梯大厅")
+        if counts.get("target_floor", 0) != 1:
+            raise DeploymentError("部署流程必须包含一个用户楼层")
+        if nodes[-1]["type"] != "target_floor":
+            raise DeploymentError("用户楼层必须是流程末节点")
+        return nodes
+
+    @classmethod
+    def _flow_stage_ids(cls, document: dict[str, Any]) -> list[str]:
+        flow = document.get("deployment_flow")
+        if not isinstance(flow, list) or not flow:
+            flow = cls._legacy_flow(document.get("scene_model"))
+        return [node["id"] for node in flow]
+
+    @classmethod
+    def _flow_stage_labels(cls, document: dict[str, Any]) -> dict[str, str]:
+        flow = document.get("deployment_flow")
+        if not isinstance(flow, list) or not flow:
+            flow = cls._legacy_flow(document.get("scene_model"))
+        return {node["id"]: node["label"] for node in flow}
+
+    @classmethod
+    def _legacy_scene_for_flow(cls, flow: list[dict[str, str]]) -> str:
+        types = tuple(node["type"] for node in flow)
+        for scene_model, order in cls.LEGACY_STAGE_ORDERS.items():
+            if types == order:
+                return scene_model
+        return "custom"
 
     def get(self, project_id: str) -> dict[str, Any]:
         target = self._document_path(project_id)
@@ -354,11 +449,35 @@ class DeploymentStore:
             if not isinstance(document.get(key), list): document[key] = []
         if not isinstance(document.get("map_stage_assignments"), list): document["map_stage_assignments"] = []
         if not isinstance(document.get("deployment_config"), dict): document["deployment_config"] = {"state": "draft", "robot_target": None}
-        if document.get("scene_model") not in {None, "indoor", "indoor_outdoor", "outdoor"}: document["scene_model"] = None
-        # Correct projects created before physical elevator levels were aligned
-        # with the robot protocol (1F maps to command level 2).  This is a
-        # derived value only; no user-entered field is changed.
+        if document.get("localization_template") is not None and not isinstance(document.get("localization_template"), dict):
+            document["localization_template"] = None
+        if document.get("scene_model") not in {None, "indoor", "indoor_outdoor", "outdoor", "custom"}: document["scene_model"] = None
         migrated = False
+        raw_flow = document.get("deployment_flow")
+        if not isinstance(raw_flow, list) or not raw_flow:
+            deployment_flow = self._legacy_flow(document.get("scene_model"))
+            if raw_flow != deployment_flow:
+                document["deployment_flow"] = deployment_flow
+                migrated = True
+        else:
+            try:
+                deployment_flow = self._normalise_deployment_flow(raw_flow)
+            except DeploymentError:
+                deployment_flow = self._legacy_flow(document.get("scene_model"))
+                migrated = True
+            if document.get("deployment_flow") != deployment_flow:
+                document["deployment_flow"] = deployment_flow
+                migrated = True
+        for waypoint in document["waypoints"]:
+            if isinstance(waypoint, dict) and waypoint.get("kind") == "return":
+                waypoint["kind"] = "transition"
+                if waypoint.get("label") in {None, "", "返程点"}:
+                    waypoint["label"] = "过渡点"
+                migrated = True
+        # Keep the legacy route field readable for older project snapshots.  New
+        # routes never write it and the compiler ignores it whenever a target
+        # floor elevator is available; retaining it here lets old projects fall
+        # back safely when their snapshot predates elevator components.
         templates = self._normalise_component_templates(document.get("component_templates"))
         if document.get("component_templates") != templates:
             document["component_templates"] = templates
@@ -384,13 +503,6 @@ class DeploymentStore:
                 continue
             if "wait_distance_m" not in attributes:
                 attributes["wait_distance_m"] = 1.5
-                migrated = True
-            try:
-                physical_floor = int(attributes.get("map_floor", 1)) + 1
-            except (TypeError, ValueError):
-                continue
-            if attributes.get("physical_floor") != physical_floor:
-                attributes["physical_floor"] = physical_floor
                 migrated = True
         if migrated: self._write_json(target, document)
         return document
@@ -590,11 +702,13 @@ class DeploymentStore:
     def _normalise_localization_route(
         self, document: dict[str, Any], data: object, *, identifier: str | None = None
     ) -> dict[str, Any]:
-        if not isinstance(data, dict) or set(data) != {
+        allowed_route_keys = {
             "building", "unit", "binding_ids", "task_start_waypoint_id",
-            "task_target_waypoint_id", "links",
-        }:
-            raise DeploymentError("定位路线仅接受楼栋、单元、绑定、任务起终点和链接")
+            "task_target_waypoint_id", "task_return_waypoint_id", "links",
+        }
+        legacy_route_keys = allowed_route_keys - {"task_return_waypoint_id"}
+        if not isinstance(data, dict) or set(data) not in (legacy_route_keys, allowed_route_keys):
+            raise DeploymentError("定位路线仅接受楼栋、单元、绑定、任务起点、目标点和链接")
         building = self._normalise_localization_identifier(data["building"], "楼栋")
         unit = self._normalise_localization_identifier(data["unit"], "单元")
         raw_binding_ids = data["binding_ids"]
@@ -623,7 +737,7 @@ class DeploymentStore:
         start_id = str(data["task_start_waypoint_id"] or "").strip()
         target_id = str(data["task_target_waypoint_id"] or "").strip()
         if not start_id or not target_id:
-            raise DeploymentError("定位路线必须指定任务起点和目标 Waypoint")
+            raise DeploymentError("定位路线必须指定任务起点和目标点")
         start = self._localization_route_waypoint(document, start_id)
         target = self._localization_route_waypoint(document, target_id)
         if start.get("map_asset_id") != bindings[0].get("map_asset_id"):
@@ -631,7 +745,7 @@ class DeploymentStore:
         if target.get("map_asset_id") != bindings[-1].get("map_asset_id"):
             raise DeploymentError("任务目标必须位于末个定位绑定地图")
         links = self._normalise_localization_route_links(document, data["links"], bindings)
-        return {
+        result = {
             "id": identifier or f"localization-route-{uuid.uuid4().hex[:12]}",
             "building": building,
             "unit": unit,
@@ -640,6 +754,11 @@ class DeploymentStore:
             "task_target_waypoint_id": target_id,
             "links": links,
         }
+        # Keep the legacy field readable for old project snapshots, but new
+        # routes never need or persist a manually selected return point.
+        if "task_return_waypoint_id" in data and str(data.get("task_return_waypoint_id") or "").strip():
+            result["task_return_waypoint_id"] = str(data["task_return_waypoint_id"]).strip()
+        return result
 
     @staticmethod
     def _localization_route_waypoint(document: dict[str, Any], waypoint_id: str) -> dict[str, Any]:
@@ -724,7 +843,13 @@ class DeploymentStore:
     @staticmethod
     def _localization_route_references_waypoint(route: dict[str, Any], waypoint_id: str) -> bool:
         return (
-            waypoint_id in {route.get("task_start_waypoint_id"), route.get("task_target_waypoint_id")}
+            waypoint_id in {
+                route.get("task_start_waypoint_id"),
+                route.get("task_target_waypoint_id"),
+                # Legacy projects may still need this fallback until an
+                # elevator landing component is added; new routes never set it.
+                route.get("task_return_waypoint_id"),
+            }
             or any(
                 isinstance(link, dict)
                 and isinstance(link.get("anchor"), dict)
@@ -806,6 +931,35 @@ class DeploymentStore:
         self._write_json(self._document_path(project_id), document)
         return compiler
 
+    def upload_localization_template(self, project_id: str, filename: object, contents: bytes) -> dict[str, Any]:
+        """Store the operator-approved localization YAML for future exports."""
+        document = self.get(project_id)
+        if not isinstance(contents, (bytes, bytearray)) or not 1 <= len(contents) <= 2 * 1024 * 1024:
+            raise DeploymentError("定位配置模板大小无效或超过 2 MiB 限制")
+        safe_name = Path(str(filename or "")).name
+        if not safe_name or Path(safe_name).suffix.lower() not in {".yaml", ".yml"}:
+            raise DeploymentError("定位配置模板必须是 YAML 文件")
+        try:
+            text = bytes(contents).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise DeploymentError("定位配置模板必须使用 UTF-8 编码") from exc
+        if len(re.findall(r"(?m)^\s*map_path:\s*.*$", text)) != 1:
+            raise DeploymentError("定位配置模板必须包含唯一 system.map_path")
+        for field in ("x", "y", "yaw"):
+            if len(re.findall(rf"(?m)^    {field}:\s*.*$", text)) != 1:
+                raise DeploymentError(f"定位配置模板必须包含唯一 init_pose.{field}")
+        target = self._project_dir(project_id) / "localization-template.yaml"
+        self._write_bytes(target, bytes(contents))
+        metadata = {
+            "name": safe_name,
+            "path": target.name,
+            "sha256": hashlib.sha256(bytes(contents)).hexdigest(),
+        }
+        document["localization_template"] = metadata
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
+        return metadata
+
     def task_compiler_preview(self, project_id: str) -> dict[str, Any]:
         document = self.get(project_id)
         preview = compile_indoor_elevator(
@@ -829,13 +983,28 @@ class DeploymentStore:
     def set_scene_model(self, project_id: str, scene_model: object) -> dict[str, Any]:
         document = self.get(project_id)
         value = str(scene_model or "")
-        if value not in self.STAGE_ORDER:
+        if value not in self.LEGACY_STAGE_ORDERS:
             raise DeploymentError("场景模型无效")
         assignments = self._stage_assignment_map(document)
-        allowed_stages = set(self.STAGE_ORDER[value])
+        allowed_stages = set(self.LEGACY_STAGE_ORDERS[value])
         if any(stage not in allowed_stages for stage in assignments):
             raise DeploymentError("场景模型与已有地图阶段不兼容；请先调整地图阶段")
+        document["deployment_flow"] = self._legacy_flow(value)
         document["scene_model"] = value
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
+        return document
+
+    def set_deployment_flow(self, project_id: str, flow: object) -> dict[str, Any]:
+        document = self.get(project_id)
+        deployment_flow = self._normalise_deployment_flow(flow)
+        stage_ids = {node["id"] for node in deployment_flow}
+        assignments = self._stage_assignment_map(document)
+        if any(stage not in stage_ids for stage in assignments):
+            raise DeploymentError("新流程不能移除已有地图阶段；请先调整地图绑定")
+        document["deployment_flow"] = deployment_flow
+        document["scene_model"] = self._legacy_scene_for_flow(deployment_flow)
         self._invalidate_task_compiler_preview(document)
         document["updated_at"] = self._now()
         self._write_json(self._document_path(project_id), document)
@@ -915,33 +1084,35 @@ class DeploymentStore:
     def stage_plan(self, project_id: str) -> dict[str, Any]:
         """Return the ordered deployment map stages without changing the project."""
         document = self.get(project_id)
-        if document.get("scene_model") not in self.STAGE_ORDER:
-            return {"scene_model": None, "stages": [], "current_stage": None, "errors": ["请先选择场景模型"]}
+        stage_order = self._flow_stage_ids(document)
+        if not stage_order:
+            return {"scene_model": None, "deployment_flow": [], "stages": [], "current_stage": None, "errors": ["请先配置部署流程"]}
         assignments = self._stage_assignment_map(document)
         assets = {item.get("id"): item for item in document["map_assets"] if isinstance(item, dict)}
+        labels = self._flow_stage_labels(document)
         stages = []
-        for stage in self.STAGE_ORDER[document["scene_model"]]:
+        for stage in stage_order:
             map_id = assignments.get(stage)
             asset = assets.get(map_id)
             stages.append({
                 "stage": stage,
-                "label": self.STAGE_LABELS[stage],
+                "label": labels[stage],
                 "map_asset_id": map_id,
                 "map_label": asset.get("label") if asset else None,
                 "status": "editing" if asset else "missing",
             })
         current = next((item["stage"] for item in stages if item["status"] == "missing"), None)
-        return {"scene_model": document["scene_model"], "stages": stages, "current_stage": current, "errors": []}
+        return {"scene_model": document.get("scene_model"), "deployment_flow": document.get("deployment_flow", []), "stages": stages, "current_stage": current, "errors": []}
 
     def assign_map_stage(self, project_id: str, map_id: object, stage: object) -> dict[str, Any]:
         """Bind one project map asset to one required deployment stage."""
         document = self.get(project_id)
-        scene_model = document.get("scene_model")
-        if scene_model not in self.STAGE_ORDER:
-            raise DeploymentError("请先选择场景模型")
+        stage_order = self._flow_stage_ids(document)
+        if not stage_order:
+            raise DeploymentError("请先配置部署流程")
         asset_id, stage_id = str(map_id or ""), str(stage or "")
-        if stage_id not in self.STAGE_ORDER[scene_model]:
-            raise DeploymentError("地图阶段不属于当前场景模型")
+        if stage_id not in stage_order:
+            raise DeploymentError("地图阶段不属于当前场景模型/部署流程")
         if not any(item.get("id") == asset_id for item in document["map_assets"] if isinstance(item, dict)):
             raise DeploymentError("要绑定的地图资产不存在")
         assignments = self._stage_assignment_map(document)
@@ -951,7 +1122,7 @@ class DeploymentStore:
         assignments[stage_id] = asset_id
         document["map_stage_assignments"] = [
             {"stage": key, "map_asset_id": assignments[key]}
-            for key in self.STAGE_ORDER[scene_model]
+            for key in stage_order
             if key in assignments
         ]
         self._invalidate_task_compiler_preview(document)
@@ -962,9 +1133,9 @@ class DeploymentStore:
     def add_map_transition(self, project_id: str, data: dict[str, Any]) -> dict[str, Any]:
         """Create one directed hand-off between immediately adjacent map stages."""
         document = self.get(project_id)
-        scene_model = document.get("scene_model")
-        if scene_model not in self.STAGE_ORDER:
-            raise DeploymentError("请先选择场景模型")
+        stages = self._flow_stage_ids(document)
+        if not stages:
+            raise DeploymentError("请先配置部署流程")
         source = self._waypoint(document, str(data.get("from_waypoint_id") or ""))
         target = self._waypoint(document, str(data.get("to_waypoint_id") or ""))
         from_map = str(data.get("from_map_asset_id") or "")
@@ -978,14 +1149,14 @@ class DeploymentStore:
         to_stage = next((stage for stage, map_id in assignments.items() if map_id == to_map), None)
         if not from_stage or not to_stage:
             raise DeploymentError("Transition 两端地图必须先绑定部署阶段")
-        stages = self.STAGE_ORDER[scene_model]
         if stages.index(to_stage) != stages.index(from_stage) + 1:
             raise DeploymentError("Transition 只能连接相邻阶段")
         if any(item.get("from_map_asset_id") == from_map for item in document["map_transitions"]):
             raise DeploymentError("该地图阶段已有出向 Transition")
         if any(item.get("to_map_asset_id") == to_map for item in document["map_transitions"]):
             raise DeploymentError("该地图阶段已有入向 Transition")
-        label = " ".join(str(data.get("label") or f"{self.STAGE_LABELS[from_stage]} 至 {self.STAGE_LABELS[to_stage]}").split())[:80]
+        stage_labels = self._flow_stage_labels(document)
+        label = " ".join(str(data.get("label") or f"{stage_labels[from_stage]} 至 {stage_labels[to_stage]}").split())[:80]
         if not label:
             raise DeploymentError("Transition 名称不能为空")
         template_ref = data.get("behavior_template_ref")
@@ -1055,52 +1226,36 @@ class DeploymentStore:
     def validate_topology(self, project_id: str) -> dict[str, Any]:
         """Validate the project-owned delivery topology without generating files."""
         document = self.get(project_id)
-        scene_model = document.get("scene_model")
-        if scene_model not in self.STAGE_ORDER:
+        stage_order = self._flow_stage_ids(document)
+        if not stage_order:
             return {
                 "valid": False,
-                "errors": ["请先选择场景模型"],
+                "errors": ["请先配置部署流程"],
                 "stages": [],
                 "transitions": [],
                 "routes": [],
                 "virtual_wall_count": len(document["virtual_walls"]),
             }
-        stage_order = self.STAGE_ORDER[scene_model]
         assignments = self._stage_assignment_map(document)
         assets = {item.get("id"): item for item in document["map_assets"] if isinstance(item, dict)}
+        labels = self._flow_stage_labels(document)
         points = {item.get("id"): item for item in document["waypoints"] if isinstance(item, dict)}
         errors: list[str] = []
         map_by_stage: dict[str, str] = {}
         for stage in stage_order:
             map_id = assignments.get(stage)
             if not map_id or map_id not in assets:
-                errors.append(f"{self.STAGE_LABELS[stage]}缺少地图")
+                errors.append(f"{labels[stage]}缺少地图")
             else:
                 map_by_stage[stage] = map_id
 
-        valid_transitions: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        transition_preview: list[dict[str, Any]] = []
-        for transition in document["map_transitions"]:
-            if not isinstance(transition, dict):
-                errors.append("Transition 数据格式无效")
-                continue
-            from_map = transition.get("from_map_asset_id")
-            to_map = transition.get("to_map_asset_id")
-            source = points.get(transition.get("from_waypoint_id"))
-            target = points.get(transition.get("to_waypoint_id"))
-            if not isinstance(source, dict) or not isinstance(target, dict):
-                errors.append("Transition 引用了不存在的 Waypoint")
-                continue
-            if source.get("map_asset_id") != from_map or target.get("map_asset_id") != to_map:
-                errors.append("Transition Waypoint 与地图不一致")
-                continue
-            from_stage = next((stage for stage, map_id in map_by_stage.items() if map_id == from_map), None)
-            to_stage = next((stage for stage, map_id in map_by_stage.items() if map_id == to_map), None)
-            if not from_stage or not to_stage or stage_order.index(to_stage) != stage_order.index(from_stage) + 1:
-                errors.append("Transition 未连接相邻地图阶段")
-                continue
-            valid_transitions.setdefault((from_stage, to_stage), []).append(transition)
-            transition_preview.append(transition)
+        # Map switching is owned by the generated behavior tree and the
+        # ordered localization route.  Legacy projects may still contain
+        # hand-authored map_transitions, but those records are informational
+        # only and must never block topology validation or deployment export.
+        transition_preview = [
+            item for item in document.get("map_transitions", []) if isinstance(item, dict)
+        ]
 
         stage_status: dict[str, str] = {
             stage: "missing" if stage not in map_by_stage else "editing"
@@ -1117,11 +1272,6 @@ class DeploymentStore:
             for point in points.values()
         ):
             errors.append("最终阶段缺少目标 Waypoint")
-        for index, stage in enumerate(stage_order[:-1]):
-            next_stage = stage_order[index + 1]
-            links = valid_transitions.get((stage, next_stage), [])
-            if len(links) != 1:
-                errors.append(f"{self.STAGE_LABELS[stage]}至{self.STAGE_LABELS[next_stage]}缺少唯一 Transition")
         if not errors:
             for stage in stage_order:
                 stage_status[stage] = "complete"
@@ -1144,7 +1294,7 @@ class DeploymentStore:
         stages = [
             {
                 "stage": stage,
-                "label": self.STAGE_LABELS[stage],
+                "label": labels[stage],
                 "map_asset_id": map_by_stage.get(stage),
                 "map_label": assets[map_by_stage[stage]]["label"] if stage in map_by_stage else None,
                 "status": stage_status[stage],
@@ -1162,19 +1312,19 @@ class DeploymentStore:
 
     def _assign_next_stage(self, document: dict[str, Any], map_id: str) -> None:
         """Use the next empty stage for imports without ever moving an existing map."""
-        scene_model = document.get("scene_model")
-        if scene_model not in self.STAGE_ORDER:
+        stage_order = self._flow_stage_ids(document)
+        if not stage_order:
             return
         assignments = self._stage_assignment_map(document)
         if map_id in assignments.values():
             return
-        next_stage = next((stage for stage in self.STAGE_ORDER[scene_model] if stage not in assignments), None)
+        next_stage = next((stage for stage in stage_order if stage not in assignments), None)
         if not next_stage:
             return
         assignments[next_stage] = map_id
         document["map_stage_assignments"] = [
             {"stage": stage, "map_asset_id": assignments[stage]}
-            for stage in self.STAGE_ORDER[scene_model]
+            for stage in stage_order
             if stage in assignments
         ]
 
@@ -1244,7 +1394,9 @@ class DeploymentStore:
         maximum_y = minimum_y + float(asset["height"]) * float(asset["resolution_m"])
         if not (minimum_x <= x <= maximum_x and minimum_y <= y <= maximum_y): raise DeploymentError("Waypoint 必须位于地图边界内")
         kind = str(data.get("kind", "waypoint"))
-        if kind not in {"start", "target", "waypoint", "building_entrance", "map_transition"}: raise DeploymentError("Waypoint 类型无效")
+        if kind == "return":
+            kind = "transition"
+        if kind not in {"start", "target", "transition", "waypoint", "building_entrance", "map_transition"}: raise DeploymentError("Waypoint 类型无效")
         label = " ".join(str(data.get("label") or kind).split())[:80]
         if not label: raise DeploymentError("Waypoint 名称不能为空")
         item = {"id": f"waypoint-{uuid.uuid4().hex[:12]}", "map_asset_id": map_id, "kind": kind, "label": label, "x": x, "y": y, "yaw": yaw}
@@ -1415,12 +1567,14 @@ class DeploymentStore:
             for index in range(len(edits) - 1, -1, -1):
                 if edits[index].get("map_asset_id") == map_id:
                     edits.pop(index)
+                    self._invalidate_task_compiler_preview(document)
                     document["updated_at"] = self._now()
                     self._write_json(self._document_path(project_id), document)
                     return document
             raise DeploymentError("当前地图没有可撤销的擦除操作")
         if action == "clear":
             document["map_edits"] = [item for item in edits if item.get("map_asset_id") != map_id]
+            self._invalidate_task_compiler_preview(document)
             document["updated_at"] = self._now()
             self._write_json(self._document_path(project_id), document)
             return document
@@ -1460,6 +1614,7 @@ class DeploymentStore:
             edit["radius_m"] = radius_m
             edit["shape"] = shape
         document["map_edits"].append(edit)
+        self._invalidate_task_compiler_preview(document)
         document["updated_at"] = self._now()
         self._write_json(self._document_path(project_id), document)
         return document
@@ -1565,13 +1720,29 @@ class DeploymentStore:
         physical_elevator_id = str(attributes.get("physical_elevator_id") or "").strip()
         if not physical_elevator_id:
             raise DeploymentError("电梯落点必须关联物理电梯")
-        if not any(
-            item.get("id") == physical_elevator_id
-            for item in document.get("physical_elevators", [])
-            if isinstance(item, dict)
-        ):
+        physical = next(
+            (
+                item
+                for item in document.get("physical_elevators", [])
+                if isinstance(item, dict) and item.get("id") == physical_elevator_id
+            ),
+            None,
+        )
+        if physical is None:
             raise DeploymentError("物理电梯不存在")
         local = dict(attributes)
+        button_floor = local.get("button_floor")
+        if button_floor not in (None, ""):
+            try:
+                button_floor = int(button_floor)
+                physical_floor_index(
+                    int(physical["min_floor"]), int(physical["max_floor"]), button_floor
+                )
+            except (TypeError, ValueError, LocationManifestError) as exc:
+                raise DeploymentError(f"电梯按钮层无效：{exc}") from exc
+            local["button_floor"] = button_floor
+        else:
+            local.pop("button_floor", None)
         for key in (
             "elevator_id",
             "elevator_protocol",

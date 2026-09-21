@@ -1,3 +1,3 @@
 # 部署文档
 
-机器人发布、DEB、升级、配置和视频运行时说明保留在 [PROJECT_OVERVIEW](../../PROJECT_OVERVIEW.md) 与根目录构建脚本中。修改面向客户端的地图或部署行为前，阅读[部署契约](../../shared/contracts/deployment.md)。
+机器人发布、DEB、升级、配置和视频运行时说明保留在 [PROJECT_OVERVIEW](../../PROJECT_OVERVIEW.md) 与根目录构建脚本中。修改面向客户端的地图或部署行为前，阅读[部署契约](../../shared/contracts/deployment.md)。PC 部署工作台的地图阶段采用可拖拽的 `deployment_flow`，可配置户外图、重复摆渡层、电梯大厅和最后的用户楼层；这只改变项目快照编辑能力，不等于实验任务编译器已经支持所有现场转场。部署项目删除同样只清理项目工作区，不触碰机器人运行目录。

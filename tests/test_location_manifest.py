@@ -81,13 +81,14 @@ def test_location_manifest_groups_bindings_by_building_unit_and_preserves_floor_
             {"id": "start", "map_asset_id": "indoor", "x": 0.0, "y": 0.0, "yaw": 0.0},
             {"id": "anchor", "map_asset_id": "indoor", "x": 0.0, "y": 0.0, "yaw": 0.0},
             {"id": "target", "map_asset_id": "floor", "x": 0.0, "y": 0.0, "yaw": 0.0},
+            {"id": "return", "map_asset_id": "floor", "x": 0.8, "y": 0.6, "yaw": 0.2},
         ],
         "components": [],
         "physical_elevators": [],
         "localization_routes": [{
             "id": "route", "building": "1", "unit": "1",
             "binding_ids": ["binding-indoor", "binding-floor"],
-            "task_start_waypoint_id": "start", "task_target_waypoint_id": "target",
+            "task_start_waypoint_id": "start", "task_target_waypoint_id": "target", "task_return_waypoint_id": "return",
             "links": [{
                 "from_binding_id": "binding-indoor", "to_binding_id": "binding-floor",
                 "anchor": {"kind": "waypoint", "waypoint_id": "anchor"},
@@ -148,6 +149,7 @@ def _route_project(tmp_path: Path, *, kinds: tuple[str, ...] = ("outdoor", "indo
     waypoints.extend([
         {"id": "start", "map_asset_id": assets[0]["id"], "x": 1.0, "y": 2.0, "yaw": 0.1},
         {"id": "target", "map_asset_id": assets[-1]["id"], "x": 20.0, "y": 21.0, "yaw": 0.0},
+        {"id": "return", "map_asset_id": assets[-1]["id"], "x": 22.0, "y": 23.0, "yaw": 0.4},
     ])
     links = []
     components = []
@@ -190,6 +192,7 @@ def _route_project(tmp_path: Path, *, kinds: tuple[str, ...] = ("outdoor", "indo
             "binding_ids": [item["id"] for item in bindings],
             "task_start_waypoint_id": "start",
             "task_target_waypoint_id": "target",
+            "task_return_waypoint_id": "return",
             "links": links,
         }],
         "waypoints": waypoints,
@@ -198,17 +201,69 @@ def _route_project(tmp_path: Path, *, kinds: tuple[str, ...] = ("outdoor", "indo
     }, map_root
 
 
-def test_manifest_uses_manual_start_then_yaml_origins_and_route_return_anchors(tmp_path: Path):
-    """Catches reading stale manual binding poses instead of the controlled route."""
+def test_manifest_uses_manual_start_then_elevator_center_origin_and_route_return_anchors(tmp_path: Path):
+    """Subsequent maps start at the elevator-centre capture origin, not raster origin."""
     project, map_root = _route_project(tmp_path)
 
     rendered = compile_location_manifest(project, map_root=map_root)
 
     entries = json.loads(rendered.json_bytes)["loc_yaml"][0]["yaml_index"]
     assert entries[0]["init_go"] == {"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.1}
-    assert entries[1]["init_go"] == {"x": -5.0, "y": -30.0, "z": 0.0, "yaw": 0.3}
+    assert entries[1]["init_go"] == {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
     assert entries[1]["init_return"] == {"x": 8.0, "y": 9.0, "z": 0.0, "yaw": 1.57}
-    assert entries[2]["init_return"] == {"x": 20.0, "y": 21.0, "z": 0.0, "yaw": 0.0}
+    assert entries[2]["init_return"] == {"x": 22.0, "y": 23.0, "z": 0.0, "yaw": 0.4}
+
+
+def test_first_localization_yaml_init_pose_matches_manual_route_start(tmp_path: Path):
+    """The runtime YAML must initialize at the selected task start, not (0, 0)."""
+    project, map_root = _route_project(tmp_path)
+
+    rendered = compile_location_manifest(project, map_root=map_root)
+
+    artifact = next(
+        item for item in rendered.artifacts
+        if item.relative_path.endswith("runtime/localization/高科一号/1_1/outdoor.yaml")
+    )
+    text = artifact.content.decode("utf-8")
+    assert "    x: 1.0" in text
+    assert "    y: 2.0" in text
+    assert "    yaw: 0.1" in text
+
+
+def test_manifest_rasterizes_saved_map_edits_into_exported_pgm(tmp_path: Path):
+    """Catches exporting the untouched source image after an editor erase."""
+    project, map_root = _route_project(tmp_path, kinds=("floor",))
+    project["map_edits"] = [{
+        "id": "edit-1",
+        "map_asset_id": "asset-0",
+        "kind": "brush_erase",
+        "radius_m": 0.5,
+        "shape": "square",
+        "points": [{"x": 0.0, "y": 0.0}],
+    }]
+
+    rendered = compile_location_manifest(project, map_root=map_root)
+    artifact = next(item for item in rendered.artifacts if item.relative_path.endswith("/map.pgm"))
+    pixels = artifact.content.split(b"\n", 3)[3]
+
+    # The fixture is entirely occupied (0); world (0, 0) maps to image pixel
+    # (10, 89) for origin (-10, -10), and the erase must make it free (254).
+    assert pixels[89 * 100 + 10] == 254
+
+
+def test_subsequent_localization_yaml_init_pose_uses_elevator_capture_origin(tmp_path: Path):
+    project, map_root = _route_project(tmp_path)
+
+    rendered = compile_location_manifest(project, map_root=map_root)
+
+    artifact = next(
+        item for item in rendered.artifacts
+        if item.relative_path.endswith("runtime/localization/高科一号/1_1/indoor.yaml")
+    )
+    text = artifact.content.decode("utf-8")
+    assert "    x: 0.0" in text
+    assert "    y: 0.0" in text
+    assert "    yaw: 0.0" in text
 
 
 def test_single_map_floor_route_uses_manual_start_and_target_poses(tmp_path: Path):
@@ -219,49 +274,69 @@ def test_single_map_floor_route_uses_manual_start_and_target_poses(tmp_path: Pat
 
     entry = json.loads(rendered.json_bytes)["loc_yaml"][0]["yaml_index"][0]
     assert entry["init_go"] == {"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.1}
-    assert entry["init_return"] == {"x": 20.0, "y": 21.0, "z": 0.0, "yaw": 0.0}
+    assert entry["init_return"] == {"x": 22.0, "y": 23.0, "z": 0.0, "yaw": 0.4}
 
 
-def test_manifest_packages_the_localization_index_and_its_numbered_cloud_chunks(tmp_path: Path):
-    """Catches generating system.map_path that contains only a 2D map."""
+def test_manifest_packages_every_valid_pcd_beside_a_compatibility_index(tmp_path: Path):
+    """Catches dropping available PCD assets because old index paths differ."""
     project, root = _route_project(tmp_path, kinds=("floor",))
     source = Path(project["map_assets"][0]["source_yaml"])
     source.with_name("index.txt").write_text(
-        "0 0 0\n7 -1 2 /original/robot/location/7.pcd\n# functional points\nstart 1 2 0 0 0 0 1\n",
+        "0 0 0\n7 -1 2 /original/robot/location/lobby-cloud.pcd\n# functional points\nstart 1 2 0 0 0 0 1\n",
         encoding="utf-8",
     )
-    source.with_name("7.pcd").write_bytes(b"# indexed static point cloud\n")
-    source.with_name("7_dyn.pcd").write_bytes(b"# optional dynamic point cloud\n")
+    source.with_name("lobby-cloud.pcd").write_bytes(b"# indexed static point cloud\n")
     source.with_name("unrelated.pcd").write_bytes(b"# unindexed file\n")
 
     rendered = compile_location_manifest(project, map_root=root)
     files = {artifact.relative_path: artifact.content for artifact in rendered.artifacts}
     prefix = "runtime/maps/高科一号/1_1/floor-2/"
     assert files[prefix + "index.txt"] == (
-        b"0 0 0\n7 -1 2 7.pcd\n# functional points\nstart 1 2 0 0 0 0 1\n"
+        b"0 0 0\n7 -1 2 /original/robot/location/lobby-cloud.pcd\n# functional points\nstart 1 2 0 0 0 0 1\n"
     )
-    assert files[prefix + "7.pcd"] == b"# indexed static point cloud\n"
-    assert files[prefix + "7_dyn.pcd"] == b"# optional dynamic point cloud\n"
-    assert prefix + "unrelated.pcd" not in files
+    assert files[prefix + "0.pcd"] == b"# controlled cloud fixture\n"
+    assert files[prefix + "lobby-cloud.pcd"] == b"# indexed static point cloud\n"
+    assert files[prefix + "unrelated.pcd"] == b"# unindexed file\n"
 
 
-def test_manifest_blocks_localization_output_without_a_map_index(tmp_path: Path):
-    """Catches exporting localization-ready YAML without the loader's index."""
+def test_manifest_keeps_legacy_index_paths_when_a_single_cloud_is_renamed(tmp_path: Path):
+    """Catches rewriting compatibility metadata to match an uploaded PCD name."""
+    project, root = _route_project(tmp_path, kinds=("floor",))
+    source = Path(project["map_assets"][0]["source_yaml"])
+    source.with_name("0.pcd").unlink()
+    source.with_name("index.txt").write_text(
+        "0 0 0\n7 -1 2 /legacy/build/1.pcd\n",
+        encoding="utf-8",
+    )
+    source.with_name("elevator-hall-cloud.pcd").write_bytes(b"# uploaded cloud\n")
+
+    rendered = compile_location_manifest(project, map_root=root)
+    files = {artifact.relative_path: artifact.content for artifact in rendered.artifacts}
+    prefix = "runtime/maps/高科一号/1_1/floor-2/"
+    assert files[prefix + "index.txt"] == b"0 0 0\n7 -1 2 /legacy/build/1.pcd\n"
+    assert files[prefix + "elevator-hall-cloud.pcd"] == b"# uploaded cloud\n"
+
+
+def test_manifest_exports_localization_output_without_a_compatibility_index(tmp_path: Path):
+    """The compatibility index is optional when controlled PCD files exist."""
     project, root = _route_project(tmp_path, kinds=("floor",))
     source = Path(project["map_assets"][0]["source_yaml"])
     source.with_name("index.txt").unlink(missing_ok=True)
 
-    with pytest.raises(LocationManifestError, match="index.txt"):
-        compile_location_manifest(project, map_root=root)
+    rendered = compile_location_manifest(project, map_root=root)
+    files = {artifact.relative_path for artifact in rendered.artifacts}
+    assert not any(path.endswith("/index.txt") for path in files)
+    assert any(path.endswith("/0.pcd") for path in files)
 
 
-def test_manifest_blocks_localization_output_when_an_indexed_chunk_is_missing(tmp_path: Path):
-    """Catches silently packaging an index that refers to an absent chunk."""
+def test_manifest_blocks_localization_output_without_any_point_cloud(tmp_path: Path):
+    """Catches accepting a compatibility index without a usable PCD asset."""
     project, root = _route_project(tmp_path, kinds=("floor",))
     source = Path(project["map_assets"][0]["source_yaml"])
+    source.with_name("0.pcd").unlink()
     source.with_name("index.txt").write_text("0 0 0\n7 -1 2 /original/7.pcd\n", encoding="utf-8")
 
-    with pytest.raises(LocationManifestError, match="7.pcd"):
+    with pytest.raises(LocationManifestError, match="至少需要一份有效 PCD"):
         compile_location_manifest(project, map_root=root)
 
 

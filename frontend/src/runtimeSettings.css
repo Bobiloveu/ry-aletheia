@@ -2,6 +2,157 @@
   display: grid;
   gap: 12px;
 }
+
+/* Optional console autostart. The control keeps the rocker affordance from
+   the supplied reference, but uses the console's graphite / cyan palette. */
+.autostart-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid #28435a;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #0d1c2c, #111a25);
+}
+.autostart-setting h3 {
+  margin: 3px 0 4px;
+  color: #f2f7fb;
+  font-size: 14px;
+  letter-spacing: 0.01em;
+}
+.autostart-setting p:not(.eyebrow) {
+  max-width: 540px;
+  margin: 0;
+  color: #91a9bb;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.autostart-setting-control {
+  display: grid;
+  justify-items: end;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+.autostart-status {
+  min-height: 12px;
+  color: #70cbd3;
+  font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+}
+.rocker.autostart-rocker {
+  position: relative;
+  display: inline-block;
+  width: 7em;
+  height: 4em;
+  margin: 0;
+  overflow: hidden;
+  border-bottom: 0.5em solid #071522;
+  color: #8ea5b6;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-align: center;
+  text-transform: uppercase;
+}
+.autostart-rocker::before {
+  content: "";
+  position: absolute;
+  inset: 0.5em 0 0;
+  border: 0.5em solid #172b3b;
+  border-bottom: 0;
+  background: #102232;
+}
+.autostart-rocker input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+}
+.autostart-rocker .switch-left,
+.autostart-rocker .switch-right {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 3em;
+  height: 2.5em;
+  cursor: pointer;
+  user-select: none;
+  transition: 0.2s ease;
+}
+.autostart-rocker .switch-left {
+  left: 0.85em;
+  bottom: 0.4em;
+  width: 2.75em;
+  height: 2.4em;
+  transform: rotate(15deg) skewX(15deg);
+  background: #203241;
+  color: #8ea5b6;
+}
+.autostart-rocker .switch-right {
+  right: 0.5em;
+  bottom: 0;
+  background: #773e4d;
+  color: #ffdce2;
+}
+.autostart-rocker .switch-left::before,
+.autostart-rocker .switch-right::before {
+  content: "";
+  position: absolute;
+  bottom: -0.45em;
+  width: 0.4em;
+  height: 2.45em;
+  background: #2b4354;
+  transform: skewY(-65deg);
+}
+.autostart-rocker .switch-left::before { left: -0.4em; }
+.autostart-rocker .switch-right::before {
+  right: -0.375em;
+  background: transparent;
+  transform: skewY(65deg);
+}
+.autostart-rocker input:checked + .switch-left {
+  left: 0.5em;
+  bottom: 0;
+  width: 3em;
+  height: 2.5em;
+  transform: rotate(0) skewX(0);
+  background: #146f7c;
+  color: #eaffff;
+  box-shadow: 0 0 12px #29d7d044;
+}
+.autostart-rocker input:checked + .switch-left::before { background: transparent; width: 3.0833em; }
+.autostart-rocker input:checked + .switch-left + .switch-right {
+  right: 0.8em;
+  bottom: 0.4em;
+  width: 2.75em;
+  height: 2.4em;
+  transform: rotate(-15deg) skewX(-15deg);
+  background: #203241;
+  color: #8ea5b6;
+}
+.autostart-rocker input:checked + .switch-left + .switch-right::before { background: #2b4354; }
+.autostart-rocker input:focus-visible + .switch-left,
+.autostart-rocker input:focus-visible + .switch-left + .switch-right {
+  outline: 2px solid #5ca0ff;
+  outline-offset: 2px;
+}
+.theme-light .autostart-setting {
+  border-color: #b8ccd8;
+  background: linear-gradient(135deg, #edf8fb, #f4f8fb);
+}
+.theme-light .autostart-setting h3 { color: #153145; }
+.theme-light .autostart-setting p:not(.eyebrow) { color: #587184; }
+.theme-light .autostart-rocker { border-bottom-color: #b8c9d1; }
+.theme-light .autostart-rocker::before { border-color: #c4d6de; background: #dbe9ee; }
+.theme-light .autostart-rocker .switch-left,
+.theme-light .autostart-rocker input:checked + .switch-left + .switch-right { background: #c7d6dc; color: #385265; }
+.theme-light .autostart-rocker input:checked + .switch-left { background: #168c98; color: #fff; }
+.theme-light .autostart-rocker .switch-right { background: #b94d63; color: #fff; }
+@media (max-width: 850px) {
+  .autostart-setting { align-items: flex-start; }
+}
 .vehicle-library-panel .panel-actions {
   display: flex;
   flex-wrap: wrap;

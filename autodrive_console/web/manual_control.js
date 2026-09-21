@@ -1,10 +1,21 @@
 import { requestVehicleControl } from "./platform/vehicle-control.js";
+import {
+  commandForKeyboardCode,
+  DEFAULT_KEYBOARD_BINDINGS,
+  isBindableKeyboardCode,
+  keyboardCodeLabel,
+  normalizeKeyboardBindings,
+  vectorForActiveCommands,
+  vectorsEqual,
+} from "./manual_control_input.js";
 
 (() => {
   const $ = (id) => document.getElementById(id);
   const driveButtons = [...document.querySelectorAll("[data-command]")];
   let sessionId = null;
-  let heldCommand = null;
+  const heldInputs = new Map();
+  let heldVector = { linearRatio: 0, angularRatio: 0 };
+  let inputSequence = 0;
   let inputTimer = null;
   let statusTimer = null;
   let heartbeatTimer = null;
@@ -15,6 +26,10 @@ import { requestVehicleControl } from "./platform/vehicle-control.js";
   let chassisParametersDirty = false;
   let previousEmergencyRelease = null;
   let requestedSource = null;
+  const keyBindingsStorageKey = "ry-aletheia.manual-control.key-bindings.v1";
+  let keyboardBindings = loadKeyboardBindings();
+  let capturingKeyBindingCommand = null;
+  let keyBindingDialogPending = false;
 
   const speedParameters = [
     { range: "linearSpeed", number: "linearSpeedNumber", output: "linearSpeedValue", unit: "m/s", decimals: 1 },
@@ -27,6 +42,111 @@ import { requestVehicleControl } from "./platform/vehicle-control.js";
   ];
 
   const request = (path, payload, keepalive = false) => requestVehicleControl(path, payload, keepalive);
+
+  function loadKeyboardBindings() {
+    try {
+      return normalizeKeyboardBindings(JSON.parse(window.localStorage.getItem(keyBindingsStorageKey)));
+    } catch {
+      return { ...DEFAULT_KEYBOARD_BINDINGS };
+    }
+  }
+
+  function saveKeyboardBindings() {
+    try {
+      window.localStorage.setItem(keyBindingsStorageKey, JSON.stringify(keyboardBindings));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function keyboardDirectionsSummary() {
+    return ["forward", "left", "backward", "right"].map((command) => keyboardCodeLabel(keyboardBindings[command])).join("/");
+  }
+
+  function renderKeyboardBindings() {
+    document.querySelectorAll("[data-key-binding-display]").forEach((element) => {
+      element.textContent = keyboardCodeLabel(keyboardBindings[element.dataset.keyBindingDisplay]);
+    });
+    document.querySelectorAll("[data-key-binding-command]").forEach((button) => {
+      button.classList.toggle("is-capturing", button.dataset.keyBindingCommand === capturingKeyBindingCommand);
+    });
+  }
+
+  function setKeyBindingMessage(text, kind = "") {
+    const target = $("keyBindingMessage");
+    target.textContent = text;
+    target.className = `key-binding-message ${kind}`;
+  }
+
+  function cancelKeyBindingCapture() {
+    if (!capturingKeyBindingCommand) return;
+    capturingKeyBindingCommand = null;
+    renderKeyboardBindings();
+    setKeyBindingMessage("已取消按键设置。选择一个方向后按下新按键。", "");
+  }
+
+  function closeKeyBindingDialog() {
+    cancelKeyBindingCapture();
+    $("keyBindingDialog").close();
+  }
+
+  async function openKeyBindingDialog() {
+    if (keyBindingDialogPending || $("keyBindingDialog").open) return;
+    keyBindingDialogPending = true;
+    const trigger = $("editKeyBindings");
+    trigger.disabled = true;
+    trigger.textContent = "正在停止车辆…";
+    driveButtons.forEach((button) => { button.disabled = true; });
+    $("stopButton").disabled = true;
+    const stopped = await stopForKeyBinding();
+    keyBindingDialogPending = false;
+    trigger.disabled = false;
+    trigger.textContent = "设置按键";
+    render(lastStatus);
+    if (!stopped) {
+      message("车辆停止请求未被确认，不能修改按键。请检查控制连接后重试。", "error");
+      return;
+    }
+    const dialog = $("keyBindingDialog");
+    dialog.showModal();
+    capturingKeyBindingCommand = null;
+    renderKeyboardBindings();
+    setKeyBindingMessage("选择一个方向后按下新按键。", "");
+  }
+
+  function startKeyBindingCapture(command) {
+    capturingKeyBindingCommand = command;
+    renderKeyboardBindings();
+    setKeyBindingMessage(`请按下用于${command === "forward" ? "前进" : command === "backward" ? "后退" : command === "left" ? "左转" : "右转"}的按键；按 Esc 取消。`, "");
+  }
+
+  function applyCapturedKeyBinding(code) {
+    const command = capturingKeyBindingCommand;
+    if (!command) return;
+    if (!isBindableKeyboardCode(code)) {
+      setKeyBindingMessage("该按键不可用于方向控制。请使用字母、数字、方向键或数字键盘按键。", "error");
+      return;
+    }
+    const owner = commandForKeyboardCode(code, keyboardBindings);
+    if (owner && owner !== command) {
+      setKeyBindingMessage(`该按键已绑定${owner === "forward" ? "前进" : owner === "backward" ? "后退" : owner === "left" ? "左转" : "右转"}，请先选择其他按键。`, "error");
+      return;
+    }
+    keyboardBindings = normalizeKeyboardBindings({ ...keyboardBindings, [command]: code });
+    capturingKeyBindingCommand = null;
+    renderKeyboardBindings();
+    const saved = saveKeyboardBindings();
+    setKeyBindingMessage(saved ? `已将${keyboardCodeLabel(code)}绑定为方向控制按键。` : "按键已在当前页面生效，但浏览器拒绝保存本机偏好。", saved ? "success" : "error");
+  }
+
+  function resetKeyboardBindings() {
+    keyboardBindings = { ...DEFAULT_KEYBOARD_BINDINGS };
+    capturingKeyBindingCommand = null;
+    renderKeyboardBindings();
+    const saved = saveKeyboardBindings();
+    setKeyBindingMessage(saved ? "已恢复默认 I/J/K/L 按键。" : "默认按键已在当前页面生效，但浏览器拒绝保存本机偏好。", saved ? "success" : "error");
+  }
 
   function sourceLabel(source) {
     if (source === "navigation") return "自动驾驶";
@@ -215,7 +335,7 @@ import { requestVehicleControl } from "./platform/vehicle-control.js";
     const enter = $("enterManual");
     const requestNavigation = $("requestNavigation");
     const exit = $("exitManual");
-    const ready = Boolean(state.manual_ready && sessionId);
+    const ready = Boolean(state.manual_ready && sessionId && !keyBindingDialogPending);
     renderSpeed(state.speed, ready);
     enter.disabled = !state.can_begin_manual || switching;
     enter.textContent = isManual ? "开始手动控制" : "进入手动控制";
@@ -226,7 +346,7 @@ import { requestVehicleControl } from "./platform/vehicle-control.js";
     exit.disabled = switching && state.transition === "navigation";
     $("driveArea").setAttribute("aria-disabled", String(!ready));
     driveButtons.forEach((button) => { button.disabled = !ready; });
-    $("stopButton").disabled = !sessionId || state.session?.state === "none";
+    $("stopButton").disabled = keyBindingDialogPending || !sessionId || state.session?.state === "none";
 
     const emergencyState = state.emergency_stop?.state || "unknown";
     if (readingCarState) {
@@ -246,7 +366,7 @@ import { requestVehicleControl } from "./platform/vehicle-control.js";
       $("gateText").textContent = "切换命令已由车端发送；方向控制会保持锁定，直到 /control_source_state 确认。";
     } else if (ready) {
       $("gateTitle").textContent = "手动控制已确认";
-      $("gateText").textContent = "可按住方向键移动。请保持观察车辆周边，并随时使用停止键。";
+      $("gateText").textContent = `可组合按住 ${keyboardDirectionsSummary()} 进行前后转向弧线行驶。请保持观察车辆周边，并随时使用停止键。`;
     } else if (state.can_begin_manual) {
       if (isManual) {
         $("gateTitle").textContent = adoptingExistingMiniapp ? "正在建立安全会话" : "手动控制源已确认";
@@ -287,17 +407,38 @@ import { requestVehicleControl } from "./platform/vehicle-control.js";
   }
 
   function clearHeld() {
-    heldCommand = null;
+    heldInputs.clear();
+    heldVector = { linearRatio: 0, angularRatio: 0 };
     if (inputTimer) window.clearInterval(inputTimer);
     inputTimer = null;
     driveButtons.forEach((button) => button.classList.remove("is-held"));
   }
 
   async function stop() {
+    const wasMoving = heldVector.linearRatio !== 0 || heldVector.angularRatio !== 0;
     clearHeld();
-    if (!sessionId) return;
-    try { render(await request("/api/vehicle-control/stop", { session_id: sessionId })); }
-    catch (error) { if (error.vehicleState) render(error.vehicleState); message(error.message, "error"); }
+    if (!sessionId) return true;
+    // Use a newer zero vector rather than an unordered legacy STOP request:
+    // any in-flight earlier movement request is then ignored by the Backend.
+    if (wasMoving) return sendVector({ linearRatio: 0, angularRatio: 0 }, nextInputSequence());
+    else {
+      try {
+        render(await request("/api/vehicle-control/stop", { session_id: sessionId }));
+        return true;
+      } catch (error) {
+        if (error.vehicleState) render(error.vehicleState);
+        message(error.message, "error");
+        return false;
+      }
+    }
+  }
+
+  async function stopForKeyBinding() {
+    clearHeld();
+    if (!sessionId) return true;
+    // Always send a newer zero vector. A previous key-up may already have
+    // cleared local state while its zero vector is still in flight.
+    return sendVector({ linearRatio: 0, angularRatio: 0 }, nextInputSequence());
   }
 
   async function updateSpeed() {
@@ -370,21 +511,69 @@ import { requestVehicleControl } from "./platform/vehicle-control.js";
     speedTimer = window.setTimeout(() => { speedTimer = null; updateSpeed(); }, 100);
   }
 
-  async function sendHeld() {
-    if (!sessionId || !heldCommand) return;
-    try { render(await request("/api/vehicle-control/command", { session_id: sessionId, command: heldCommand })); }
-    catch (error) { clearHeld(); if (error.vehicleState) render(error.vehicleState); message(error.message, "error"); }
+  function nextInputSequence() {
+    inputSequence += 1;
+    return inputSequence;
   }
 
-  function beginHold(command, button) {
-    if (!lastStatus?.manual_ready || !sessionId) return;
-    if (heldCommand === command) return;
-    clearHeld();
-    heldCommand = command;
-    button.classList.add("is-held");
-    sendHeld();
-    // 此频率只维持前端输入活性；ROS2 的 20 Hz 发布在车端控制器内完成。
-    inputTimer = window.setInterval(sendHeld, 100);
+  function renderHeldButtons() {
+    const activeCommands = new Set(heldInputs.values());
+    driveButtons.forEach((button) => button.classList.toggle("is-held", activeCommands.has(button.dataset.command)));
+  }
+
+  async function sendVector(vector, sequence) {
+    if (!sessionId) return false;
+    try {
+      const state = await request("/api/vehicle-control/vector", {
+        session_id: sessionId,
+        linear_ratio: vector.linearRatio,
+        angular_ratio: vector.angularRatio,
+        input_sequence: sequence,
+      });
+      // A response to an older overlapping request must not overwrite the UI
+      // state already confirmed for a newer input.
+      if (sequence === inputSequence) render(state);
+      return true;
+    } catch (error) {
+      if (sequence !== inputSequence) return false;
+      clearHeld();
+      if (error.vehicleState) render(error.vehicleState);
+      message(error.message, "error");
+      return false;
+    }
+  }
+
+  function refreshHeldMotion() {
+    const nextVector = vectorForActiveCommands(new Set(heldInputs.values()));
+    if (vectorsEqual(nextVector, heldVector)) return;
+    heldVector = nextVector;
+    const sequence = nextInputSequence();
+    if (nextVector.linearRatio === 0 && nextVector.angularRatio === 0) {
+      if (inputTimer) window.clearInterval(inputTimer);
+      inputTimer = null;
+      sendVector(nextVector, sequence);
+      return;
+    }
+    sendVector(nextVector, sequence);
+    if (!inputTimer) {
+      // 20 Hz is below the 350 ms vehicle watchdog with adequate margin and
+      // removes the former browser-side 0–100 ms command-start delay.
+      inputTimer = window.setInterval(() => sendVector(heldVector, inputSequence), 50);
+    }
+  }
+
+  function beginHold(inputId, command) {
+    if (keyBindingDialogPending || !lastStatus?.manual_ready || !sessionId) return;
+    if (heldInputs.get(inputId) === command) return;
+    heldInputs.set(inputId, command);
+    renderHeldButtons();
+    refreshHeldMotion();
+  }
+
+  function releaseHold(inputId) {
+    if (!heldInputs.delete(inputId)) return;
+    renderHeldButtons();
+    refreshHeldMotion();
   }
 
   async function enterManual({ adoptExisting = false } = {}) {
@@ -450,20 +639,62 @@ import { requestVehicleControl } from "./platform/vehicle-control.js";
   $("stopButton").addEventListener("click", stop);
   $("releaseEmergencyStop").addEventListener("click", releaseEmergencyStop);
   $("saveChassisParameters").addEventListener("click", saveChassisParameters);
+  $("editKeyBindings").addEventListener("click", openKeyBindingDialog);
+  $("closeKeyBindings").addEventListener("click", closeKeyBindingDialog);
+  $("doneKeyBindings").addEventListener("click", closeKeyBindingDialog);
+  $("resetKeyBindings").addEventListener("click", resetKeyboardBindings);
+  document.querySelectorAll("[data-key-binding-command]").forEach((button) => {
+    button.addEventListener("click", () => startKeyBindingCapture(button.dataset.keyBindingCommand));
+  });
+  $("keyBindingDialog").addEventListener("cancel", (event) => {
+    if (!capturingKeyBindingCommand) return;
+    event.preventDefault();
+    cancelKeyBindingCapture();
+  });
+  $("keyBindingDialog").addEventListener("close", () => {
+    capturingKeyBindingCommand = null;
+    renderKeyboardBindings();
+  });
   driveButtons.forEach((button) => {
-    button.addEventListener("pointerdown", (event) => { event.preventDefault(); button.setPointerCapture?.(event.pointerId); beginHold(button.dataset.command, button); });
-    ["pointerup", "pointercancel", "lostpointercapture", "pointerleave"].forEach((eventName) => button.addEventListener(eventName, stop));
+    button.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      button.setPointerCapture?.(event.pointerId);
+      beginHold(`pointer:${event.pointerId}`, button.dataset.command);
+    });
+    ["pointerup", "pointercancel", "lostpointercapture"].forEach((eventName) => button.addEventListener(eventName, (event) => {
+      releaseHold(`pointer:${event.pointerId}`);
+    }));
   });
-  const keyboardCommand = { i: "forward", I: "forward", j: "left", J: "left", k: "backward", K: "backward", l: "right", L: "right" };
   document.addEventListener("keydown", (event) => {
+    if (keyBindingDialogPending) {
+      const command = commandForKeyboardCode(event.code, keyboardBindings);
+      if (command || event.key === " " || event.key === "Escape") event.preventDefault();
+      return;
+    }
+    if ($("keyBindingDialog").open) {
+      if (!capturingKeyBindingCommand || event.repeat) return;
+      event.preventDefault();
+      if (event.code === "Escape") cancelKeyBindingCapture();
+      else if (event.ctrlKey || event.metaKey || event.altKey) setKeyBindingMessage("请不要组合 Ctrl、Alt 或系统快捷键。", "error");
+      else applyCapturedKeyBinding(event.code);
+      return;
+    }
     if (event.repeat || event.target.matches("input, textarea, select")) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key === " " || event.key === "Escape") { event.preventDefault(); stop(); return; }
-    const command = keyboardCommand[event.key];
-    if (!command) return;
-    event.preventDefault(); beginHold(command, driveButtons.find((button) => button.dataset.command === command));
+    const command = commandForKeyboardCode(event.code, keyboardBindings);
+    if (!command || !lastStatus?.manual_ready || !sessionId) return;
+    event.preventDefault();
+    beginHold(`key:${event.code}`, command);
   });
-  document.addEventListener("keyup", (event) => { if (keyboardCommand[event.key]) stop(); });
+  document.addEventListener("keyup", (event) => {
+    if ($("keyBindingDialog").open) return;
+    if (!commandForKeyboardCode(event.code, keyboardBindings) || !lastStatus?.manual_ready || !sessionId) return;
+    event.preventDefault();
+    releaseHold(`key:${event.code}`);
+  });
   document.addEventListener("visibilitychange", () => { if (document.hidden) stop(); });
+  window.addEventListener("blur", stop);
   speedParameters.forEach((control) => {
     const range = $(control.range);
     const number = $(control.number);
@@ -482,6 +713,7 @@ import { requestVehicleControl } from "./platform/vehicle-control.js";
   });
   window.addEventListener("pagehide", leavePageSafely);
   window.addEventListener("beforeunload", leavePageSafely);
+  renderKeyboardBindings();
   statusTimer = window.setInterval(refresh, 350);
   heartbeatTimer = window.setInterval(heartbeat, 250);
   refresh();

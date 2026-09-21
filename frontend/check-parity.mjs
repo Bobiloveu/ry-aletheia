@@ -113,7 +113,8 @@ for (const value of [
   'type="module" src="/manual_control.js"',
   'from "./platform/vehicle-control.js"',
   '/api/vehicle-control/enter',
-  '/api/vehicle-control/command',
+  '/api/vehicle-control/vector',
+  'input_sequence',
   '/api/vehicle-control/release-emergency-stop',
 ]) {
   if (!(manualControlPage + manualControlSource).includes(value)) {

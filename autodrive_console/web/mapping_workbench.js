@@ -51,7 +51,7 @@ import { requestWorkbenchJson } from "./mapping-workbench/api.js";
     const session = mapping?.session;
     const state = session?.state || "idle";
     $("mappingTitle").textContent = session?.label || "实时建图";
-    $("mappingSubtitle").textContent = session ? `${session.kind} · ${session.source_yaml || "项目工作区 YAML"}` : "请先在部署建图页面上传 YAML 并准备会话。";
+    $("mappingSubtitle").textContent = session ? `车端建图会话 · ${session.source_yaml || "项目工作区 YAML"}` : "请先在部署建图页面上传 YAML 并准备会话。";
     $("mappingStateName").textContent = state === "prepared" ? "待启动" : state === "running" ? "正在建图" : state === "saved" ? "已保存" : state === "failed" ? "建图失败" : "未准备";
     $("mappingStateDot").className = `mapping-state-dot ${state}`;
     $("startMapping").disabled = !mapping?.available || state !== "prepared";

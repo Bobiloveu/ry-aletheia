@@ -59,6 +59,17 @@ class SupervisorConfigurationTests(unittest.TestCase):
         self.assertEqual(loaded.nodes, custom_nodes)
         self.assertEqual(loaded.monitor_nodes, ["ROBOT_B:localizer"])
 
+    def test_optional_autostart_setting_persists_and_rejects_non_boolean_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "console.json")
+
+            self.assertFalse(store.load().autostart_enabled)
+            saved = store.save({"autostart_enabled": True})
+            self.assertTrue(saved.autostart_enabled)
+            self.assertTrue(store.load().autostart_enabled)
+            with self.assertRaisesRegex(ValueError, "开机自启开关格式错误"):
+                store.save({"autostart_enabled": "yes"})
+
     def test_preflight_skips_supervisor_when_no_health_nodes_are_configured(self):
         """未启用依赖编排且未选择监控节点时，Supervisor 不应阻断任务预检。"""
         with tempfile.TemporaryDirectory() as directory:

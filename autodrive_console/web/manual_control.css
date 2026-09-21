@@ -54,8 +54,13 @@
 .parameter-message.pending { color: var(--warning); }
 .parameter-message.error { color: var(--danger); }
 .parameter-message.success { color: var(--success); }
-.drive-area { padding: 30px 28px 26px; }
+.drive-area { padding: 22px 28px 26px; }
 .drive-area[aria-disabled="true"] { opacity: .42; }
+.keyboard-settings { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin: 0 28px; padding: 18px 0 16px; border-bottom: 1px solid var(--line); }
+.keyboard-settings h3 { margin: 0; color: var(--ink); font-size: 14px; }
+.keyboard-settings p { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.key-binding-trigger { min-height: 34px; padding-inline: 12px; border-color: var(--line-strong); color: var(--ink); }
+.key-binding-trigger:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .drive-pad { position: relative; display: grid; grid-template-columns: repeat(3, 84px); grid-template-rows: repeat(3, 70px); place-content: center; gap: 8px; min-height: 272px; }
 .drive-button { display: grid; place-items: center; align-content: center; gap: 3px; width: 84px; height: 70px; margin: 0; padding: 0; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface-raised); color: var(--ink); box-shadow: none; font-size: 11px; transition: background .16s ease, border-color .16s ease, transform .08s ease; touch-action: none; user-select: none; }
 .drive-button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
@@ -73,6 +78,32 @@
 .hold-note { display: flex; align-items: center; justify-content: center; gap: 6px; margin: 6px 0 0; color: var(--muted); text-align: center; font-size: 12px; line-height: 1.45; }
 .hold-note span { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
 .hold-note kbd { padding: 1px 4px; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--ink); background: var(--surface-raised); font: 600 10px/1.2 inherit; }
+.key-binding-dialog { width: min(440px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface); color: var(--ink); box-shadow: 0 18px 48px rgba(0, 0, 0, .24); }
+.key-binding-dialog::backdrop { background: rgba(15, 17, 23, .48); }
+.key-binding-dialog__header { display: flex; align-items: start; justify-content: space-between; gap: 18px; padding: 22px 22px 18px; border-bottom: 1px solid var(--line); }
+.key-binding-dialog__header > div { flex: 1 1 auto; min-width: 0; }
+.key-binding-dialog__header h2 { margin: 0; font-size: 18px; letter-spacing: -0.02em; }
+.key-binding-dialog__header p { max-width: 35ch; margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.key-binding-close { flex: none; width: auto; min-height: 32px; margin: 0; padding: 0 8px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font: 600 12px/1 inherit; cursor: pointer; }
+.key-binding-close:hover { color: var(--ink); background: var(--surface-raised); }
+.key-binding-list { display: grid; gap: 8px; padding: 18px 22px 10px; }
+.key-binding-row { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 43px; margin: 0; padding: 0 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-raised); color: var(--ink); box-shadow: none; font-size: 13px; text-align: left; }
+.key-binding-row:hover, .key-binding-row:focus-visible, .key-binding-row.is-capturing { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--surface-raised)); }
+.key-binding-row.is-capturing span::after { content: "正在等待按键"; margin-left: 8px; color: var(--accent); font-size: 11px; font-weight: 500; }
+.key-binding-row kbd { min-width: 28px; padding: 4px 7px; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--ink); background: var(--surface); font: 650 11px/1.2 inherit; text-align: center; }
+.key-binding-message { min-height: 18px; margin: 6px 22px 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.key-binding-message.error { color: var(--danger); }
+.key-binding-message.success { color: var(--success); }
+.key-binding-dialog__actions { display: flex; justify-content: space-between; gap: 12px; padding: 18px 22px 22px; }
+.key-binding-reset { min-height: 36px; border-color: var(--line-strong); background: transparent; color: var(--ink); }
+.key-binding-reset:hover { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.key-binding-done { min-height: 36px; }
+body.theme-light .key-binding-close { background: transparent; color: var(--muted); }
+body.theme-light .key-binding-close:hover { background: var(--surface-raised); color: var(--ink); }
+body.theme-light .key-binding-row { border-color: var(--line); background: var(--surface-raised); color: var(--ink); }
+body.theme-light .key-binding-row:hover, body.theme-light .key-binding-row:focus-visible, body.theme-light .key-binding-row.is-capturing { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--surface-raised)); }
+body.theme-light .key-binding-reset { border-color: var(--line-strong); background: transparent; color: var(--ink); }
+body.theme-light .key-binding-reset:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); }
 .manual-facts { padding: 24px 22px; }
 .emergency-stop { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; margin-top: 18px; padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .emergency-stop span { display: block; color: var(--muted); font-size: 11px; }
@@ -96,4 +127,4 @@
 .control-message.success { color: var(--success); }
 @media (max-width: 1180px) { .speed-controls { min-width: 0; } }
 @media (max-width: 980px) { .manual-page { margin-left: 248px; padding: 36px 28px 56px; } .manual-layout { grid-template-columns: 1fr; } .manual-facts { display: grid; grid-template-columns: 160px 1fr; column-gap: 20px; } .manual-facts h2, .emergency-stop { grid-column: 1 / -1; } .manual-facts dl { margin: 18px 0 0; } .safety-note { align-self: center; } }
-@media (max-width: 700px) { .manual-page { margin-left: 0; padding: 24px 18px 48px; } .manual-header, .stage-status, .control-gate, .motion-settings { align-items: stretch; flex-direction: column; } .source-readout { min-width: 0; } .control-gate, .motion-settings, .chassis-settings { margin-inline: 14px; } .speed-controls { min-width: 0; grid-template-columns: 1fr; gap: 14px; } .chassis-settings, .chassis-controls { grid-template-columns: 1fr; } .parameter-message { margin-top: -4px; } .manual-primary, .manual-secondary { width: 100%; } .drive-area { padding-inline: 12px; } .manual-facts { display: block; } .manual-facts dl { margin-top: 18px; } .hold-note { flex-wrap: wrap; } }
+@media (max-width: 700px) { .manual-page { margin-left: 0; padding: 24px 18px 48px; } .manual-header, .stage-status, .control-gate, .motion-settings, .keyboard-settings { align-items: stretch; flex-direction: column; } .source-readout { min-width: 0; } .control-gate, .motion-settings, .chassis-settings, .keyboard-settings { margin-inline: 14px; } .speed-controls { min-width: 0; grid-template-columns: 1fr; gap: 14px; } .chassis-settings, .chassis-controls { grid-template-columns: 1fr; } .parameter-message { margin-top: -4px; } .manual-primary, .manual-secondary { width: 100%; } .key-binding-dialog { width: min(440px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); } .key-binding-dialog__header { gap: 12px; padding: 18px 18px 15px; } .key-binding-list { padding: 15px 18px 8px; } .key-binding-message { margin-inline: 18px; } .key-binding-dialog__actions { padding: 15px 18px 18px; } .key-binding-dialog__actions .manual-primary, .key-binding-dialog__actions .manual-secondary { width: auto; } .drive-area { padding-inline: 12px; } .manual-facts { display: block; } .manual-facts dl { margin-top: 18px; } .hold-note { flex-wrap: wrap; } }

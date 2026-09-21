@@ -31,6 +31,8 @@ class _Gateway:
     def preflight(_case, **_kwargs):
         return _Preflight()
 
+    preflight_without_orchestration = preflight
+
     @staticmethod
     def confirm_dependencies_ready(**_kwargs):
         return True, "全部 RUNNING", []
@@ -94,6 +96,64 @@ class _CancelledWaitingExecutor:
 
 
 class TrajectoryFallbackTests(unittest.TestCase):
+    def test_acceptance_preparation_forwards_every_dependency_snapshot(self):
+        """Supervisor 每次状态变化都必须抵达验收计划事件，不得停在旧快照。"""
+        class Gateway:
+            def __init__(self, *_args):
+                pass
+
+            @staticmethod
+            def restart_configured_dependencies(*, progress_callback=None, **_kwargs):
+                progress_callback({"stages": [{
+                    "index": 1, "state": "waiting_stable",
+                    "nodes": [{"name": "MODULES:209-lightning", "status": "STARTING"}],
+                }]})
+                progress_callback({"stages": [{
+                    "index": 1, "state": "ready",
+                    "nodes": [{"name": "MODULES:209-lightning", "status": "RUNNING"}],
+                }]})
+                return True, "依赖节点已稳定 RUNNING"
+
+        case = TestCase("case", "case.json", "验收任务", TaskParameters("园区", 1, 1, 1, 101), "unused.json")
+        run = RunRecord("run", case, 1, 0, prepare_trajectory_maps=False)
+        context = {
+            "scenario_profile_id": None,
+            "scenario_profile_name": None,
+            "dependency_plan": {"enabled": True, "steps": [{"nodes": ["MODULES:209-lightning"], "wait_seconds": 0}]},
+        }
+
+        class Settings:
+            @staticmethod
+            def load():
+                return SimpleNamespace(
+                    dependency_plan={"enabled": False, "steps": []},
+                    elevator_wait_timeout_s=180,
+                    task_execution_timeout_s=900,
+                )
+
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            manager = RunManager(Path(directory), _Executor(), Settings())
+            with patch("autodrive_console.run_manager.RobotGateway", Gateway):
+                result = manager._prepare_sequence_execution(
+                    run,
+                    context,
+                    threading.Event(),
+                    progress_callback=lambda state, message, dependency_progress=None: events.append(
+                        (state, message, dependency_progress)
+                    ),
+                )
+
+        self.assertTrue(result["ok"])
+        snapshots = [event[2] for event in events if event[2] is not None]
+        self.assertEqual(
+            snapshots,
+            [
+                {"stages": [{"index": 1, "state": "waiting_stable", "nodes": [{"name": "MODULES:209-lightning", "status": "STARTING"}]}]},
+                {"stages": [{"index": 1, "state": "ready", "nodes": [{"name": "MODULES:209-lightning", "status": "RUNNING"}]}]},
+            ],
+        )
+
     def test_acceptance_preflight_runs_once_for_the_whole_sequence(self):
         """A frozen acceptance setup must not restart nodes once per sampled task."""
         events = []
@@ -172,6 +232,35 @@ class TrajectoryFallbackTests(unittest.TestCase):
         self.assertEqual([event for event in events if event[0] == "case_preflight"], [("case_preflight", "case-1"), ("case_preflight", "case-2")])
         self.assertEqual(events.count(("scenario_restore", "")), 1)
 
+    def test_cancel_during_sequence_preflight_finishes_as_cancelled_not_blocked(self):
+        """A cancellation racing with resume/preflight must keep its terminal meaning."""
+        case = TestCase("case", "case.json", "验收任务", TaskParameters("园区", 1, 1, 1, 101), "unused.json")
+        run = RunRecord("run", case, 1, 0, prepare_trajectory_maps=False)
+        events = []
+
+        def cancelled_preflight(_run, _preflight, cancel_event, **_kwargs):
+            cancel_event.set()
+            return {
+                "ok": False,
+                "message": "测试已取消",
+                "settings": object(),
+                "scenario": {"applied": False},
+                "scenario_applied": False,
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = RunManager(Path(directory), _Executor(), _Settings())
+            manager._runs[run.id] = run
+            manager._cancel_events[run.id] = threading.Event()
+            manager._resume_events[run.id] = threading.Event()
+            manager._attempt_interrupt_events[run.id] = threading.Event()
+            with patch.object(manager, "_prepare_sequence_execution", cancelled_preflight):
+                manager._run_sequence(run, (case,), events.append, {"frozen": "preflight"})
+
+        self.assertEqual(run.status, "cancelled")
+        self.assertEqual(events[-1]["type"], "sequence_finished")
+        self.assertEqual(events[-1]["status"], "cancelled")
+
     def test_sequence_executes_each_case_under_the_existing_run_lock(self):
         """验收序列必须复用 RunManager，不得另起 ROS 调用路径。"""
         cases = [
@@ -190,6 +279,92 @@ class TrajectoryFallbackTests(unittest.TestCase):
         self.assertEqual(run.status, "completed")
         self.assertEqual([item.case_filename for item in run.attempts], [case.filename for case in cases])
         self.assertEqual([event["type"] for event in events if event["type"] == "item_finished"], ["item_finished", "item_finished"])
+
+    def test_automatic_return_bridge_is_limited_to_enabled_acceptance_items(self):
+        """Only an opted-in acceptance sequence may arm the fixed return-signal bridge."""
+        calls = []
+
+        class Bridge:
+            def start(self):
+                calls.append("start")
+
+            def arm(self, item_index):
+                calls.append(("arm", item_index))
+
+            def disarm(self, item_index):
+                calls.append(("disarm", item_index))
+
+            def close(self):
+                calls.append("close")
+
+        class Settings:
+            @staticmethod
+            def load():
+                return SimpleNamespace(
+                    dependency_plan={"enabled": False, "steps": []},
+                    elevator_wait_timeout_s=180,
+                    task_execution_timeout_s=900,
+                )
+
+        cases = [
+            TestCase("case-1", "case-1.json", "任务 1", TaskParameters("园区", 1, 1, 1, 101), "unused-1.json"),
+            TestCase("case-2", "case-2.json", "任务 2", TaskParameters("园区", 1, 1, 2, 201), "unused-2.json"),
+        ]
+        context = {
+            "scenario_profile_id": None,
+            "scenario_profile_name": None,
+            "dependency_plan": {"enabled": False, "steps": []},
+            "automatic_return": True,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            manager = RunManager(
+                Path(directory), _Executor(), Settings(),
+                return_signal_factory=Bridge,
+            )
+            with patch("autodrive_console.run_manager.RobotGateway", _Gateway), patch.object(manager, "_write_report"):
+                run = manager.start_sequence(cases, prepare_trajectory_maps=False, execution_preflight=context)
+                deadline = time.monotonic() + 2.0
+                while run.status not in {"completed", "cancelled", "blocked", "failed"} and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(calls, ["start", ("arm", 1), ("disarm", 1), ("arm", 2), ("disarm", 2), "close"])
+
+    def test_disabled_acceptance_sequence_never_creates_a_return_signal_bridge(self):
+        """The opt-in policy must leave ordinary acceptance behavior unchanged."""
+        case = TestCase("case", "case.json", "任务", TaskParameters("园区", 1, 1, 1, 101), "unused.json")
+
+        class Settings:
+            @staticmethod
+            def load():
+                return SimpleNamespace(
+                    dependency_plan={"enabled": False, "steps": []},
+                    elevator_wait_timeout_s=180,
+                    task_execution_timeout_s=900,
+                )
+
+        def fail_if_called():
+            raise AssertionError("关闭自动返程时不得创建 ROS bridge")
+
+        context = {
+            "scenario_profile_id": None,
+            "scenario_profile_name": None,
+            "dependency_plan": {"enabled": False, "steps": []},
+            "automatic_return": False,
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = RunManager(
+                Path(directory), _Executor(), Settings(),
+                return_signal_factory=fail_if_called,
+            )
+            with patch("autodrive_console.run_manager.RobotGateway", _Gateway), patch.object(manager, "_write_report"):
+                run = manager.start_sequence([case], prepare_trajectory_maps=False, execution_preflight=context)
+                deadline = time.monotonic() + 2.0
+                while run.status not in {"completed", "cancelled", "blocked", "failed"} and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+        self.assertEqual(run.status, "completed")
 
     def test_acceptance_sequence_disables_only_the_local_service_deadline(self):
         """长路线验收等待任务服务完成，但仍由执行器响应人工取消。"""

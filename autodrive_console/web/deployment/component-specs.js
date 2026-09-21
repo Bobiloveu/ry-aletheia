@@ -36,6 +36,7 @@ export const COMPONENT_SPECS = {
   elevator: {
     name: "电梯",
     fields: [
+      { key: "button_floor", label: "本地图按钮层", type: "number", step: "1", placeholder: "例如：1" },
       { key: "wait_distance_m", label: "候梯距离（m）", type: "number", min: "0.5", max: "5", step: "0.1", default: 1.5 },
     ],
   },

@@ -1,9 +1,12 @@
 import { requestJson } from "./platform/http.js";
+import { taskDashboardRefreshDelay } from "./task_dashboard_sync.js";
+import { findMagneticTrajectoryPoint, formatBeijingTime, interpolateCounterValue } from "./trajectory-hover.js";
 
 const $ = (id) => document.getElementById(id);
 let cases = [], uiPreferences = { case_id: '', count: 20, interval_seconds: 3 }, dependencyPlan = { enabled: false, steps: [] }, monitorNodes = [], supervisorProcesses = [], timer = null, currentRun = null;
 const acknowledgedStallAlerts = new Set();
 const trajectoryView = { scale: 1, x: 0, y: 0, drag: null };
+const trajectoryHover = { attempt: null, mapId: null, counterFrame: null, counterValues: {} };
 // 轮询恰好落在 TF/map 短暂切换窗口时，状态包可能没有路线百分比；同一轮
 // 必须保留上一次有效值，不能把实际已运行的进度视觉上归零。
 const displayedRouteProgress = { runId: null, attempt: null, percent: 0 };
@@ -111,7 +114,7 @@ function renderLiveProgress(run) {
 function renderRun(run) {
   currentRun = run || null;
   const hasRun = Boolean(run), summary = run?.summary || { completed: 0, passed: 0, failed: 0, passRate: 0 };
-  $('runStatus').textContent = hasRun ? statusText(run.status) : '待命'; $('runHint').textContent = hasRun ? `${summary.completed}/${run.requestedCount} 次已完成` : 'PRE-FLIGHT REQUIRED'; $('passRate').textContent = hasRun && summary.completed ? `${summary.passRate}%` : '—'; $('runId').textContent = hasRun ? `RUN / ${run.id}` : '';
+  $('runStatus').textContent = hasRun ? statusText(run.status) : '待命'; $('runHint').textContent = hasRun ? `${summary.completed}/${run.requestedCount} 次已完成` : 'PRE-FLIGHT REQUIRED'; $('passRate').textContent = hasRun && summary.completed ? `${summary.passRate}%` : '—';
   $('statusBadge').textContent = hasRun ? run.status.toUpperCase() : 'IDLE'; $('statusBadge').className = `badge ${run?.status === 'running' || run?.status === 'preparing' ? '' : 'muted'}`;
   $('progressBar').style.width = `${hasRun ? summary.completed / run.requestedCount * 100 : 0}%`; $('progressText').textContent = hasRun ? `${statusText(run.status)} · ${summary.completed}/${run.requestedCount} 次 · ${summary.passed} 通过 / ${summary.failed} 失败${summary.cancelled ? ` / ${summary.cancelled} 已取消` : ''}` : '暂无执行任务'; $('durationText').textContent = run?.attempts?.length ? `最近 ${minutes(run.attempts.at(-1).duration_s)}` : '—';
   $('resultBody').innerHTML = run?.attempts?.length ? run.attempts.slice().reverse().map(item => `<tr><td>T-${String(item.index).padStart(3, '0')}</td><td>${new Date(item.started_at).toLocaleTimeString('zh-CN', { hour12: false })}</td><td class="status ${item.status}">${item.status.toUpperCase()}</td><td>${escapeHtml(item.message)}</td><td>${minutes(item.duration_s)}</td><td>${item.trajectory?.visualizations?.length ? `<button class="trajectory-view" data-attempt="${item.index}" type="button">查看轨迹</button>` : '—'}</td></tr>`).join('') : `<tr><td colspan="6" class="empty">${escapeHtml(run?.error || '等待测试任务')}</td></tr>`;
@@ -121,13 +124,25 @@ function renderRun(run) {
 async function loadSettings() {
   const settings = await requestJson('/api/settings'); uiPreferences = settings.ui_preferences || uiPreferences; dependencyPlan = settings.dependency_plan || { enabled: false, steps: [] }; monitorNodes = settings.monitor_nodes || []; applyUiPreferences(); renderDependencyEditor();
 }
-async function poll() { const data = await requestJson('/api/runs/latest'); renderRun(data.run); if (['running', 'queued', 'preparing', 'awaiting_recovery', 'recovering', 'cancelling'].includes(data.run?.status)) timer = setTimeout(poll, 1000); }
+async function poll() {
+  try {
+    const data = await requestJson('/api/runs/latest');
+    renderRun(data.run);
+    clearTimeout(timer);
+    if (!document.hidden) timer = setTimeout(poll, taskDashboardRefreshDelay(data.run));
+  } catch (error) {
+    $('formMessage').textContent = `运行状态读取失败：${error.message}`;
+    clearTimeout(timer);
+    if (!document.hidden) timer = setTimeout(poll, taskDashboardRefreshDelay(null));
+  }
+}
 function toast(message, tone = 'success') { const element = $('toast'); element.textContent = message; element.className = `toast show ${tone}`; clearTimeout(toast.timer); toast.timer = setTimeout(() => element.className = 'toast', 3200); }
 function confirmAction({ eyebrow, title, body, confirmText, danger = false }) {
   return new Promise(resolve => { const dialog = $('confirmDialog'); $('dialogEyebrow').textContent = eyebrow; $('dialogTitle').textContent = title; $('dialogBody').textContent = body; $('dialogConfirm').textContent = confirmText; $('dialogConfirm').className = danger ? 'danger-confirm' : ''; dialog.classList.add('show'); dialog.setAttribute('aria-hidden', 'false'); const finish = answer => { dialog.classList.remove('show'); dialog.setAttribute('aria-hidden', 'true'); $('dialogConfirm').onclick = null; $('dialogCancel').onclick = null; resolve(answer); }; $('dialogConfirm').onclick = () => finish(true); $('dialogCancel').onclick = () => finish(false); });
 }
 function showTrajectory(attempt) {
   const views = attempt?.trajectory?.visualizations || []; if (!views.length || !currentRun) return;
+  trajectoryHover.attempt = attempt;
   const dialog = $('trajectoryDialog'); $('trajectoryTitle').textContent = `T-${String(attempt.index).padStart(3, '0')} 地图运行轨迹`;
   // 旧报告没有 point_count 时，从保存的 segments 推导。将包含实测点的地图排在
   // 最前面，避免同名离线缓存/运行时地图并存时默认打开一张“无轨迹”的底图。
@@ -140,10 +155,84 @@ function showTrajectory(attempt) {
     const suffix = points ? ` · 实测 ${points} 点` : ' · 未采到实测点';
     return `<option value="${escapeHtml(view.map_id)}">${escapeHtml(view.label)}${suffix}</option>`;
   }).join('');
-  const display = () => { const view = orderedViews.find(item => item.map_id === $('trajectoryMapSelect').value); $('trajectoryImage').src = `/api/runs/${encodeURIComponent(currentRun.id)}/attempts/${attempt.index}/trajectory/${encodeURIComponent(view.map_id)}`; };
+  const display = () => { const view = orderedViews.find(item => item.map_id === $('trajectoryMapSelect').value); trajectoryHover.mapId = view?.map_id || null; trajectoryHover.counterValues = {}; hideTrajectoryTooltip(); $('trajectoryImage').src = `/api/runs/${encodeURIComponent(currentRun.id)}/attempts/${attempt.index}/trajectory/${encodeURIComponent(view.map_id)}`; };
   $('trajectoryMapSelect').onchange = display; display(); dialog.classList.add('show'); dialog.setAttribute('aria-hidden', 'false');
 }
 function applyTrajectoryTransform() { $('trajectoryImage').style.transform = `translate(-50%, -50%) translate(${trajectoryView.x}px, ${trajectoryView.y}px) scale(${trajectoryView.scale})`; }
+function hideTrajectoryTooltip() {
+  const tooltip = $('trajectoryTooltip');
+  const cursor = $('trajectoryCursor');
+  if (trajectoryHover.counterFrame) cancelAnimationFrame(trajectoryHover.counterFrame);
+  trajectoryHover.counterFrame = null;
+  if (tooltip) tooltip.hidden = true;
+  if (cursor) cursor.hidden = true;
+}
+function animateTrajectoryCounters(values) {
+  const fields = {
+    index: { decimals: 0, suffix: '' },
+    x: { decimals: 3, suffix: '' },
+    y: { decimals: 3, suffix: '' },
+  };
+  const from = trajectoryHover.counterValues;
+  const to = Object.fromEntries(Object.entries(fields).map(([name]) => [name, Number(values[name]) || 0]));
+  trajectoryHover.counterValues = to;
+  if (trajectoryHover.counterFrame) cancelAnimationFrame(trajectoryHover.counterFrame);
+  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  const started = performance.now();
+  const duration = reducedMotion ? 0 : 280;
+  const render = progress => {
+    Object.entries(fields).forEach(([name, config]) => {
+      const value = interpolateCounterValue(Number(from[name]) || 0, to[name], progress);
+      const element = document.querySelector(`[data-trajectory-counter="${name}"]`);
+      if (element) element.textContent = `${value.toFixed(config.decimals)}${config.suffix}`;
+    });
+    if (progress < 1) trajectoryHover.counterFrame = requestAnimationFrame(() => render(Math.min(1, (performance.now() - started) / duration)));
+    else trajectoryHover.counterFrame = null;
+  };
+  render(duration ? 0 : 1);
+}
+function updateTrajectoryTooltip(event) {
+  const image = $('trajectoryImage');
+  const canvas = $('trajectoryCanvas');
+  const tooltip = $('trajectoryTooltip');
+  if (!tooltip || trajectoryView.drag || event.pointerType && event.pointerType !== 'mouse' || !image.naturalWidth || !trajectoryHover.attempt || !trajectoryHover.mapId) {
+    hideTrajectoryTooltip();
+    return;
+  }
+  const segments = (trajectoryHover.attempt.trajectory?.segments || []).filter(segment => segment.map_id === trajectoryHover.mapId && segment.map);
+  const map = segments[0]?.map;
+  const paths = segments.filter(segment => Array.isArray(segment.points) && segment.points.length);
+  let sampleIndex = 0;
+  const points = paths.flatMap(segment => segment.points.map(point => ({ ...point, route_name: segment.route_name, route_index: segment.route_index, sample_index: sampleIndex++ })));
+  if (!map || !points.length) { hideTrajectoryTooltip(); return; }
+  const rect = canvas.getBoundingClientRect();
+  const nearest = findMagneticTrajectoryPoint(points, map, {
+    canvasWidth: rect.width,
+    canvasHeight: rect.height,
+    imageWidth: image.naturalWidth,
+    imageHeight: image.naturalHeight,
+    evidenceHeight: 76 + paths.length * 17,
+    scale: trajectoryView.scale,
+    offsetX: trajectoryView.x,
+    offsetY: trajectoryView.y,
+  }, { x: event.clientX - rect.left, y: event.clientY - rect.top }, { maxDistancePx: Math.max(rect.width, rect.height), verticalWeight: 0.38 });
+  if (!nearest) { hideTrajectoryTooltip(); return; }
+  const point = nearest.point;
+  const cursor = $('trajectoryCursor');
+  if (cursor) {
+    cursor.hidden = false;
+    cursor.style.setProperty('--cursor-x', `${nearest.screen.x}px`);
+    cursor.style.setProperty('--cursor-y', `${nearest.screen.y}px`);
+  }
+  const timestamp = tooltip.querySelector('[data-trajectory-counter="timestamp"]');
+  const route = tooltip.querySelector('[data-trajectory-counter="route"]');
+  if (timestamp) timestamp.textContent = formatBeijingTime(point.timestamp_ns);
+  if (route) route.textContent = point.route_name || '轨迹采样';
+  animateTrajectoryCounters({ index: Number(point.sample_index) + 1, x: Number(point.x), y: Number(point.y) });
+  tooltip.hidden = false;
+  tooltip.style.left = `${Math.max(8, Math.min(rect.width - tooltip.offsetWidth - 8, nearest.screen.x - tooltip.offsetWidth / 2))}px`;
+  tooltip.style.top = `${Math.max(8, nearest.screen.y - tooltip.offsetHeight - 14)}px`;
+}
 function resetTrajectoryView() {
   const image = $('trajectoryImage'), canvas = $('trajectoryCanvas'); if (!image.naturalWidth || !image.naturalHeight) return;
   trajectoryView.scale = Math.min(1, (canvas.clientWidth - 28) / image.naturalWidth, (canvas.clientHeight - 28) / image.naturalHeight); trajectoryView.x = 0; trajectoryView.y = 0; applyTrajectoryTransform();
@@ -192,12 +281,13 @@ $('dependencyFlow').addEventListener('click', event => { const step = event.targ
 $('dependencyFlow').addEventListener('change', event => { if (!event.target.matches('.step-wait')) return; dependencyPlan.steps[Number(event.target.closest('.flow-step').dataset.step)].wait_seconds = Number(event.target.value); });
 $('saveDependencyPlan').addEventListener('click', async () => { try { await saveDependencyPlan(); $('dependencyMessage').style.color = '#35d69c'; $('dependencyMessage').textContent = '依赖编排已保存；下次创建测试计划时将按阶段强制重启。'; toast('测试依赖编排已保存。'); } catch (error) { $('dependencyMessage').style.color = ''; $('dependencyMessage').textContent = error.message; } });
 $('resultBody').addEventListener('click', event => { const button = event.target.closest('.trajectory-view'); if (!button) return; showTrajectory(currentRun?.attempts?.find(item => item.index === Number(button.dataset.attempt))); });
-$('trajectoryClose').addEventListener('click', () => { $('trajectoryDialog').classList.remove('show'); $('trajectoryDialog').setAttribute('aria-hidden', 'true'); $('trajectoryImage').removeAttribute('src'); });
+$('trajectoryClose').addEventListener('click', () => { hideTrajectoryTooltip(); trajectoryHover.attempt = null; trajectoryHover.mapId = null; $('trajectoryDialog').classList.remove('show'); $('trajectoryDialog').setAttribute('aria-hidden', 'true'); $('trajectoryImage').removeAttribute('src'); });
 $('trajectoryImage').addEventListener('load', resetTrajectoryView); $('trajectoryReset').addEventListener('click', resetTrajectoryView); $('trajectoryZoomIn').addEventListener('click', () => zoomTrajectory(1.25)); $('trajectoryZoomOut').addEventListener('click', () => zoomTrajectory(.8));
-$('trajectoryCanvas').addEventListener('wheel', event => { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); zoomTrajectory(event.deltaY < 0 ? 1.15 : 1 / 1.15, event.clientX - rect.left, event.clientY - rect.top); }, { passive: false });
-$('trajectoryCanvas').addEventListener('pointerdown', event => { if (event.button !== 0) return; trajectoryView.drag = { x: event.clientX, y: event.clientY }; event.currentTarget.setPointerCapture(event.pointerId); });
-$('trajectoryCanvas').addEventListener('pointermove', event => { if (!trajectoryView.drag) return; trajectoryView.x += event.clientX - trajectoryView.drag.x; trajectoryView.y += event.clientY - trajectoryView.drag.y; trajectoryView.drag = { x: event.clientX, y: event.clientY }; applyTrajectoryTransform(); });
-$('trajectoryCanvas').addEventListener('pointerup', event => { trajectoryView.drag = null; event.currentTarget.releasePointerCapture(event.pointerId); });
+$('trajectoryCanvas').addEventListener('wheel', event => { event.preventDefault(); hideTrajectoryTooltip(); const rect = event.currentTarget.getBoundingClientRect(); zoomTrajectory(event.deltaY < 0 ? 1.15 : 1 / 1.15, event.clientX - rect.left, event.clientY - rect.top); }, { passive: false });
+$('trajectoryCanvas').addEventListener('pointerdown', event => { if (event.button !== 0) return; hideTrajectoryTooltip(); trajectoryView.drag = { x: event.clientX, y: event.clientY }; event.currentTarget.setPointerCapture(event.pointerId); });
+$('trajectoryCanvas').addEventListener('pointermove', event => { if (trajectoryView.drag) { trajectoryView.x += event.clientX - trajectoryView.drag.x; trajectoryView.y += event.clientY - trajectoryView.drag.y; trajectoryView.drag = { x: event.clientX, y: event.clientY }; applyTrajectoryTransform(); } updateTrajectoryTooltip(event); });
+$('trajectoryCanvas').addEventListener('pointerleave', hideTrajectoryTooltip);
+$('trajectoryCanvas').addEventListener('pointerup', event => { trajectoryView.drag = null; event.currentTarget.releasePointerCapture(event.pointerId); updateTrajectoryTooltip(event); });
 $('trajectoryCanvas').addEventListener('pointercancel', () => { trajectoryView.drag = null; });
 $('startButton').addEventListener('click', async () => {
   $('formMessage').textContent = '';
@@ -228,9 +318,38 @@ async function waitForConsoleShutdown(timeoutMilliseconds = 8000) {
   }
   return false;
 }
-$('shutdownButton').addEventListener('click', async () => {
+const shutdownToggle = $('shutdownToggle');
+const shutdownControl = document.querySelector('[data-shutdown-control]');
+const shutdownToggleState = $('shutdownToggleState');
+const shutdownToggleHint = $('shutdownToggleHint');
+const SHUTDOWN_ARM_DELAY = 1000;
+let shutdownReleaseTimer = null;
+const resetShutdownToggle = () => {
+  if (shutdownReleaseTimer) {
+    clearTimeout(shutdownReleaseTimer);
+    shutdownReleaseTimer = null;
+  }
+  if (shutdownToggle) {
+    shutdownToggle.checked = false;
+    shutdownToggle.disabled = false;
+  }
+  shutdownControl?.classList.remove('is-armed', 'is-busy');
+  if (shutdownToggleState) shutdownToggleState.textContent = '运行中';
+  if (shutdownToggleHint) shutdownToggleHint.textContent = '右拨关闭';
+};
+async function confirmShutdownAfterArm() {
+  if (!shutdownToggle?.checked) return;
+  shutdownToggle.disabled = true;
+  if (shutdownToggleState) shutdownToggleState.textContent = '请确认';
+  if (shutdownToggleHint) shutdownToggleHint.textContent = '确认后退出';
   const accepted = await confirmAction({ eyebrow: 'SAFE SHUTDOWN', title: '确认退出测试控制台？', body: '当前 Web 服务将停止。若测试正在执行，建议等待当前测试结束后再退出。', confirmText: '安全退出', danger: true });
-  if (!accepted) return;
+  if (!accepted) {
+    resetShutdownToggle();
+    return;
+  }
+  shutdownControl?.classList.add('is-busy');
+  if (shutdownToggleState) shutdownToggleState.textContent = '正在关闭';
+  if (shutdownToggleHint) shutdownToggleHint.textContent = '请稍候';
   try {
     const response = await fetch('/api/system/shutdown', { method: 'POST' });
     if (!response.ok) throw new Error('控制台未接受退出请求');
@@ -240,7 +359,28 @@ $('shutdownButton').addEventListener('click', async () => {
     }
     document.body.innerHTML = '<main class="closed-state"><p>TEST CONSOLE STOPPED</p><h1>控制台已安全退出</h1><span>8087 已停止监听，可以关闭此浏览器标签页。</span></main>';
   } catch (error) {
+    resetShutdownToggle();
     toast(`安全退出未完成：${error.message}`, 'error');
+  }
+}
+shutdownToggle?.addEventListener('change', () => {
+  if (!shutdownToggle.checked) {
+    resetShutdownToggle();
+    return;
+  }
+  shutdownControl?.classList.add('is-armed');
+  if (shutdownToggleState) shutdownToggleState.textContent = '准备关闭';
+  if (shutdownToggleHint) shutdownToggleHint.textContent = '保持 1 秒';
+  shutdownReleaseTimer = window.setTimeout(() => {
+    shutdownReleaseTimer = null;
+    void confirmShutdownAfterArm();
+  }, SHUTDOWN_ARM_DELAY);
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    clearTimeout(timer);
+  } else {
+    poll();
   }
 });
 tickClock(); setInterval(tickClock, 1000); Promise.all([loadCases(), loadSettings()]).then(poll).catch(error => $('formMessage').textContent = `控制台连接失败：${error.message}`);

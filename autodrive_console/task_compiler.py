@@ -25,6 +25,7 @@ from .location_manifest import (
     RuntimeLayout,
     compile_location_manifest,
     elevator_inward_yaw,
+    localization_template_text,
     physical_floor_index,
 )
 
@@ -78,8 +79,14 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
     """Compile the only approved profile without writing any output to disk."""
     if not isinstance(project, dict):
         raise CompilationError("部署项目格式无效")
-    if project.get("scene_model") != "indoor":
-        raise CompilationError("第一期仅支持室内两图单电梯场景")
+    scene_model = project.get("scene_model")
+    if scene_model not in {"indoor", "custom"}:
+        raise CompilationError("当前室内任务模板需要电梯大厅和用户楼层流程")
+    if scene_model == "custom":
+        flow = project.get("deployment_flow")
+        flow_types = [item.get("type") for item in flow] if isinstance(flow, list) else []
+        if flow_types[-1:] != ["target_floor"] or flow_types.count("lobby") != 1:
+            raise CompilationError("自定义流程必须以用户楼层结束，并包含一个电梯大厅")
 
     root = Path(map_root).resolve()
     if not root.is_dir():
@@ -115,6 +122,10 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
 
     lobby_wait, lobby_inward = _wait_point(lobby_elevator)
     target_wait, target_inward = _wait_point(target_elevator)
+    # The return task starts at the target-floor elevator call point.  It is
+    # derived from the same door/wait geometry as the arrival task, so the
+    # operator only needs to mark the delivery target.
+    return_target = target_wait
     _validate_point(lobby_asset, lobby_wait, "大厅候梯点")
     _validate_point(target_asset, target_wait, "目标层候梯点")
 
@@ -157,6 +168,7 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
     derived = {
         "start": _point_dict(start),
         "target": _point_dict(target),
+        "return_target": _point_dict(return_target),
         "lobby_wait": _point_dict(lobby_wait, lobby_inward),
         "lobby_elevator_center": _point_dict(lobby_elevator, lobby_inward),
         "target_wait": _point_dict(target_wait, target_inward),
@@ -192,7 +204,10 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
         content = _render_xml(template, values).encode("utf-8")
         artifacts.append(_artifact(f"waypoint_tasks/{site_id}/{output_name}", content))
 
-    template_hashes.setdefault("localization_base.yaml", _sha(_template("localization_base.yaml").encode("utf-8")))
+    template_hashes.setdefault(
+        "localization_base.yaml",
+        _sha(localization_template_text(project, map_root=root).encode("utf-8")),
+    )
     artifacts.extend(
         _artifact(item.relative_path, item.content) for item in location_manifest.artifacts
     )
@@ -536,8 +551,7 @@ def _task_json(value: CompilationInput, points: dict[str, dict[str, float]]) -> 
                 _waypoint("target", points["target"], "single_point", "place_water"),
             ]},
             {"change_loc": False, "map_url": value.target_map_url, "pcd_url": "", "subtask_name": f"{value.door}_r", "waypoints": [
-                _waypoint("target_return_origin", points["target"], "single_point"),
-                _waypoint("target_return_wait", points["target_wait"], "task_point", f"{b}_{u}_elevator_in_x_n"),
+                _waypoint("target_return_wait", points["return_target"], "task_point", f"{b}_{u}_elevator_in_x_n"),
                 _waypoint("target_return_elevator_center", points["target_elevator_center"], "elevator_in", f"{b}_{u}_elevator_out_x_n"),
             ]},
             {"change_loc": False, "map_url": value.lobby_map_url, "pcd_url": "", "subtask_name": "elevator_hall_r", "waypoints": [
@@ -602,7 +616,7 @@ def _render_localization(template: str, map_directory: Path) -> str:
 
 
 def _input_hash(project: dict[str, Any], value: CompilationInput, derived: dict[str, dict[str, float]]) -> str:
-    payload = {"profile": PROFILE, "input": value.__dict__, "scene_model": project.get("scene_model"), "components": project.get("components"), "physical_elevators": project.get("physical_elevators"), "map_assets": project.get("map_assets"), "map_instances": project.get("map_instances"), "localization_bindings": project.get("localization_bindings"), "localization_routes": project.get("localization_routes"), "route_waypoints": _route_waypoint_facts(project), "map_stage_assignments": project.get("map_stage_assignments"), "derived": derived}
+    payload = {"profile": PROFILE, "input": value.__dict__, "scene_model": project.get("scene_model"), "deployment_flow": project.get("deployment_flow"), "components": project.get("components"), "physical_elevators": project.get("physical_elevators"), "map_assets": project.get("map_assets"), "map_edits": project.get("map_edits"), "map_instances": project.get("map_instances"), "localization_bindings": project.get("localization_bindings"), "localization_routes": project.get("localization_routes"), "route_waypoints": _route_waypoint_facts(project), "map_stage_assignments": project.get("map_stage_assignments"), "derived": derived}
     return _sha(_json_bytes(payload))
 
 
@@ -672,7 +686,10 @@ def _route_waypoint_facts(project: dict[str, Any]) -> list[dict[str, Any]]:
     for route in routes:
         if not isinstance(route, dict):
             continue
-        for value in (route.get("task_start_waypoint_id"), route.get("task_target_waypoint_id")):
+        for value in (
+            route.get("task_start_waypoint_id"),
+            route.get("task_target_waypoint_id"),
+        ):
             if isinstance(value, str) and value not in identifiers:
                 identifiers.append(value)
         for link in route.get("links", []):
