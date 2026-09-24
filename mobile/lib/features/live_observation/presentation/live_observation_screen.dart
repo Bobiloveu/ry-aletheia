@@ -27,6 +27,7 @@ import '../domain/live_map.dart';
 import '../domain/pose_frame.dart';
 import '../domain/video_status.dart';
 import '../visualization/visualization_engine.dart';
+import 'map_marker_geometry.dart';
 import 'whep_video_view.dart';
 
 /// Optional debug-only replacement for map pixels.
@@ -737,6 +738,7 @@ Future<void> _showVideoLayoutSheet(
     context: context,
     useSafeArea: true,
     isScrollControlled: true,
+    sheetAnimationStyle: AletheiaMotion.surfaceAnimationStyle(context),
     showDragHandle: true,
     builder: (_) => UncontrolledProviderScope(
       container: container,
@@ -2725,26 +2727,39 @@ class _WorldGridMapLayer extends StatelessWidget {
   final double viewportScale;
 
   @override
-  Widget build(BuildContext context) => IgnorePointer(
-    child: CustomPaint(
-      key: const ValueKey('map-world-grid'),
-      painter: _WorldGridPainter(
-        metadata: metadata,
-        viewportScale: viewportScale,
+  Widget build(BuildContext context) {
+    // Capture the semantic colours in the painter. This also lets
+    // `shouldRepaint` detect a daylight/dark-mode switch even if map geometry
+    // itself has not changed.
+    final minorColor = AletheiaTheme.mapGridMinor;
+    final majorColor = AletheiaTheme.mapGridMajor;
+    return IgnorePointer(
+      child: CustomPaint(
+        key: const ValueKey('map-world-grid'),
+        painter: _WorldGridPainter(
+          metadata: metadata,
+          viewportScale: viewportScale,
+          minorColor: minorColor,
+          majorColor: majorColor,
+        ),
+        child: const SizedBox.expand(),
       ),
-      child: const SizedBox.expand(),
-    ),
-  );
+    );
+  }
 }
 
 class _WorldGridPainter extends CustomPainter {
   const _WorldGridPainter({
     required this.metadata,
     required this.viewportScale,
+    required this.minorColor,
+    required this.majorColor,
   });
 
   final LiveMapMetadata metadata;
   final double viewportScale;
+  final Color minorColor;
+  final Color majorColor;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -2752,10 +2767,10 @@ class _WorldGridPainter extends CustomPainter {
     final minorMeters = _minorGridMetersFor(pixelsPerMeter);
     final majorMeters = minorMeters * 5;
     final minorPaint = Paint()
-      ..color = AletheiaTheme.canvas.withValues(alpha: .11)
+      ..color = minorColor
       ..strokeWidth = .7 / viewportScale;
     final majorPaint = Paint()
-      ..color = AletheiaTheme.canvas.withValues(alpha: .2)
+      ..color = majorColor
       ..strokeWidth = 1 / viewportScale;
     _drawVerticalGrid(canvas, size, minorMeters, minorPaint);
     _drawHorizontalGrid(canvas, size, minorMeters, minorPaint);
@@ -2798,7 +2813,9 @@ class _WorldGridPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _WorldGridPainter oldDelegate) =>
       oldDelegate.metadata != metadata ||
-      oldDelegate.viewportScale != viewportScale;
+      oldDelegate.viewportScale != viewportScale ||
+      oldDelegate.minorColor != minorColor ||
+      oldDelegate.majorColor != majorColor;
 }
 
 /// A compact raster overlay for the robot's current local navigation costs.
@@ -3196,14 +3213,18 @@ class _PoseMapLayerState extends ConsumerState<_PoseMapLayer> {
     } else if (latestPose?.sequence == _mapSwitchFenceSequence) {
       poseToDraw = null;
     }
-    return IgnorePointer(
-      child: CustomPaint(
-        painter: _PosePainter(
-          metadata: widget.metadata,
-          footprint: widget.footprint,
-          pose: poseToDraw,
+    return Semantics(
+      label: '实时车辆位置，弧形前标',
+      container: true,
+      child: IgnorePointer(
+        child: CustomPaint(
+          painter: _PosePainter(
+            metadata: widget.metadata,
+            footprint: widget.footprint,
+            pose: poseToDraw,
+          ),
+          child: const SizedBox.expand(),
         ),
-        child: const SizedBox.expand(),
       ),
     );
   }
@@ -3236,34 +3257,125 @@ class _PosePainter extends CustomPainter {
     if (width <= 0 || length <= 0) {
       return;
     }
-    final fill = Paint()
-      ..color = AletheiaTheme.mapRobot.withValues(alpha: .92)
-      ..style = PaintingStyle.fill;
-    final outline = Paint()
-      ..color = AletheiaTheme.mapRobotOutline
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.6;
-    final heading = Paint()
-      ..color = AletheiaTheme.surfaceSunken
-      ..strokeWidth = math.max(1, length * .07)
-      ..strokeCap = StrokeCap.round;
     canvas.save();
     canvas.translate(x, y);
     // Matches the established PC world-to-screen vehicle orientation.
     canvas.rotate(math.pi / 2 - frame.yaw);
+    _paintReferenceVehicleMarker(canvas, width: width, length: length);
+    canvas.restore();
+  }
+
+  /// A compact vector adaptation of the reference's white chassis: dark
+  /// perimeter, recessed center module, red arc front marker and rear light
+  /// bar. It intentionally uses no time-based effects because this layer is
+  /// repainted by live pose telemetry.
+  void _paintReferenceVehicleMarker(
+    Canvas canvas, {
+    required double width,
+    required double length,
+  }) {
+    final geometry = VehicleMarkerGeometry.fromSize(
+      width: width,
+      length: length,
+    );
     final body = Rect.fromCenter(
       center: Offset.zero,
       width: width,
       height: length,
     );
-    canvas.drawRect(body, fill);
-    canvas.drawRect(body, outline);
-    canvas.drawLine(
-      Offset(-width * .24, -length * .34),
-      Offset(width * .24, -length * .34),
-      heading,
+    final radius = Radius.circular(geometry.bodyCornerRadius);
+    final outer = RRect.fromRectAndRadius(body, radius);
+    final edge = geometry.edge;
+    final inner = RRect.fromRectAndRadius(
+      body.deflate(edge),
+      Radius.circular(geometry.innerCornerRadius),
     );
-    canvas.restore();
+    const chassisEdge = Color(0xFF111A2B);
+    const chassisShade = Color(0xFF313948);
+    const chassisWhite = Color(0xFFFDFDFE);
+    const panelStroke = Color(0xFFD0D5DE);
+    const signal = Color(0xFFFF3B3B);
+    final outerPath = Path()..addRRect(outer);
+    canvas.drawShadow(outerPath, const Color(0x85000000), width * .18, true);
+    canvas.drawRRect(outer, Paint()..color = chassisEdge);
+    canvas.drawRRect(
+      inner,
+      Paint()
+        ..shader = ui.Gradient.linear(
+          Offset(-width * .42, -length * .5),
+          Offset(width * .42, length * .5),
+          const [Color(0xFFFFFFFF), chassisWhite, Color(0xFFF0F2F6)],
+          const [0, .56, 1],
+        ),
+    );
+
+    final panel = RRect.fromRectAndRadius(
+      Rect.fromCenter(
+        center: Offset(0, length * .015),
+        width: width * .64,
+        height: length * .56,
+      ),
+      Radius.circular(geometry.panelCornerRadius),
+    );
+    canvas.drawRRect(
+      panel,
+      Paint()
+        ..color = panelStroke.withValues(alpha: .82)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = geometry.panelStrokeWidth,
+    );
+
+    final dialCenter = Offset(0, length * .025);
+    final dialRadius = geometry.dialRadius;
+    final dialPath = Path()
+      ..addOval(Rect.fromCircle(center: dialCenter, radius: dialRadius));
+    canvas.drawShadow(dialPath, const Color(0x99000000), width * .13, true);
+    canvas.drawCircle(dialCenter, dialRadius, Paint()..color = chassisShade);
+    canvas.drawCircle(
+      dialCenter,
+      dialRadius * .83,
+      Paint()
+        ..shader = ui.Gradient.radial(
+          dialCenter - Offset(width * .055, length * .04),
+          dialRadius,
+          const [Color(0xFF313B49), Color(0xFF090F1B)],
+          const [0, 1],
+        ),
+    );
+    canvas.drawCircle(
+      dialCenter,
+      dialRadius * .93,
+      Paint()
+        ..color = signal
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = geometry.dialRingStrokeWidth,
+    );
+
+    final frontArc = Path()
+      ..moveTo(-width * .28, -length * .315)
+      ..quadraticBezierTo(0, -length * .435, width * .28, -length * .315);
+    final lightWidth = geometry.lightWidth;
+    final glow = Paint()
+      ..color = signal.withValues(alpha: .18)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = lightWidth * 2.3
+      ..strokeCap = StrokeCap.round;
+    final lamp = Paint()
+      ..color = signal
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = lightWidth
+      ..strokeCap = StrokeCap.round;
+    canvas.drawPath(frontArc, glow);
+    canvas.drawPath(frontArc, lamp);
+    final rearStart = Offset(-width * .25, length * .355);
+    final rearEnd = Offset(width * .25, length * .355);
+    canvas.drawLine(rearStart, rearEnd, glow);
+    canvas.drawLine(rearStart, rearEnd, lamp);
+    canvas.drawCircle(
+      Offset(0, -length * .18),
+      geometry.sensorRadius,
+      Paint()..color = const Color(0xFF542C35),
+    );
   }
 
   @override

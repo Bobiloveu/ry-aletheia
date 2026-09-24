@@ -8,6 +8,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../app/motion/aletheia_interaction.dart';
+import '../../../app/motion/aletheia_motion.dart';
 import '../../../app/theme/aletheia_theme.dart';
 import '../../../core/connection/robot_connection_controller.dart';
 import '../../robot_connection/presentation/robot_connection_screen.dart';
@@ -32,6 +34,9 @@ class ManualControlScreen extends ConsumerStatefulWidget {
 
 class _ManualControlScreenState extends ConsumerState<ManualControlScreen>
     with WidgetsBindingObserver {
+  final _hapticGate = AletheiaHapticGate();
+  var _completedActionHapticSequence = 0;
+
   @override
   void initState() {
     super.initState();
@@ -62,6 +67,12 @@ class _ManualControlScreenState extends ConsumerState<ManualControlScreen>
     if (!connected) return const _ConnectionRequired();
 
     final viewState = ref.watch(manualControlControllerProvider);
+    ref.listen<ManualControlScreenState>(manualControlControllerProvider, (
+      previous,
+      next,
+    ) {
+      if (previous != null) _emitStateHaptic(previous, next);
+    });
     final controller = ref.read(manualControlControllerProvider.notifier);
     final status = viewState.status;
     if (status == null) {
@@ -114,6 +125,8 @@ class _ManualControlScreenState extends ConsumerState<ManualControlScreen>
                     _DirectionPanel(
                       enabled: viewState.canSendMotion,
                       busy: viewState.isBusy,
+                      link: viewState.link,
+                      lastControlRoundTrip: viewState.lastControlRoundTrip,
                       onVector: controller.sendVector,
                       onStop: controller.stop,
                     ),
@@ -157,12 +170,48 @@ class _ManualControlScreenState extends ConsumerState<ManualControlScreen>
     );
   }
 
+  void _emitStateHaptic(
+    ManualControlScreenState previous,
+    ManualControlScreenState next,
+  ) {
+    String? eventId;
+    Future<void> Function()? emit;
+    if (!previous.hasActiveSession && next.hasActiveSession) {
+      eventId = 'manual-session:${next.status?.session.id ?? 'unknown'}';
+      emit = HapticFeedback.mediumImpact;
+    } else if (previous.link != ManualControlLink.locked &&
+        next.link == ManualControlLink.locked) {
+      eventId = 'manual-locked:${next.status?.session.id ?? 'unknown'}';
+      emit = HapticFeedback.heavyImpact;
+    } else if (!previous.isError && next.isError) {
+      eventId = 'manual-error:${next.message}';
+      emit = HapticFeedback.heavyImpact;
+    } else if (previous.hasActiveSession &&
+        !next.hasActiveSession &&
+        !next.isError) {
+      eventId =
+          'manual-session-exited:${previous.status?.session.id ?? 'unknown'}';
+      emit = HapticFeedback.mediumImpact;
+    } else if (previous.isActionPending &&
+        !next.isActionPending &&
+        !next.isError) {
+      // A new, confirmed controller completion earns one quiet acknowledgement.
+      // The sequence is page-owned so repeatedly saving the same value still
+      // feels responsive, while rebuilds and polling cannot duplicate it.
+      eventId = 'manual-action-complete:${++_completedActionHapticSequence}';
+      emit = HapticFeedback.lightImpact;
+    }
+    if (eventId == null || emit == null) return;
+    unawaited(_hapticGate.triggerOnce(eventId, emit));
+  }
+
   Future<void> _confirmEnter(
     BuildContext context,
     ManualControlController controller,
   ) async {
     final accepted = await showDialog<bool>(
       context: context,
+      animationStyle: AletheiaMotion.surfaceAnimationStyle(context),
       builder: (context) => AlertDialog(
         title: const Text('确认进入手动控制？'),
         content: const Text(
@@ -251,22 +300,37 @@ class _ControlStatusCard extends StatelessWidget {
     final ready = state.canSendMotion;
     final active = state.hasActiveSession;
     final (label, icon, color) = switch ((
+      state.link,
       active,
       ready,
       status.emergency.state,
     )) {
-      (_, _, EmergencyStopState.triggered) => (
+      (_, _, _, EmergencyStopState.triggered) => (
         '急停已触发',
         Icons.emergency_rounded,
         AletheiaTheme.danger,
       ),
-      (_, _, EmergencyStopState.unknown) => (
+      (_, _, _, EmergencyStopState.unknown) => (
         '急停状态未知',
         Icons.help_outline_rounded,
         AletheiaTheme.warning,
       ),
-      (true, true, _) => ('已就绪', Icons.verified_rounded, AletheiaTheme.mint),
-      (true, false, _) => ('等待车端确认', Icons.sync_rounded, AletheiaTheme.warning),
+      (ManualControlLink.locked, _, _, _) => (
+        '控制已锁定',
+        Icons.lock_outline_rounded,
+        AletheiaTheme.danger,
+      ),
+      (ManualControlLink.delayed, _, _, _) => (
+        '链路延迟',
+        Icons.sync_problem_rounded,
+        AletheiaTheme.warning,
+      ),
+      (_, true, true, _) => ('已就绪', Icons.verified_rounded, AletheiaTheme.mint),
+      (_, true, false, _) => (
+        '等待车端确认',
+        Icons.sync_rounded,
+        AletheiaTheme.warning,
+      ),
       _ => ('未进入', Icons.lock_outline_rounded, AletheiaTheme.textTertiary),
     };
 
@@ -283,7 +347,11 @@ class _ControlStatusCard extends StatelessWidget {
                       ?.copyWith(fontWeight: FontWeight.w700),
                 ),
               ),
-              _StatusPill(icon: icon, label: label, color: color),
+              AletheiaStatusTransition(
+                stateKey:
+                    '${state.link.name}-$active-$ready-${status.emergency.state.name}',
+                child: _StatusPill(icon: icon, label: label, color: color),
+              ),
             ],
           ),
           const SizedBox(height: 12),
@@ -324,12 +392,16 @@ class _DirectionPanel extends StatelessWidget {
   const _DirectionPanel({
     required this.enabled,
     required this.busy,
+    required this.link,
+    required this.lastControlRoundTrip,
     required this.onVector,
     required this.onStop,
   });
 
   final bool enabled;
   final bool busy;
+  final ManualControlLink link;
+  final Duration? lastControlRoundTrip;
   final Future<void> Function(VehicleControlVector vector) onVector;
   final Future<void> Function() onStop;
 
@@ -338,10 +410,16 @@ class _DirectionPanel extends StatelessWidget {
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          '方向',
-          style: Theme.of(context).textTheme.titleMedium
-              ?.copyWith(fontWeight: FontWeight.w700),
+        Row(
+          children: [
+            Text(
+              '方向',
+              style: Theme.of(context).textTheme.titleMedium
+                  ?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const Spacer(),
+            _ControlLinkIndicator(link: link, roundTrip: lastControlRoundTrip),
+          ],
         ),
         const SizedBox(height: 16),
         Center(
@@ -354,6 +432,54 @@ class _DirectionPanel extends StatelessWidget {
       ],
     ),
   );
+}
+
+class _ControlLinkIndicator extends StatelessWidget {
+  const _ControlLinkIndicator({required this.link, required this.roundTrip});
+
+  final ManualControlLink link;
+  final Duration? roundTrip;
+
+  @override
+  Widget build(BuildContext context) {
+    final (label, icon, color) = switch (link) {
+      ManualControlLink.idle => (
+        '未激活',
+        Icons.pause_circle_outline_rounded,
+        AletheiaTheme.textTertiary,
+      ),
+      ManualControlLink.healthy => (
+        roundTrip == null ? '链路正常' : '${roundTrip!.inMilliseconds} ms',
+        Icons.check_circle_outline_rounded,
+        AletheiaTheme.mint,
+      ),
+      ManualControlLink.delayed => (
+        '链路延迟',
+        Icons.sync_problem_rounded,
+        AletheiaTheme.warning,
+      ),
+      ManualControlLink.locked => (
+        '已安全锁定',
+        Icons.lock_outline_rounded,
+        AletheiaTheme.danger,
+      ),
+    };
+    return AletheiaStatusTransition(
+      stateKey: 'control-link-${link.name}',
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 5),
+          Text(
+            label,
+            style: Theme.of(context).textTheme.labelMedium
+                ?.copyWith(color: color, fontWeight: FontWeight.w700),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _DirectionJoystick extends StatefulWidget {
@@ -440,7 +566,19 @@ class _DirectionJoystickState extends State<_DirectionJoystick>
 
   void _release() {
     _activePointer = null;
-    if (!_vector.isStop) widget.onStop();
+    if (!_vector.isStop) {
+      HapticFeedback.lightImpact();
+      widget.onStop();
+    }
+    if (AletheiaMotion.isReducedMotion(context)) {
+      if (mounted) {
+        setState(() {
+          _offset = Offset.zero;
+          _vector = VehicleControlVector.stop;
+        });
+      }
+      return;
+    }
     _xReturn.value = _offset.dx;
     _yReturn.value = _offset.dy;
     _xReturn.animateWith(SpringSimulation(_returnSpring, _offset.dx, 0, 0));
@@ -619,7 +757,8 @@ class _SpeedPanelState extends State<_SpeedPanel> {
   @override
   Widget build(BuildContext context) {
     final speed = widget.state.status!.speed;
-    final enabled = widget.state.canSendMotion && !widget.state.isBusy;
+    final enabled =
+        widget.state.canAdjustMotionSettings && !widget.state.isBusy;
     final minimum = speed.minimum.clamp(.1, 1.0).toDouble();
     final maximum = speed.maximum.clamp(minimum, 1.0).toDouble();
     return _Panel(
@@ -782,6 +921,7 @@ class _ChassisParametersPanel extends StatelessWidget {
     isScrollControlled: true,
     useSafeArea: true,
     backgroundColor: Colors.transparent,
+    sheetAnimationStyle: AletheiaMotion.surfaceAnimationStyle(context),
     builder: (_) => _ChassisParametersSheet(initial: initial, onSave: onSave),
   );
 }
@@ -1090,30 +1230,33 @@ class _Notice extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = isError ? AletheiaTheme.danger : AletheiaTheme.cyan;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: .1),
-        borderRadius: BorderRadius.circular(AletheiaTheme.controlRadius),
-        border: Border.all(color: color.withValues(alpha: .3)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(13),
-        child: Row(
-          children: [
-            Icon(
-              isError
-                  ? Icons.error_outline_rounded
-                  : Icons.info_outline_rounded,
-              color: color,
-            ),
-            const SizedBox(width: 9),
-            Expanded(
-              child: Text(
-                message,
-                style: TextStyle(color: color, height: 1.35),
+    return AletheiaStatusTransition(
+      stateKey: '$isError:$message',
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: .1),
+          borderRadius: BorderRadius.circular(AletheiaTheme.controlRadius),
+          border: Border.all(color: color.withValues(alpha: .3)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(13),
+          child: Row(
+            children: [
+              Icon(
+                isError
+                    ? Icons.error_outline_rounded
+                    : Icons.info_outline_rounded,
+                color: color,
               ),
-            ),
-          ],
+              const SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  message,
+                  style: TextStyle(color: color, height: 1.35),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

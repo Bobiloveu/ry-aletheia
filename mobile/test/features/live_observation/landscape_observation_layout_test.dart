@@ -9,6 +9,7 @@ void main() {
   testWidgets(
     'map and three-stream camera workspace remain usable in landscape',
     (tester) async {
+      final semantics = tester.ensureSemantics();
       tester.view.physicalSize = const Size(2532, 1170);
       tester.view.devicePixelRatio = 3;
       addTearDown(tester.view.resetPhysicalSize);
@@ -40,6 +41,7 @@ void main() {
       expect(find.byKey(const ValueKey('map-tool-rail')), findsOneWidget);
       expect(find.byTooltip('活动地图'), findsOneWidget);
       expect(find.text('实时位姿'), findsOneWidget);
+      expect(find.bySemanticsLabel('实时车辆位置，弧形前标'), findsOneWidget);
       final mapRect = tester.getRect(
         find.byKey(const ValueKey('observation-map-workspace')),
       );
@@ -103,6 +105,7 @@ void main() {
         find.byKey(const ValueKey('video-display-slot-辅助画面 2')),
         findsOneWidget,
       );
+      semantics.dispose();
     },
   );
 

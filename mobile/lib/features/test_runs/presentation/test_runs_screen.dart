@@ -1077,6 +1077,7 @@ class _AttemptRow extends StatelessWidget {
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
+      sheetAnimationStyle: AletheiaMotion.surfaceAnimationStyle(context),
       builder: (sheetContext) => SafeArea(
         child: Container(
           padding: EdgeInsets.fromLTRB(20, 12, 20, 24),
@@ -1413,6 +1414,7 @@ Future<bool> showTestRunConfirmDialog({
 }) async {
   final approved = await showDialog<bool>(
     context: context,
+    animationStyle: AletheiaMotion.surfaceAnimationStyle(context),
     builder: (dialogContext) => AlertDialog(
       title: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

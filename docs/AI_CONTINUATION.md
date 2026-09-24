@@ -1,5 +1,177 @@
 # 当前开发断点
 
+## 2026-09-24：Mobile 非叠层详情与状态过渡修复（最新）
+
+### 已完成
+
+- 范围严格限定为 Flutter Mobile；未修改 Backend、PC Web、ROS、Shared 契约、地图/视频/点云实时渲染、一级导航或摇杆控制链路。
+- 根因经 Widget 回归确认有两项：详情页以全页 `FadeTransition` 进入时会把上一页内容透过新页面混合出来；局部状态 `AnimatedSwitcher` 会在短时切换中同时保留旧、新标签，形成重影和语义冲突。
+- `AletheiaMotion.detailPage` 现在只保留 1.5% 的短水平空间提示，整个新页面从第一帧起保持不透明；系统启用 Reduce Motion 时直接替换，不再做全页透明混合。
+- `AletheiaStatusTransition` 现在只布局最新 child。连接、控制等状态在切换瞬间不会同时出现新旧文案；淡入/轻微缩放仍仅作用于当前状态并尊重 Reduce Motion。
+- `AletheiaFadeThrough` 已单独以真实 Widget 替换检查，现有 Flutter 路径没有保留旧 child，因此未为“看似可能”的来源引入额外改动。地图、视频、点云和一级 HMI 仍保持原有直接、低延迟的表现。
+
+### 验证与恢复提示
+
+- TDD：详情页“进入表面不透明”和状态“旧标签立即移除”回归均先在旧实现下按预期失败；最小修复后通过。关联的 Manual Control、机器人连接与 Debug Gallery 定向测试共 26 项通过。
+- 已在 iPhone 18 Pro (`A49C5D93-E5D2-421F-8F4D-1F271512BB46`) 的正式 Manual Control 延迟 Gallery 状态审查：界面仅显示单一黄色“链路延迟”状态，没有“控制已锁定”或旧状态残影。无代理 `fvm flutter analyze` 已通过，`git diff --check` 无输出。全量 Gallery Golden 未运行，工作区已有大量未归属的 Golden failure 图片，不能重录或删除。
+- 主要文件：`mobile/lib/app/motion/{aletheia_motion.dart,aletheia_interaction.dart}`、`mobile/test/app/aletheia_motion_test.dart`、`mobile/test/app/motion/aletheia_interaction_test.dart`。
+- Resume Prompt：`阅读 AGENTS.md、mobile/AGENTS.md 和本节；保持范围为 Mobile。详情页必须不透明地进入，状态替换只能显示最新 child；不要给地图、视频、遥测、一级导航或 joystick 添加过渡。运行 motion、manual-control、connection、Gallery 定向测试、analyze 与 diff check，并在 iPhone 18 Pro 审查。`
+
+## 2026-09-24：Mobile 手动控制短暂网络抖动不再本地硬锁（最新）
+
+### 已完成
+
+- 范围严格限定为 Flutter Mobile；未修改 Backend、PC Web、ROS、HTTP 契约、车端输入看门狗或急停边界。
+- 根因：App 曾在任一 `/vector` 请求超过车端 `input_timeout_ms` 的 85% 时，将本地链路转为永久 `locked`。默认 350 ms 输入窗口下，只要一次 HTTP 往返超过约 298 ms，即使网络马上恢复，操作者也必须退出并重新进入会话。
+- 现仅保留 60% 时间点的“链路延迟”呈现；移除 85% 时间点的本地硬锁。请求仍只有一个在途、输入仍 latest-wins，恢复响应后状态回到正常，不会堆积过期指令。
+- 车端输入看门狗仍是唯一运动超时安全边界：链路真正中断时车端照常停止。急停 `triggered/unknown`、控制源变更、会话或 heartbeat 失效、缺失 `input_timeout_ms` 仍按原有 fail-closed 规则禁用运动；本变更不自动绕过任何车端状态。
+
+### 验证与恢复提示
+
+- TDD：将慢 vector 回归先改为期望 `delayed + canSendMotion`，旧实现按预期失败为 `locked`；移除本地超时锁后通过，并验证响应恢复回 `healthy`。
+- Debug Gallery 的原“链路延迟安全锁”状态已替换为“可恢复链路延迟”，复用正式 Manual Control 页面；不会把已废弃的硬锁表现留在调试审查入口。
+- 已通过无代理的 Manual Control controller/screen/domain 与 Debug Gallery 定向回归、完整 `fvm flutter analyze` 与 `git diff --check`。尚需在真实机器人连接下制造一次短暂 Wi-Fi 抖动，确认车端停止与恢复交互符合现场安全要求。
+- 主要文件：`mobile/lib/features/manual_control/application/manual_control_controller.dart`、`mobile/lib/debug_ui/{gallery_manifest,gallery_preview}.dart`，以及对应 Controller / Gallery 测试。
+- Resume Prompt：`阅读 AGENTS.md、mobile/AGENTS.md、shared/contracts/robot_control.md 和本节；保持范围为 Mobile。短暂慢 vector 只能显示 delayed，禁止恢复本地超时永久锁；但不得移除 Backend input watchdog、急停/unknown、会话或 heartbeat 失效的 fail-closed 行为。运行 manual_control 定向测试、analyze 与 diff check。`
+
+## 2026-09-24：Mobile 地图车辆严格物理投影与等比细节修复（最新）
+
+### 已完成
+
+- 范围严格限定为 Flutter Mobile；未修改 Backend、PC Web、ROS、位姿/地图协议或车型数据结构。
+- 根因有两层：此前的 26 px 最小可读尺寸会改变车辆在地图中的物理投影；且车身内的描边、圆角、灯带和传感器使用固定像素下限，导致放大/缩小时视觉细节比例发生漂移。
+- 现在车辆外框**直接**按 `length_m / worldHeight` 与 `width_m / worldWidth` 投影，不保留任何显示像素最小值。地图缩放与格栅、墙体、点云共用同一变换，因此车身的米制比例在任意倍率下严格一致。
+- 新增 `VehicleMarkerGeometry`：外框、内面板、中心圆模块、红环、弧形前标、后灯带和传感器均只由车身宽长的比例计算；不再存在固定 px / `math.max` 视觉下限。缩放时整车所有细节等比变化，车的样式不会因倍率切换而重构。
+- 这取代上一版“26 px 显示下限”的方案；总览中车辆可能自然小到不适合辨认，这是严格物理投影的必然结果，不能通过放大车身来伪造比例。
+
+### 验证与恢复提示
+
+- 已在 iPhone 18 Pro 的 `observe_live_daylight` 页面复核 20 m / 格总览：车辆不会被人为放大；与格栅使用同一米制投影。后续应在真实地图的近/远两档倍率一并目测确认。
+- 已通过无代理的 marker geometry（严格 4× 等比细节）及地图工作区（4 项）回归、完整 `fvm flutter analyze` 与 `git diff --check`。
+- 主要文件：`mobile/lib/features/live_observation/presentation/{live_observation_screen.dart,map_marker_geometry.dart}`、`mobile/test/features/live_observation/presentation/map_marker_geometry_test.dart`。
+- Resume Prompt：`阅读 AGENTS.md、mobile/AGENTS.md 和本节；保持范围为 Mobile。车辆必须直接按 width_m / length_m 投影，禁止加入任何最小显示尺寸、固定像素描边或缩放特例。所有车辆细节必须仅由车身宽长推导。运行 map_marker_geometry_test、landscape_observation_layout_test、analyze 与 diff check。`
+
+## 2026-09-24：Mobile 地图车辆弧形前标（最新）
+
+### 已完成
+
+- 范围严格限定为 Flutter Mobile；未修改 Backend、PC Web、ROS、地图坐标换算、位姿协议或 Shared 契约。
+- 地图车辆标记改为用户最终确认的唯一参考：白色圆角车身、深色外周边、中央深色圆形模块与红色信号环、**红色弧形前标**和红色后灯带。所有结构均由 `CustomPaint` 矢量绘制，不引入图片资源、动画循环或额外实时开销。
+- 标记继续沿用既有 `pi/2 - yaw` 旋转和世界坐标投影，车头方向与 PC/地图坐标体系一致；只在普通总览比例下施加最小可读尺寸，不移动真实位置，也不改变车辆宽长比。
+- 车辆层增加“实时车辆位置，弧形前标”的辅助功能语义，供自动化和读屏识别此关键安全信息。
+- Debug Gallery 的静态观测页此前只发送首帧位姿，而地图为防止切图后绘制旧坐标会安全丢弃首帧，因而预览无车辆。现在 Gallery 以 32 ms 间隔发送紧随的一帧本地模拟位姿；这是调试数据修复，不改变生产网络流、地图切换栅栏或控制逻辑。
+
+### 验证与恢复提示
+
+- 已在 iPhone 18 Pro 模拟器 `A49C5D93-E5D2-421F-8F4D-1F271512BB46` 启动 `observe_live_daylight` 真实生产页面复核：弧形前标、中央红环、后灯带、深色外框与随 yaw 转向均可见，白色占据图背景下保持可辨识度。
+- 已以无代理环境通过地图横屏/缩放/拖拽/局部代价地图 4 项定向回归、完整 `fvm flutter analyze` 与 `git diff --check`。全量 Gallery Golden 仍不执行，工作区已存在非本次产生的大量 Golden failure 图片。
+- 主要文件：`mobile/lib/features/live_observation/presentation/live_observation_screen.dart`、`mobile/lib/debug_ui/gallery_preview.dart`、`mobile/test/features/live_observation/landscape_observation_layout_test.dart`。
+- Resume Prompt：`阅读 AGENTS.md、mobile/AGENTS.md 和本节；保持范围为 Mobile。以无代理环境运行 landscape_observation_layout_test、flutter analyze、git diff --check，并用 iPhone 18 Pro 的 observe_live_daylight 审查弧形前标车辆。不要修改位姿坐标、yaw、Backend/PC Web 或 Shared 契约。`
+
+## 2026-09-24：Mobile 运行依赖重新配置残留节点修复（最新）
+
+### 已完成
+
+- 范围严格限定为 Flutter Mobile；未修改 Backend、PC Web、ROS、Supervisor 控制边界或共享 HTTP 契约。
+- 根因：运行配置页将 `monitor_nodes`（健康预检清单）和自动依赖编排的启动阶段作为两份独立、可累积的状态保存。操作者换用新的 Supervisor 名称后，旧 `MODULES:*` 仍会随配置写回；Backend 正确地将这些已不存在的进程报告为 `MISSING`，导致页面同时显示旧节点红色和新节点绿色。
+- 当自动依赖编排启用时，App 现从当前启动阶段按首次出现顺序去重派生 `monitor_nodes`，保存时不会保留旧的人工监控项；同一节点即使误选到多个阶段，也只会被健康预检一次。
+- 自动依赖编排关闭时，仍完整保留既有的人工运行依赖监控模式。配置弹层在自动编排启用时明确说明“随启动阶段自动同步”，并禁用容易造成两份清单分叉的独立勾选。
+- 测试运行页不隐藏、过滤或篡改 Backend 返回的预检快照；若新保存的阶段内节点真实缺失，仍会以红色安全告警显示。
+
+### 验证与恢复提示
+
+- 已按 TDD 完成红绿验证：旧实现会把历史 `MODULES:*` 写回 `monitor_nodes`；修复后自动编排只写当前阶段的三个去重节点，关闭编排时仍写人工选择项。
+- 已通过无代理环境下的 runtime-settings、test-runs domain、Debug Gallery 定向测试，完整 `fvm flutter analyze` 和 `git diff --check`。
+- 部署新包后，进入“工具 → 运行配置 → 测试依赖编排”，确认启动阶段仅包含当前实际进程，然后点击“完成配置”与页面“保存”。正在运行的既有测试保留其启动时的安全预检快照；请新建一次测试以读取更新后的清单，不能让 App 在运行中伪造或抹除旧预检结果。
+- 主要文件：`mobile/lib/features/runtime_settings/{domain/runtime_settings.dart,presentation/runtime_settings_screen.dart}`、`mobile/test/features/runtime_settings/domain/runtime_settings_test.dart`。
+- Resume Prompt：`阅读 AGENTS.md、mobile/AGENTS.md 和本节；保持范围为 Mobile。以无代理环境运行 runtime_settings_test、test_runs domain、Gallery 定向测试及 analyze。不要过滤 test-run API 返回的 node_states；只在自动编排保存路径同步 monitor_nodes。`
+
+## 2026-09-24：Mobile 全局交互动效一致性（最新）
+
+### 已完成
+
+- 范围严格限定为 Flutter Mobile；未修改 Backend、PC Web、ROS、共享契约、地图/视频/点云的实时渲染，以及手动控制的 Controller、Repository 或传输安全链路。
+- 所有正式业务页的 `showDialog` 与 `showModalBottomSheet` 统一接入 `AletheiaMotion.surfaceAnimationStyle(context)`：报告、维护、运行设置、场景配置、测试用例、测试运行、实时观测、应用设置与手动控制现在采用一致的短时、可打断表面过渡；系统启用 Reduce Motion 时自动缩短。
+- 根 Theme 过渡不再硬编码时长/曲线，改为读取 `AletheiaMotion`：常规模式维持克制的 180 ms 状态曲线，Reduce Motion 下为 100 ms。
+- `AletheiaPressFeedback` 现在追踪当前手指是否仍在卡片范围内。手指拖出时会立即恢复原尺寸，重新进入可再按下，抬起/取消也会可靠复位；不拦截其下方的 `InkWell`、滚动或手势竞争。
+- 测试用例的大卡片补齐这一按压反馈。高频地图、视频、点云、遥测、一级导航与 joystick 仍明确不添加额外转场或缓动，保持 HMI 响应优先。
+- 已用 Widget 回归排除一个“FadeThrough 会双层叠显”的假设：当前 Flutter 路径不会保留旧 child，因此没有为了视觉效果引入无意义改动。
+
+### 验证、风险与恢复提示
+
+- 已通过（无代理环境）：动效按压离开/Reduce Motion 回归、测试用例、场景、测试运行、报告、实时观测横屏布局的定向 Flutter 测试，以及完整 `fvm flutter analyze` 与 `git diff --check`。
+- 未运行全量 Gallery Golden：工作区已有大量未归属的 Golden failure 图片和既有像素基线差异，不能在本任务中生成、删除或重录它们。尚需在 iPhone 18 Pro 模拟器手动检查深色/白蓝主题、Reduce Motion 下的一个弹层打开/关闭与一张测试用例卡片的按压离开行为。
+- 主要文件：`mobile/lib/app/{app.dart,motion/aletheia_motion.dart,motion/aletheia_interaction.dart}`、`mobile/lib/features/{test_cases,runtime_settings,scenario_setup,test_runs,reports,system_maintenance,live_observation}/presentation/`、`mobile/test/app/motion/aletheia_interaction_test.dart`。
+- Resume Prompt：`阅读 AGENTS.md、mobile/AGENTS.md、本节与 motion spec；保持范围为 Mobile。先以无代理环境运行 aletheia_interaction_test、flutter analyze 与 git diff --check，再在 iPhone 18 Pro 验证弹层和卡片的深/浅色与 Reduce Motion。不要给地图、视频、遥测、一级导航或 joystick 增加装饰性动效。`
+
+## 2026-09-23：Mobile 白蓝地图格栅可见性修复（最新）
+
+### 已完成
+
+- 范围严格限定为 Flutter Mobile；未修改 Backend、PC Web、ROS、地图坐标/手势、实时遥测或 Shared 契约。
+- 根因：地图格栅复用了 `canvas` 的低透明度。在白色占据图自由空间上，白蓝主题的 `canvas` 近白，导致格栅几乎没有对比度；深色主题则正常。
+- `AletheiaTheme` 现提供独立的地图格栅语义色。深色主题保持旧的实际颜色与透明度；白蓝主题使用克制的冷灰蓝细线与主线，以保留米制参照而不压制占据图、点云、虚拟墙或局部代价地图。
+- `_WorldGridPainter` 显式接收格栅颜色，并将颜色纳入 `shouldRepaint`。切换日间/深色主题时，即使地图元数据和缩放不变，也会正确重绘。
+
+### 验证与恢复提示
+
+- 已通过：新增白底格栅对比度回归测试、地图横屏布局/缩放/拖拽/局部代价地图定向测试（7 项）以及针对性 `flutter analyze`、`git diff --check`。
+- iPhone 18 Pro 已运行现有实时地图 Debug 状态，深色地图格栅可见；日间静态色彩与合成对比度由定向测试覆盖。日间 Debug 路由的完整 Xcode 启动在本机交互时限内未完成，后续可用 `observe_live_daylight` 进行一次纯视觉复核。
+- 测试命令应沿用 `scripts/test-mobile.sh` 的无代理方式（临时移除 `HTTP_PROXY`/`HTTPS_PROXY`），否则 Flutter tester 到 `127.0.0.1` 的本地服务会被代理断开。
+- Resume Prompt：`阅读 AGENTS.md、mobile/AGENTS.md 和本节；保持范围为 Mobile。先运行无代理的地图/主题定向测试与 analyze，再在 observe_live_daylight 状态审查白蓝格栅。不要改变图层顺序：静态地图 → 格栅 → costmap → 墙 → 点云 → 车辆。`
+
+## 2026-09-23：Mobile 原生测试报告卡片（最新）
+
+### 已完成
+
+- 范围限定为 `mobile/`、`shared/contracts/task_execution.md` 与必要文档；未修改 Backend、PC Web、ROS、报告生成器、HTML/CSV 存档或 PNG 导出。
+- Shared 新增 **Planned** `Mobile Native Reports`：既有 `GET /api/reports` 保持兼容，可选 `native_report` 摘要；未来详情端点为 `GET /api/reports/{report_id}/native?cursor=&limit=`。Backend 仍未实现，PC Web 明确为非消费者。
+- App 新增 fail-closed 结构化模型、最大 100 条的详情分页请求与追加失败保留策略。未知/畸形/不安全数据只显示“车端尚未提供原生报告数据”，不会访问浏览器、WebView、HTML、CSV、文件系统或相册。
+- 报告中心改为原生 Apple 风格工业 HMI 卡片：状态、类型、生成时间、耗时、任务/通过/异常与简短结论；仅有效原生报告进入 App 内详情。详情按异常优先展示，再列全部任务；删除确认保留。无循环、延迟或装饰性动画，卡片只复用现有可中断按压反馈并尊重 Reduce Motion。
+- Debug Gallery 新增 `reports_native_ready`、`reports_native_failed`、`reports_native_legacy`、`report_native_detail`、`report_native_detail_loading`、`report_native_detail_error`，全部渲染正式页面并只注入本地 fake Provider 数据。
+
+### 验证与后续
+
+- 已通过：原生模型、Repository、分页 Controller、卡片/详情 Widget、Gallery 定向测试，以及 `fvm flutter analyze`；定向集共 24 项通过。
+- 已在 iPhone 18 Pro 模拟器审查 native ready、failed、legacy、detail 与 detail-error：失败任务优先级、统计、迁移提示和 App 内重试在深色 HMI 下层级清晰；日光主题由卡片/详情 Widget 测试使用 `AletheiaTheme.light()` 覆盖。
+- `./scripts/test-mobile.sh` 运行到 131 个普通测试通过；脚本因既有 79 项 Gallery Golden 像素基线差异返回非零。新增 native-report Gallery 状态保留在 Debug Gallery，但刻意不纳入 Golden，未生成新的 Golden 失败图片；既有失败文件不得重录或删除。
+- 下一步 Backend 仅在获得单独授权后实现 Shared 的 Planned 契约、输入校验与迁移；完成三方消费者验证后才可将其提升为 Existing。整份报告长图 PNG 导出与相册保存明确后置，不在当前实现中。
+
+### 本轮文件与恢复提示
+
+- 主要文件：`shared/contracts/task_execution.md`、`mobile/lib/features/reports/**`、`mobile/lib/app/router.dart`、`mobile/lib/debug_ui/{gallery_manifest,gallery_preview}.dart`、对应 `mobile/test/features/reports/**` 与 Gallery 测试。
+- Resume Prompt：`阅读 AGENTS.md、mobile/AGENTS.md、Shared task_execution 原生报告 Planned 段落和本节；保持范围为 Mobile + 必要契约。先运行 reports/Gallery 定向测试与 analyze，再在 iPhone 18 Pro 的 Debug Gallery 审查六个 native-report 状态。不要触碰 frontend、Backend 或 PNG/Photos 导出。`
+
+## 2026-09-23：Mobile 核心交互动效第一期（最新）
+
+### 目标与已完成
+
+- 范围严格限定为 Flutter Mobile；未修改 Backend、Web、ROS、HTTP/WS 契约、地图/视频/点云渲染或手动控制 Controller/Repository。
+- 新增统一的数学动效底盘：按压 120 ms、局部状态 180 ms、弹层 240 ms，均使用 `Tween`、`Cubic` 或既有 `SpringSimulation`；没有引入循环、GIF/Lottie、Timer 或业务延迟。
+- 工具卡片和可点击设置行获得不抢占手势的即时按压反馈；连接、手动控制状态和通知使用局部 keyed transition；设置、手动控制确认和底盘参数弹层统一采用短曲线。
+- 手动控制继续使用原有直接 Pointer 摇杆与 STOP 安全链路。松手先走既有 STOP，再仅视觉回中；Reduce Motion 直接归中。已补齐进入/退出、锁定、错误、参数操作完成与摇杆 STOP 的一次性触觉确认，且不会等待触觉 Future。
+- Debug Gallery 增加“手动控制链路延迟安全锁定”真实生产页状态，并保留原有 ready/emergency/dialog/bottom-sheet/SnackBar 审查入口。
+
+### 文件与决策
+
+- 动效：`mobile/lib/app/motion/aletheia_motion.dart`、新增 `mobile/lib/app/motion/aletheia_interaction.dart`。
+- 接入：`mobile/lib/features/{tools,app_settings,robot_connection,manual_control}/presentation/`、`mobile/lib/debug_ui/{gallery_manifest,gallery_preview}.dart`。
+- 测试：新增 `mobile/test/app/motion/aletheia_interaction_test.dart`、`mobile/test/features/tools/presentation/tools_screen_test.dart`，并扩展连接、手动控制和 Gallery 测试。
+- 设计与执行记录：`docs/superpowers/specs/2026-09-23-mobile-core-interaction-motion-design.md`、`docs/superpowers/plans/2026-09-23-mobile-core-interaction-motion.md`。
+- 任何后续动效仍必须避开地图、视频、点云、遥测、一级 HMI 导航和 joystick/control transport；关键状态继续用正式组件加入 Debug Gallery。
+
+### 验证与遗留问题
+
+- 定向动效/工具/连接/手动控制/Gallery 测试与 `fvm flutter analyze` 通过；其中手动控制回归继续覆盖三帧 STOP、latest-wins、滚动不抢摇杆和安全锁定。
+- iPhone 18 Pro 模拟器 `A49C5D93-E5D2-421F-8F4D-1F271512BB46` 已启动 Debug App，并审查手动控制 ready 状态；系统日光外观已切换，但当前 Gallery Debug 状态按 App 的深色主题渲染。Reduce Motion 由 Widget 测试覆盖，后续若改主题偏好应再做可视化复核。
+- `./scripts/test-mobile.sh` 的功能测试完成，但 Gallery Golden 比对有 79 项既有基线像素差异（约 0.06%）；脚本会写入 `mobile/test/debug_ui/failures/`。这些图片不是本次修改目标，已保留且未重录/删除，须由独立 Golden 基线任务处理。
+- 当前工作区本来就包含其他未提交的 Mobile、iOS、手动控制安全与 Golden 变更；不要 reset、checkout、删除或自动提交它们。
+
+### 使用的 Skills 与恢复提示
+
+- 使用：`brainstorming`、`apple-design`、`find-animation-opportunities`、`writing-plans`、`executing-plans`、`test-driven-development`、`systematic-debugging`、`verification-before-completion`。
+- Resume Prompt：`阅读 AGENTS.md、mobile/AGENTS.md、本节和 2026-09-23 motion spec/plan；先检查 git status。若继续扩大动效范围，先为正式 Widget 建立 Debug Gallery 状态与定向测试，保持动效为数学函数，绝不触及手动控制 Controller/Repository、实时渲染或共享契约。`
+
 ## 2026-09-02：主线切回 Flutter 渲染，Unity 嵌入暂停
 
 ### 当前决策

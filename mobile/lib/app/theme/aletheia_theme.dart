@@ -27,6 +27,10 @@ abstract final class AletheiaTheme {
     mapVirtualWall: Color(0xFFE06F67),
     mapRobot: Color(0xFFE2B46E),
     mapRobotOutline: Color(0xFF17201F),
+    // Keep the original dark-map grid treatment exactly as it was when the
+    // grid used `canvas.withValues(alpha: …)` directly.
+    mapGridMinor: Color(0x1C101415),
+    mapGridMajor: Color(0x33101415),
     onPrimary: Color(0xFF10201E),
     onSecondary: Color(0xFF102117),
     primaryContainer: Color(0xFF20332F),
@@ -57,6 +61,11 @@ abstract final class AletheiaTheme {
     mapVirtualWall: Color(0xFFB6433D),
     mapRobot: Color(0xFF9B650B),
     mapRobotOutline: Color(0xFF172033),
+    // Static-map free space is white in daylight mode. These cool, low-alpha
+    // lines remain quiet, but retain enough contrast to be a useful metric
+    // reference rather than disappearing into that white surface.
+    mapGridMinor: Color(0x20748298),
+    mapGridMajor: Color(0x38748298),
     onPrimary: Color(0xFFFFFFFF),
     onSecondary: Color(0xFFFFFFFF),
     primaryContainer: Color(0xFFD8E9FF),
@@ -85,6 +94,8 @@ abstract final class AletheiaTheme {
   static Color get mapVirtualWall => _activePalette.mapVirtualWall;
   static Color get mapRobot => _activePalette.mapRobot;
   static Color get mapRobotOutline => _activePalette.mapRobotOutline;
+  static Color get mapGridMinor => _activePalette.mapGridMinor;
+  static Color get mapGridMajor => _activePalette.mapGridMajor;
 
   static const double controlRadius = 10;
   static const double sectionRadius = 14;
@@ -320,6 +331,8 @@ class _AletheiaPalette {
     required this.mapVirtualWall,
     required this.mapRobot,
     required this.mapRobotOutline,
+    required this.mapGridMinor,
+    required this.mapGridMajor,
     required this.onPrimary,
     required this.onSecondary,
     required this.primaryContainer,
@@ -346,6 +359,8 @@ class _AletheiaPalette {
   final Color mapVirtualWall;
   final Color mapRobot;
   final Color mapRobotOutline;
+  final Color mapGridMinor;
+  final Color mapGridMajor;
   final Color onPrimary;
   final Color onSecondary;
   final Color primaryContainer;

@@ -4,6 +4,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../app/motion/aletheia_interaction.dart';
+import '../../../app/motion/aletheia_motion.dart';
 import '../../../app/theme/aletheia_theme.dart';
 import '../../../core/connection/robot_connection_controller.dart';
 import '../application/test_cases_controller.dart';
@@ -135,6 +137,7 @@ class _CaseCard extends ConsumerWidget {
         context: context,
         isScrollControlled: true,
         backgroundColor: Colors.transparent,
+        sheetAnimationStyle: AletheiaMotion.surfaceAnimationStyle(context),
         builder: (context) => _CaseManagementSheet(
           testCase: testCase,
           profiles: profiles.document.profiles,
@@ -147,108 +150,110 @@ class _CaseCard extends ConsumerWidget {
       }
     }
 
-    return Material(
-      color: AletheiaTheme.surface,
-      borderRadius: BorderRadius.circular(AletheiaTheme.sectionRadius),
-      child: InkWell(
+    return AletheiaPressFeedback(
+      child: Material(
+        color: AletheiaTheme.surface,
         borderRadius: BorderRadius.circular(AletheiaTheme.sectionRadius),
-        onTap: selectAndOpenRun,
-        child: Container(
-          padding: EdgeInsets.all(18),
-          decoration: BoxDecoration(
-            border: Border.all(color: AletheiaTheme.border),
-            borderRadius: BorderRadius.circular(AletheiaTheme.sectionRadius),
-          ),
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final compact = constraints.maxWidth < 620;
-              final details = Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          testCase.displayName,
-                          style: Theme.of(context).textTheme.titleMedium
-                              ?.copyWith(fontWeight: FontWeight.w700),
-                        ),
-                      ),
-                      _LifecycleChip(value: testCase.management.lifecycle),
-                    ],
-                  ),
-                  SizedBox(height: 6),
-                  Text(
-                    testCase.parameters.locationLabel,
-                    style: TextStyle(color: AletheiaTheme.textSecondary),
-                  ),
-                  SizedBox(height: 6),
-                  Text(
-                    testCase.filename,
-                    style: TextStyle(
-                      color: AletheiaTheme.textTertiary,
-                      fontSize: 12,
-                    ),
-                  ),
-                  if (testCase.management.summary.isNotEmpty) ...[
-                    SizedBox(height: 12),
-                    Text(
-                      testCase.management.summary,
-                      style: TextStyle(
-                        color: AletheiaTheme.textSecondary,
-                        height: 1.35,
-                      ),
-                    ),
-                  ],
-                  if (testCase.management.tags.isNotEmpty) ...[
-                    const SizedBox(height: 13),
-                    Wrap(
-                      spacing: 7,
-                      runSpacing: 7,
-                      children: testCase.management.tags
-                          .map((tag) => _TagChip(label: tag))
-                          .toList(growable: false),
-                    ),
-                  ],
-                ],
-              );
-              final action = FilledButton.tonalIcon(
-                onPressed: selectAndOpenRun,
-                icon: const Icon(Icons.arrow_forward_rounded),
-                label: const Text('用于测试'),
-              );
-              final manageAction = OutlinedButton.icon(
-                onPressed: manage,
-                icon: const Icon(Icons.tune_outlined),
-                label: const Text('管理'),
-              );
-              if (compact) {
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(AletheiaTheme.sectionRadius),
+          onTap: selectAndOpenRun,
+          child: Container(
+            padding: EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              border: Border.all(color: AletheiaTheme.border),
+              borderRadius: BorderRadius.circular(AletheiaTheme.sectionRadius),
+            ),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final compact = constraints.maxWidth < 620;
+                final details = Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    details,
-                    const SizedBox(height: 16),
                     Row(
                       children: [
-                        Expanded(child: manageAction),
-                        const SizedBox(width: 10),
-                        Expanded(child: action),
+                        Expanded(
+                          child: Text(
+                            testCase.displayName,
+                            style: Theme.of(context).textTheme.titleMedium
+                                ?.copyWith(fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                        _LifecycleChip(value: testCase.management.lifecycle),
                       ],
                     ),
+                    SizedBox(height: 6),
+                    Text(
+                      testCase.parameters.locationLabel,
+                      style: TextStyle(color: AletheiaTheme.textSecondary),
+                    ),
+                    SizedBox(height: 6),
+                    Text(
+                      testCase.filename,
+                      style: TextStyle(
+                        color: AletheiaTheme.textTertiary,
+                        fontSize: 12,
+                      ),
+                    ),
+                    if (testCase.management.summary.isNotEmpty) ...[
+                      SizedBox(height: 12),
+                      Text(
+                        testCase.management.summary,
+                        style: TextStyle(
+                          color: AletheiaTheme.textSecondary,
+                          height: 1.35,
+                        ),
+                      ),
+                    ],
+                    if (testCase.management.tags.isNotEmpty) ...[
+                      const SizedBox(height: 13),
+                      Wrap(
+                        spacing: 7,
+                        runSpacing: 7,
+                        children: testCase.management.tags
+                            .map((tag) => _TagChip(label: tag))
+                            .toList(growable: false),
+                      ),
+                    ],
                   ],
                 );
-              }
-              return Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Expanded(child: details),
-                  const SizedBox(width: 24),
-                  SizedBox(width: 112, child: manageAction),
-                  const SizedBox(width: 10),
-                  SizedBox(width: 132, child: action),
-                ],
-              );
-            },
+                final action = FilledButton.tonalIcon(
+                  onPressed: selectAndOpenRun,
+                  icon: const Icon(Icons.arrow_forward_rounded),
+                  label: const Text('用于测试'),
+                );
+                final manageAction = OutlinedButton.icon(
+                  onPressed: manage,
+                  icon: const Icon(Icons.tune_outlined),
+                  label: const Text('管理'),
+                );
+                if (compact) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      details,
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          Expanded(child: manageAction),
+                          const SizedBox(width: 10),
+                          Expanded(child: action),
+                        ],
+                      ),
+                    ],
+                  );
+                }
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Expanded(child: details),
+                    const SizedBox(width: 24),
+                    SizedBox(width: 112, child: manageAction),
+                    const SizedBox(width: 10),
+                    SizedBox(width: 132, child: action),
+                  ],
+                );
+              },
+            ),
           ),
         ),
       ),

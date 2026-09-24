@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../app/motion/aletheia_motion.dart';
 import '../app/app_shell.dart';
 import '../app/theme/aletheia_theme.dart';
 import '../core/connection/observation_status.dart';
@@ -32,6 +33,7 @@ import '../features/manual_control/domain/vehicle_control_state.dart';
 import '../features/manual_control/presentation/manual_control_screen.dart';
 import '../features/reports/application/reports_controller.dart';
 import '../features/reports/domain/aletheia_report.dart';
+import '../features/reports/presentation/report_detail_screen.dart';
 import '../features/reports/presentation/reports_screen.dart';
 import '../features/robot_connection/presentation/robot_connection_screen.dart';
 import '../features/test_cases/application/test_cases_controller.dart';
@@ -175,6 +177,8 @@ class _GalleryPreviewScope extends StatelessWidget {
         toolLogEntriesProvider.overrideWith((ref) => _logsFor(spec)),
         diagnosticFilesProvider.overrideWith((ref) async => _galleryLogFiles),
         reportsProvider.overrideWith((ref) => _reportsFor(spec)),
+        nativeReportDetailProvider('rpt_01J8')
+            .overrideWith(() => _GalleryNativeReportDetailController(spec)),
         runtimeSettingsProvider.overrideWith((ref) async => _gallerySettings),
         supervisorProcessesProvider.overrideWith(
           (ref) async => _gallerySupervisorProcesses,
@@ -270,6 +274,9 @@ class _PreviewPageState extends State<_PreviewPage> {
       GallerySurface.testCases => const TestCasesScreen(),
       GallerySurface.logs => const ToolLogsScreen(),
       GallerySurface.reports => const ReportsScreen(),
+      GallerySurface.reportDetail => const ReportDetailScreen(
+        reportId: 'rpt_01J8',
+      ),
       GallerySurface.runtimeSettings => const RuntimeSettingsScreen(),
       GallerySurface.scenarioSetup => const ScenarioSetupScreen(),
       GallerySurface.maintenance => const SystemMaintenanceScreen(),
@@ -327,9 +334,17 @@ class _GalleryManualControlController extends ManualControlController {
   @override
   ManualControlScreenState build() {
     final emergency = spec.id == 'manual_control_emergency';
+    final latencyDelayed = spec.id == 'manual_control_latency_delayed';
     return ManualControlScreenState(
       hasActiveSession: true,
-      message: emergency ? '急停已触发，方向控制已锁定。' : '手动控制已就绪。',
+      link: latencyDelayed
+          ? ManualControlLink.delayed
+          : ManualControlLink.healthy,
+      message: emergency
+          ? '急停已触发，方向控制已锁定。'
+          : latencyDelayed
+          ? '控制链路延迟偏高，正在等待车端响应。'
+          : '手动控制已就绪。',
       isError: emergency,
       status: VehicleControlState.fromJson({
         'runtime': 'ready',
@@ -340,6 +355,11 @@ class _GalleryManualControlController extends ManualControlController {
           'present': true,
           'state': 'active',
           'id': 'gallery-session',
+        },
+        'safety': {
+          'publish_hz': 20,
+          'input_timeout_ms': 350,
+          'heartbeat_timeout_ms': 1200,
         },
         'speed': {'linear_mps': .4, 'angular_radps': .6, 'min': .1, 'max': 1.0},
         'emergency_stop': {
@@ -792,19 +812,34 @@ Stream<PoseTelemetrySample> _poseStreamFor(GalleryScreenSpec spec) {
       },
     );
   }
-  return Stream<PoseTelemetrySample>.value(
-    PoseTelemetrySample(
-      receivedPackets: 2,
+  return () async* {
+    final timestamp = DateTime.now().microsecondsSinceEpoch * 1000;
+    yield PoseTelemetrySample(
+      receivedPackets: 1,
       frame: PoseFrame(
         sequence: 42,
-        sourceTimestampNanoseconds:
-            DateTime.now().microsecondsSinceEpoch * 1000,
+        sourceTimestampNanoseconds: timestamp,
         x: .5,
         y: .5,
         yaw: .7,
       ),
-    ),
-  );
+    );
+    // The production map intentionally fences the first pose after a map
+    // replacement so it cannot render a stale location on the new map. A
+    // gallery preview has no live transport to supply another packet, so
+    // emit a follow-up frame exactly as a real telemetry stream would.
+    await Future<void>.delayed(const Duration(milliseconds: 32));
+    yield PoseTelemetrySample(
+      receivedPackets: 1,
+      frame: PoseFrame(
+        sequence: 43,
+        sourceTimestampNanoseconds: timestamp + 32000000,
+        x: .5,
+        y: .5,
+        yaw: .7,
+      ),
+    );
+  }();
 }
 
 Stream<CloudTelemetrySample> _cloudStreamFor(GalleryScreenSpec spec) {
@@ -1154,15 +1189,138 @@ Future<List<AletheiaReport>> _reportsFor(GalleryScreenSpec spec) =>
         StateError('无法读取测试报告。'),
       ),
       'reports_empty' => Future.value(const []),
+      'reports_native_legacy' => Future.value(_galleryLegacyReports),
+      'reports_native_ready' => Future.value(_galleryNativeReports),
+      'reports_native_failed' => Future.value(_galleryFailedReports),
       _ => Future.value([
         AletheiaReport(
           filename: 'route-validation-2026-08-27.html',
           sizeBytes: 234112,
           modifiedAt: DateTime(2026, 8, 27, 10, 32),
           csvFilename: 'route-validation-2026-08-27.csv',
+          nativeReport: _galleryNativeReport,
         ),
       ]),
     };
+
+class _GalleryNativeReportDetailController
+    extends NativeReportDetailController {
+  _GalleryNativeReportDetailController(this._spec) : super('rpt_01J8');
+
+  final GalleryScreenSpec _spec;
+
+  @override
+  Future<NativeReportDetailState> build() => switch (_spec.id) {
+    'report_native_detail_loading' =>
+      Completer<NativeReportDetailState>().future,
+    'report_native_detail_error' => Future<NativeReportDetailState>.error(
+      StateError('车端暂时未返回原生报告详情。'),
+    ),
+    _ => Future.value(_galleryNativeDetail),
+  };
+}
+
+final _galleryNativeReport = NativeReportSummary(
+  reportId: 'rpt_01J8',
+  kind: ReportKind.test,
+  title: '路径验证 · 第 3 次运行',
+  status: ReportStatus.passed,
+  createdAt: DateTime(2026, 9, 23, 10, 30),
+  duration: const Duration(minutes: 3, seconds: 4),
+  summary: const NativeReportMetrics(
+    total: 12,
+    passed: 12,
+    failed: 0,
+    blocked: 0,
+    passRate: 100,
+  ),
+  headline: '本次路径验证已完成。',
+);
+
+final _galleryFailedReport = NativeReportSummary(
+  reportId: 'rpt_01J9',
+  kind: ReportKind.acceptance,
+  title: '部署验收 · 第 1 次运行',
+  status: ReportStatus.failed,
+  createdAt: DateTime(2026, 9, 23, 10, 30),
+  duration: const Duration(minutes: 5, seconds: 12),
+  summary: const NativeReportMetrics(
+    total: 8,
+    passed: 6,
+    failed: 2,
+    blocked: 0,
+    passRate: 75,
+  ),
+  headline: '两个关键任务未通过。',
+);
+
+final _galleryDetailReport = NativeReportSummary(
+  reportId: 'rpt_01J8',
+  kind: ReportKind.test,
+  title: '路径验证 · 第 3 次运行',
+  status: ReportStatus.failed,
+  createdAt: DateTime(2026, 9, 23, 10, 30),
+  duration: const Duration(minutes: 3, seconds: 4),
+  summary: const NativeReportMetrics(
+    total: 2,
+    passed: 1,
+    failed: 1,
+    blocked: 0,
+    passRate: 50,
+  ),
+  headline: '定位收敛超时。',
+);
+
+final _galleryNativeReports = [
+  AletheiaReport(
+    filename: 'route-validation-2026-09-23.html',
+    sizeBytes: 234112,
+    modifiedAt: DateTime(2026, 9, 23, 10, 30),
+    csvFilename: 'route-validation-2026-09-23.csv',
+    nativeReport: _galleryNativeReport,
+  ),
+];
+
+final _galleryFailedReports = [
+  AletheiaReport(
+    filename: 'acceptance-2026-09-23.html',
+    sizeBytes: 234112,
+    modifiedAt: DateTime(2026, 9, 23, 10, 30),
+    csvFilename: 'acceptance-2026-09-23.csv',
+    nativeReport: _galleryFailedReport,
+  ),
+];
+
+final _galleryLegacyReports = [
+  AletheiaReport(
+    filename: 'legacy-route-validation.html',
+    sizeBytes: 234112,
+    modifiedAt: DateTime(2026, 8, 27, 10, 32),
+    csvFilename: 'legacy-route-validation.csv',
+  ),
+];
+
+final _galleryNativeDetail = NativeReportDetailState(
+  report: _galleryDetailReport,
+  items: const [
+    NativeReportItem(
+      itemId: 'task_01',
+      title: '定位检查',
+      status: ReportStatus.failed,
+      duration: Duration(seconds: 90),
+      summary: '定位未在阈值内收敛。',
+      detail: '车端仅返回受控诊断摘要。',
+    ),
+    NativeReportItem(
+      itemId: 'task_02',
+      title: '到达目标点',
+      status: ReportStatus.passed,
+      duration: Duration(seconds: 60),
+      summary: '到达阈值内。',
+    ),
+  ],
+  nextCursor: null,
+);
 
 Widget _mockVideoFrame({required Uri endpoint, required String resolution}) =>
     const _MockVideoFrame();
@@ -1440,6 +1598,7 @@ class _GlobalStatePreviewState extends State<_GlobalStatePreview> {
           showModalBottomSheet<void>(
             context: context,
             showDragHandle: true,
+            sheetAnimationStyle: AletheiaMotion.surfaceAnimationStyle(context),
             builder: (context) => const _BottomSheetPreview(),
           ),
         );

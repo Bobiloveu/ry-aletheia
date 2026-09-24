@@ -77,3 +77,75 @@ R6B 链路执行期间只读监听既有 `/task_status`；状态码 `701` 且 `t
 ## Planned（规划中）
 
 新的任务 schema 版本在使用前，需要在 `shared/schemas` 中提供 JSON Schema、经过 Backend 校验、完成消费者兼容性评审并给出迁移说明。
+
+### Mobile Native Reports（Mobile 原生测试报告）
+
+**Status: Planned（仅契约，尚未由 Backend 实现）**
+**未来运行时生产者：** `robot_backend`
+**未来消费者：** `mobile`；**PC Web：非消费者**，保持现有 HTML/CSV 报告流程不变。
+**兼容性：** 本节是对既有报告索引的增量约定。本文档的 Existing `GET /api/reports`、文件下载、预览和 filename 删除语义在 Backend 完成迁移并通过消费者验证前均保持不变。
+
+#### 索引增量字段
+
+`GET /api/reports` 必须继续返回既有的 `filename`、`size`、`modified_at`、`csv_filename`、`report_type` 和 `title`。当车端具备原生报告数据时，可以为单个索引项额外返回可选的 `native_report`：
+
+```json
+{
+  "schema_version": 1,
+  "report_id": "rpt_01J8",
+  "kind": "test",
+  "title": "路径验证 · 第 3 次运行",
+  "status": "failed",
+  "created_at": "2026-09-23T10:30:00+08:00",
+  "duration_ms": 184000,
+  "summary": {
+    "total": 12,
+    "passed": 10,
+    "failed": 1,
+    "blocked": 1,
+    "pass_rate": 83.3
+  },
+  "headline": "定位收敛超时。"
+}
+```
+
+`schema_version` 当前只能为 `1`；`report_id` 是服务端生成的 opaque identifier，客户端不得从文件名、路径或内容推导它。`kind` 只允许 `test`、`acceptance`；`status` 只允许 `passed`、`failed`、`blocked`、`cancelled`、`incomplete`、`unknown`。时间为 ISO-8601 带时区时间；`duration_ms`、任务数及其计数必须是有限且非负的整数，`pass_rate` 必须为有限的 `0..100` 数值，且 `passed + failed + blocked <= total`。`headline` 为短的受控纯文本，允许缺省。
+
+未知 schema、非法 identifier/枚举、畸形时间或指标、以及缺失 `native_report` 都表示该索引项没有可安全展示的原生数据；Mobile 必须显示“车端尚未提供原生报告数据”，不得将其降级为 HTML、CSV、浏览器、WebView 或文件下载。
+
+#### 分页详情端点
+
+Backend 完成实现后提供：
+
+```text
+GET /api/reports/{report_id}/native?cursor=<opaque>&limit=<1..100>
+```
+
+未传 `cursor` 时返回第一页；默认 `limit` 为 `50`，最大为 `100`。`cursor` 仅能原样回传服务端先前给出的 opaque cursor，不能作为路径、文件名或查询表达式解析。成功响应重复固定 `report` 元数据，返回一个 `items` 页及 `next_cursor`（末页为 `null`）：
+
+```json
+{
+  "report": { "schema_version": 1, "report_id": "rpt_01J8", "kind": "test", "title": "路径验证 · 第 3 次运行", "status": "failed", "created_at": "2026-09-23T10:30:00+08:00", "duration_ms": 184000, "summary": { "total": 12, "passed": 10, "failed": 1, "blocked": 1, "pass_rate": 83.3 }, "headline": "定位收敛超时。" },
+  "items": [
+    {
+      "item_id": "task_01",
+      "title": "到达目标点",
+      "status": "passed",
+      "duration_ms": 84000,
+      "summary": "到达阈值内。",
+      "detail": "受控诊断摘要。"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+`item_id` 与 `report_id` 使用相同的 opaque identifier 约束；单项 `status` 可为上述固定值，未知的未来状态由客户端显示为 `unknown`。`summary` 与 `detail` 仅允许受控纯文本诊断摘要，必须受长度限制；不得返回或渲染本机路径、文件 URL、HTML、CSV、SVG、任意富文本、原始 ROS 消息、指令、凭据或未脱敏现场数据。无效或不属于当前授权报告的 `report_id` 必须返回 `404`；无效 cursor/limit 必须返回受控 `400`，不得泄露报告目录或其他报告的存在性。
+
+#### 迁移、影响与升级条件
+
+- Backend 先在生成新报告时写入受控的结构化 sidecar/存储记录，并仅在完整校验通过时向索引添加 `native_report`；历史 HTML/CSV 可以按需回填，但不是客户端解析历史文件的理由。
+- Mobile 在 `native_report` 缺失或不安全时保持不可导航的迁移状态；只在 summary 有效时请求 Planned 详情端点。它不读取、下载、保存或导出报告文件。
+- PC Web 不消费此字段或详情端点，不改变现有报告页面、下载与删除行为。
+- 既有 `DELETE /api/reports/{filename}` 的 filename 受控删除路径保持不变；`report_id` 不能替代、扩展或绕过它。
+- 将本节端点从 Planned 提升为 Existing 前，Backend 必须完成输入/输出校验、404/400 安全语义、旧索引兼容与迁移说明；Mobile 必须验证缺失/畸形/分页/错误状态；PC Web 必须确认忽略新增字段仍保持既有流程。然后在本文档记录三方验证证据与实际权威实现。

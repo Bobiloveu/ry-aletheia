@@ -38,12 +38,18 @@ class RuntimeSettings {
   final DependencyPlan dependencyPlan;
   final LiveObservationSettings liveObservation;
 
+  /// A configured automatic plan is the authoritative list of dependencies
+  /// for a test run. Persisting an older manual monitor list alongside it
+  /// would make the backend preflight report retired processes as MISSING.
+  List<String> get effectiveMonitorNodes =>
+      dependencyPlan.enabled ? dependencyPlan.monitoredNodes : monitorNodes;
+
   Map<String, dynamic> toJson() => {
     'task_directory': taskDirectory,
     'command_timeout_s': commandTimeoutSeconds,
     'elevator_wait_timeout_s': elevatorWaitTimeoutSeconds,
     'task_execution_timeout_s': taskExecutionTimeoutSeconds,
-    'monitor_nodes': monitorNodes,
+    'monitor_nodes': effectiveMonitorNodes,
     'dependency_plan': dependencyPlan.toJson(),
     'live_observation': liveObservation.toJson(),
   };
@@ -62,6 +68,16 @@ class DependencyPlan {
 
   final bool enabled;
   final List<DependencyStep> steps;
+
+  /// Preserve first-stage order while ensuring a process selected in more
+  /// than one stage is monitored exactly once.
+  List<String> get monitoredNodes {
+    final names = <String>{};
+    for (final step in steps) {
+      names.addAll(step.nodes);
+    }
+    return names.toList(growable: false);
+  }
 
   Map<String, dynamic> toJson() => {
     'enabled': enabled,

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../app/motion/aletheia_motion.dart';
 import '../../../app/theme/aletheia_theme.dart';
 import '../../../core/connection/robot_connection_controller.dart';
 import '../../robot_connection/presentation/robot_connection_screen.dart';
@@ -150,6 +151,7 @@ class _RuntimeSettingsEditorState
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      sheetAnimationStyle: AletheiaMotion.surfaceAnimationStyle(context),
       builder: (context) => _DependencyPlanSheet(
         initialPlan: _plan,
         initialMonitorNodes: _monitorNodes,
@@ -167,6 +169,7 @@ class _RuntimeSettingsEditorState
   Future<void> _editVehicle(VehicleModel current) async {
     final result = await showDialog<VehicleModel>(
       context: context,
+      animationStyle: AletheiaMotion.surfaceAnimationStyle(context),
       builder: (context) => _VehicleDialog(initial: current),
     );
     if (result == null || !mounted) return;
@@ -457,6 +460,14 @@ class _DependencyPlanSheetState extends State<_DependencyPlanSheet> {
   List<String> get _names =>
       widget.processes.map((item) => item.name).toList(growable: false);
 
+  List<String> get _planNodes {
+    final names = <String>{};
+    for (final step in _steps) {
+      names.addAll(step.nodes);
+    }
+    return names.toList(growable: false);
+  }
+
   void _toggleMonitor(String name, bool enabled) {
     setState(() {
       if (enabled) {
@@ -544,7 +555,9 @@ class _DependencyPlanSheetState extends State<_DependencyPlanSheet> {
               Text('运行依赖', style: TextStyle(fontWeight: FontWeight.w700)),
               SizedBox(height: 4),
               Text(
-                '测试运行期间必须持续可用的 Supervisor 进程。',
+                _enabled
+                    ? '已随启动阶段自动同步，避免旧节点继续参与预检。'
+                    : '测试运行期间必须持续可用的 Supervisor 进程。',
                 style: TextStyle(
                   color: AletheiaTheme.textSecondary,
                   fontSize: 13,
@@ -561,8 +574,10 @@ class _DependencyPlanSheetState extends State<_DependencyPlanSheet> {
                   (name) => CheckboxListTile(
                     dense: true,
                     contentPadding: EdgeInsets.zero,
-                    value: _monitor.contains(name),
-                    onChanged: (value) => _toggleMonitor(name, value ?? false),
+                    value: (_enabled ? _planNodes : _monitor).contains(name),
+                    onChanged: _enabled
+                        ? null
+                        : (value) => _toggleMonitor(name, value ?? false),
                     title: Text(name, style: const TextStyle(fontSize: 14)),
                   ),
                 ),
@@ -627,7 +642,9 @@ class _DependencyPlanSheetState extends State<_DependencyPlanSheet> {
                         enabled: _enabled,
                         steps: cleanSteps,
                       ),
-                      monitorNodes: _monitor,
+                      monitorNodes: _enabled
+                          ? _monitorNodesFor(cleanSteps)
+                          : _monitor,
                     ),
                   );
                 },
@@ -638,6 +655,14 @@ class _DependencyPlanSheetState extends State<_DependencyPlanSheet> {
         ),
       ),
     );
+  }
+
+  List<String> _monitorNodesFor(List<DependencyStep> steps) {
+    final names = <String>{};
+    for (final step in steps) {
+      names.addAll(step.nodes);
+    }
+    return names.toList(growable: false);
   }
 }
 

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../app/motion/aletheia_motion.dart';
 import '../../../app/theme/aletheia_theme.dart';
 import '../../../core/connection/robot_connection_controller.dart';
 import '../../robot_connection/presentation/robot_connection_screen.dart';
@@ -88,6 +89,7 @@ class _MaintenanceBodyState extends ConsumerState<_MaintenanceBody> {
   }) async =>
       await showDialog<bool>(
         context: context,
+        animationStyle: AletheiaMotion.surfaceAnimationStyle(context),
         builder: (context) => AlertDialog(
           title: Text(title),
           content: Text(detail, style: const TextStyle(height: 1.4)),

@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../app/branding/aletheia_brand_mark.dart';
-import '../../../app/motion/aletheia_motion.dart';
+import '../../../app/motion/aletheia_interaction.dart';
 import '../../../app/responsive_layout.dart';
 import '../../../app/theme/aletheia_theme.dart';
 import '../../../core/connection/observation_status.dart';
@@ -266,11 +266,9 @@ class _StatusPanel extends ConsumerWidget {
             text: '连接状态',
           ),
           const SizedBox(height: 18),
-          AletheiaFadeThrough(
-            child: KeyedSubtree(
-              key: ValueKey('connection-phase-${state.phase.name}'),
-              child: _ConnectionBanner(state: state),
-            ),
+          AletheiaStatusTransition(
+            stateKey: 'connection-phase-${state.phase.name}',
+            child: _ConnectionBanner(state: state),
           ),
           if (state.message.isNotEmpty &&
               state.phase != ConnectionPhase.checking) ...[
