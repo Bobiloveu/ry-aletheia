@@ -10,6 +10,7 @@ export function drawDeploymentCanvas({
   drawGrid,
   drawMapEdits,
   drawMapRoutes,
+  drawWaypointSymbol,
   drawComponentSymbol,
   drawMapOrigin,
   drawLocalizationMarkers,
@@ -53,22 +54,7 @@ export function drawDeploymentCanvas({
   drawMapRoutes();
   for (const point of (project?.waypoints || []).filter((item) => item.map_asset_id === activeMap.id && !item.generated_by)) {
     const { x, y } = mapPointToCanvas(point, activeMap, view);
-    const palette = { start: "#39dcad", target: "#ffbd61", return: "#ff6b9d", map_transition: "#b995ef" };
-    context.fillStyle = palette[point.kind] || "#5bb8ff";
-    context.beginPath();
-    context.arc(x, y, point.kind === "map_transition" ? 7 : 5, 0, Math.PI * 2);
-    context.fill();
-    if (point.kind === "map_transition") {
-      context.strokeStyle = "#fff";
-      context.lineWidth = 1.5;
-      context.beginPath();
-      context.arc(x, y, 3, 0, Math.PI * 2);
-      context.stroke();
-    }
-    context.fillStyle = "rgba(18, 28, 34, .9)";
-    context.font = "600 10px system-ui, sans-serif";
-    context.textAlign = "left";
-    context.fillText(point.label, x + 8, y - 8);
+    drawWaypointSymbol(point, x, y);
   }
   for (const item of (project?.components || []).filter((component) => component.map_asset_id === activeMap.id)) {
     const { x, y } = mapPointToCanvas(item, activeMap, view);

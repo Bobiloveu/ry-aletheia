@@ -58,28 +58,25 @@
           </div>
         </div>
         <div id="deploymentGuideSteps" class="deployment-guide-steps" role="list" aria-label="部署步骤"></div>
-        <div class="deployment-guide-body">
-          <article id="deploymentGuideCurrent" class="deployment-guide-current" aria-live="polite">
-            <div class="deployment-guide-current-copy">
-              <span class="deployment-guide-kicker">当前要做</span>
-              <h3>正在读取项目状态…</h3>
-              <p>向导会在项目加载后显示下一步。</p>
-            </div>
-            <button id="deploymentGuideNext" class="page-top-action" type="button" disabled>读取下一步</button>
-          </article>
-          <aside class="deployment-guide-checklist" aria-labelledby="deploymentGuideChecklistTitle">
-            <div class="deployment-guide-checklist-head">
-              <h3 id="deploymentGuideChecklistTitle">现场检查清单</h3>
-              <span id="deploymentGuideChecklistMeta">0 / 5</span>
-            </div>
-            <div id="deploymentGuideChecklist"></div>
-          </aside>
-        </div>
       </section>
-      <section class="page-grid">
-        <section class="deployment-left-rail" aria-label="部署项目与地图">
-          <section class="deployment-setup-rail" aria-label="部署项目启动">
-        <article class="panel span-5 deployment-setup-project" data-deployment-stage="project">
+      <section id="deploymentTaskConsole" class="deployment-task-console">
+        <div class="deployment-task-main">
+          <div id="deploymentTaskSummary" aria-live="polite">
+            <div id="deploymentTaskReceipt" class="deployment-task-receipt deployment-hidden" role="status"></div>
+            <section id="deploymentTaskCard" class="deployment-task-card" aria-labelledby="deploymentTaskTitle">
+              <div class="deployment-task-copy">
+                <span class="deployment-task-sequence">当前任务</span>
+                <h2 id="deploymentTaskTitle" tabindex="-1">正在读取项目状态…</h2>
+                <p id="deploymentTaskDetail">项目加载后，这里只会显示当前需要完成的一项任务。</p>
+              </div>
+              <div class="deployment-task-action">
+                <button id="deploymentTaskPrimary" class="page-top-action" type="button" disabled>读取下一步</button>
+              </div>
+            </section>
+          </div>
+          <section id="deploymentTaskWorkspace" class="deployment-task-workspace">
+            <section id="deploymentTaskPanels" class="page-grid" aria-label="当前任务工作区">
+        <article class="panel span-5 deployment-setup-project" data-deployment-stage="project" data-deployment-tasks="project.createProject">
           <div id="newProjectForm">
             <div class="panel-title">
               <div>
@@ -108,7 +105,7 @@
           </section>
           <p id="projectMessage" class="inline-message"></p>
         </article>
-        <article class="panel span-7 deployment-setup-flow" data-deployment-stage="project">
+        <article class="panel span-7 deployment-setup-flow" data-deployment-stage="project" data-deployment-tasks="project.confirmScene project.edit">
           <h2>部署流程</h2>
           <div class="deployment-flow-note">
             <span class="deployment-flow-note-icon" aria-hidden="true"></span>
@@ -130,7 +127,7 @@
           </div>
           <p id="deploymentFlowMessage" class="inline-message">先创建或打开一个部署项目。</p>
         </article>
-        <article class="panel deployment-setup-projects" data-deployment-stage="project">
+        <article class="panel deployment-setup-projects" data-deployment-stage="project" data-deployment-tasks="project.createProject project.confirmScene project.edit">
           <div class="panel-title">
             <div>
               <p class="eyebrow">PROJECTS</p>
@@ -141,7 +138,7 @@
             <div class="page-empty">正在读取项目…</div>
           </div>
         </article>
-        <article class="panel deployment-map-import" data-deployment-stage="maps">
+        <article class="panel deployment-map-import" data-deployment-stage="maps" data-deployment-tasks="maps.source maps.import maps.describe maps.edit">
           <div class="panel-title">
             <div>
               <p class="eyebrow">MAP IMPORT</p>
@@ -152,16 +149,21 @@
             从打开此网页的电脑选择地图文件。请同时选择 <code>map.yaml</code>
             与对应 PGM；定位地图只需选择同目录任意命名的 PCD，兼容性 <code>index.txt</code> 可选，普通 2D 地图可不含点云。
           </p>
+          <fieldset id="mapSourceChoices" class="deployment-map-source-choices">
+            <legend>这张地图从哪里获得？</legend>
+            <label><input type="radio" name="mapSource" value="import" data-map-source="import" />导入已有地图</label>
+            <label><input type="radio" name="mapSource" value="mapping" data-map-source="mapping" />车端实时建图</label>
+          </fieldset>
           <div id="importControls" class="settings-form deployment-hidden">
             <div id="mapStageSummary" class="map-stage-summary"></div>
             <label class="map-folder-picker"
-              >选择地图文件<input id="mapFolder" type="file" multiple accept=".yaml,.yml,.pgm,.pcd,.txt,text/plain" aria-describedby="mapFolderMessage" /></label
+              ><span id="mapFolderLabel">选择地图文件</span><input id="mapFolder" type="file" multiple accept=".yaml,.yml,.pgm,.pcd,.txt,text/plain" aria-describedby="mapImportTarget mapFolderMessage" /></label
             ><p id="mapFolderMessage" class="inline-message map-folder-message">尚未选择地图文件。</p>
             <div id="mapFolderManifest" class="map-folder-manifest" aria-live="polite">
               选择文件后，这里会显示 YAML、PGM、PCD 和可选兼容文件的清单。
             </div>
             <label
-              >显示名称<input
+              ><span id="mapLabelText">显示名称</span><input
                 id="mapLabel"
                 maxlength="80"
                 placeholder="室外地图 / 电梯大厅" /></label
@@ -173,7 +175,7 @@
             请先打开一个部署项目。
           </p>
         </article>
-        <article class="panel mapping-session-panel" data-deployment-stage="maps">
+        <article class="panel mapping-session-panel" data-deployment-stage="maps" data-deployment-tasks="maps.source maps.mapping_prepare maps.mapping_continue maps.mapping_blocked maps.edit">
           <div class="panel-title"><div><h2>车端实时建图</h2></div><span id="mappingRuntimeBadge" class="badge muted">检查运行时…</span></div>
           <p class="page-muted">从打开此网页的电脑选择 YAML。Aletheia 仅保存副本到当前项目工作区，绝不读取、修改或覆盖小车原有定位配置。</p>
           <div id="mappingControls" class="settings-form deployment-hidden">
@@ -185,7 +187,7 @@
           </div>
           <p id="mappingMessage" class="inline-message">创建项目后可选择“车端建图”。</p>
         </article>
-        <article class="panel span-12 map-assets-panel" data-deployment-stages="maps annotations localization">
+        <article class="panel span-12 map-assets-panel" data-deployment-stages="maps annotations localization" data-deployment-tasks="maps.assign maps.edit annotations.* localization.*">
           <div class="panel-title">
             <div>
               <h2 id="selectedProjectTitle">项目地图</h2>
@@ -195,9 +197,7 @@
             <div class="page-empty">项目地图将在这里显示。</div>
           </div>
         </article>
-          </section>
-        </section>
-        <article class="panel span-12" data-deployment-stages="maps annotations localization">
+        <article class="panel span-12" data-deployment-stages="maps annotations localization" data-deployment-tasks="maps.edit annotations.* localization.*">
           <div class="panel-title">
             <div>
               <p class="eyebrow">MAPPING WORKSPACE</p>
@@ -235,7 +235,7 @@
                 data-waypoint-kind="transition"
                 class="compact-action waypoint-tool"
                 type="button"
-                title="标记可选的地图过渡点；速度沿用下一个点"
+                title="标记任务去程中的可选过渡点；点选后可配置速度"
               >
                 <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M5 7h12M13 3l4 4-4 4M19 17H7m4-4-4 4 4 4" /></svg
@@ -449,8 +449,12 @@
                 </button>
               </header>
               <p id="waypointPopoverDetail" class="page-muted"></p>
-              <p class="page-muted">删除后需重新在定位路线中选择起点、目标点或过渡点；已保存路线引用时会先阻止删除。</p>
+              <p id="waypointPopoverPurpose" class="page-muted">删除后需重新在定位路线中选择起点、目标点或过渡点；已保存路线引用时会先阻止删除。</p>
+              <label id="transitionSpeedControl" class="deployment-hidden">过渡速度模式<select id="waypointTransitionSpeed"><option value="single_point">常规</option><option value="slow_point">减速</option><option value="narrow_point">窄通道</option><option value="task_point">任务点</option></select></label>
+              <label id="transitionYawControl" class="deployment-hidden">去程朝向（°）<input id="waypointTransitionYaw" type="number" min="-180" max="180" step="1" inputmode="decimal" /><small>拖动地图上的蓝色圆形方向手柄调整；数字会同步更新。</small></label>
+              <p id="transitionReturnDirectionHint" class="page-muted deployment-hidden">实线箭头是去程，虚线箭头是返程自动反向 180°；返程方向不可单独设置。</p>
               <div class="component-actions">
+                <button id="saveWaypointTransitionSpeed" class="compact-action deployment-hidden" type="button">保存过渡点设置</button>
                 <button id="deleteWaypoint" class="compact-action danger-action" type="button">删除此标记</button>
               </div>
             </section>
@@ -486,6 +490,7 @@
                 <label>梯控协议<select id="newPhysicalElevatorProtocol"></select></label>
                 <label>最低服务楼层<input id="newPhysicalElevatorMinFloor" type="number" step="1" value="1" /></label>
                 <label>最高服务楼层<input id="newPhysicalElevatorMaxFloor" type="number" step="1" value="1" /></label>
+                <label class="elevator-missing-buttons">缺失按键（可选）<input id="newPhysicalElevatorUnavailableButtons" type="text" inputmode="numeric" placeholder="例如：11；多个用逗号分隔" /><small>只填面板实际不存在的按键；服务范围已在上方设置，无需重复填写。</small></label>
               </div>
               <label class="elevator-button-floor">本地图电梯按钮层<input id="elevatorLandingButtonFloor" type="number" step="1" placeholder="例如：1（不允许 0）" /></label>
               <p id="elevatorLandingMessage" class="inline-message">选择要关联的物理电梯。</p>
@@ -501,27 +506,29 @@
             >
               <header>
                 <div>
-                  <strong>配置定位绑定</strong>
-                  <small>定位和地图路径由部署包自动生成；这里只保存地图角色与物理位置。</small>
+                  <strong id="localizationBindingDialogTitle">设置地图运行角色</strong>
+                  <small id="localizationBindingDialogDescription">选择机器人进入当前地图时使用的定位角色；路线和定位文件会在导出时自动生成。</small>
                 </div>
                 <button id="cancelLocalizationBinding" class="popover-close" type="button" aria-label="关闭定位绑定">×</button>
               </header>
               <div class="localization-binding-fields">
-                <label>地图角色<select id="localizationBindingType"><option value="indoor">室内大厅</option><option value="floor">用户楼层</option><option value="outdoor">户外</option><option value="ferry">摆渡层</option></select></label>
-                <label>楼栋<input id="localizationBuilding" type="text" maxlength="32" /></label>
-                <label>单元<input id="localizationUnit" type="text" maxlength="32" /></label>
-                <label id="localizationFloorTemplateLabel">楼层布局模板<input id="localizationFloorTemplate" type="text" maxlength="32" placeholder="例如：2" /></label>
+                <label>运行角色<select id="localizationBindingType"><option value="indoor">室内大厅（任务起点 / 进梯前）</option><option value="floor">用户楼层（交付终点）</option><option value="outdoor">户外（室外起点）</option><option value="ferry">摆渡层（中途经过）</option></select></label>
+                <div id="localizationTopologySummary" class="localization-topology-summary"></div>
+                <div id="localizationIdentityFields" class="localization-identity-fields">
+                  <label>归属楼栋<input id="localizationBuilding" type="text" maxlength="32" /></label>
+                  <label>归属单元<input id="localizationUnit" type="text" maxlength="32" /></label>
+                </div>
+                <label id="localizationFloorTemplateLabel">楼层布局模板（不是实际楼层）<input id="localizationFloorTemplate" type="text" maxlength="32" placeholder="例如：2" /></label>
               </div>
-              <p id="localizationBindingMessage" class="inline-message">选择当前地图的运行角色。</p>
-              <div class="component-actions"><button id="saveLocalizationBinding" class="page-top-action" type="button">保存绑定</button><button id="deleteLocalizationBinding" class="compact-action danger-action deployment-hidden" type="button">删除</button></div>
+              <p id="localizationBindingMessage" class="inline-message">选择当前地图的运行角色；保存后才能配置地图经过顺序。</p>
+              <div class="component-actions"><button id="saveLocalizationBinding" class="page-top-action" type="button">保存运行角色</button><button id="deleteLocalizationBinding" class="compact-action danger-action deployment-hidden" type="button">删除</button></div>
             </section>
           </div>
           <p id="mapToolHint" class="page-muted">
                 先标记地图上的真实组件并填写属性；跨图切换由行为树按定位路线自动执行，目标层返程呼梯点由电梯组件自动派生。
           </p>
         </article>
-        <section class="deployment-inspector-rail" aria-label="部署属性与检查">
-        <article class="panel span-6 topology-panel" data-deployment-stage="maps">
+        <article class="panel span-6 topology-panel" data-deployment-stage="maps" data-deployment-tasks="maps.assign maps.edit">
           <div class="panel-title">
             <div>
               <h2>地图阶段</h2>
@@ -534,22 +541,32 @@
           </div>
           <p id="stageAssignmentMessage" class="inline-message">选择地图后可检查其阶段归属。</p>
         </article>
-        <article class="panel span-6 localization-binding-panel" data-deployment-stage="localization">
-          <div class="panel-title"><div><h2>定位运行绑定</h2></div></div>
-          <p class="page-muted">为当前项目地图指定户外、大厅、摆渡层或用户楼层模板。导出时自动生成定位清单和受控路径。</p>
-          <label class="localization-template-picker">定位配置模板 YAML<input id="localizationTemplateFile" type="file" accept=".yaml,.yml,application/x-yaml,text/yaml" aria-describedby="localizationTemplateMessage" /></label>
-          <p id="localizationTemplateMessage" class="inline-message">未导入时使用项目默认模板；导入后每次生成都以该模板为准。</p>
-          <button id="openLocalizationBinding" class="compact-action" type="button" disabled>绑定当前地图</button>
-          <div id="localizationBindingList" class="localization-binding-list"><div class="page-empty">选择地图后可添加定位绑定。</div></div>
-          <div id="localizationRouteList" class="localization-route-list"></div>
-          <section id="localizationRouteDialog" class="localization-route-dialog deployment-hidden" aria-label="编辑定位路线">
+        <article class="panel span-6 localization-binding-panel" data-deployment-stage="localization" data-deployment-tasks="localization.*">
+          <div class="panel-title"><div><h2>定位运行配置</h2></div></div>
+          <p id="localizationPurpose" class="page-muted">完成后，部署包会自动生成定位清单、地图切换顺序和受控路径。</p>
+          <section class="localization-flow-step" aria-labelledby="localizationRoleTitle">
+            <div class="localization-flow-heading">
+              <div><h3 id="localizationRoleTitle">确定每张地图的运行角色</h3><p id="localizationRoleMessage">先选择当前地图，再说明它是大厅、用户楼层、摆渡层还是户外地图。</p></div>
+              <span id="localizationRoleProgress" class="localization-step-progress">0 / 0 张已完成</span>
+            </div>
+            <button id="openLocalizationBinding" class="page-top-action" type="button" disabled>设置当前地图的运行角色</button>
+            <div id="localizationBindingList" class="localization-binding-list"><div class="page-empty">选择地图后可设置运行角色。</div></div>
+          </section>
+          <section class="localization-flow-step localization-route-step" aria-labelledby="localizationRouteTitle">
+            <div class="localization-flow-heading">
+              <div><h3 id="localizationRouteTitle">确认机器人经过地图的顺序</h3><p id="localizationRoutePurpose">完成所有地图角色后，在这里确认去程经过的地图顺序和切图依据；返程由系统自动派生。</p></div>
+              <span id="localizationRouteProgress" class="localization-step-progress">等待地图角色完成</span>
+            </div>
+            <button id="openLocalizationRoute" class="page-top-action" type="button" disabled>确认地图经过顺序</button>
+            <div id="localizationRouteList" class="localization-route-list"><div class="page-empty">先完成每张地图的运行角色。</div></div>
+            <section id="localizationRouteDialog" class="localization-route-dialog deployment-hidden" aria-label="配置地图经过顺序">
             <header>
-              <div><strong>编辑定位路线</strong><small id="localizationRouteIdentity">按地图经过顺序选择受控锚点；后续地图从电梯中心 0,0 起步，楼上返程目标自动取电梯门前呼梯点。</small></div>
+              <div><strong>确认地图经过顺序</strong><small id="localizationRouteIdentity">按机器人去程实际经过的顺序选择地图；后续地图从电梯中心 0,0 起步，目标层返程会自动取电梯门前呼梯点。</small></div>
               <button id="cancelLocalizationRoute" class="popover-close" type="button" aria-label="关闭定位路线">×</button>
             </header>
             <fieldset class="localization-route-membership">
               <legend>选择路线地图</legend>
-              <p class="page-muted">只勾选本次经过的地图；多个楼层模板只选一个。更改在保存后生效。</p>
+              <p class="page-muted">只勾选本次去程实际经过的地图；多个楼层模板只选一个。保存后机器人会按此顺序自动切图。</p>
               <div id="localizationRouteMembership"></div>
             </fieldset>
             <p id="localizationRouteMessage" class="inline-message" role="status">末项必须为“用户楼层”。</p>
@@ -561,8 +578,15 @@
               <button id="saveLocalizationRoute" class="page-top-action" type="button">保存定位路线</button>
             </div>
           </section>
+          </section>
+          <details class="localization-template-settings">
+            <summary>高级设置：替换定位模板（可选）</summary>
+            <p>默认沿用项目模板。仅当现场需要替换定位 YAML 时才选择文件；这不会改变已配置的地图角色和经过顺序。</p>
+            <label class="localization-template-picker">选择定位配置模板 YAML<input id="localizationTemplateFile" type="file" accept=".yaml,.yml,application/x-yaml,text/yaml" aria-describedby="localizationTemplateMessage" /></label>
+            <p id="localizationTemplateMessage" class="inline-message">当前沿用项目默认模板。</p>
+          </details>
         </article>
-        <article class="panel span-6 task-compiler-panel" data-deployment-stage="export" aria-labelledby="taskCompilerTitle">
+        <article class="panel span-6 task-compiler-panel" data-deployment-stage="export" data-deployment-tasks="export.*" aria-labelledby="taskCompilerTitle">
           <div class="panel-title">
             <div>
               <h2 id="taskCompilerTitle">任务编译预览</h2>
@@ -582,7 +606,7 @@
           </div>
           <button id="downloadTaskCompilerBundle" class="compact-action" type="button" disabled>下载实验包</button>
         </article>
-        <article class="panel span-6" data-deployment-stage="maps">
+        <article class="panel span-6" data-deployment-stage="maps" data-deployment-tasks="maps.assign maps.instance maps.edit">
           <div class="panel-title">
             <div>
               <p class="eyebrow">MAP INSTANCE</p>
@@ -619,7 +643,7 @@
           <p id="instanceMessage" class="inline-message">请先选择一个地图。</p>
           <div id="instanceList" class="asset-list"></div>
         </article>
-        <article class="panel span-6 component-template-panel" data-deployment-stage="annotations">
+        <article class="panel span-6 component-template-panel" data-deployment-stage="annotations" data-deployment-tasks="annotations.*">
           <section
             id="componentTemplateConfig"
             class="component-template-config deployment-hidden"
@@ -647,9 +671,26 @@
             <p id="protocolMessage" class="inline-message"></p>
           </section>
         </article>
-        </section>
+            </section>
+          </section>
+          <div id="deploymentTaskAfter" class="deployment-task-after" aria-live="polite">
+            完成当前任务后，系统会自动显示下一步。
+          </div>
+        </div>
+        <aside id="deploymentTaskProgress" class="deployment-task-progress" aria-label="本阶段进度">
+          <h2>本阶段进度</h2>
+          <p>正在读取任务进度…</p>
+        </aside>
       </section>
     </main>
+    <!-- Keep the modal outside the inert/pointer-disabled page content. -->
+    <section
+      id="deploymentEditImpactDialog"
+      class="deployment-edit-impact deployment-hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="deploymentEditImpactTitle"
+    ></section>
     <div
       id="taskPreviewOverlay"
       class="task-preview-overlay deployment-hidden"

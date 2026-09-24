@@ -195,6 +195,9 @@ def test_industrial_video_uses_whep_html_video_and_pixi_texture_without_a_frame_
     assert "WebSocket(stream.url" not in source
     assert 'id="webrtcVideoGrid"' in html
     stylesheet = (ROOT / "frontend" / "src" / "liveObservation.css").read_text(encoding="utf-8")
+    # 卡片底部不再占一行显示分辨率/编码/协议；状态详情仍保留给辅助技术。
+    _assert_source_contains(source, 'detail.className = "webrtc-video-detail visually-hidden";')
+    assert ".webrtc-video-card p" not in stylesheet
     assert '.webrtc-video-grid[data-count="5"]' in stylesheet
     assert '.webrtc-video-grid[data-count="6"]' in stylesheet
     assert '.webrtc-stream-controls' in stylesheet

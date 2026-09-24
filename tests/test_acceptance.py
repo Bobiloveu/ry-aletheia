@@ -9,19 +9,546 @@ import pytest
 
 import web_console
 from autodrive_console.acceptance_catalog import AcceptanceTaskCatalog
+from autodrive_console.multi_task_catalog import MultiTaskCatalog
 from autodrive_console.acceptance_plan import (
     AcceptancePlan,
     AcceptanceCriteria,
     AcceptancePlanFactory,
     AcceptancePlanStore,
     evaluate_conclusion,
+    select_multi_requests,
 )
 from autodrive_console.acceptance_orchestrator import (
     AcceptanceConflict,
     AcceptanceOrchestrator,
 )
 from autodrive_console.acceptance_report import AcceptanceReportWriter
-from autodrive_console.models import TaskParameters
+from autodrive_console.models import MultiDestination, MultiTaskRequest, TaskParameters
+
+
+def test_multi_task_request_rejects_invalid_destinations_and_duplicate_delivery_codes():
+    with pytest.raises(ValueError, match="货舱类型"):
+        MultiDestination("1", "1", "5", "501", 3, "code-1")
+    with pytest.raises(ValueError, match="不能为空"):
+        MultiDestination("1", "1", "", "501", 1, "code-1")
+    with pytest.raises(ValueError, match="配送码"):
+        MultiTaskRequest(
+            community="数创大厦",
+            out_eguard=False,
+            return_origin=True,
+            destinations=(
+                MultiDestination("1", "1", "5", "501", 1, "same"),
+                MultiDestination("1", "1", "3", "301", 2, "same"),
+            ),
+            task_uuid="task-001",
+        )
+
+
+def test_legacy_plan_without_execution_mode_restores_as_single_r6s(tmp_path):
+    plan = AcceptancePlanFactory.create(
+        catalog_snapshot_for_plan(tmp_path),
+        scope_type="community",
+        community="园区_A",
+        building=None,
+        mode="full",
+        sample_size=None,
+        random_seed=7,
+        criteria=AcceptanceCriteria.empty(),
+    )
+    legacy = plan.to_storage_dict()
+    legacy["schema"] = 4
+    legacy.pop("execution_mode")
+    legacy.pop("multi_options")
+
+    restored = AcceptancePlan.from_storage_dict(legacy)
+
+    assert restored.execution_mode == "single_r6s"
+    assert restored.multi_options is None
+
+
+def test_multi_request_scope_filter_supports_community_and_physical_building():
+    requests = [
+        MultiTaskRequest("数创大厦", False, True, (MultiDestination("1", "1", "5", "501", 1, "a"),), "task-a"),
+        MultiTaskRequest("数创大厦", False, True, (MultiDestination("2", "1", "3", "301", 2, "b"),), "task-b"),
+        MultiTaskRequest("另一个小区", False, True, (MultiDestination("1", "1", "1", "101", 0, "c"),), "task-c"),
+    ]
+
+    community = select_multi_requests(requests, scope_type="community", community="数创大厦")
+    building = select_multi_requests(requests, scope_type="building", community="数创大厦", building=1, unit=1)
+
+    assert [item.task_uuid for item in community] == ["task-a", "task-b"]
+    assert [item.task_uuid for item in building] == ["task-a"]
+
+
+def make_multi_tasks(root: Path, *, complete: bool = True) -> MultiTaskCatalog:
+    community = root / "数创大厦"
+    names = [
+        "floor/5_1_n_n01.json",
+        "floor/5_1_n_n01_r.json",
+        "indoor/5_1.json",
+        "indoor/5_1_r.json",
+        "outdoor/5_1.json",
+        "outdoor/5_1_r.json",
+        "sub_outdoor_eguard.json",
+        "sub_outdoor_eguard_r.json",
+    ]
+    if not complete:
+        names.remove("floor/5_1_n_n01_r.json")
+    for name in names:
+        (community / name).parent.mkdir(parents=True, exist_ok=True)
+        write_task(community / name, {"subtasks": [{}]})
+    return MultiTaskCatalog(root)
+
+
+def make_floor_only_multi_tasks(root: Path) -> MultiTaskCatalog:
+    community = root / "数创大厦"
+    for name in ("floor/1_1_2_201.json", "floor/1_1_2_201_r.json"):
+        (community / name).parent.mkdir(parents=True, exist_ok=True)
+        write_task(community / name, {"subtasks": [{}]})
+    return MultiTaskCatalog(root)
+
+
+def test_multi_floor_only_plan_uses_concrete_filename_values_without_outdoor_route(tmp_path):
+    plan = AcceptancePlanFactory.create_multi(
+        make_floor_only_multi_tasks(tmp_path / "multi_tasks").scan(),
+        scope_type="building",
+        community="数创大厦",
+        building=1,
+        unit=1,
+        mode="full",
+        sample_size=None,
+        random_seed=7,
+        criteria=AcceptanceCriteria.empty(),
+        multi_options={"out_eguard": False, "return_origin": True, "chain_mode": "single"},
+    )
+
+    request = plan.items[0].multi_request
+    assert request is not None
+    assert plan.items[0].filename == "1_1_2_201.json"
+    assert request.destinations[0].floor == "2"
+    assert request.destinations[0].door == "201"
+    assert all("outdoor" not in path and "indoor" not in path for path in plan.items[0].source_paths)
+
+
+def test_floor_only_plan_requires_gate_only_when_outdoor_transfer_is_enabled(tmp_path):
+    with pytest.raises(ValueError, match="sub_outdoor_eguard.json"):
+        AcceptancePlanFactory.create_multi(
+            make_floor_only_multi_tasks(tmp_path / "multi_tasks").scan(),
+            scope_type="building",
+            community="数创大厦",
+            building=1,
+            unit=1,
+            mode="full",
+            sample_size=None,
+            random_seed=7,
+            criteria=AcceptanceCriteria.empty(),
+            multi_options={"out_eguard": True, "return_origin": False, "chain_mode": "single"},
+        )
+
+
+def test_template_floor_range_expands_into_one_single_chain_per_elevator_button(tmp_path):
+    plan = AcceptancePlanFactory.create_multi(
+        make_multi_tasks(tmp_path / "multi_tasks").scan(),
+        scope_type="building",
+        community="数创大厦",
+        building=5,
+        unit=1,
+        mode="full",
+        sample_size=None,
+        random_seed=7,
+        criteria=AcceptanceCriteria.empty(),
+        multi_options={
+            "out_eguard": False,
+            "return_origin": False,
+            "chain_mode": "single",
+            "floor_ranges": [{"building": 5, "unit": 1, "min_floor": 5, "max_floor": 12}],
+        },
+    )
+
+    destinations = [item.multi_request.destinations[0] for item in plan.items if item.multi_request]
+    assert plan.task_pool_size == 8
+    assert sorted(((item.floor, item.door) for item in destinations), key=lambda item: int(item[0])) == [
+        ("5", "501"),
+        ("6", "601"),
+        ("7", "701"),
+        ("8", "801"),
+        ("9", "901"),
+        ("10", "1001"),
+        ("11", "1101"),
+        ("12", "1201"),
+    ]
+    assert plan.multi_options["floor_ranges"] == [
+        {"building": 5, "unit": 1, "min_floor": 5, "max_floor": 12}
+    ]
+
+
+def test_template_sampling_uses_the_expanded_floor_pool(tmp_path):
+    plan = AcceptancePlanFactory.create_multi(
+        make_multi_tasks(tmp_path / "multi_tasks").scan(),
+        scope_type="building",
+        community="数创大厦",
+        building=5,
+        unit=1,
+        mode="sample",
+        sample_size=2,
+        random_seed=7,
+        criteria=AcceptanceCriteria.empty(),
+        multi_options={
+            "out_eguard": False,
+            "return_origin": False,
+            "chain_mode": "single",
+            "floor_ranges": [{"building": 5, "unit": 1, "min_floor": 5, "max_floor": 12}],
+        },
+    )
+
+    destinations = [item.multi_request.destinations[0] for item in plan.items if item.multi_request]
+    assert plan.task_pool_size == 8
+    assert len(destinations) == 2
+    assert len({(item.floor, item.door) for item in destinations}) == 2
+    assert all(5 <= int(item.floor) <= 12 and item.door == f"{item.floor}01" for item in destinations)
+
+
+def test_multi_chain_sampling_generates_requested_unique_random_groups(tmp_path):
+    options = {
+        "out_eguard": False,
+        "return_origin": False,
+        "chain_mode": "chain",
+        "max_points_per_task": 10,
+        "floor_ranges": [{"building": 5, "unit": 1, "min_floor": -2, "max_floor": 30}],
+    }
+
+    plans = [
+        AcceptancePlanFactory.create_multi(
+            make_multi_tasks(tmp_path / f"multi_tasks_{index}").scan(),
+            scope_type="building",
+            community="数创大厦",
+            building=5,
+            unit=1,
+            mode="sample",
+            sample_size=6,
+            random_seed=7,
+            criteria=AcceptanceCriteria.empty(),
+            multi_options=options,
+        )
+        for index in range(2)
+    ]
+
+    requests = [item.multi_request for item in plans[0].items if item.multi_request]
+    assert len(requests) == 6
+    assert all(1 <= len(request.destinations) <= 10 for request in requests)
+    assert len({len(request.destinations) for request in requests}) > 1
+    points = [
+        (destination.building, destination.unit, destination.floor, destination.door)
+        for request in requests
+        for destination in request.destinations
+    ]
+    assert len(points) == len(set(points))
+    assert [request.task_uuid for request in requests] == [f"task-{index:03d}" for index in range(1, 7)]
+    assert all(
+        [destination.delivery_code for destination in request.destinations]
+        == [f"{index:02d}" for index in range(1, len(request.destinations) + 1)]
+        for request in requests
+    )
+    signatures = [
+        [[(destination.floor, destination.door) for destination in item.multi_request.destinations] for item in plan.items]
+        for plan in plans
+    ]
+    assert signatures[0] == signatures[1]
+    assert plans[0].task_pool_size == 32
+    assert plans[0].multi_options["max_points_per_task"] == 10
+    assert plans[0].to_public_dict()["selection_summary"] == {
+        "tasks": 6,
+        "delivery_points": len(points),
+        "physical_buildings": 1,
+        "floors": len(points),
+        "doors": len(points),
+    }
+
+
+def test_full_multi_chain_randomly_partitions_every_point_at_the_configured_limit(tmp_path):
+    plan = AcceptancePlanFactory.create_multi(
+        make_multi_tasks(tmp_path / "multi_tasks").scan(),
+        scope_type="building",
+        community="数创大厦",
+        building=5,
+        unit=1,
+        mode="full",
+        sample_size=None,
+        random_seed=7,
+        criteria=AcceptanceCriteria.empty(),
+        multi_options={
+            "out_eguard": False,
+            "return_origin": False,
+            "chain_mode": "chain",
+            "max_points_per_task": 10,
+            "floor_ranges": [{"building": 5, "unit": 1, "min_floor": -2, "max_floor": 30}],
+        },
+    )
+
+    requests = [item.multi_request for item in plan.items if item.multi_request]
+    assert [len(request.destinations) for request in requests] == [10, 10, 10, 2]
+    points = [
+        (destination.floor, destination.door)
+        for request in requests
+        for destination in request.destinations
+    ]
+    assert len(points) == len(set(points)) == 32
+
+
+@pytest.mark.parametrize("maximum", [False, 0, 11])
+def test_multi_chain_rejects_invalid_maximum_points_per_task(tmp_path, maximum):
+    with pytest.raises(ValueError, match="单任务最多配送点必须是 1 到 10 的整数"):
+        AcceptancePlanFactory.create_multi(
+            make_multi_tasks(tmp_path / f"multi_tasks_{maximum}").scan(),
+            scope_type="building",
+            community="数创大厦",
+            building=5,
+            unit=1,
+            mode="sample",
+            sample_size=1,
+            random_seed=7,
+            criteria=AcceptanceCriteria.empty(),
+            multi_options={
+                "out_eguard": False,
+                "return_origin": False,
+                "chain_mode": "chain",
+                "max_points_per_task": maximum,
+                "floor_ranges": [{"building": 5, "unit": 1, "min_floor": 1, "max_floor": 2}],
+            },
+        )
+
+
+def test_multi_chain_sampling_reports_the_non_repeating_task_limit(tmp_path):
+    with pytest.raises(ValueError, match="最多可生成 2 条不重复任务"):
+        AcceptancePlanFactory.create_multi(
+            make_multi_tasks(tmp_path / "multi_tasks").scan(),
+            scope_type="building",
+            community="数创大厦",
+            building=5,
+            unit=1,
+            mode="sample",
+            sample_size=3,
+            random_seed=7,
+            criteria=AcceptanceCriteria.empty(),
+            multi_options={
+                "out_eguard": False,
+                "return_origin": False,
+                "chain_mode": "chain",
+                "max_points_per_task": 10,
+                "floor_ranges": [{"building": 5, "unit": 1, "min_floor": 1, "max_floor": 2}],
+            },
+        )
+
+
+def test_template_plan_requires_one_valid_floor_range_for_the_selected_building(tmp_path):
+    snapshot = make_multi_tasks(tmp_path / "multi_tasks").scan()
+    base_options = {"out_eguard": False, "return_origin": False, "chain_mode": "single"}
+
+    with pytest.raises(ValueError, match="5栋1单元.*楼层范围"):
+        AcceptancePlanFactory.create_multi(
+            snapshot,
+            scope_type="building",
+            community="数创大厦",
+            building=5,
+            unit=1,
+            mode="full",
+            sample_size=None,
+            random_seed=7,
+            criteria=AcceptanceCriteria.empty(),
+            multi_options=base_options,
+        )
+
+    with pytest.raises(ValueError, match="最低层和最高层范围无效"):
+        AcceptancePlanFactory.create_multi(
+            snapshot,
+            scope_type="building",
+            community="数创大厦",
+            building=5,
+            unit=1,
+            mode="full",
+            sample_size=None,
+            random_seed=7,
+            criteria=AcceptanceCriteria.empty(),
+            multi_options={
+                **base_options,
+                "floor_ranges": [{"building": 5, "unit": 1, "min_floor": 12, "max_floor": 5}],
+            },
+        )
+
+
+def test_concrete_floor_file_overrides_only_its_exact_template_destination(tmp_path):
+    multi_root = tmp_path / "multi_tasks"
+    catalog = make_multi_tasks(multi_root)
+    community = multi_root / "数创大厦"
+    for name in ("floor/5_1_10_1001.json", "floor/5_1_10_1001_r.json"):
+        write_task(community / name, {"subtasks": [{}]})
+
+    plan = AcceptancePlanFactory.create_multi(
+        catalog.scan(),
+        scope_type="building",
+        community="数创大厦",
+        building=5,
+        unit=1,
+        mode="full",
+        sample_size=None,
+        random_seed=7,
+        criteria=AcceptanceCriteria.empty(),
+        multi_options={
+            "out_eguard": False,
+            "return_origin": False,
+            "chain_mode": "single",
+            "floor_ranges": [{"building": 5, "unit": 1, "min_floor": 9, "max_floor": 11}],
+        },
+    )
+
+    by_floor = {
+        item.multi_request.destinations[0].floor: item
+        for item in plan.items
+        if item.multi_request
+    }
+    assert sorted(by_floor) == ["10", "11", "9"]
+    assert by_floor["9"].filename == "5_1_n_n01.json"
+    assert by_floor["10"].filename == "5_1_10_1001.json"
+    assert by_floor["11"].filename == "5_1_n_n01.json"
+
+
+def test_orchestrator_creates_and_freezes_multi_r6b_plan(tmp_path):
+    task_dir = tmp_path / "origin_tasks"
+    catalog_snapshot_for_plan(task_dir)
+    multi_catalog = make_multi_tasks(tmp_path / "multi_tasks")
+    orchestrator = AcceptanceOrchestrator(
+        catalog=AcceptanceTaskCatalog(task_dir),
+        multi_catalog=multi_catalog,
+        plan_store=AcceptancePlanStore(tmp_path / "state" / "acceptance"),
+        run_manager=_NoopRunManager(),
+        report_dir=tmp_path / "state" / "reports",
+    )
+
+    plan = orchestrator.create_plan({
+        "execution_mode": "multi_r6b",
+        "scope_type": "community",
+        "community": "数创大厦",
+        "mode": "full",
+        "multi_options": {
+            "out_eguard": False,
+            "return_origin": True,
+            "chain_mode": "chain",
+            "floor_ranges": [{"building": 5, "unit": 1, "min_floor": 5, "max_floor": 5}],
+            "task_uuid": "preview-chain",
+            "destinations": [],
+        },
+    })
+
+    assert plan["execution_mode"] == "multi_r6b"
+    request = plan["items"][0]["multi_request"]
+    assert request["task_uuid"] == "task-001"
+    assert plan["items"][0]["parameters"]["execution_mode"] == "multi_r6b"
+    assert len(request["tasks_seqs"]) == 1
+    destination = request["tasks_seqs"][0]
+    assert plan["items"][0]["filename"] == "5_1_n_n01.json"
+    assert any(path.endswith("/floor/5_1_n_n01.json") for path in plan["items"][0]["source_paths"])
+    assert destination["building"] == "5"
+    assert destination["unit"] == "1"
+    assert destination["floor"] == "5"
+    assert destination["door"].endswith("01")
+    assert destination["floor"] != "n"
+    assert destination["door"] != "n01"
+    assert destination["delivery_code"] == "01"
+    assert plan["multi_options"]["chains"][0]["task_uuid"] == request["task_uuid"]
+
+
+def test_orchestrator_rejects_multi_plan_with_missing_return_route(tmp_path):
+    task_dir = tmp_path / "origin_tasks"
+    catalog_snapshot_for_plan(task_dir)
+    orchestrator = AcceptanceOrchestrator(
+        catalog=AcceptanceTaskCatalog(task_dir),
+        multi_catalog=make_multi_tasks(tmp_path / "multi_tasks", complete=False),
+        plan_store=AcceptancePlanStore(tmp_path / "state" / "acceptance"),
+        run_manager=_NoopRunManager(),
+        report_dir=tmp_path / "state" / "reports",
+    )
+
+    with pytest.raises(Exception, match="返程"):
+        orchestrator.create_plan({
+            "execution_mode": "multi_r6b",
+            "scope_type": "community",
+            "community": "数创大厦",
+            "mode": "full",
+            "multi_options": {
+                "out_eguard": False,
+                "return_origin": True,
+                "chain_mode": "single",
+            },
+        })
+
+
+def test_multi_plan_generates_randomized_points_for_each_catalog_template(tmp_path):
+    task_dir = tmp_path / "origin_tasks"
+    catalog_snapshot_for_plan(task_dir)
+    multi_root = tmp_path / "multi_tasks"
+    multi_catalog = make_multi_tasks(multi_root)
+    community = multi_root / "数创大厦"
+    for name in ("floor/5_1_n_n02.json", "floor/5_1_n_n02_r.json"):
+        write_task(community / name, {"subtasks": [{}]})
+
+    plan = AcceptancePlanFactory.create_multi(
+        multi_catalog.scan(),
+        scope_type="building",
+        community="数创大厦",
+        building=5,
+        unit=1,
+        mode="full",
+        sample_size=None,
+        random_seed=7,
+        criteria=AcceptanceCriteria.empty(),
+        multi_options={
+            "out_eguard": False,
+            "return_origin": True,
+            "chain_mode": "chain",
+            "floor_ranges": [{"building": 5, "unit": 1, "min_floor": 5, "max_floor": 5}],
+        },
+    )
+
+    request = plan.items[0].multi_request
+    assert request is not None
+    assert set(plan.items[0].filename.split(" + ")) == {"5_1_n_n01.json", "5_1_n_n02.json"}
+    assert plan.items[0].source_path.endswith("/floor/5_1_n_n01.json") or plan.items[0].source_path.endswith("/floor/5_1_n_n02.json")
+    assert len(request.destinations) == 2
+    assert len({destination.delivery_code for destination in request.destinations}) == 2
+    assert request.task_uuid == "task-001"
+    assert [destination.delivery_code for destination in request.destinations] == ["01", "02"]
+    assert all(destination.building == "5" and destination.unit == "1" for destination in request.destinations)
+    assert all(destination.cargo_type in {1, 2, 0, -1} for destination in request.destinations)
+    assert all(2 <= int(destination.floor) <= 30 for destination in request.destinations)
+
+
+def test_combined_multi_plan_keeps_single_baseline_and_chain_when_sampling_one_group(tmp_path):
+    task_dir = tmp_path / "origin_tasks"
+    catalog_snapshot_for_plan(task_dir)
+    plan = AcceptancePlanFactory.create_multi(
+        make_multi_tasks(tmp_path / "multi_tasks").scan(),
+        scope_type="building",
+        community="数创大厦",
+        building=5,
+        unit=1,
+        mode="sample",
+        sample_size=1,
+        random_seed=7,
+        criteria=AcceptanceCriteria.empty(),
+        multi_options={
+            "out_eguard": True,
+            "return_origin": True,
+            "chain_mode": "combined",
+            "floor_ranges": [{"building": 5, "unit": 1, "min_floor": 5, "max_floor": 5}],
+        },
+    )
+
+    assert len(plan.items) == 2
+    assert [len(item.multi_request.destinations) for item in plan.items if item.multi_request] == [1, 1]
+    # The original browser failure happened while persisting the frozen plan,
+    # where combined mode validates that both chains are present.
+    stored = plan.to_storage_dict()
+    assert len(stored["multi_options"]["chains"]) == 2
 
 
 def write_task(path: Path, payload: dict | None = None) -> None:

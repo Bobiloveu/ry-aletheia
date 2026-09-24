@@ -3,9 +3,19 @@ from __future__ import annotations
 import os
 import time
 import threading
+from dataclasses import dataclass
 from typing import Callable
 
-from .models import TaskParameters
+from .models import MultiTaskRequest, TaskParameters
+from .multi_task_status import MultiTaskStatusCollector
+
+
+@dataclass(frozen=True)
+class MultiExecutionResult:
+    success: bool
+    message: str
+    duration_s: float
+    delivery_evidence: list[dict[str, str]]
 
 
 class RosTaskExecutor:
@@ -13,7 +23,27 @@ class RosTaskExecutor:
 
     def __init__(self, service_name: str = "/start_execute_tasks", timeout_s: float = 300.0) -> None:
         self.service_name = service_name
+        self.multi_service_name = "/start_multi_tasks_execute"
         self.timeout_s = timeout_s
+
+    @staticmethod
+    def build_multi_request(service_request, request: MultiTaskRequest, destination_type) -> None:
+        """Populate the generated ROS request without encoding JSON strings."""
+        service_request.community = request.community
+        service_request.out_eguard = request.out_eguard
+        service_request.return_origin = request.return_origin
+        service_request.task_uuid = request.task_uuid
+        destinations = []
+        for destination in request.destinations:
+            item = destination_type()
+            item.building = destination.building
+            item.unit = destination.unit
+            item.floor = destination.floor
+            item.door = destination.door
+            item.cargo_type = destination.cargo_type
+            item.delivery_code = destination.delivery_code
+            destinations.append(item)
+        service_request.tasks_seqs = destinations
 
     def wait_until_available(self, timeout_s: float = 300.0, cancel_event: threading.Event | None = None, status_callback: Callable[[str], None] | None = None) -> tuple[bool, str]:
         """在执行前确认 ROS2 服务已经完成 DDS 注册，避免重启后的发现竞态。
@@ -121,5 +151,61 @@ class RosTaskExecutor:
                 return bool(response.success), str(response.message), round(time.monotonic() - started, 2)
             except Exception as exc:
                 return False, f"服务调用异常：{exc}", round(time.monotonic() - started, 2)
+        finally:
+            node.destroy_node()
+
+    def execute_multi(
+        self,
+        request: MultiTaskRequest,
+        log: Callable[[str], None],
+        cancel_event: threading.Event | None = None,
+        interrupt_event: threading.Event | None = None,
+        timeout_s: float | None = None,
+    ) -> MultiExecutionResult:
+        """Call the typed R6B service and collect matching delivery events."""
+        import rclpy
+        from master_interfaces.msg import MultiTaskDestination, TaskStatus
+        from master_interfaces.srv import StartMultiTasksExecute
+        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+        from rclpy.node import Node
+
+        if not rclpy.ok():
+            rclpy.init()
+        node = Node("autodrive_test_console_multi_executor")
+        started = time.monotonic()
+        effective_timeout = self.timeout_s if timeout_s is None else float(timeout_s)
+        collector = MultiTaskStatusCollector(request)
+        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
+        try:
+            node.create_subscription(TaskStatus, collector.TASK_STATUS_TOPIC, collector.observe, qos)
+            client = node.create_client(StartMultiTasksExecute, self.multi_service_name)
+            if not client.wait_for_service(timeout_sec=10.0):
+                return MultiExecutionResult(False, f"服务不可用：{self.multi_service_name}", round(time.monotonic() - started, 2), collector.evidence())
+            service_request = StartMultiTasksExecute.Request()
+            self.build_multi_request(service_request, request, MultiTaskDestination)
+            log(f"开始执行 R6B 多点任务：{request.task_uuid}，目的地 {len(request.destinations)} 个")
+            future = client.call_async(service_request)
+            while rclpy.ok() and not future.done():
+                if cancel_event and cancel_event.is_set():
+                    future.cancel()
+                    return MultiExecutionResult(False, "操作员已终止本次多点任务", round(time.monotonic() - started, 2), collector.evidence())
+                if interrupt_event and interrupt_event.is_set():
+                    future.cancel()
+                    return MultiExecutionResult(False, "人工判定本轮失败，等待车辆恢复", round(time.monotonic() - started, 2), collector.evidence())
+                if effective_timeout > 0 and time.monotonic() - started > effective_timeout:
+                    future.cancel()
+                    return MultiExecutionResult(False, f"多点服务调用超时（{effective_timeout:.0f}s）", round(time.monotonic() - started, 2), collector.evidence())
+                rclpy.spin_once(node, timeout_sec=0.1)
+            try:
+                response = future.result()
+            except Exception as exc:
+                return MultiExecutionResult(False, f"多点服务调用异常：{exc}", round(time.monotonic() - started, 2), collector.evidence())
+            evidence = collector.evidence()
+            missing = [item["delivery_code"] for item in evidence if item["status"] != "passed"]
+            success = bool(response.success) and not missing
+            message = str(response.message)
+            if bool(response.success) and missing:
+                message = f"服务返回成功，但未收到配送码事件：{', '.join(missing)}"
+            return MultiExecutionResult(success, message, round(time.monotonic() - started, 2), evidence)
         finally:
             node.destroy_node()

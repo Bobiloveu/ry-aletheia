@@ -19,6 +19,8 @@ from typing import Any
 
 from .location_manifest import (
     LocationManifestError,
+    button_sequence,
+    normalise_unavailable_button_floors,
     physical_floor_index,
     validate_path_component,
 )
@@ -62,6 +64,9 @@ class DeploymentStore:
     PROJECT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
     MAP_ID = re.compile(r"map-[a-z0-9][a-z0-9-]{0,63}\Z")
     TASK_COMPILER_COMMUNITY = re.compile(r"[^/\\\x00-\x1f]{1,80}\Z")
+    TASK_TRANSITION_SPEED_MODES = frozenset({
+        "task_point", "single_point", "slow_point", "narrow_point",
+    })
     TASK_COMPILER_DOOR = re.compile(r"[A-Za-z0-9_-]{1,32}\Z")
     MAX_MAP_BYTES = 2 * 1024 * 1024 * 1024
     MAP_MEMBERS = ("map.yaml", "map.pgm", "map_walls.yaml")
@@ -181,12 +186,22 @@ class DeploymentStore:
             raise DeploymentError("电梯服务楼层必须为整数") from exc
         if not -20 <= minimum <= maximum <= 120:
             raise DeploymentError("电梯最低层和最高层范围无效")
+        try:
+            unavailable = normalise_unavailable_button_floors(
+                minimum, maximum, source.get("unavailable_button_floors", ())
+            )
+            # Validate the complete panel configuration at save time, rather
+            # than leaving an impossible all-missing panel for the compiler.
+            button_sequence(minimum, maximum, unavailable)
+        except LocationManifestError as exc:
+            raise DeploymentError(f"电梯缺失按键无效：{exc}") from exc
         result = {
             "id": identifier or f"physical-elevator-{uuid.uuid4().hex[:12]}",
             "elevator_id": elevator_id,
             "elevator_protocol": protocol,
             "min_floor": minimum,
             "max_floor": maximum,
+            **({"unavailable_button_floors": list(unavailable)} if unavailable else {}),
         }
         conflict = source.get("migration_conflict")
         if isinstance(conflict, str) and conflict.strip():
@@ -471,8 +486,12 @@ class DeploymentStore:
         for waypoint in document["waypoints"]:
             if isinstance(waypoint, dict) and waypoint.get("kind") == "return":
                 waypoint["kind"] = "transition"
+                waypoint["exclude_task_export"] = True
                 if waypoint.get("label") in {None, "", "返程点"}:
                     waypoint["label"] = "过渡点"
+                migrated = True
+            if isinstance(waypoint, dict) and waypoint.get("kind") == "transition" and "speed_mode" not in waypoint:
+                waypoint["speed_mode"] = "single_point"
                 migrated = True
         # Keep the legacy route field readable for older project snapshots.  New
         # routes never write it and the compiler ignores it whenever a target
@@ -581,6 +600,7 @@ class DeploymentStore:
             for item in document["physical_elevators"]
         ):
             raise DeploymentError("电梯编号已存在")
+        self._assert_physical_elevator_keeps_landing_buttons(document, updated)
         current.clear()
         current.update(updated)
         self._invalidate_task_compiler_preview(document)
@@ -1394,14 +1414,61 @@ class DeploymentStore:
         maximum_y = minimum_y + float(asset["height"]) * float(asset["resolution_m"])
         if not (minimum_x <= x <= maximum_x and minimum_y <= y <= maximum_y): raise DeploymentError("Waypoint 必须位于地图边界内")
         kind = str(data.get("kind", "waypoint"))
+        legacy_return = kind == "return"
         if kind == "return":
             kind = "transition"
         if kind not in {"start", "target", "transition", "waypoint", "building_entrance", "map_transition"}: raise DeploymentError("Waypoint 类型无效")
         label = " ".join(str(data.get("label") or kind).split())[:80]
         if not label: raise DeploymentError("Waypoint 名称不能为空")
         item = {"id": f"waypoint-{uuid.uuid4().hex[:12]}", "map_asset_id": map_id, "kind": kind, "label": label, "x": x, "y": y, "yaw": yaw}
-        document["waypoints"].append(item); document["updated_at"] = self._now(); self._write_json(self._document_path(project_id), document)
+        if kind == "transition":
+            item["speed_mode"] = self._normalise_task_transition_speed(data.get("speed_mode"))
+            if legacy_return:
+                item["exclude_task_export"] = True
+        document["waypoints"].append(item)
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
         return item
+
+    def update_waypoint(self, project_id: str, waypoint_id: str, data: object) -> dict[str, Any]:
+        """Update one manual task transition's speed and/or forward heading."""
+        if (
+            not isinstance(data, dict)
+            or not data
+            or not set(data) <= {"speed_mode", "yaw"}
+        ):
+            raise DeploymentError("过渡点更新仅支持速度模式或朝向")
+        document = self.get(project_id)
+        waypoint = self._waypoint(document, waypoint_id)
+        if waypoint.get("kind") != "transition" or waypoint.get("generated_by"):
+            raise DeploymentError("仅手动过渡点可配置速度模式或朝向")
+        if "speed_mode" in data:
+            waypoint["speed_mode"] = self._normalise_task_transition_speed(data.get("speed_mode"))
+        if "yaw" in data:
+            try:
+                yaw = float(data["yaw"])
+            except (TypeError, ValueError) as exc:
+                raise DeploymentError("过渡点朝向必须是数字") from exc
+            asset = next(
+                (item for item in document["map_assets"] if item.get("id") == waypoint.get("map_asset_id")),
+                None,
+            )
+            if not isinstance(asset, dict):
+                raise DeploymentError("过渡点对应地图不存在")
+            self._validate_point(asset, float(waypoint["x"]), float(waypoint["y"]), yaw)
+            waypoint["yaw"] = yaw
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
+        return waypoint
+
+    @classmethod
+    def _normalise_task_transition_speed(cls, value: object) -> str:
+        speed_mode = str(value or "single_point").strip()
+        if speed_mode not in cls.TASK_TRANSITION_SPEED_MODES:
+            raise DeploymentError("过渡点速度模式仅支持 task_point、single_point、slow_point 或 narrow_point")
+        return speed_mode
 
     def delete_waypoint(self, project_id: str, waypoint_id: str) -> None:
         document = self.get(project_id)
@@ -1414,6 +1481,7 @@ class DeploymentStore:
         previous = len(document["waypoints"])
         document["waypoints"] = [item for item in document["waypoints"] if item.get("id") != waypoint_id]
         if len(document["waypoints"]) == previous: raise DeploymentError("Waypoint 不存在")
+        self._invalidate_task_compiler_preview(document)
         document["updated_at"] = self._now(); self._write_json(self._document_path(project_id), document)
 
     def add_component(self, project_id: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -1736,7 +1804,8 @@ class DeploymentStore:
             try:
                 button_floor = int(button_floor)
                 physical_floor_index(
-                    int(physical["min_floor"]), int(physical["max_floor"]), button_floor
+                    int(physical["min_floor"]), int(physical["max_floor"]), button_floor,
+                    physical.get("unavailable_button_floors", ()),
                 )
             except (TypeError, ValueError, LocationManifestError) as exc:
                 raise DeploymentError(f"电梯按钮层无效：{exc}") from exc
@@ -1754,6 +1823,30 @@ class DeploymentStore:
             local.pop(key, None)
         local["physical_elevator_id"] = physical_elevator_id
         return local
+
+    @staticmethod
+    def _assert_physical_elevator_keeps_landing_buttons(
+        document: dict[str, Any], elevator: dict[str, Any]
+    ) -> None:
+        """Do not save a shared panel layout that invalidates a mapped landing."""
+        for component in document.get("components", []):
+            attributes = component.get("attributes") if isinstance(component, dict) else None
+            if not isinstance(attributes, dict) or attributes.get("physical_elevator_id") != elevator["id"]:
+                continue
+            button_floor = attributes.get("button_floor")
+            if button_floor in (None, ""):
+                continue
+            try:
+                physical_floor_index(
+                    int(elevator["min_floor"]),
+                    int(elevator["max_floor"]),
+                    int(button_floor),
+                    elevator.get("unavailable_button_floors", ()),
+                )
+            except (TypeError, ValueError, LocationManifestError) as exc:
+                raise DeploymentError(
+                    f"共享电梯配置会使已关联地图落点按钮层 {button_floor} 无效：{exc}"
+                ) from exc
 
     def add_virtual_wall(self, project_id: str, data: dict[str, Any]) -> dict[str, Any]:
         document = self.get(project_id); map_id = str(data.get("map_id", ""))

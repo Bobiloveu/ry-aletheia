@@ -25,9 +25,19 @@ import {
   setRouteBindingIncluded,
 } from "./deployment/localization-route.js";
 import {
+  deriveDeploymentEditImpact,
+  deriveDeploymentTask,
   deriveDeploymentWorkflow,
+  deriveLocalizationGuidance,
+  deriveMapImportGuidance,
   isDeploymentStageUnlocked,
+  nextMapImportDraft,
 } from "./deployment/workflow.js";
+import { synchronizeMapSourceChoice } from "./deployment/map-source-choice.js";
+import {
+  createTaskActionGate,
+  taskConsoleMarkup,
+} from "./deployment/task-console.js";
 import {
   clampDeploymentStage,
   clearDeploymentSession,
@@ -74,7 +84,20 @@ let routeDraft = [];
 let taskCompilerPreview = null;
 let taskCompilerProjectId = null;
 let deploymentWorkflow = null;
+let deploymentTask = null;
+let deploymentTaskPending = null;
+let deploymentTaskDraft = {
+  mapSource: null,
+  fileSummary: null,
+  mapLabel: "",
+  latestCreatedMapId: null,
+  receipt: null,
+};
 let viewedDeploymentStage = null;
+let editingDeploymentStage = null;
+let pendingEditStage = null;
+let deploymentEditReturnFocus = null;
+const taskActionGate = createTaskActionGate();
 let elevatorLandingDraft = null;
 let localizationBindingDraft = null;
 let localizationRouteDraft = null;
@@ -102,6 +125,16 @@ const mapInstanceFor = (mapId) =>
   (selectedProject?.map_instances || []).find(
     (item) => item.map_asset_id === mapId,
   );
+const taskTransitionRole = (mapId) => {
+  const flowById = new Map(flowForProject(selectedProject).map((item) => [item.id, item.type]));
+  const stage = (topology?.stages || []).find((item) => item.map_asset_id === mapId)?.stage
+    || (selectedProject?.map_stage_assignments || []).find((item) => item.map_asset_id === mapId)?.stage;
+  const type = flowById.get(stage) || stage;
+  if (type === "lobby" || type === "target_floor") return type;
+  const instanceRole = mapInstanceFor(mapId)?.role;
+  return instanceRole === "lobby" ? "lobby" : ["typical_floor", "floor_override"].includes(instanceRole) ? "target_floor" : null;
+};
+const isTargetFloorMap = (mapId) => taskTransitionRole(mapId) === "target_floor";
 const request = (url, options) => requestJson(url, options);
 function note(id, text, error = false) {
   const target = $(id);
@@ -113,7 +146,11 @@ function persistDeploymentSession() {
   writeDeploymentSession(localStorage, {
     projectId: selectedProject.id,
     mapId: activeMap?.id || null,
-    viewedStage: viewedDeploymentStage || deploymentWorkflow?.current?.id || null,
+    viewedDeploymentStage: viewedDeploymentStage || deploymentWorkflow?.current?.id || null,
+    deploymentTaskDraft: {
+      mapSource: deploymentTaskDraft.mapSource,
+      mapLabel: deploymentTaskDraft.mapLabel,
+    },
   });
 }
 function taskCompilerMessage(text, error = false) {
@@ -256,8 +293,8 @@ function renderTaskCompilerState(project) {
   const localizationTemplateMessage = $("localizationTemplateMessage");
   localizationTemplateMessage.classList.remove("error");
   localizationTemplateMessage.textContent = localizationTemplate
-    ? `当前模板：${localizationTemplate.name || "localization-template.yaml"}；已加载，生成时会以此模板为准。`
-    : "未导入时使用项目默认模板；导入后每次生成都以该模板为准。";
+    ? `当前使用：${localizationTemplate.name || "localization-template.yaml"}。仅在现场需要替换定位配置时才需重新选择文件。`
+    : "当前沿用项目默认模板；仅在现场需要替换定位配置时才选择文件。";
   $("saveTaskCompilerConfig").disabled = !project;
   $("generateTaskCompilerPreview").disabled = !project || !community;
   const persistedPreviewHash = identity.last_preview_input_sha256 || null;
@@ -300,6 +337,7 @@ async function saveTaskCompilerConfig() {
     taskCompilerProjectId = selectedProject.id;
     renderTaskCompilerState(selectedProject);
     taskCompilerMessage("任务信息已保存；现在可生成实验预览。");
+    completeDeploymentTask("任务信息已保存；下一步可以生成实验预览。");
   } catch (error) {
     taskCompilerMessage(compilerRecovery(error.message), true);
   } finally {
@@ -373,15 +411,26 @@ function renderMapStages() {
   const stages = topology?.stages?.length
     ? topology.stages
     : fallback.map((label, index) => ({ stage: String(index), label, status: "missing" }));
-  $("mapStageSummary").innerHTML = stages
+  const guidance = deriveMapImportGuidance(
+    { stages },
+    deploymentTask?.stageId === "maps" ? deploymentTask.targetStageId : null,
+  );
+  $("mapStageSummary").innerHTML = `<div id="mapImportTarget" class="map-stage-target ${guidance.state}" role="status">
+      <strong>${esc(guidance.title)}</strong>
+      <span>${esc(guidance.detail)}</span>
+      ${guidance.position ? `<small>${esc(guidance.position)}</small>` : ""}
+    </div>${stages
     .map((stage, index) => {
       const bound = Boolean(stage.map_asset_id);
       return `<span class="${bound ? "done" : stage.status === "editing" ? "active" : ""}"><b>${bound ? "✓" : index + 1}</b>${esc(stage.map_label || stage.label)}</span>`;
     })
-    .join("");
+    .join("")}`;
+  $("mapFolderLabel").textContent = guidance.fileLabel;
+  $("mapLabelText").textContent = guidance.nameLabel;
+  $("mapLabel").placeholder = guidance.namePlaceholder;
   const current = stages.find((stage) => !stage.map_asset_id);
   $("importMessage").textContent = current
-    ? `当前待完善：${current.label}。可导入既有地图或使用下方车端建图。`
+    ? `${guidance.title}（${guidance.position}）。可导入既有地图或使用下方车端建图。`
     : "地图阶段已齐全；继续标记实际组件，任务编译器会自动推导路点与切图依据。";
 }
 
@@ -446,11 +495,13 @@ const GUIDE_STATUS_LABELS = {
 function guideTargetForStep(stepId) {
   return {
     project: selectedProject ? "deploymentFlowEditor" : "projectName",
-    maps: topology?.stages?.length && topology.stages.every((stage) => stage.map_asset_id)
-      ? "mapWorkspace"
-      : topology?.stages?.length
-        ? "mapStageAssignment"
-        : "mapFolder",
+    maps: deploymentTask?.id === "maps.instance"
+      ? "instanceControls"
+      : topology?.stages?.length && topology.stages.every((stage) => stage.map_asset_id)
+        ? "mapWorkspace"
+        : topology?.stages?.length
+          ? "mapStageAssignment"
+          : "mapFolder",
     annotations: "mapWorkspace",
     localization: localizationBindings().length ? "localizationRouteList" : "openLocalizationBinding",
     export: taskCompilerPreview?.status === "ready" ? "downloadTaskCompilerBundle" : "generateTaskCompilerPreview",
@@ -461,7 +512,7 @@ function renderDeploymentGuide() {
   const guide = $("deploymentGuide");
   if (!guide) return;
   deploymentWorkflow = deriveDeploymentWorkflow(selectedProject, topology, taskCompilerPreview);
-  const { steps, current, next, completed, total, percent, checklist } = deploymentWorkflow;
+  const { steps, current, completed, total, percent } = deploymentWorkflow;
   if (viewedDeploymentStage && (topology || !(selectedProject?.map_assets || []).length)) {
     viewedDeploymentStage = clampDeploymentStage(current.id, viewedDeploymentStage);
   }
@@ -478,40 +529,121 @@ function renderDeploymentGuide() {
       </button>`,
     )
     .join("");
-  const guideTitle = reviewingCompletedStage ? `${activeStep.label}已完成` : next.label;
-  const guideDetail = reviewingCompletedStage
-    ? "正在查看已完成阶段；返回当前步骤后继续现场配置。"
-    : next.detail || current.reason || current.detail;
-  const guideButton = reviewingCompletedStage
-    ? '<button id="deploymentGuideNext" class="page-top-action" type="button" data-guide-action="return-current">回到当前步骤</button>'
-    : `<button id="deploymentGuideNext" class="page-top-action" type="button" data-guide-action="${esc(next.id)}">${esc(next.label)}</button>`;
-  $("deploymentGuideCurrent").innerHTML = `<div class="deployment-guide-current-copy">
-    <span class="deployment-guide-kicker">${reviewingCompletedStage ? "已完成阶段" : `当前要做 · ${esc(current.label)}`}</span>
-    <h3>${esc(guideTitle)}</h3>
-    <p>${esc(guideDetail)}</p>
-    ${!reviewingCompletedStage && current.reason ? `<small class="deployment-guide-reason">${esc(current.reason)}</small>` : ""}
-  </div>${guideButton}`;
-  $("deploymentGuideChecklist").innerHTML = checklist
-    .map(
-      (item) => `<div class="deployment-guide-check ${item.done ? "done" : ""}"><span class="deployment-guide-check-mark" aria-hidden="true"></span><span>${esc(item.label)}</span><small>${item.done ? "已确认" : "待完成"}</small></div>`,
-    )
-    .join("");
-  $("deploymentGuideChecklistMeta").textContent = `${checklist.filter((item) => item.done).length} / ${checklist.length}`;
-  applyDeploymentStageGating();
+  renderDeploymentTaskConsole();
   persistDeploymentSession();
 }
 
-function applyDeploymentStageGating() {
-  const activeStage = viewedDeploymentStage || deploymentWorkflow?.current?.id || "project";
+function deploymentReviewFacts(stageId) {
+  const maps = selectedProject?.map_assets || [];
+  const stages = topology?.stages || [];
+  return {
+    project: [
+      { label: "项目", value: selectedProject?.name || "尚未创建" },
+      { label: "部署阶段", value: `${selectedProject?.deployment_flow?.length || 0} 个` },
+    ],
+    maps: [
+      { label: "地图资产", value: `${maps.length} 张` },
+      { label: "阶段绑定", value: `${stages.filter((item) => item.map_asset_id).length} / ${stages.length}` },
+    ],
+    annotations: [
+      { label: "地图标记", value: `${selectedProject?.waypoints?.length || 0} 个` },
+      { label: "现场组件", value: `${selectedProject?.components?.length || 0} 个` },
+    ],
+    localization: [
+      { label: "定位绑定", value: `${selectedProject?.localization_bindings?.length || 0} 项` },
+      { label: "定位路线", value: `${selectedProject?.localization_routes?.length || 0} 条` },
+    ],
+    export: [
+      { label: "校验状态", value: taskCompilerPreview?.status === "ready" ? "已通过" : "待重新校验" },
+      { label: "实验文件", value: `${taskCompilerPreview?.artifacts?.length || 0} 个` },
+    ],
+  }[stageId] || [];
+}
+
+function renderDeploymentTaskConsole() {
+  if (!deploymentWorkflow) return;
+  deploymentTask = deriveDeploymentTask({
+    workflow: deploymentWorkflow,
+    project: selectedProject,
+    topology,
+    mappingSession,
+    draft: deploymentTaskDraft,
+    viewedStage: viewedDeploymentStage,
+    editingStage: editingDeploymentStage,
+  });
+  if (synchronizeTaskWorkspace()) return;
+  if (editingDeploymentStage && deploymentTask.readOnly) {
+    deploymentTask = {
+      ...deploymentTask,
+      id: `${editingDeploymentStage}.edit`,
+      title: `修改${deploymentTask.title}`,
+      detail: "编辑仅在现有保存按钮提交后生效；未保存离开不会改变项目事实。",
+      completionCriterion: "保存必要修改，并返回当前任务重新确认后续阶段",
+      primaryAction: { id: "return-current", label: "结束修改并返回", target: "deploymentTaskTitle" },
+      readOnly: false,
+    };
+  }
+  const markup = taskConsoleMarkup(
+    deploymentTask,
+    {
+      pending: deploymentTaskPending === deploymentTask.id,
+      receipt: deploymentTaskDraft.receipt,
+      facts: deploymentReviewFacts(deploymentTask.stageId),
+    },
+    esc,
+  );
+  $("deploymentTaskSummary").innerHTML = markup.summaryHtml;
+  $("deploymentTaskProgress").innerHTML = markup.progressHtml;
+  $("deploymentTaskAfter").innerHTML = markup.afterHtml;
+  $("deploymentTaskWorkspace").classList.toggle("deployment-hidden", deploymentTask.readOnly);
+  applyDeploymentTaskGating();
+  synchronizeMapSourceChoice(document, deploymentTaskDraft.mapSource);
+  synchronizeTaskWorkspace();
+}
+
+function synchronizeTaskWorkspace() {
+  const stageSelect = $("mapStageAssignment");
+  if (!stageSelect) return false;
+  if (!["maps.assign", "maps.instance"].includes(deploymentTask?.id)) {
+    stageSelect.disabled = false;
+    return false;
+  }
+  const targetMap = (selectedProject?.map_assets || []).find(
+    (item) => item.id === deploymentTask.targetMapId,
+  );
+  if (targetMap && activeMap?.id !== targetMap.id) {
+    selectMap(targetMap);
+    return true;
+  }
+  if (deploymentTask.id === "maps.instance") {
+    $("instanceRole").value = deploymentTask.instanceRole || "typical_floor";
+    $("instanceMessage").textContent = `当前任务：为“${targetMap?.label || "当前地图"}”设置部署拓扑位置。请核对用途，并填写实际楼栋、单元和楼层。`;
+    return false;
+  }
+  if (deploymentTask.targetStageId) {
+    stageSelect.value = deploymentTask.targetStageId;
+    stageSelect.disabled = true;
+    const stageLabel = (topology?.stages || []).find(
+      (item) => item.stage === deploymentTask.targetStageId,
+    )?.label || deploymentTask.targetStageId;
+    $("stageAssignmentMessage").textContent = `${targetMap?.label || deploymentTask.targetMapId} 将绑定到“${stageLabel}”；该目标由当前任务锁定。`;
+  }
+  return false;
+}
+
+function applyDeploymentTaskGating() {
+  const taskId = deploymentTask?.id || "project.createProject";
+  const activeStage = deploymentTask?.stageId || "project";
   if (activeStage === "maps" && activeTool !== "pan") setTool("pan");
   document.body.dataset.deploymentStage = activeStage;
-  document.querySelectorAll("[data-deployment-stage], [data-deployment-stages]").forEach((panel) => {
-    const requiredStages = (panel.dataset.deploymentStages || panel.dataset.deploymentStage || "")
+  document.body.dataset.deploymentTask = taskId;
+  document.querySelectorAll("[data-deployment-task], [data-deployment-tasks]").forEach((panel) => {
+    const requiredTasks = (panel.dataset.deploymentTasks || panel.dataset.deploymentTask || "")
       .split(/\s+/)
       .filter(Boolean);
-    const visible = requiredStages.includes(activeStage);
-    panel.classList.toggle("deployment-stage-hidden", !visible);
-    panel.classList.toggle("deployment-stage-visible", visible);
+    const visible = requiredTasks.includes(taskId) || requiredTasks.includes(`${activeStage}.*`);
+    panel.classList.toggle("deployment-task-hidden", !visible);
+    panel.classList.toggle("deployment-task-visible", visible);
     panel.setAttribute("aria-hidden", String(!visible));
   });
 }
@@ -526,9 +658,10 @@ function focusGuideTarget(targetId) {
 function runDeploymentGuideAction(actionId) {
   if (actionId === "return-current") {
     viewedDeploymentStage = null;
+    editingDeploymentStage = null;
     persistDeploymentSession();
     renderDeploymentGuide();
-    focusGuideTarget(guideTargetForStep(deploymentWorkflow?.current?.id));
+    focusCurrentTaskHeading();
     return;
   }
   const next = deploymentWorkflow?.next;
@@ -540,8 +673,8 @@ function runDeploymentGuideAction(actionId) {
     if (map) selectMap(map);
   }
   if (actionId === "editRoute") {
-    const routeButton = $("localizationRouteList")?.querySelector("button");
-    if (routeButton) {
+    const routeButton = $("openLocalizationRoute");
+    if (routeButton && !routeButton.disabled) {
       routeButton.click();
       return;
     }
@@ -559,14 +692,113 @@ function runDeploymentGuideAction(actionId) {
 function focusGuideStep(stepId) {
   if (!deploymentWorkflow || !isDeploymentStageUnlocked(deploymentWorkflow.current.id, stepId)) return;
   viewedDeploymentStage = stepId;
+  editingDeploymentStage = null;
   persistDeploymentSession();
   renderDeploymentGuide();
-  const target = guideTargetForStep(stepId);
   if (stepId === "annotations" && deploymentWorkflow?.next?.targetMapId) {
     const map = (selectedProject?.map_assets || []).find((item) => item.id === deploymentWorkflow.next.targetMapId);
     if (map) selectMap(map);
   }
-  focusGuideTarget(target);
+  focusCurrentTaskHeading();
+}
+
+function focusCurrentTaskHeading() {
+  requestAnimationFrame(() => {
+    const heading = $("deploymentTaskTitle");
+    if (!heading) return;
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    heading.focus({ preventScroll: true });
+    heading.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "nearest" });
+  });
+}
+
+const EDIT_IMPACT_COPY = {
+  reconfirm: "需要重新确认",
+  invalid: "现有结果可能失效",
+  locked: "完成前置确认前将保持锁定",
+};
+
+function openDeploymentEditImpact(stageId, returnFocus = document.activeElement) {
+  if (!stageId || !deploymentWorkflow) return;
+  pendingEditStage = stageId;
+  deploymentEditReturnFocus = returnFocus;
+  const impact = deriveDeploymentEditImpact(stageId, deploymentWorkflow.current.id);
+  const dialog = $("deploymentEditImpactDialog");
+  dialog.innerHTML = `<div class="deployment-edit-impact-card">
+    <span class="deployment-review-state">受保护的修改</span>
+    <h2 id="deploymentEditImpactTitle">修改此步骤会影响后续内容</h2>
+    <p>这里只进入本地编辑模式，不会自动回滚或写入机器人。只有你随后明确保存的内容才会提交。</p>
+    <ul>${impact.items.map((item) => `<li class="${esc(item.status)}"><b>${esc(item.label)}</b><span>${esc(EDIT_IMPACT_COPY[item.status])}</span></li>`).join("") || "<li><b>当前步骤</b><span>修改后请重新核对</span></li>"}</ul>
+    <div class="deployment-edit-impact-actions">
+      <button id="cancelDeploymentStageEdit" class="compact-action" type="button">取消</button>
+      <button id="confirmDeploymentStageEdit" class="page-top-action" type="button">确认进入修改</button>
+    </div>
+  </div>`;
+  dialog.classList.remove("deployment-hidden");
+  document.body.classList.add("deployment-edit-impact-open");
+  requestAnimationFrame(() => $("cancelDeploymentStageEdit")?.focus());
+}
+
+function closeDeploymentEditImpact({ restoreFocus = true } = {}) {
+  const dialog = $("deploymentEditImpactDialog");
+  dialog.classList.add("deployment-hidden");
+  dialog.innerHTML = "";
+  document.body.classList.remove("deployment-edit-impact-open");
+  pendingEditStage = null;
+  if (restoreFocus) {
+    const target = deploymentEditReturnFocus?.isConnected && deploymentEditReturnFocus !== document.body
+      ? deploymentEditReturnFocus
+      : document.querySelector('[data-task-action="request-stage-edit"]');
+    requestAnimationFrame(() => target?.focus());
+  }
+  deploymentEditReturnFocus = null;
+}
+
+function confirmDeploymentStageEdit() {
+  if (!pendingEditStage) return;
+  editingDeploymentStage = pendingEditStage;
+  viewedDeploymentStage = pendingEditStage;
+  const stageId = pendingEditStage;
+  closeDeploymentEditImpact({ restoreFocus: false });
+  persistDeploymentSession();
+  renderDeploymentGuide();
+  focusGuideTarget(guideTargetForStep(stageId));
+}
+
+function completeDeploymentEdit(message) {
+  if (!editingDeploymentStage) return false;
+  const completedTaskId = deploymentTask?.id || editingDeploymentStage;
+  editingDeploymentStage = null;
+  viewedDeploymentStage = null;
+  deploymentTaskDraft.receipt = { taskId: completedTaskId, message };
+  persistDeploymentSession();
+  renderDeploymentGuide();
+  focusCurrentTaskHeading();
+  return true;
+}
+
+function keepMapAnnotationOpen(message) {
+  const isAnnotating = editingDeploymentStage === "annotations" ||
+    deploymentWorkflow?.current?.id === "annotations";
+  if (!isAnnotating) return false;
+  editingDeploymentStage = "annotations";
+  viewedDeploymentStage = "annotations";
+  deploymentTaskDraft.receipt = { taskId: "annotations.edit", message };
+  persistDeploymentSession();
+  renderDeploymentGuide();
+  return true;
+}
+
+function completeDeploymentTask(message) {
+  if (completeDeploymentEdit(message)) return;
+  viewedDeploymentStage = null;
+  deploymentTaskDraft.receipt = {
+    taskId: deploymentTask?.id || deploymentWorkflow?.current?.id || "deployment",
+    message,
+  };
+  persistDeploymentSession();
+  renderDeploymentGuide();
+  focusCurrentTaskHeading();
 }
 
 async function refreshTopology() {
@@ -624,6 +856,7 @@ async function refreshMappingStatus() {
     mappingRuntime = data;
     mappingSession = data.session || null;
     renderMappingStatus();
+    renderDeploymentTaskConsole();
     updateLivePreview();
     if (mappingSession?.state === "running" && !mappingPollTimer) {
       mappingPollTimer = window.setInterval(refreshMappingStatus, 900);
@@ -657,7 +890,16 @@ function renderProject(project) {
     selectedWaypoint = null;
     $("waypointPopover").classList.add("deployment-hidden");
     const session = readDeploymentSession();
-    viewedDeploymentStage = session?.projectId === project.id ? session.viewedStage : null;
+    const canRestore = session?.projectId === project.id;
+    viewedDeploymentStage = canRestore ? session.viewedDeploymentStage : null;
+    deploymentTaskDraft = {
+      mapSource: canRestore ? session.deploymentTaskDraft?.mapSource || null : null,
+      mapLabel: canRestore ? session.deploymentTaskDraft?.mapLabel || "" : "",
+      fileSummary: null,
+      latestCreatedMapId: null,
+      receipt: null,
+    };
+    editingDeploymentStage = null;
   }
   document.body.classList.remove("deployment-no-project");
   document.body.classList.toggle(
@@ -674,6 +916,9 @@ function renderProject(project) {
   deploymentFlow = flowForProject(project);
   renderDeploymentFlowEditor();
   $("importControls").classList.remove("deployment-hidden");
+  if (deploymentTaskDraft.mapLabel && !$("mapLabel").value) {
+    $("mapLabel").value = deploymentTaskDraft.mapLabel;
+  }
   $("importMessage").textContent =
     "地图只会复制到部署项目快照；不会修改机器人原目录。";
   $("mapList").innerHTML = maps.length
@@ -686,7 +931,6 @@ function renderProject(project) {
     : '<div class="page-empty">尚未导入地图。先选择一个现有 map.yaml 作为项目快照。</div>';
   renderInstances();
   renderLocalizationBindings();
-  renderLocalizationRoutes();
   renderComponentTemplates();
   renderMapStages();
   renderTopology();
@@ -706,6 +950,18 @@ function localizationBindings() {
   return Array.isArray(selectedProject?.localization_bindings)
     ? selectedProject.localization_bindings
     : [];
+}
+const LOCALIZATION_ROLE_LABELS = {
+  indoor: "室内大厅（任务起点 / 进梯前）",
+  floor: "用户楼层（交付终点）",
+  outdoor: "户外（室外起点）",
+  ferry: "摆渡层（中途经过）",
+};
+function localizationRoleLabel(binding) {
+  if (binding?.type === "floor") {
+    return `用户楼层（交付终点）· 模板 ${binding.floor_template || "未填写"}`;
+  }
+  return LOCALIZATION_ROLE_LABELS[binding?.type] || binding?.type || "未设置";
 }
 function localizationRoutes() {
   return Array.isArray(selectedProject?.localization_routes)
@@ -929,6 +1185,7 @@ async function saveLocalizationRoute() {
     );
     renderProject(data.project);
     closeLocalizationRoute();
+    completeDeploymentEdit("定位路线已保存，已返回当前任务。");
   } catch (error) {
     note("localizationRouteMessage", error.message, true);
   }
@@ -948,33 +1205,59 @@ async function deleteLocalizationRoute() {
     const data = await request(`/api/deployments/${encodeURIComponent(selectedProject.id)}`);
     renderProject(data.project);
     closeLocalizationRoute();
+    completeDeploymentEdit("定位路线已删除，已返回当前任务。");
   } catch (error) {
     note("localizationRouteMessage", error.message, true);
   } finally {
     button.disabled = false;
   }
 }
-function renderLocalizationRoutes() {
+function renderLocalizationRoutes(guidance = deriveLocalizationGuidance(selectedProject, activeMap?.id)) {
   const holder = $("localizationRouteList");
   const routes = localizationRoutes();
+  if (!guidance.route.available) {
+    holder.innerHTML = `<div class="page-empty">${esc(`还需完成 ${guidance.roles.total - guidance.roles.configured} 张地图的运行角色，随后才能确认经过顺序。`)}</div>`;
+    return;
+  }
   holder.innerHTML = routes.length
     ? routes.map((route) => {
       const bindings = route.binding_ids.map((id) => localizationBindings().find((item) => item.id === id)).filter(Boolean);
       const labels = bindings.map((binding, index) => `${mapForId(binding.map_asset_id)?.label || binding.map_asset_id}：${index === 0 ? "人工任务起点" : "电梯中心 0,0"}${index === bindings.length - 1 ? ` / 去程终点${route.task_target_waypoint_id ? " · 返程呼梯点自动派生" : ""}` : ` / ${route.links[index]?.anchor?.kind === "component_center" ? "组件中心自动派生" : "受控锚点"}`}`);
-      return `<div class="localization-route-row"><div><b>${esc(route.building)} 栋 ${esc(route.unit)} 单元 · ${bindings.length} 图路线</b><small>${labels.map(esc).join(" · ")}</small></div><button class="compact-action edit-localization-route" data-route-building="${esc(route.building)}" data-route-unit="${esc(route.unit)}" type="button">编辑定位路线</button></div>`;
+      return `<div class="localization-route-row"><div><b>${esc(route.building)} 栋 ${esc(route.unit)} 单元 · ${bindings.length} 张地图</b><small>${labels.map(esc).join(" · ")}</small></div><button class="compact-action edit-localization-route" data-route-building="${esc(route.building)}" data-route-unit="${esc(route.unit)}" type="button">检查经过顺序</button></div>`;
     }).join("")
-    : '<div class="page-empty">保存同一楼栋/单元的多个绑定后，可在此编辑定位路线。</div>';
+    : '<div class="page-empty">所有地图角色已完成。点击上方按钮，确认机器人去程实际经过的地图顺序。</div>';
 }
 function renderLocalizationBindings() {
   const holder = $("localizationBindingList");
   const open = $("openLocalizationBinding");
+  const routeOpen = $("openLocalizationRoute");
+  const guidance = deriveLocalizationGuidance(selectedProject, activeMap?.id);
+  const currentLabel = guidance.currentMapLabel || "当前地图";
   open.disabled = !selectedProject || !activeMap;
+  open.textContent = activeMap
+    ? (guidance.state === "needs_role" ? guidance.primaryAction.label : `修改 ${currentLabel} 的运行角色`)
+    : "先选择一张地图";
+  $("localizationPurpose").textContent = "完成后，部署包会自动生成定位清单、地图切换顺序和受控路径；无需手工维护切图文件。";
+  $("localizationRoleMessage").textContent = guidance.detail;
+  $("localizationRoleProgress").textContent = `${guidance.roles.configured} / ${guidance.roles.total} 张已完成`;
+  $("localizationRoutePurpose").textContent = guidance.route.available
+    ? guidance.detail
+    : "先完成每张地图的运行角色。系统随后会让你确认机器人去程经过的地图顺序和切图依据；返程自动派生。";
+  $("localizationRouteProgress").textContent = guidance.route.available
+    ? (guidance.route.configured ? "路线已保存" : "现在可配置")
+    : "等待地图角色完成";
+  const routeStep = $("openLocalizationRoute").closest(".localization-flow-step");
+  routeStep?.classList.toggle("is-waiting", !guidance.route.available);
+  routeStep?.setAttribute("aria-disabled", guidance.route.available ? "false" : "true");
+  routeOpen.disabled = !guidance.route.available || !guidance.route.identity?.building || !guidance.route.identity?.unit;
+  routeOpen.textContent = guidance.route.available ? guidance.primaryAction.label : "先完成地图角色";
   const bindings = localizationBindings().filter(
     (item) => item.map_asset_id === activeMap?.id,
   );
   holder.innerHTML = bindings.length
-    ? bindings.map((item) => `<div class="localization-binding-row active"><div><b>${esc(item.type === "floor" ? `用户楼层 · 模板 ${item.floor_template}` : { outdoor: "户外", indoor: "室内大厅", ferry: "摆渡层" }[item.type] || item.type)}</b><small>${esc(item.building)} 栋 ${esc(item.unit)} 单元 · 当前地图</small></div><div class="localization-binding-actions"><button class="compact-action edit-localization-binding" data-binding-id="${esc(item.id)}" type="button">编辑</button><button class="compact-action edit-localization-route" data-route-building="${esc(item.building)}" data-route-unit="${esc(item.unit)}" type="button">编辑定位路线</button></div></div>`).join("")
-    : '<div class="page-empty">当前地图尚未配置定位绑定。</div>';
+    ? bindings.map((item) => `<div class="localization-binding-row active"><div><b>${esc(localizationRoleLabel(item))}</b><small>${esc(item.building)} 栋 ${esc(item.unit)} 单元 · ${esc(currentLabel)}</small></div><div class="localization-binding-actions"><button class="compact-action edit-localization-binding" data-binding-id="${esc(item.id)}" type="button">修改角色</button></div></div>`).join("")
+    : `<div class="page-empty">${esc(`“${currentLabel}”尚未确定运行角色。设置后才能确认地图经过顺序。`)}</div>`;
+  renderLocalizationRoutes(guidance);
 }
 function localizationTypeChanged() {
   const floor = $("localizationBindingType").value === "floor";
@@ -984,15 +1267,30 @@ function localizationTypeChanged() {
 function openLocalizationBinding(binding = null) {
   if (!selectedProject || !activeMap) return;
   const instance = mapInstanceFor(activeMap.id) || {};
+  const topologyOwnsIdentity = Boolean(instance.building && instance.unit);
   localizationBindingDraft = binding || { map_asset_id: activeMap.id, building: instance.building || "", unit: instance.unit || "", type: "indoor" };
   $("localizationBindingType").value = localizationBindingDraft.type;
-  $("localizationBuilding").value = localizationBindingDraft.building || "";
-  $("localizationUnit").value = localizationBindingDraft.unit || "";
+  $("localizationBuilding").value = instance.building || localizationBindingDraft.building || "";
+  $("localizationUnit").value = instance.unit || localizationBindingDraft.unit || "";
   $("localizationFloorTemplate").value = localizationBindingDraft.floor_template || "";
+  $("localizationIdentityFields").classList.toggle("deployment-hidden", topologyOwnsIdentity);
+  $("localizationTopologySummary").textContent = topologyOwnsIdentity
+    ? `部署拓扑已确定：${instance.building} 栋 ${instance.unit} 单元 ${instance.floor}F。楼栋和单元由此复用，无需重复填写。`
+    : "该地图尚无可复用的楼栋、单元部署位置；请在这里补充定位归属。";
+  $("localizationBindingDialogTitle").textContent = binding
+    ? `修改“${activeMap.label || activeMap.id}”的运行角色`
+    : `设置“${activeMap.label || activeMap.id}”的运行角色`;
+  $("localizationBindingDialogDescription").textContent = "选择机器人进入当前地图时使用的定位角色；保存后可继续确认地图经过顺序。";
   $("deleteLocalizationBinding").classList.toggle("deployment-hidden", !binding?.id);
   $("localizationBindingDialog").classList.remove("deployment-hidden");
   localizationTypeChanged();
   $("localizationBindingType").focus();
+}
+function openSuggestedLocalizationRoute() {
+  const guidance = deriveLocalizationGuidance(selectedProject, activeMap?.id);
+  const identity = guidance.route.identity;
+  if (!guidance.route.available || !identity?.building || !identity?.unit) return;
+  openLocalizationRoute(identity.building, identity.unit);
 }
 function closeLocalizationBinding() {
   localizationBindingDraft = null;
@@ -1000,14 +1298,21 @@ function closeLocalizationBinding() {
 }
 async function saveLocalizationBinding() {
   if (!selectedProject || !activeMap) return;
-  const payload = { map_asset_id: activeMap.id, building: $("localizationBuilding").value, unit: $("localizationUnit").value, type: $("localizationBindingType").value };
+  const instance = mapInstanceFor(activeMap.id) || {};
+  const payload = {
+    map_asset_id: activeMap.id,
+    building: instance.building || $("localizationBuilding").value,
+    unit: instance.unit || $("localizationUnit").value,
+    type: $("localizationBindingType").value,
+  };
   if (payload.type === "floor") payload.floor_template = $("localizationFloorTemplate").value;
   const id = localizationBindingDraft?.id;
   try {
     const data = await request(`/api/deployments/${encodeURIComponent(selectedProject.id)}/localization-bindings${id ? `/${encodeURIComponent(id)}` : ""}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     renderProject(data.project);
     closeLocalizationBinding();
-    note("mapToolHint", "定位绑定已保存；导出时将自动生成受控定位路径。");
+    note("mapToolHint", "地图运行角色已保存；完成每张地图角色后，可确认机器人经过顺序。");
+    completeDeploymentEdit("定位绑定已保存，已返回当前任务。");
   } catch (error) { note("localizationBindingMessage", error.message, true); }
 }
 async function deleteLocalizationBinding() {
@@ -1016,6 +1321,7 @@ async function deleteLocalizationBinding() {
     await request(`/api/deployments/${encodeURIComponent(selectedProject.id)}/localization-bindings/${encodeURIComponent(localizationBindingDraft.id)}`, { method: "DELETE" });
     await openProject(selectedProject.id);
     closeLocalizationBinding();
+    completeDeploymentEdit("定位绑定已删除，已返回当前任务。");
   } catch (error) { note("localizationBindingMessage", error.message, true); }
 }
 function renderInstances() {
@@ -1313,6 +1619,103 @@ function drawMapRoutes() {
   for (const route of routes) drawLine(route.waypoint_ids || [], "rgba(10, 132, 255, .9)");
   if (routeDraft.length) drawLine(routeDraft, "rgba(255, 149, 0, .95)", true);
 }
+function waypointHeadingDegrees(waypoint) {
+  return Math.round((Number(waypoint.yaw || 0) * 180) / Math.PI);
+}
+function syncTransitionYawControl(waypoint) {
+  const degrees = waypointHeadingDegrees(waypoint);
+  let returnDegrees = degrees + 180;
+  if (returnDegrees > 180) returnDegrees -= 360;
+  $("waypointTransitionYaw").value = String(degrees);
+  $("waypointPopoverDetail").textContent = `过渡点 · x ${Number(waypoint.x).toFixed(2)} · y ${Number(waypoint.y).toFixed(2)} · 去程 ${degrees}° · 返程 ${returnDegrees}°`;
+}
+function transitionDirectionHandlePoint(waypoint) {
+  const center = worldCanvasPoint(waypoint);
+  const yaw = Number(waypoint.yaw || 0);
+  const distance = 32;
+  return {
+    x: center.x + Math.cos(yaw) * distance,
+    y: center.y - Math.sin(yaw) * distance,
+  };
+}
+function drawWaypointSymbol(point, px, py) {
+  const palette = { start: "#39dcad", target: "#ffbd61", return: "#ff6b9d", map_transition: "#b995ef" };
+  const isTransition = point.kind === "transition";
+  const isTaskTransition = isTransition && Boolean(taskTransitionRole(point.map_asset_id));
+  const selected = selectedWaypoint?.id === point.id;
+  const color = palette[point.kind] || "#5bb8ff";
+  context.save();
+  context.fillStyle = color;
+  context.beginPath();
+  context.arc(px, py, point.kind === "map_transition" ? 7 : isTransition ? 6 : 5, 0, Math.PI * 2);
+  context.fill();
+  if (point.kind === "map_transition") {
+    context.strokeStyle = "#fff";
+    context.lineWidth = 1.5;
+    context.beginPath();
+    context.arc(px, py, 3, 0, Math.PI * 2);
+    context.stroke();
+  }
+  if (isTaskTransition) {
+    const yaw = Number(point.yaw || 0);
+    context.translate(px, py);
+    context.rotate(-yaw);
+    context.strokeStyle = "#1677ff";
+    context.lineWidth = 2.5;
+    context.beginPath();
+    context.moveTo(0, 0);
+    context.lineTo(22, 0);
+    context.stroke();
+    context.fillStyle = "#1677ff";
+    context.beginPath();
+    context.moveTo(24, 0);
+    context.lineTo(15, -5);
+    context.lineTo(15, 5);
+    context.closePath();
+    context.fill();
+    // The faint opposite arrow makes the automatically mirrored return
+    // direction visible without turning it into a separately editable pose.
+    context.strokeStyle = "rgba(22, 119, 255, .48)";
+    context.lineWidth = 1.5;
+    context.setLineDash([4, 3]);
+    context.beginPath();
+    context.moveTo(0, 0);
+    context.lineTo(-18, 0);
+    context.stroke();
+    context.setLineDash([]);
+    context.fillStyle = "rgba(22, 119, 255, .48)";
+    context.beginPath();
+    context.moveTo(-20, 0);
+    context.lineTo(-12, -4);
+    context.lineTo(-12, 4);
+    context.closePath();
+    context.fill();
+    if (selected) {
+      context.strokeStyle = "#77acff";
+      context.lineWidth = 1.5;
+      context.beginPath();
+      context.moveTo(24, 0);
+      context.lineTo(32, 0);
+      context.stroke();
+      context.fillStyle = "#0a84ff";
+      context.beginPath();
+      context.arc(32, 0, 8, 0, Math.PI * 2);
+      context.fill();
+      context.strokeStyle = "#fff";
+      context.lineWidth = 1.5;
+      context.beginPath();
+      context.arc(32, 0, 3.5, -0.8, 2.4);
+      context.stroke();
+    }
+    context.restore();
+    context.save();
+  }
+  context.fillStyle = "rgba(18, 28, 34, .9)";
+  context.font = "600 10px system-ui, sans-serif";
+  context.textAlign = "left";
+  context.fillText(isTaskTransition ? `${point.label} · 去 ${waypointHeadingDegrees(point)}°` : point.label, px + 9, py - 10);
+  context.restore();
+}
 function componentLocalPoint(item, event) {
   return getComponentLocalPoint(item, canvasPointFromEvent(event), activeMap, mapView);
 }
@@ -1484,6 +1887,7 @@ function drawMap() {
     drawGrid,
     drawMapEdits,
     drawMapRoutes,
+    drawWaypointSymbol,
     drawComponentSymbol,
     drawMapOrigin,
     drawLocalizationMarkers,
@@ -1560,7 +1964,7 @@ async function loadProjects() {
       ? data.projects
           .map(
             (item) =>
-            `<div class="asset-row project-row"><div><b>${esc(item.name)}</b><small>${esc(item.id)} · ${item.map_count} 张地图 · 更新于 ${esc(item.updated_at)}</small></div><div class="project-row-actions"><button class="compact-action open-project" data-id="${esc(item.id)}" type="button">打开</button><button class="project-delete-button delete-project" data-id="${esc(item.id)}" data-name="${esc(item.name)}" type="button" aria-label="删除部署项目 ${esc(item.name)}" title="删除部署项目"><svg class="project-delete-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="project-delete-lid" d="M5 7h14M9 7V5h6v2"/><path d="M7 9l1 10h8l1-10M10 11v5M14 11v5"/></svg><span>删除</span></button></div></div>`,
+            `<div class="asset-row project-row"><div><b>${esc(item.name)}</b><small>${esc(item.id)} · ${item.map_count} 张地图 · 更新于 ${esc(item.updated_at)}</small></div><div class="project-row-actions"><button class="compact-action open-project" data-id="${esc(item.id)}" type="button">打开</button><span class="project-delete-slot"><button class="project-delete-button delete-project" data-id="${esc(item.id)}" data-name="${esc(item.name)}" type="button" aria-label="删除部署项目 ${esc(item.name)}"><svg class="project-delete-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="project-delete-lid" d="M5 7h14M9 7V5h6v2"/><path d="M7 9l1 10h8l1-10M10 11v5M14 11v5"/></svg><span>删除</span></button></span></div></div>`,
           )
           .join("")
       : '<div class="page-empty">还没有部署项目。</div>';
@@ -1586,7 +1990,7 @@ async function openProject(id) {
   await refreshMappingStatus();
   await refreshTopology();
 }
-$("saveDeploymentFlow").addEventListener("click", async () => {
+async function saveCurrentDeploymentFlow() {
   if (!selectedProject || !validateFlow(deploymentFlow).valid) return;
   const button = $("saveDeploymentFlow");
   button.disabled = true;
@@ -1606,11 +2010,13 @@ $("saveDeploymentFlow").addEventListener("click", async () => {
     renderTopology();
     renderDeploymentGuide();
     note("deploymentFlowMessage", "部署流程已保存；地图阶段将按新顺序显示。");
+    completeDeploymentTask("部署流程已保存，地图阶段已按新顺序刷新。");
   } catch (error) {
     note("deploymentFlowMessage", error.message, true);
     renderDeploymentFlowEditor();
   }
-});
+}
+$("saveDeploymentFlow").addEventListener("click", saveCurrentDeploymentFlow);
 $("deploymentFlowPalette").addEventListener("click", (event) => {
   const button = event.target.closest("[data-flow-add]");
   if (!button) return;
@@ -1623,8 +2029,16 @@ $("deploymentFlowPalette").addEventListener("click", (event) => {
   }
   renderDeploymentFlowEditor();
 });
-$("prepareMapping").addEventListener("click", async () => {
+async function prepareMappingSession() {
   if (!selectedProject) return;
+  const foreignActiveSession = mappingSession &&
+    mappingSession.project_id !== selectedProject.id &&
+    ["prepared", "running", "stopping"].includes(mappingSession.state);
+  if (foreignActiveSession) {
+    note("mappingMessage", `请先处理项目“${mappingSession.project_id}”的活动建图会话，当前项目不会重复创建。`, true);
+    focusGuideTarget("mappingMessage");
+    return;
+  }
   try {
     const data = await request("/api/mapping/sessions", {
       method: "POST",
@@ -1639,10 +2053,13 @@ $("prepareMapping").addEventListener("click", async () => {
     });
     mappingSession = data.session;
     renderMappingStatus();
+    renderDeploymentTaskConsole();
+    completeDeploymentTask("建图会话已准备完成，可以进入建图工作台。");
   } catch (error) {
     note("mappingMessage", error.message, true);
   }
-});
+}
+$("prepareMapping").addEventListener("click", prepareMappingSession);
 $("mappingTemplateFile").addEventListener("change", async () => {
   const file = $("mappingTemplateFile").files?.[0];
   if (!file || !selectedProject) return;
@@ -1702,7 +2119,7 @@ $("discardMapping").addEventListener("click", async () => {
     note("mappingMessage", error.message, true);
   }
 });
-$("createProject").addEventListener("click", async () => {
+async function createDeploymentProject() {
   try {
     const data = await request("/api/deployments", {
       method: "POST",
@@ -1710,14 +2127,18 @@ $("createProject").addEventListener("click", async () => {
       body: JSON.stringify({ name: $("projectName").value }),
     });
     $("projectName").value = "";
+    topology = null;
     renderProject(data.project);
     note("projectMessage", "部署项目已创建。");
     await loadProjects();
     await refreshMappingStatus();
+    await refreshTopology();
+    completeDeploymentTask("部署项目已创建；下一步配置现场地图流程。");
   } catch (error) {
     note("projectMessage", error.message, true);
   }
-});
+}
+$("createProject").addEventListener("click", createDeploymentProject);
 $("showNewProjectForm").addEventListener("click", () => {
   $("newProjectForm").classList.remove("deployment-hidden");
   $("currentProjectCard").classList.add("deployment-hidden");
@@ -1760,7 +2181,7 @@ function renderMapFolderSelection(files) {
   }
   return { yamlCount, pgmCount, pcdCount, indexCount };
 }
-$("importMap").addEventListener("click", async () => {
+async function importSelectedMap() {
   if (!selectedProject) return;
   const files = Array.from($("mapFolder").files || []);
   const candidates = files.filter((file) => (file.webkitRelativePath || file.name).split("/").pop().toLowerCase() === "map.yaml");
@@ -1779,28 +2200,46 @@ $("importMap").addEventListener("click", async () => {
     const data = await new Promise((resolve, reject) => {
       const upload = new XMLHttpRequest();
       upload.open("POST", `/api/deployments/${encodeURIComponent(selectedProject.id)}/maps/upload`);
+      upload.timeout = 300000;
       upload.upload.onprogress = (event) => {
         if (event.lengthComputable) note("importMessage", `正在上传地图：${Math.round(event.loaded / event.total * 100)}%`);
       };
       upload.onerror = () => reject(new Error("地图上传连接中断，未确认导入。"));
+      upload.onabort = () => reject(new Error("地图上传已取消，未确认导入。"));
+      upload.ontimeout = () => reject(new Error("地图上传超时，未确认导入；请检查连接后重试。"));
       upload.onload = () => {
-        const response = JSON.parse(upload.responseText || "{}");
+        let response;
+        try {
+          response = JSON.parse(upload.responseText || "{}");
+        } catch {
+          reject(new Error("地图导入返回了无法解析的数据，未确认导入。"));
+          return;
+        }
         if (upload.status >= 200 && upload.status < 300) resolve(response);
         else reject(new Error(response.error || `地图导入失败（HTTP ${upload.status}）`));
       };
       upload.send(payload);
     });
+    deploymentTaskDraft = nextMapImportDraft();
+    $("mapLabel").value = "";
     renderProject(data.project);
+    const createdMap = (data.project.map_assets || []).find((item) => item.id === data.map.id);
+    if (createdMap) selectMap(createdMap);
     await refreshTopology();
     $("mapFolder").value = "";
     renderMapFolderSelection([]);
-    note("mapFolderMessage", "地图文件已导入；可继续选择下一张地图。 ");
     note("importMessage", `已导入 ${data.map.label}；机器人原地图未被修改。`);
+    deploymentTaskDraft.receipt = {
+      taskId: "maps.describe",
+      message: `${data.map.label} 已导入并通过校验。`,
+    };
+    completeDeploymentTask(`${data.map.label} 已导入并通过校验。`);
     await loadProjects();
   } catch (error) {
     note("importMessage", error.message, true);
   }
-});
+}
+$("importMap").addEventListener("click", importSelectedMap);
 $("mapFolder").addEventListener("change", () => {
   const files = Array.from($("mapFolder").files || []);
   const summary = renderMapFolderSelection(files);
@@ -1809,12 +2248,38 @@ $("mapFolder").addEventListener("change", () => {
     const relative = mapYaml[0].webkitRelativePath || mapYaml[0].name;
     const name = relative.split("/").slice(0, -1).join(" / ");
     if (!$("mapLabel").value.trim()) $("mapLabel").value = name;
+    deploymentTaskDraft.mapLabel = $("mapLabel").value;
     note("mapFolderMessage", summary.pgmCount
       ? `已选择 ${files.length} 个文件，将使用 ${relative}。${summary.pcdCount ? `已发现 ${summary.pcdCount} 个 PCD。` : "定位导出时请准备至少一个 PCD。"}`
       : `已选择 ${files.length} 个文件，但缺少 YAML 引用的 PGM。`, !summary.pgmCount);
   } else {
     note("mapFolderMessage", `已选择 ${files.length} 个文件；需要且只能包含一个 map.yaml。`, true);
   }
+  deploymentTaskDraft.fileSummary = {
+    ...summary,
+    valid: summary.yamlCount === 1 && summary.pgmCount > 0,
+  };
+  persistDeploymentSession();
+  renderDeploymentTaskConsole();
+  focusCurrentTaskHeading();
+});
+$("mapLabel").addEventListener("input", () => {
+  deploymentTaskDraft.mapLabel = $("mapLabel").value;
+  persistDeploymentSession();
+});
+$("mapSourceChoices").addEventListener("change", (event) => {
+  const source = event.target.closest("[data-map-source]")?.dataset.mapSource;
+  if (!source) return;
+  deploymentTaskDraft = {
+    ...deploymentTaskDraft,
+    mapSource: source,
+    fileSummary: null,
+    latestCreatedMapId: null,
+    receipt: null,
+  };
+  persistDeploymentSession();
+  renderDeploymentTaskConsole();
+  focusCurrentTaskHeading();
 });
 $("addProtocol").addEventListener("click", async () => {
   if (!selectedProject) return;
@@ -1834,6 +2299,7 @@ $("addProtocol").addEventListener("click", async () => {
     $("protocolLabel").value = "";
     renderProject(data.project);
     note("protocolMessage", "通信协议模板已更新。");
+    completeDeploymentEdit("通信协议模板已更新，已返回当前任务。");
   } catch (error) {
     note("protocolMessage", error.message, true);
   }
@@ -1889,6 +2355,7 @@ document.addEventListener("click", (event) => {
     .then((data) => {
       renderProject(data.project);
       note("protocolMessage", "通信协议模板已更新。");
+      completeDeploymentEdit("通信协议模板已更新，已返回当前任务。");
     })
     .catch((error) => note("protocolMessage", error.message, true));
 });
@@ -1948,6 +2415,8 @@ async function commitMapEdit(payload, successMessage) {
     );
     renderProject(data.project);
     note("mapToolHint", successMessage);
+    keepMapAnnotationOpen(`${successMessage}；请继续检查当前地图，完成后再确认进入定位路线。`) ||
+      completeDeploymentEdit(`${successMessage} 已返回当前任务。`);
   } catch (error) {
     note("mapToolHint", error.message, true);
   }
@@ -2047,6 +2516,20 @@ function openWaypointPopover(waypoint, event) {
   $("waypointPopoverTitle").textContent = waypoint.label || "地图标记";
   const waypointKindLabel = waypoint.kind === "transition" ? "过渡点" : waypoint.kind;
   $("waypointPopoverDetail").textContent = `${waypointKindLabel} · x ${Number(waypoint.x).toFixed(2)} · y ${Number(waypoint.y).toFixed(2)} · yaw ${Number(waypoint.yaw || 0).toFixed(2)}`;
+  const isTaskTransition = waypoint.kind === "transition" && !waypoint.generated_by;
+  const transitionRole = isTaskTransition ? taskTransitionRole(waypoint.map_asset_id) : null;
+  const appearsInTask = Boolean(transitionRole);
+  $("transitionSpeedControl").classList.toggle("deployment-hidden", !appearsInTask);
+  $("transitionYawControl").classList.toggle("deployment-hidden", !appearsInTask);
+  $("transitionReturnDirectionHint").classList.toggle("deployment-hidden", !appearsInTask);
+  $("saveWaypointTransitionSpeed").classList.toggle("deployment-hidden", !appearsInTask);
+  $("waypointTransitionSpeed").value = waypoint.speed_mode || "single_point";
+  syncTransitionYawControl(waypoint);
+  $("waypointPopoverPurpose").textContent = appearsInTask
+    ? `${transitionRole === "lobby" ? "电梯大厅" : "用户楼层"}任务过渡点会按创建顺序插入去程任务；返程按相反顺序经过。实线箭头表示去程，虚线箭头表示自动反向的返程。拖动蓝色圆形方向手柄即可调整去程朝向；它不生成行为树。`
+    : isTaskTransition
+      ? "这是定位路线的过渡锚点。当前实验任务只会编译用户楼层地图上的任务过渡点，因此它不会写入配送任务 JSON。"
+    : "删除后需重新在定位路线中选择起点、目标点或过渡点；已保存路线引用时会先阻止删除。";
   closeComponentPopover();
   popover.classList.remove("deployment-hidden");
   const workspace = $("mapWorkspace");
@@ -2056,9 +2539,24 @@ function openWaypointPopover(waypoint, event) {
   const y = event.clientY - workspace.getBoundingClientRect().top;
   popover.style.left = `${Math.max(12, Math.min(x + 14, workspace.clientWidth - width - 12))}px`;
   popover.style.top = `${Math.max(12, Math.min(y + 14, workspace.clientHeight - height - 12))}px`;
+  drawMap();
 }
 function elevatorLandingMode() {
   return document.querySelector('input[name="elevatorLandingMode"]:checked')?.value || "existing";
+}
+function unavailableElevatorButtons(elevator) {
+  return Array.isArray(elevator?.unavailable_button_floors)
+    ? elevator.unavailable_button_floors.map(Number).filter(Number.isInteger)
+    : [];
+}
+function parseUnavailableElevatorButtons() {
+  const raw = $("newPhysicalElevatorUnavailableButtons").value.trim();
+  if (!raw) return [];
+  const values = raw.split(/[，,、]/).map((value) => value.trim());
+  if (values.some((value) => !/^-?\d+$/.test(value))) {
+    throw new Error("缺失按键请填写整数；多个按键请用逗号分隔。");
+  }
+  return values.map(Number);
 }
 function renderElevatorLandingDialog() {
   const elevators = physicalElevators();
@@ -2090,6 +2588,7 @@ function renderElevatorLandingDialog() {
     protocol.value = editingElevator.elevator_protocol;
     $("newPhysicalElevatorMinFloor").value = editingElevator.min_floor;
     $("newPhysicalElevatorMaxFloor").value = editingElevator.max_floor;
+    $("newPhysicalElevatorUnavailableButtons").value = unavailableElevatorButtons(editingElevator).join(", ");
   }
   const existingRadio = document.querySelector('input[name="elevatorLandingMode"][value="existing"]');
   existingRadio.disabled = !elevators.length;
@@ -2098,7 +2597,7 @@ function renderElevatorLandingDialog() {
   }
   const linked = elevators.find((item) => item.id === existing.value);
   $("existingPhysicalElevatorSummary").textContent = linked
-    ? `编号 ${linked.elevator_id} · ${protocolTitle(selectedProject, linked.elevator_protocol)} · 服务 ${linked.min_floor}F 至 ${linked.max_floor}F。各楼层分别确认门方向。`
+    ? `编号 ${linked.elevator_id} · ${protocolTitle(selectedProject, linked.elevator_protocol)} · 服务 ${linked.min_floor}F 至 ${linked.max_floor}F${unavailableElevatorButtons(linked).length ? ` · 缺失按键 ${unavailableElevatorButtons(linked).join("、")}` : ""}。各楼层分别确认门方向。`
     : "请先新建一部物理电梯，再在其他楼层关联它。";
   const isNew = editing || elevatorLandingMode() === "new";
   $("elevatorLandingDialogTitle").textContent = editing ? "编辑共享电梯" : "放置电梯落点";
@@ -2112,13 +2611,14 @@ function renderElevatorLandingDialog() {
   $("confirmElevatorLanding").disabled = !elevatorLandingDraft || (!isNew && !linked);
   $("elevatorLandingMessage").textContent = isNew
     ? editing
-      ? "修改后会同步应用到该物理电梯的所有地图落点。"
-      : "共享编号、协议和服务楼层只在这里填写一次。"
+      ? "修改后会同步应用到该物理电梯的所有地图落点；不能把已有落点设置为缺失按键。"
+      : "共享编号、协议、服务范围和缺失按键只在这里填写一次。"
     : "当前地图将保存独立的电梯门方向、尺寸和候梯距离。";
 }
 function openElevatorLandingDialog(point) {
   elevatorLandingDraft = { point };
   $("elevatorLandingButtonFloor").value = "";
+  $("newPhysicalElevatorUnavailableButtons").value = "";
   $("elevatorLandingDialog").classList.remove("deployment-hidden");
   renderElevatorLandingDialog();
   $(elevatorLandingMode() === "new" ? "newPhysicalElevatorNumber" : "existingPhysicalElevator").focus();
@@ -2150,6 +2650,7 @@ async function confirmElevatorLanding() {
             elevator_protocol: $("newPhysicalElevatorProtocol").value,
             min_floor: Number($("newPhysicalElevatorMinFloor").value),
             max_floor: Number($("newPhysicalElevatorMaxFloor").value),
+            unavailable_button_floors: parseUnavailableElevatorButtons(),
           }),
         },
       );
@@ -2158,6 +2659,7 @@ async function confirmElevatorLanding() {
       if (component) selectComponent(component);
       closeElevatorLandingDialog();
       note("mapToolHint", "共享电梯配置已更新；所有关联地图均使用新的协议和服务楼层。");
+      completeDeploymentEdit("共享电梯配置已更新，已返回当前任务。");
       return;
     }
     const buttonFloor = Number($("elevatorLandingButtonFloor").value);
@@ -2176,6 +2678,7 @@ async function confirmElevatorLanding() {
             elevator_protocol: $("newPhysicalElevatorProtocol").value,
             min_floor: Number($("newPhysicalElevatorMinFloor").value),
             max_floor: Number($("newPhysicalElevatorMaxFloor").value),
+            unavailable_button_floors: parseUnavailableElevatorButtons(),
           }),
         },
       );
@@ -2202,6 +2705,8 @@ async function confirmElevatorLanding() {
     closeElevatorLandingDialog();
     await refreshTopology();
     note("mapToolHint", "已放置电梯落点；可拖动、旋转门方向，或右键调整候梯距离。");
+    keepMapAnnotationOpen("电梯落点已保存；请继续检查当前地图，完成后再确认进入定位路线。") ||
+      completeDeploymentEdit("电梯落点已保存，已返回当前任务。");
   } catch (error) {
     note("elevatorLandingMessage", error.message, true);
   } finally {
@@ -2218,6 +2723,7 @@ $("confirmElevatorLanding").addEventListener("click", confirmElevatorLanding);
 $("cancelElevatorLanding").addEventListener("click", closeElevatorLandingDialog);
 $("cancelElevatorLandingSecondary").addEventListener("click", closeElevatorLandingDialog);
 $("openLocalizationBinding").addEventListener("click", () => openLocalizationBinding());
+$("openLocalizationRoute").addEventListener("click", openSuggestedLocalizationRoute);
 $("cancelLocalizationBinding").addEventListener("click", closeLocalizationBinding);
 $("saveLocalizationBinding").addEventListener("click", saveLocalizationBinding);
 $("deleteLocalizationBinding").addEventListener("click", deleteLocalizationBinding);
@@ -2326,6 +2832,17 @@ function rotateHandleAt(event) {
     mapView,
   );
 }
+function transitionRotateHandleAt(event) {
+  if (
+    !selectedWaypoint ||
+    selectedWaypoint.map_asset_id !== activeMap?.id ||
+    selectedWaypoint.kind !== "transition" ||
+    !taskTransitionRole(selectedWaypoint.map_asset_id)
+  ) return false;
+  const pointer = canvasPointFromEvent(event);
+  const handle = transitionDirectionHandlePoint(selectedWaypoint);
+  return Math.hypot(pointer.x - handle.x, pointer.y - handle.y) <= 14;
+}
 $("saveComponent").addEventListener("click", async () => {
   if (!selectedComponent || !selectedProject) return;
   try {
@@ -2358,6 +2875,8 @@ $("saveComponent").addEventListener("click", async () => {
     selectedComponent = updated;
     renderProject(data.project);
     selectComponent(updated);
+    keepMapAnnotationOpen("组件属性已保存；请继续检查当前地图，完成后再确认进入定位路线。") ||
+      completeDeploymentEdit("组件属性已保存，已返回当前任务。");
   } catch (error) {
     note("mapToolHint", error.message, true);
   }
@@ -2372,6 +2891,8 @@ $("deleteComponent").addEventListener("click", async () => {
     selectComponent(null);
     closeComponentPopover();
     await openProject(selectedProject.id);
+    keepMapAnnotationOpen("组件已删除；请继续检查当前地图，完成后再确认进入定位路线。") ||
+      completeDeploymentEdit("组件已删除，已返回当前任务。");
   } catch (error) {
     note("mapToolHint", error.message, true);
   }
@@ -2387,6 +2908,35 @@ $("deleteWaypoint").addEventListener("click", async () => {
     closeWaypointPopover();
     await openProject(selectedProject.id);
     note("mapToolHint", "地图标记已删除；如该点用于定位路线，请重新选择中间过渡锚点。");
+    keepMapAnnotationOpen("地图标记已删除；请继续检查当前地图，完成后再确认进入定位路线。") ||
+      completeDeploymentEdit("地图标记已删除，已返回当前任务。");
+  } catch (error) {
+    note("mapToolHint", error.message, true);
+  }
+});
+$("saveWaypointTransitionSpeed").addEventListener("click", async () => {
+  if (!selectedProject || !selectedWaypoint || selectedWaypoint.kind !== "transition") return;
+  const yawDegrees = Number($("waypointTransitionYaw").value);
+  if (!Number.isFinite(yawDegrees) || yawDegrees < -180 || yawDegrees > 180) {
+    note("mapToolHint", "过渡点朝向请输入 -180 到 180 的数字。", true);
+    return;
+  }
+  try {
+    const data = await request(
+      `/api/deployments/${encodeURIComponent(selectedProject.id)}/waypoints/${encodeURIComponent(selectedWaypoint.id)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          speed_mode: $("waypointTransitionSpeed").value,
+          yaw: yawDegrees * Math.PI / 180,
+        }),
+      },
+    );
+    renderProject(data.project);
+    selectedWaypoint = data.waypoint;
+    note("mapToolHint", `过渡点速度和去程朝向已保存；重新生成预览后会同步写入去程与返程任务 JSON。`);
+    closeWaypointPopover();
   } catch (error) {
     note("mapToolHint", error.message, true);
   }
@@ -2411,12 +2961,21 @@ $("addInstance").addEventListener("click", async () => {
     );
     renderProject(data.project);
     note("instanceMessage", "地图实例已加入部署拓扑。");
+    completeDeploymentEdit("地图实例已保存，已返回当前任务。") ||
+      completeDeploymentTask("地图实例已保存；正在检查下一张地图的部署位置。");
   } catch (error) {
     note("instanceMessage", error.message, true);
   }
 });
-$("assignMapStage").addEventListener("click", async () => {
-  if (!selectedProject || !activeMap) return;
+async function assignCurrentMapStage() {
+  if (!selectedProject) return;
+  const targetMapId = deploymentTask?.targetMapId || activeMap?.id || null;
+  const targetStageId = deploymentTask?.targetStageId || $("mapStageAssignment").value || null;
+  const targetMap = (selectedProject.map_assets || []).find((item) => item.id === targetMapId);
+  if (!targetMapId || !targetStageId || !targetMap) {
+    note("stageAssignmentMessage", "当前任务缺少可绑定的地图或部署阶段，请刷新项目后重试。", true);
+    return;
+  }
   try {
     const data = await request(
       `/api/deployments/${encodeURIComponent(selectedProject.id)}/map-stages`,
@@ -2424,8 +2983,8 @@ $("assignMapStage").addEventListener("click", async () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          map_asset_id: activeMap.id,
-          stage: $("mapStageAssignment").value,
+          map_asset_id: targetMapId,
+          stage: targetStageId,
         }),
       },
     );
@@ -2433,13 +2992,80 @@ $("assignMapStage").addEventListener("click", async () => {
     renderProject(data.project);
     await refreshTopology();
     note("stageAssignmentMessage", "当前地图的部署阶段已保存。");
+    deploymentTaskDraft = {
+      mapSource: null,
+      fileSummary: null,
+      mapLabel: "",
+      latestCreatedMapId: null,
+      receipt: {
+        taskId: "maps.assign",
+        message: `${targetMap.label} 的地图阶段已保存。`,
+      },
+    };
+    completeDeploymentTask(`${targetMap.label} 的地图阶段已保存。`);
   } catch (error) {
     note("stageAssignmentMessage", error.message, true);
   }
-});
+}
+$("assignMapStage").addEventListener("click", assignCurrentMapStage);
 $("saveTaskCompilerConfig").addEventListener("click", saveTaskCompilerConfig);
 $("generateTaskCompilerPreview").addEventListener("click", refreshTaskCompilerPreview);
 $("downloadTaskCompilerBundle").addEventListener("click", downloadTaskCompilerBundle);
+async function runDeploymentTaskAction(actionId) {
+  if (actionId === "request-stage-edit") {
+    return openDeploymentEditImpact(deploymentTask?.stageId);
+  }
+  if (actionId === "createProject") {
+    if (!$("projectName").value.trim()) return focusGuideTarget("projectName");
+    return createDeploymentProject();
+  }
+  if (actionId === "confirmScene") {
+    if ($("saveDeploymentFlow").disabled) return focusGuideTarget("deploymentFlowEditor");
+    return saveCurrentDeploymentFlow();
+  }
+  if (actionId === "saveCompilerIdentity") {
+    if (!$("taskCompilerCommunity").value.trim()) return focusGuideTarget("taskCompilerCommunity");
+    return saveTaskCompilerConfig();
+  }
+  if (actionId === "bindLocalization" && !$("openLocalizationBinding").disabled) {
+    return $("openLocalizationBinding").click();
+  }
+  if (actionId === "choose-map-source") return focusGuideTarget("mapSourceChoices");
+  if (actionId === "configure-map-instance") return focusGuideTarget("instanceControls");
+  if (actionId === "focus-mapping-conflict") return focusGuideTarget("mappingMessage");
+  if (actionId === "select-map-files") return $("mapFolder").click();
+  if (actionId === "import-map") return importSelectedMap();
+  if (actionId === "prepare-mapping") return prepareMappingSession();
+  if (actionId === "open-mapping-workbench") return $("openMappingWorkbench").click();
+  if (actionId === "assign-map-stage") return assignCurrentMapStage();
+  if (actionId === "preview") return refreshTaskCompilerPreview();
+  if (actionId === "export") return downloadTaskCompilerBundle();
+  return runDeploymentGuideAction(actionId);
+}
+$("deploymentTaskConsole").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-task-action]");
+  if (!button || !deploymentTask) return;
+  const actionId = button.dataset.taskAction;
+  await taskActionGate.run(deploymentTask.id, async () => {
+    deploymentTaskPending = deploymentTask.id;
+    renderDeploymentTaskConsole();
+    try {
+      await runDeploymentTaskAction(actionId);
+    } finally {
+      deploymentTaskPending = null;
+      renderDeploymentTaskConsole();
+    }
+  });
+});
+$("deploymentEditImpactDialog").addEventListener("click", (event) => {
+  if (event.target.closest("#cancelDeploymentStageEdit")) {
+    closeDeploymentEditImpact();
+    return;
+  }
+  if (event.target.closest("#confirmDeploymentStageEdit")) {
+    confirmDeploymentStageEdit();
+  }
+});
 $("deploymentGuide").addEventListener("click", (event) => {
   const action = event.target.closest("[data-guide-action]");
   if (action) {
@@ -2453,6 +3079,7 @@ let drag = null;
 let componentDrag = null;
 let componentResize = null;
 let componentRotate = null;
+let waypointRotate = null;
 let componentPlacementPending = false;
 function beginCanvasPan(event) {
   event.preventDefault();
@@ -2549,6 +3176,13 @@ canvas.addEventListener("pointerdown", async (event) => {
     canvas.style.cursor = "crosshair";
     return;
   }
+  if (transitionRotateHandleAt(event)) {
+    if (activeTool !== "pan") setTool("pan");
+    waypointRotate = selectedWaypoint;
+    canvas.setPointerCapture(event.pointerId);
+    canvas.style.cursor = "crosshair";
+    return;
+  }
   if (resizeHandleAt(event)) {
     if (activeTool !== "pan") setTool("pan");
     componentResize = selectedComponent;
@@ -2565,6 +3199,12 @@ canvas.addEventListener("pointerdown", async (event) => {
     selectComponent(hit);
     componentDrag = hit;
     canvas.setPointerCapture(event.pointerId);
+    return;
+  }
+  const waypoint = waypointAt(event);
+  if (waypoint) {
+    if (activeTool !== "pan") setTool("pan");
+    openWaypointPopover(waypoint, event);
     return;
   }
   if (activeTool !== "pan" && activeMap && selectedProject) {
@@ -2587,11 +3227,17 @@ canvas.addEventListener("pointerdown", async (event) => {
               x: point.x,
               y: point.y,
               yaw: 0,
+              speed_mode: "single_point",
             }),
           },
         );
         renderProject(data.project);
-        note("mapToolHint", "已标记过渡点；需要时可作为中间切图锚点，速度沿用下一个点。");
+        const transitionRole = taskTransitionRole(activeMap.id);
+        note("mapToolHint", transitionRole
+          ? `已标记${transitionRole === "lobby" ? "电梯大厅" : "用户楼层"}任务过渡点；点选它可配置速度和去程朝向。生成预览后会自动串入去程及返程。`
+          : "已标记定位过渡锚点。只有大厅或用户楼层地图上的任务过渡点会写入配送任务 JSON。");
+        keepMapAnnotationOpen("过渡点已保存；请继续检查当前地图，完成后再确认进入定位路线。") ||
+          completeDeploymentEdit("过渡点已保存，已返回当前任务。");
         return;
       }
       if (placementKind === "elevator") {
@@ -2620,6 +3266,8 @@ canvas.addEventListener("pointerdown", async (event) => {
         "mapToolHint",
         `已放置${componentName(data.component)}；现在可左键拖动它，或右键编辑属性。`,
       );
+      keepMapAnnotationOpen(`${componentName(data.component)}已保存；请继续检查当前地图，完成后再确认进入定位路线。`) ||
+        completeDeploymentEdit(`${componentName(data.component)}已保存，已返回当前任务。`);
     } catch (error) {
       note("mapToolHint", error.message, true);
     } finally {
@@ -2735,8 +3383,21 @@ canvas.addEventListener("pointermove", (event) => {
       drawMap();
       return;
     }
+    if (waypointRotate) {
+      const center = worldCanvasPoint(waypointRotate);
+      const pointer = canvasPointFromEvent(event);
+      const rawYaw = -Math.atan2(pointer.y - center.y, pointer.x - center.x);
+      const increment = Math.PI / 18;
+      const snappedYaw = Math.round(rawYaw / increment) * increment;
+      waypointRotate.yaw = Math.max(-Math.PI, Math.min(Math.PI, snappedYaw));
+      syncTransitionYawControl(waypointRotate);
+      drawMap();
+      return;
+    }
     if (!drag) {
-      canvas.style.cursor = rotateHandleAt(event)
+      canvas.style.cursor = transitionRotateHandleAt(event)
+        ? "crosshair"
+        : rotateHandleAt(event)
         ? "crosshair"
         : resizeHandleAt(event)
           ? "nwse-resize"
@@ -2787,10 +3448,35 @@ canvas.addEventListener("pointerup", async (event) => {
       renderProject(data.project);
       selectComponent(updated);
       note("mapToolHint", "组件朝向已保存（每 10° 自动吸附）。");
+      keepMapAnnotationOpen("组件朝向已保存；请继续检查当前地图，完成后再确认进入定位路线。") ||
+        completeDeploymentEdit("组件朝向已保存，已返回当前任务。");
     } catch (error) {
       note("mapToolHint", error.message, true);
     }
     componentRotate = null;
+    return;
+  }
+  if (waypointRotate && selectedProject) {
+    try {
+      const data = await request(
+        `/api/deployments/${encodeURIComponent(selectedProject.id)}/waypoints/${encodeURIComponent(waypointRotate.id)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ yaw: waypointRotate.yaw }),
+        },
+      );
+      renderProject(data.project);
+      selectedWaypoint = data.waypoint;
+      syncTransitionYawControl(selectedWaypoint);
+      drawMap();
+      note("mapToolHint", "过渡点去程朝向已保存（每 10° 自动吸附）；虚线箭头会自动表示返程方向。");
+      keepMapAnnotationOpen("过渡点去程朝向已保存；请继续检查当前地图，完成后再确认进入定位路线。") ||
+        completeDeploymentEdit("过渡点去程朝向已保存，已返回当前任务。");
+    } catch (error) {
+      note("mapToolHint", error.message, true);
+    }
+    waypointRotate = null;
     return;
   }
   if (componentResize && selectedProject) {
@@ -2809,6 +3495,8 @@ canvas.addEventListener("pointerup", async (event) => {
       renderProject(data.project);
       selectComponent(updated);
       note("mapToolHint", "组件尺寸已保存；继续拖动组件可调整位置。");
+      keepMapAnnotationOpen("组件尺寸已保存；请继续检查当前地图，完成后再确认进入定位路线。") ||
+        completeDeploymentEdit("组件尺寸已保存，已返回当前任务。");
     } catch (error) {
       note("mapToolHint", error.message, true);
     }
@@ -2830,6 +3518,9 @@ canvas.addEventListener("pointerup", async (event) => {
       );
       renderProject(data.project);
       selectComponent(updated);
+      note("mapToolHint", "组件位置已保存。");
+      keepMapAnnotationOpen("组件位置已保存；请继续检查当前地图，完成后再确认进入定位路线。") ||
+        completeDeploymentEdit("组件位置已保存，已返回当前任务。");
     } catch (error) {
       note("mapToolHint", error.message, true);
     }
@@ -2865,6 +3556,27 @@ document.addEventListener("keydown", (event) => {
   if (!taskPreviewOpen || event.key !== "Escape") return;
   event.preventDefault();
   closeTaskPreview();
+});
+document.addEventListener("keydown", (event) => {
+  const dialog = $("deploymentEditImpactDialog");
+  if (!dialog || dialog.classList.contains("deployment-hidden")) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeDeploymentEditImpact();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = Array.from(dialog.querySelectorAll("button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])"));
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 });
 document.addEventListener("click", (event) => {
   const button = event.target.closest(".delete-waypoint");

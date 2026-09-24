@@ -31,6 +31,17 @@ def test_button_sequence_rejects_the_missing_zero_button_and_out_of_range_button
         physical_floor_index(-2, 25, 26)
 
 
+def test_button_sequence_skips_explicitly_unavailable_panel_buttons():
+    """Catches treating omitted panel labels as physical floors."""
+    buttons = button_sequence(-2, 20, [11])
+
+    assert 11 not in buttons
+    assert physical_floor_index(-2, 20, 12, [11]) == 12
+    assert physical_floor_index(-2, 20, 15, [11]) == 15
+    with pytest.raises(LocationManifestError, match="缺失按键"):
+        physical_floor_index(-2, 20, 11, [11])
+
+
 def test_runtime_layout_generates_only_deterministic_package_relative_paths():
     """Catches user identity values escaping the controlled export layout."""
     layout = RuntimeLayout("site-a", "数创大厦")
@@ -49,10 +60,10 @@ def test_runtime_layout_rejects_path_like_project_identities():
         RuntimeLayout("site-a", "../unsafe")
 
 
-def test_location_manifest_groups_bindings_by_building_unit_and_preserves_floor_template(
+def test_location_manifest_renders_floor_template_before_runtime_paths(
     tmp_path: Path,
 ):
-    """Catches treating the floor layout template as a physical elevator floor."""
+    """Catches appending the required floor template after runtime pose fields."""
     map_root = tmp_path / "maps"
     indoor = map_root / "indoor" / "map.yaml"
     floor = map_root / "floor" / "map.yaml"
@@ -102,6 +113,7 @@ def test_location_manifest_groups_bindings_by_building_unit_and_preserves_floor_
 
     assert document["community"] == "数创大厦"
     assert floor_entry["floor"] == "2"
+    assert list(floor_entry) == ["type", "floor", "yaml", "2D_yaml", "init_go", "init_return"]
     assert "runtime/loc_yaml_path.json" in {artifact.relative_path for artifact in rendered.artifacts}
 
 
@@ -212,6 +224,23 @@ def test_manifest_uses_manual_start_then_elevator_center_origin_and_route_return
     assert entries[1]["init_go"] == {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
     assert entries[1]["init_return"] == {"x": 8.0, "y": 9.0, "z": 0.0, "yaw": 1.57}
     assert entries[2]["init_return"] == {"x": 22.0, "y": 23.0, "z": 0.0, "yaw": 0.4}
+
+
+def test_final_floor_manifest_uses_the_last_task_transition_as_return_start(tmp_path: Path):
+    """Direct manifest callers must share the compiler's target return chain."""
+    project, map_root = _route_project(tmp_path, kinds=("indoor", "floor"))
+    floor_map_id = project["map_assets"][-1]["id"]
+    project["waypoints"].extend([
+        {"id": "floor-transition-first", "map_asset_id": floor_map_id, "kind": "transition", "x": 12.0, "y": 13.0, "yaw": 0.4, "speed_mode": "slow_point"},
+        {"id": "floor-transition-last", "map_asset_id": floor_map_id, "kind": "transition", "x": 14.0, "y": 15.0, "yaw": -0.2, "speed_mode": "narrow_point"},
+    ])
+
+    rendered = compile_location_manifest(project, map_root=map_root)
+    floor_entry = json.loads(rendered.json_bytes)["loc_yaml"][0]["yaml_index"][-1]
+
+    assert floor_entry["init_return"] == {
+        "x": 14.0, "y": 15.0, "z": 0.0, "yaw": pytest.approx(pi - 0.2),
+    }
 
 
 def test_first_localization_yaml_init_pose_matches_manual_route_start(tmp_path: Path):

@@ -3,8 +3,11 @@ import test from "node:test";
 
 import {
   activeAcceptancePlanSelection,
+  acceptanceTaskPreview,
+  acceptancePlanModePayload,
   acceptancePlanPreflightPayload,
   dependencyPreparationView,
+  multiAcceptanceOptions,
   readyPlanReplacementNotice,
   shouldRenderPreparationRuntime,
   shouldRenderDependencyPreparation,
@@ -31,6 +34,58 @@ test("acceptance plan request exposes only the boolean automatic-return choice",
       use_automatic_return: false,
     },
   );
+});
+
+test("task preview exposes the frozen ROS request without making it editable", () => {
+  assert.deepEqual(
+    acceptanceTaskPreview({
+      filename: "1_1_2_201.json",
+      parameters: { community: "数创大厦", building: 1, unit: 1, floor: 2, door: 201, execution_mode: "single_r6s" },
+    }),
+    {
+      service: "/start_execute_tasks",
+      serviceType: "master_interfaces/srv/StartExecuteTasks",
+      modeLabel: "R6S 单点任务",
+      fields: [
+        ["community", "数创大厦"],
+        ["building", 1],
+        ["unit", 1],
+        ["floor", 2],
+        ["door", 201],
+        ["task_uuid", ""],
+      ],
+      destinations: [],
+    },
+  );
+
+  const preview = acceptanceTaskPreview({
+    filename: "5_1_n_n01.json + 5_1_n_n01_return.json",
+    parameters: { community: "数创大厦", building: 5, unit: 1, floor: 1, door: 101, execution_mode: "multi_r6b" },
+    multi_request: {
+      community: "数创大厦",
+      out_eguard: false,
+      return_origin: true,
+      task_uuid: "task-001",
+      tasks_seqs: [{ building: "5", unit: "1", floor: "1", door: "101", cargo_type: 1, delivery_code: "01" }],
+    },
+  });
+  assert.equal(preview.service, "/start_multi_tasks_execute");
+  assert.equal(preview.serviceType, "master_interfaces/srv/StartMultiTasksExecute");
+  assert.equal(preview.modeLabel, "R6B 多点配送");
+  assert.deepEqual(preview.fields.slice(0, 4), [
+    ["community", "数创大厦"],
+    ["out_eguard", false],
+    ["return_origin", true],
+    ["task_uuid", "task-001"],
+  ]);
+  assert.deepEqual(preview.destinations[0], [
+    ["building", "5"],
+    ["unit", "1"],
+    ["floor", "1"],
+    ["door", "101"],
+    ["cargo_type", 1],
+    ["delivery_code", "01"],
+  ]);
 });
 
 test("dependency preparation stays hidden when the frozen plan has no dependency orchestration", () => {
@@ -157,11 +212,44 @@ test("an active frozen plan owns the acceptance scope instead of a local draft",
       community: "高科一号",
       buildingUnit: "3:1",
       mode: "full",
+      executionMode: "single_r6s",
       scenarioProfileId: "",
       dependencyPlanEnabled: true,
       automaticReturnEnabled: true,
     },
   );
+});
+
+test("R6B mode payload sends only generation controls while R6S stays isolated", () => {
+  assert.deepEqual(
+    acceptancePlanModePayload("multi_r6b", {
+      outEguard: true,
+      returnOrigin: false,
+      chainMode: "chain",
+      floorRanges: [{ building: 5, unit: 1, min_floor: 3, max_floor: 25 }],
+    }),
+    {
+      execution_mode: "multi_r6b",
+      multi_options: {
+        out_eguard: true,
+        return_origin: false,
+        chain_mode: "chain",
+        max_points_per_task: 10,
+        floor_ranges: [{ building: 5, unit: 1, min_floor: 3, max_floor: 25 }],
+      },
+    },
+  );
+  assert.deepEqual(acceptancePlanModePayload("single_r6s", { destinations: [{ delivery_code: "ignored" }] }), { execution_mode: "single_r6s" });
+});
+
+test("R6B task-send defaults do not request outdoor transfer or return", () => {
+  assert.deepEqual(multiAcceptanceOptions(), {
+    out_eguard: false,
+    return_origin: false,
+    chain_mode: "single",
+    max_points_per_task: 10,
+    floor_ranges: [],
+  });
 });
 
 test("terminal acceptance plans leave the browser draft available for the next plan", () => {

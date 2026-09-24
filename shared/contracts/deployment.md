@@ -38,13 +38,15 @@ Backend 校验具有权威性：客户端展示并提交用户意图，但不得
 **消费者：** 当前仅 Web Console；Mobile 未实现且不得调用这些路由。
 
 一个 `SiteProject` 以 `physical_elevators` 保存真实电梯的唯一事实。每个实体在同一项目内的
-`elevator_id` 必须唯一，并保存 `elevator_protocol`、`min_floor` 和 `max_floor`。地图上的
+`elevator_id` 必须唯一，并保存 `elevator_protocol`、`min_floor`、`max_floor` 和可选
+`unavailable_button_floors`。后者是电梯面板实际不存在的楼层按键（例如 `11`），不是地图楼层；
+缺省或空数组保持既有连续按键行为。地图上的
 `elevator` 组件只保存 `physical_elevator_id`、门向（`yaw`）、尺寸和 `wait_distance_m`；因此同一
 实体可在大厅图和目标层图各有一个落点，而每张地图仍可独立标记电梯门方向。
 
 | Method | Route | Request | Response |
 | --- | --- | --- | --- |
-| `POST` | `/api/deployments/{project_id}/physical-elevators` | `{ "elevator_id": "10014", "elevator_protocol": "bluetooth", "min_floor": 1, "max_floor": 15 }` | `{ "physical_elevator": { … }, "project": { … } }`，`201 Created` |
+| `POST` | `/api/deployments/{project_id}/physical-elevators` | `{ "elevator_id": "10014", "elevator_protocol": "bluetooth", "min_floor": -2, "max_floor": 20, "unavailable_button_floors": [11] }` | `{ "physical_elevator": { … }, "project": { … } }`，`201 Created` |
 | `POST` | `/api/deployments/{project_id}/physical-elevators/{physical_elevator_id}` | 同上 | `{ "physical_elevator": { … }, "project": { … } }` |
 | `DELETE` | `/api/deployments/{project_id}/physical-elevators/{physical_elevator_id}` | 无 | `{ "deleted": true }` |
 
@@ -54,8 +56,14 @@ Backend 校验具有权威性：客户端展示并提交用户意图，但不得
 不写机器人任务、行为树、定位目录，也不调用 ROS 或 Supervisor。
 
 电梯落点必须另存本地图实际可按的 `button_floor`。物理楼层从零开始，按
-`min_floor…max_floor` 的按钮顺序计算且跳过按钮 `0`：例如 `-2, -1, 1, …` 中 `-2` 为
-物理层 `0`，`1` 为物理层 `2`。因此不得从地图实例楼层推测物理层，也不得使用“地图楼层 + 1”。
+`min_floor…max_floor` 的**实际面板按键顺序**计算，并跳过按钮 `0` 和
+`unavailable_button_floors`：例如 `-2…20` 且 `[11]` 缺失时，序列为
+`-2, -1, 1, …, 10, 12, …, 20`，`12` 的物理层为 `12`、`15` 为 `15`。
+缺失按键必须是服务范围内、不为 `0` 的唯一整数；后端拒绝将已有地图落点的 `button_floor`
+改为缺失按键。因此不得从地图实例楼层推测物理层，也不得使用“地图楼层 + 1”。
+一个实验任务中的 `origin_floor` 是**任务最初起点地图**关联电梯落点的物理层；编译时只解析一次，
+所有包含 `SetBlackboard output_key="origin_floor"` 的去程、返程及关门行为树必须使用完全相同的值。
+目标地图的物理层只用于任务目标 `{floor}`，不得覆盖 `origin_floor`。
 
 ## 项目级定位运行绑定
 
@@ -117,8 +125,29 @@ Backend 校验具有权威性：客户端展示并提交用户意图，但不得
 包含/排除同身份绑定、清空未保存草稿或确认删除路线。新绑定不会自动加入已保存路线；所有
 成员、顺序和锚点变更只在显式保存/删除后生效。
 
-地图切换不依赖项目级 `map_transitions` 记录。PC 编辑器会在来源地图只有一个电梯组件时自动使用其中心作为返程切图依据；存在多个电梯时要求明确选择实际物理电梯。画布中的“过渡点”只作为需要时的中间锚点，速度沿用其后继点，不参与楼上返程目标选择。旧的
+地图切换不依赖项目级 `map_transitions` 记录。PC 编辑器会在来源地图只有一个电梯组件时自动使用其中心作为返程切图依据；存在多个电梯时要求明确选择实际物理电梯。旧的
 `map_transitions` 只读保留，不参与拓扑通过条件，也不会由新界面继续创建。流程中的 `ferry` 只是可配置的中间地图阶段；没有相应地图绑定或批准的编译模板时，导出必须阻断，不能猜测机器人动作。
+
+### 任务过渡点
+
+**Status: Existing（已实现）**
+**消费者：** `robot_backend` 验证并编译；PC `web_console` 负责标记、展示和保存速度、去程朝向。Mobile 不读取或写入该字段。
+
+画布的手动 `Waypoint` 中，`kind: "transition"` 是**任务过渡点**，不是定位路线的切图锚点。它可由定位路线引用，但两种用途独立：定位路线锚点只影响定位清单；只有当前室内编译所选的电梯大厅和用户楼层地图上的任务过渡点会进入 `indoor_elevator_v1` 实验任务。每段按项目快照保存顺序走去程、严格反序走返程：
+
+- 大厅去程：`lobby_start → lobby_1… → lobby_wait → lobby_elevator_center`；大厅返程：`lobby_return_wait → lobby_r_1… → lobby_return_start`。
+- 用户层去程：`target_wait → 1509_1… → target`；用户层返程：`1509_r_1… → target_return_wait → target_return_elevator_center`。因此只要存在用户层过渡点，返程的首个导航点就是最后一个去程过渡点，不能直接跳到候梯点。
+
+每个生成条目固定为 `waypoint_task_id: ""`、`is_task_point: false`，因此不生成或引用行为树。过渡点保存的 `yaw` 是去程朝向；返程采用同一点的相反顺序并自动转向 180°，使姿态与返程行驶方向一致。
+
+任务 JSON 和 `runtime/loc_yaml_path.json` 必须消费同一条地图段过渡点链，不能分别推导返程。用户楼层存在任务过渡点时，定位清单最终 `floor` 条目的 `init_return` 等于**最后一个去程过渡点**的坐标及其返程朝向（也就是返程子任务的首个导航点）；没有用户楼层任务过渡点时，才回退为目标层电梯门前呼梯点。大厅过渡点同样写入大厅的去/返任务段，但不替代进入大厅时由电梯行为树控制的定位切换锚点。
+
+任务过渡点持久化 `speed_mode`，缺省为 `single_point`；只允许 `task_point`、`single_point`、`slow_point` 和 `narrow_point`。`elevator_in` 与 `backward` 属于受控电梯行为，不能被手动过渡点使用。旧 `kind: "return"` 兼容迁移为不参与任务导出的过渡记录，避免把历史返程选择误插到去程。修改任何任务过渡点都会使现有实验预览失效，必须重新由 Backend 编译。
+
+| Method | Route | Request | Response |
+| --- | --- | --- | --- |
+| `POST` | `/api/deployments/{project_id}/waypoints` | 新建 `kind: "transition"` 时可选 `{ "speed_mode": "single_point", "yaw": 0 }`，未给速度时为 `single_point` | `{ "waypoint": { …, "speed_mode": "…", "yaw": 0 }, "project": { … } }` |
+| `POST` | `/api/deployments/{project_id}/waypoints/{waypoint_id}` | 仅手动任务过渡点；可更新非空子集 `{ "speed_mode": "task_point\|single_point\|slow_point\|narrow_point", "yaw": <弧度数值> }` | `{ "waypoint": { … }, "project": { … } }` |
 
 | Method | Route | Request | Response |
 | --- | --- | --- | --- |
@@ -138,7 +167,7 @@ Backend 校验具有权威性：客户端展示并提交用户意图，但不得
 | 首项（包括唯一项） | `init_go` | 首项（包括唯一项）使用人工选择的任务起点 `task_start_waypoint_id`；首图使用人工选择的任务起点 |
 | 仅非首项 | `init_go` | 后续地图统一使用采图电梯中心坐标系原点 `{x: 0.0, y: 0.0, z: 0.0, yaw: 0.0}`；不使用栅格 YAML 左下角 `origin` |
 | 非最终项 | `init_return` | 该图出向链接的受控锚点 |
-| 最终项 | `init_return` | 最终项自动使用目标层电梯门前呼梯点；不要求人工选择返程点 |
+| 最终项 | `init_return` | 存在用户楼层任务过渡点时使用最后一个去程过渡点的返程姿态；否则自动使用目标层电梯门前呼梯点 |
 
 导出的每张定位 YAML 的 `system.init_pose.x`、`system.init_pose.y`、
 `system.init_pose.yaw` 必须与该路线条目的 `init_go` 完全一致；首图因此使用人工任务起点，
@@ -153,7 +182,8 @@ Backend 校验具有权威性：客户端展示并提交用户意图，但不得
 `runtime/loc_yaml_path.json` 的精确顶层结构为
 `{ "community": "…", "loc_yaml": [{ "building": "…", "unit": "…", "yaml_index": [ … ] }] }`。
 每个 `yaml_index` 条目包含 `type`、`yaml`、`2D_yaml`、`init_go` 和 `init_return`；`floor` 条目额外
-包含 `floor`，其值等于绑定的 `floor_template`。`yaml` 和 `2D_yaml` 是包内受控副本将来安装时的固定目标路径，不能由
+包含 `floor`，其值等于绑定的 `floor_template`。为保持既有运行时样例兼容，楼层条目的字段顺序固定为
+`type`、`floor`、`yaml`、`2D_yaml`、`init_go`、`init_return`。`yaml` 和 `2D_yaml` 是包内受控副本将来安装时的固定目标路径，不能由
 客户端传入。
 
 `runtime/lift_id_list.json` 的精确结构为

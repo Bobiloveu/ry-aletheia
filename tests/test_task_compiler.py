@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import zipfile
 from io import BytesIO
-from math import isclose, pi
+from math import cos, isclose, pi, sin
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -136,6 +136,119 @@ def test_compiler_keeps_outbound_target_and_return_handoff_distinct(two_map_proj
     assert (return_origin["x"], return_origin["y"]) != (outbound["x"], outbound["y"])
 
 
+def test_compiler_emits_saved_target_transition_points_without_behavior_trees(two_map_project):
+    """A marked task transition must survive preview generation in route order."""
+    two_map_project["waypoints"].extend([
+        {
+            "id": "transition-first", "map_asset_id": "target-map", "kind": "transition",
+            "label": "过渡点", "x": 3.0, "y": 1.0, "yaw": 0.5,
+            "speed_mode": "slow_point",
+        },
+        {
+            "id": "transition-second", "map_asset_id": "target-map", "kind": "transition",
+            "label": "过渡点", "x": 4.0, "y": 2.0, "yaw": 0.75,
+            "speed_mode": "narrow_point",
+        },
+    ])
+
+    outbound = _compile(two_map_project).task_json["subtasks"][1]["waypoints"]
+
+    assert [point["waypoint_id"] for point in outbound] == [
+        "target_wait", "1509_1", "1509_2", "target",
+    ]
+    assert [point["speed_mode"] for point in outbound] == [
+        "backward", "slow_point", "narrow_point", "single_point",
+    ]
+    assert [(point["waypoint_task_id"], point["is_task_point"]) for point in outbound[1:3]] == [
+        ("", False), ("", False),
+    ]
+    assert [point["pose"]["position"] for point in outbound[1:3]] == [
+        {"x": 3.0, "y": 1.0, "z": 0.0},
+        {"x": 4.0, "y": 2.0, "z": 0.0},
+    ]
+
+
+def test_compiler_mirrors_lobby_and_target_transitions_through_all_four_task_segments(two_map_project):
+    """Catches dropping a map's transitions or traversing them forward on return."""
+    two_map_project["waypoints"].extend([
+        {"id": "lobby-first", "map_asset_id": "lobby-map", "kind": "transition", "label": "大厅过渡 1", "x": 0.0, "y": -1.5, "yaw": 0.2, "speed_mode": "slow_point"},
+        {"id": "lobby-second", "map_asset_id": "lobby-map", "kind": "transition", "label": "大厅过渡 2", "x": 0.0, "y": -1.0, "yaw": 0.4, "speed_mode": "narrow_point"},
+        {"id": "target-first", "map_asset_id": "target-map", "kind": "transition", "label": "楼层过渡 1", "x": 3.0, "y": 1.0, "yaw": 0.5, "speed_mode": "slow_point"},
+        {"id": "target-second", "map_asset_id": "target-map", "kind": "transition", "label": "楼层过渡 2", "x": 4.0, "y": 2.0, "yaw": 0.75, "speed_mode": "narrow_point"},
+    ])
+
+    subtasks = _compile(two_map_project).task_json["subtasks"]
+    by_name = {item["subtask_name"]: item["waypoints"] for item in subtasks}
+
+    assert [point["waypoint_id"] for point in by_name["elevator_hall"]] == [
+        "lobby_start", "lobby_1", "lobby_2", "lobby_wait", "lobby_elevator_center",
+    ]
+    assert [point["waypoint_id"] for point in by_name["1509"]] == [
+        "target_wait", "1509_1", "1509_2", "target",
+    ]
+    assert [point["waypoint_id"] for point in by_name["1509_r"]] == [
+        "1509_r_1", "1509_r_2", "target_return_wait", "target_return_elevator_center",
+    ]
+    assert [point["waypoint_id"] for point in by_name["elevator_hall_r"]] == [
+        "lobby_return_wait", "lobby_r_1", "lobby_r_2", "lobby_return_start",
+    ]
+    assert [point["speed_mode"] for point in by_name["1509_r"][:2]] == ["narrow_point", "slow_point"]
+    assert [point["pose"]["orientation"] for point in by_name["1509_r"][:2]] == [
+        {"x": 0.0, "y": 0.0, "z": sin(-2.391592653589793 / 2), "w": cos(-2.391592653589793 / 2)},
+        {"x": 0.0, "y": 0.0, "z": sin(-2.641592653589793 / 2), "w": cos(-2.641592653589793 / 2)},
+    ]
+    transition_ids = {"lobby_1", "lobby_2", "1509_1", "1509_2", "1509_r_1", "1509_r_2", "lobby_r_1", "lobby_r_2"}
+    for waypoints in by_name.values():
+        for point in waypoints:
+            if point["waypoint_id"] in transition_ids:
+                assert point["waypoint_task_id"] == ""
+                assert point["is_task_point"] is False
+
+
+def test_target_return_transition_is_shared_by_task_json_and_location_manifest(two_map_project):
+    """The target floor must relocalize at its first return transition, not the elevator wait."""
+    two_map_project["waypoints"].extend([
+        {"id": "target-first", "map_asset_id": "target-map", "kind": "transition", "label": "楼层过渡 1", "x": 3.0, "y": 1.0, "yaw": 0.5, "speed_mode": "slow_point"},
+        {"id": "target-last", "map_asset_id": "target-map", "kind": "transition", "label": "楼层过渡 2", "x": 4.0, "y": 2.0, "yaw": 0.75, "speed_mode": "narrow_point"},
+    ])
+
+    preview = _compile(two_map_project)
+    task_return = next(item for item in preview.task_json["subtasks"] if item["subtask_name"] == "1509_r")["waypoints"][0]
+    manifest = json.loads(next(
+        item.content for item in preview.artifacts if item.relative_path == "runtime/loc_yaml_path.json"
+    ))
+    floor_return = manifest["loc_yaml"][0]["yaml_index"][1]["init_return"]
+
+    assert task_return["waypoint_id"] == "1509_r_1"
+    assert floor_return == {"x": 4.0, "y": 2.0, "z": 0.0, "yaw": pytest.approx(0.75 - pi)}
+    assert floor_return["x"] != pytest.approx(2.0)
+    assert floor_return["y"] != pytest.approx(-2.5)
+
+
+def test_target_return_without_transitions_falls_back_to_the_elevator_wait_pose(two_map_project):
+    """The door wait remains the only fallback when no task transition was marked."""
+    preview = _compile(two_map_project)
+    task_return = next(item for item in preview.task_json["subtasks"] if item["subtask_name"] == "1509_r")["waypoints"][0]
+    manifest = json.loads(next(
+        item.content for item in preview.artifacts if item.relative_path == "runtime/loc_yaml_path.json"
+    ))
+    floor_return = manifest["loc_yaml"][0]["yaml_index"][1]["init_return"]
+
+    assert task_return["waypoint_id"] == "target_return_wait"
+    assert task_return["pose"]["position"] == {"x": floor_return["x"], "y": floor_return["y"], "z": 0.0}
+
+
+def test_compiler_rejects_transition_speed_modes_reserved_for_behavior_trees(two_map_project):
+    two_map_project["waypoints"].append({
+        "id": "unsafe-transition", "map_asset_id": "target-map", "kind": "transition",
+        "label": "过渡点", "x": 3.0, "y": 1.0, "yaw": 0.0,
+        "speed_mode": "elevator_in",
+    })
+
+    with pytest.raises(CompilationError, match="过渡点速度模式"):
+        _compile(two_map_project)
+
+
 def test_exported_task_json_keeps_the_approved_readable_field_order(two_map_project):
     preview = _compile(two_map_project)
     task = next(item for item in preview.artifacts if item.relative_path.startswith("tasks/"))
@@ -245,17 +358,39 @@ def test_xml_and_localization_substitutions_are_controlled(two_map_project):
     preview = _compile(two_map_project)
     contents = {item.relative_path: item.content.decode("utf-8") for item in preview.artifacts}
     inbound = contents["waypoint_tasks/gk1/1_1_elevator_in_n_x.xml"]
-    return_inbound = contents["waypoint_tasks/gk1/1_1_elevator_in_x_n.xml"]
     outbound = contents["waypoint_tasks/gk1/1_1_elevator_out_n_x.xml"]
     returned = contents["waypoint_tasks/gk1/1_1_elevator_out_x_n.xml"]
     assert 'output_key="origin_floor" value="2"' in inbound
-    assert 'output_key="origin_floor" value="16"' in return_inbound
     assert 'map_url="/opt/ry/data/maps/高科一号/1_1/floor-2/map.yaml"' in outbound
     assert 'x="0" y="0"' in returned
     lobby_yaml = contents["runtime/localization/高科一号/1_1/indoor.yaml"]
     assert "map_path: /opt/ry/data/maps/高科一号/1_1/indoor" in lobby_yaml
     assert "map_path:" in lobby_yaml
     assert "{{" not in inbound + outbound + returned
+
+
+def test_all_behavior_trees_use_the_task_origin_physical_floor(two_map_project):
+    """Catches return trees overwriting origin_floor with the target landing."""
+    preview = _compile(two_map_project)
+    values_by_tree = {}
+    for artifact in preview.artifacts:
+        if not artifact.relative_path.startswith("waypoint_tasks/"):
+            continue
+        values = [
+            node.attrib["value"]
+            for node in ElementTree.fromstring(artifact.content).iter("SetBlackboard")
+            if node.attrib.get("output_key") == "origin_floor"
+        ]
+        if values:
+            values_by_tree[artifact.relative_path] = values
+
+    assert values_by_tree == {
+        "waypoint_tasks/gk1/1_1_elevator_in_n_x.xml": ["2"],
+        "waypoint_tasks/gk1/1_1_elevator_in_x_n.xml": ["2"],
+        "waypoint_tasks/gk1/1_1_elevator_out_n_x.xml": ["2"],
+        "waypoint_tasks/gk1/1_1_elevator_out_x_n.xml": ["2"],
+        "waypoint_tasks/gk1/1_1_close_elevdoor_n.xml": ["2"],
+    }
 
 
 def test_compiler_derives_origin_floor_from_the_landing_button_not_the_map_floor(two_map_project):
@@ -266,6 +401,18 @@ def test_compiler_derives_origin_floor_from_the_landing_button_not_the_map_floor
     outgoing = next(item for item in preview.artifacts if item.relative_path.endswith("elevator_out_n_x.xml"))
 
     assert 'output_key="origin_floor" value="1"' in outgoing.content.decode("utf-8")
+
+
+def test_compiler_skips_unavailable_elevator_buttons_when_deriving_physical_floors(two_map_project):
+    """Catches every button above a missing panel key being offset by one."""
+    two_map_project["physical_elevators"][0]["max_floor"] = 20
+    two_map_project["physical_elevators"][0]["unavailable_button_floors"] = [11]
+
+    preview = _compile(two_map_project)
+
+    # XML keeps ``floor`` as a runtime blackboard placeholder. The compiled
+    # task group is the consumer of the derived physical target floor.
+    assert preview.task_json["task_group_name"] == "高科一号_1_14_1509"
 
 
 def test_compiler_rejects_a_landing_without_an_explicit_button_floor(two_map_project):

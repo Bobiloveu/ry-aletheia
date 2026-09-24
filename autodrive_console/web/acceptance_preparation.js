@@ -45,10 +45,72 @@ export function activeAcceptancePlanSelection(plan) {
     community: plan.community,
     buildingUnit: plan.scope_type === "building" ? `${plan.building}:${plan.unit}` : "",
     mode: plan.mode,
+    executionMode: plan.execution_mode || "single_r6s",
     scenarioProfileId: plan.execution_preflight?.scenario_profile_id || "",
     dependencyPlanEnabled: plan.execution_preflight?.dependency_plan_enabled === true,
     automaticReturnEnabled: plan.execution_preflight?.automatic_return_enabled === true,
   };
+}
+
+export function multiAcceptanceOptions({
+  outEguard = false,
+  returnOrigin = false,
+  chainMode = "single",
+  maxPointsPerTask = 10,
+  floorRanges = [],
+} = {}) {
+  return {
+    out_eguard: outEguard === true,
+    return_origin: returnOrigin === true,
+    chain_mode: ["single", "chain", "combined"].includes(chainMode) ? chainMode : "single",
+    max_points_per_task: maxPointsPerTask,
+    floor_ranges: Array.isArray(floorRanges) ? floorRanges : [],
+  };
+}
+
+export function acceptanceTaskPreview(item) {
+  const request = item?.multi_request;
+  if (!request) {
+    const parameters = item?.parameters || {};
+    return {
+      service: "/start_execute_tasks",
+      serviceType: "master_interfaces/srv/StartExecuteTasks",
+      modeLabel: "R6S 单点任务",
+      fields: [
+        ["community", parameters.community ?? ""],
+        ["building", parameters.building ?? ""],
+        ["unit", parameters.unit ?? ""],
+        ["floor", parameters.floor ?? ""],
+        ["door", parameters.door ?? ""],
+        ["task_uuid", ""],
+      ],
+      destinations: [],
+    };
+  }
+  return {
+    service: "/start_multi_tasks_execute",
+    serviceType: "master_interfaces/srv/StartMultiTasksExecute",
+    modeLabel: "R6B 多点配送",
+    fields: [
+      ["community", request.community ?? ""],
+      ["out_eguard", request.out_eguard === true],
+      ["return_origin", request.return_origin === true],
+      ["task_uuid", request.task_uuid ?? ""],
+    ],
+    destinations: (request.tasks_seqs || []).map((destination) => [
+      ["building", destination.building ?? ""],
+      ["unit", destination.unit ?? ""],
+      ["floor", destination.floor ?? ""],
+      ["door", destination.door ?? ""],
+      ["cargo_type", destination.cargo_type ?? ""],
+      ["delivery_code", destination.delivery_code ?? ""],
+    ]),
+  };
+}
+
+export function acceptancePlanModePayload(executionMode, options = {}) {
+  if (executionMode !== "multi_r6b") return { execution_mode: "single_r6s" };
+  return { execution_mode: "multi_r6b", multi_options: multiAcceptanceOptions(options) };
 }
 
 export function readyPlanReplacementNotice(plan) {

@@ -295,6 +295,7 @@ class RunManager:
                             "duration_s": attempt.duration_s,
                             "started_at": attempt.started_at,
                             "trajectory": attempt.trajectory,
+                            "delivery_evidence": attempt.delivery_evidence,
                         },
                     )
                 if child.status == "cancelled" or cancel_event.is_set():
@@ -626,12 +627,16 @@ class RunManager:
                 if not preflight.ok:
                     run.status, run.error = "blocked", preflight.message
                     return
-                run.preflight["ros_service"] = {"ok": None, "message": "正在等待 ROS2 服务就绪：/start_execute_tasks（最长 300 秒）"}
-                service_ok, service_message = self.executor.wait_until_available(
-                    timeout_s=300,
-                    cancel_event=cancel_event,
-                    status_callback=lambda message: self._update_ros_service_status(run, message),
-                )
+                service_name = "/start_multi_tasks_execute" if run.case.execution_mode == "multi_r6b" else "/start_execute_tasks"
+                run.preflight["ros_service"] = {"ok": None, "message": f"正在等待 ROS2 服务就绪：{service_name}（最长 300 秒）"}
+                if run.case.execution_mode == "multi_r6b":
+                    service_ok, service_message = True, "R6B 多点服务将在强类型执行器中检查可用性"
+                else:
+                    service_ok, service_message = self.executor.wait_until_available(
+                        timeout_s=300,
+                        cancel_event=cancel_event,
+                        status_callback=lambda message: self._update_ros_service_status(run, message),
+                    )
                 run.preflight["ros_service"] = {"ok": service_ok, "message": service_message}
                 if cancel_event.is_set():
                     run.status = "cancelled"
@@ -707,19 +712,33 @@ class RunManager:
                     return_signal = getattr(run, "_return_signal_bridge", None)
                     return_signal_item = getattr(run, "_sequence_attempt_index", index)
                     return_signal_armed = False
+                    delivery_evidence = None
                     try:
                         # 只在全部预检完成、即将真正下发当前任务时武装。这样上
                         # 一项任务迟到的 103 不会在下一项预检期间误触发返程。
                         if return_signal is not None:
                             return_signal.arm(return_signal_item)
                             return_signal_armed = True
-                        ok, message, duration = self.executor.execute(
-                            run.case.parameters,
-                            lambda _msg: None,
-                            cancel_event,
-                            attempt_interrupt_event,
-                            timeout_s=execution_timeout,
-                        )
+                        if run.case.execution_mode == "multi_r6b":
+                            if run.case.multi_request is None:
+                                raise ValueError("R6B 测试项缺少冻结的多点请求")
+                            result = self.executor.execute_multi(
+                                run.case.multi_request,
+                                lambda _msg: None,
+                                cancel_event,
+                                attempt_interrupt_event,
+                                timeout_s=execution_timeout,
+                            )
+                            ok, message, duration = result.success, result.message, result.duration_s
+                            delivery_evidence = result.delivery_evidence
+                        else:
+                            ok, message, duration = self.executor.execute(
+                                run.case.parameters,
+                                lambda _msg: None,
+                                cancel_event,
+                                attempt_interrupt_event,
+                                timeout_s=execution_timeout,
+                            )
                     except Exception as exc:
                         # ROS 环境、接口包缺失等基础设施错误不能靠重试恢复。
                         ok, message, duration = False, f"执行器异常：{exc}", 0.0
@@ -772,17 +791,17 @@ class RunManager:
                     existing = next((item for item in run.attempts if item.index == index), None)
                     if cancel_event.is_set():
                         if existing:
-                            existing.status, existing.message, existing.duration_s, existing.trajectory = "cancelled", message, duration, trajectory
+                            existing.status, existing.message, existing.duration_s, existing.trajectory, existing.delivery_evidence = "cancelled", message, duration, trajectory, delivery_evidence
                         else:
-                            run.attempts.append(AttemptResult(index, "cancelled", message, duration, started, trajectory, run.case.id, run.case.filename))
+                            run.attempts.append(AttemptResult(index, "cancelled", message, duration, started, trajectory, run.case.id, run.case.filename, delivery_evidence))
                         run.active_attempt = None
                         run.forced_attempt_failure = None
                         run.status = "cancelled"
                         break
                     if existing:
-                        existing.status, existing.message, existing.duration_s, existing.trajectory = "failed", message, duration, trajectory
+                        existing.status, existing.message, existing.duration_s, existing.trajectory, existing.delivery_evidence = "failed", message, duration, trajectory, delivery_evidence
                     else:
-                        run.attempts.append(AttemptResult(index, "passed" if ok else "failed", message, duration, started, trajectory, run.case.id, run.case.filename))
+                        run.attempts.append(AttemptResult(index, "passed" if ok else "failed", message, duration, started, trajectory, run.case.id, run.case.filename, delivery_evidence))
                     run.active_attempt = None
                     run.forced_attempt_failure = None
                     if not ok:

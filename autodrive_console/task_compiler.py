@@ -28,6 +28,11 @@ from .location_manifest import (
     localization_template_text,
     physical_floor_index,
 )
+from .task_path import (
+    TaskPathError,
+    return_task_transition_points,
+    task_segment_transitions,
+)
 
 
 PROFILE = "indoor_elevator_v1"
@@ -128,6 +133,11 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
     return_target = target_wait
     _validate_point(lobby_asset, lobby_wait, "大厅候梯点")
     _validate_point(target_asset, target_wait, "目标层候梯点")
+    # Every manually marked transition belongs to one physical map segment.
+    # A segment is traversed in save order on the outbound route and in the
+    # exact reverse order on return, so return never skips a marked corridor.
+    lobby_transitions = _task_transition_points(project, lobby_asset)
+    target_transitions = _task_transition_points(project, target_asset)
 
     try:
         location_manifest = compile_location_manifest(project, map_root=root)
@@ -174,8 +184,12 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
         "target_wait": _point_dict(target_wait, target_inward),
         "target_elevator_center": _point_dict(target_elevator, target_inward),
     }
-    input_sha = _input_hash(project, input_value, derived)
-    task_json = _task_json(input_value, derived)
+    input_sha = _input_hash(
+        project, input_value, derived, lobby_transitions, target_transitions
+    )
+    task_json = _task_json(
+        input_value, derived, lobby_transitions, target_transitions
+    )
     template_hashes: dict[str, str] = {}
     artifacts: list[Artifact] = []
 
@@ -183,7 +197,7 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
     artifacts.append(_artifact(f"tasks/{task_name}", _task_json_bytes(task_json)))
     xml_values = _xml_values(
         input_value, target_map_yaml, source_localization, target_localization,
-        lobby_physical_floor, target_physical_floor, lobby_elevator, lobby_inward
+        lobby_physical_floor, lobby_elevator, lobby_inward
     )
     xml_names = {
         "start_task.xml": "start_task.xml",
@@ -198,10 +212,7 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
     for template_name, output_name in xml_names.items():
         template = _template(template_name)
         template_hashes[template_name] = _sha(template.encode("utf-8"))
-        values = dict(xml_values)
-        if template_name in {"elevator_in_x_n.xml", "elevator_out_x_n.xml"}:
-            values["ORIGIN_FLOOR"] = values["TARGET_ORIGIN_FLOOR"]
-        content = _render_xml(template, values).encode("utf-8")
+        content = _render_xml(template, xml_values).encode("utf-8")
         artifacts.append(_artifact(f"waypoint_tasks/{site_id}/{output_name}", content))
 
     template_hashes.setdefault(
@@ -521,7 +532,12 @@ def _shared_physical_floor(physical_elevator: dict[str, Any], landing: dict[str,
     if not -20 <= minimum <= maximum <= 120:
         raise CompilationError("电梯服务楼层范围无效")
     try:
-        return physical_floor_index(minimum, maximum, button_floor)
+        return physical_floor_index(
+            minimum,
+            maximum,
+            button_floor,
+            physical_elevator.get("unavailable_button_floors", ()),
+        )
     except LocationManifestError as exc:
         raise CompilationError(f"电梯落点按钮层无效：{exc}") from exc
 
@@ -537,25 +553,47 @@ def _waypoint(identifier: str, point: dict[str, float], speed_mode: str, task_id
     return {"waypoint_task_id": task_id, "is_task_point": is_task_point, "speed_mode": speed_mode, "is_backward": False, "is_single_point": True, "pose": _pose(point), "waypoint_id": identifier}
 
 
-def _task_json(value: CompilationInput, points: dict[str, dict[str, float]]) -> dict[str, Any]:
+def _task_transition_points(project: dict[str, Any], asset: dict[str, Any]) -> list[dict[str, float | str]]:
+    """Read one map segment's operator-marked transitions in save order."""
+    try:
+        transitions = task_segment_transitions(project, str(asset.get("id") or ""))
+    except TaskPathError as exc:
+        raise CompilationError(str(exc)) from exc
+    for waypoint in transitions:
+        _validate_point(asset, waypoint, "任务过渡点")
+    return transitions
+
+
+def _task_json(
+    value: CompilationInput,
+    points: dict[str, dict[str, float]],
+    lobby_transitions: list[dict[str, float | str]],
+    target_transitions: list[dict[str, float | str]],
+) -> dict[str, Any]:
     b, u = value.building, value.unit
+    lobby_return_transitions = _return_transition_points(lobby_transitions)
+    target_return_transitions = _return_transition_points(target_transitions)
     return {
         "subtasks": [
             {"change_loc": False, "map_url": value.lobby_map_url, "pcd_url": "", "subtask_name": "elevator_hall", "waypoints": [
                 _waypoint("lobby_start", points["start"], "task_point", "start_task", is_task_point=False),
+                *_transition_waypoints("lobby", lobby_transitions),
                 _waypoint("lobby_wait", points["lobby_wait"], "single_point", f"{b}_{u}_elevator_in_n_x"),
                 _waypoint("lobby_elevator_center", points["lobby_elevator_center"], "elevator_in", f"{b}_{u}_elevator_out_n_x"),
             ]},
             {"change_loc": False, "map_url": value.target_map_url, "pcd_url": "", "subtask_name": value.door, "waypoints": [
                 _waypoint("target_wait", points["target_wait"], "backward", f"{b}_{u}_close_elevdoor_x"),
+                *_transition_waypoints(value.door, target_transitions),
                 _waypoint("target", points["target"], "single_point", "place_water"),
             ]},
             {"change_loc": False, "map_url": value.target_map_url, "pcd_url": "", "subtask_name": f"{value.door}_r", "waypoints": [
+                *_transition_waypoints(f"{value.door}_r", target_return_transitions),
                 _waypoint("target_return_wait", points["return_target"], "task_point", f"{b}_{u}_elevator_in_x_n"),
                 _waypoint("target_return_elevator_center", points["target_elevator_center"], "elevator_in", f"{b}_{u}_elevator_out_x_n"),
             ]},
             {"change_loc": False, "map_url": value.lobby_map_url, "pcd_url": "", "subtask_name": "elevator_hall_r", "waypoints": [
                 _waypoint("lobby_return_wait", points["lobby_wait"], "backward", f"{b}_{u}_close_elevdoor_n"),
+                *_transition_waypoints("lobby_r", lobby_return_transitions),
                 _waypoint("lobby_return_start", points["start"], "single_point", "task_complete"),
             ]},
         ],
@@ -565,7 +603,29 @@ def _task_json(value: CompilationInput, points: dict[str, dict[str, float]]) -> 
     }
 
 
-def _xml_values(value: CompilationInput, target_map_yaml: str, source_localization: str, target_localization: str, lobby_floor: int, target_floor: int, lobby: dict[str, Any], lobby_inward: float) -> dict[str, str]:
+def _transition_waypoints(
+    prefix: str, transitions: list[dict[str, float | str]]
+) -> list[dict[str, Any]]:
+    return [
+        _waypoint(
+            f"{prefix}_{index}", transition, str(transition["speed_mode"]), "",
+            is_task_point=False,
+        )
+        for index, transition in enumerate(transitions, start=1)
+    ]
+
+
+def _return_transition_points(
+    outbound: list[dict[str, float | str]],
+) -> list[dict[str, float | str]]:
+    """Reverse a map segment and turn each saved heading toward the return path."""
+    try:
+        return return_task_transition_points(outbound)
+    except TaskPathError as exc:
+        raise CompilationError(str(exc)) from exc
+
+
+def _xml_values(value: CompilationInput, target_map_yaml: str, source_localization: str, target_localization: str, lobby_floor: int, lobby: dict[str, Any], lobby_inward: float) -> dict[str, str]:
     return {
         "ORIGIN_FLOOR": str(lobby_floor),
         "TARGET_LOCALIZATION_YAML": target_localization,
@@ -574,7 +634,6 @@ def _xml_values(value: CompilationInput, target_map_yaml: str, source_localizati
         "RELOCALIZE_X": _format_number(_number(lobby.get("x"), "大厅电梯坐标")),
         "RELOCALIZE_Y": _format_number(_number(lobby.get("y"), "大厅电梯坐标")),
         "RELOCALIZE_YAW": _format_number(lobby_inward),
-        "TARGET_ORIGIN_FLOOR": str(target_floor),
     }
 
 
@@ -615,8 +674,14 @@ def _render_localization(template: str, map_directory: Path) -> str:
     return updated
 
 
-def _input_hash(project: dict[str, Any], value: CompilationInput, derived: dict[str, dict[str, float]]) -> str:
-    payload = {"profile": PROFILE, "input": value.__dict__, "scene_model": project.get("scene_model"), "deployment_flow": project.get("deployment_flow"), "components": project.get("components"), "physical_elevators": project.get("physical_elevators"), "map_assets": project.get("map_assets"), "map_edits": project.get("map_edits"), "map_instances": project.get("map_instances"), "localization_bindings": project.get("localization_bindings"), "localization_routes": project.get("localization_routes"), "route_waypoints": _route_waypoint_facts(project), "map_stage_assignments": project.get("map_stage_assignments"), "derived": derived}
+def _input_hash(
+    project: dict[str, Any],
+    value: CompilationInput,
+    derived: dict[str, dict[str, float]],
+    lobby_transitions: list[dict[str, float | str]],
+    target_transitions: list[dict[str, float | str]],
+) -> str:
+    payload = {"profile": PROFILE, "input": value.__dict__, "scene_model": project.get("scene_model"), "deployment_flow": project.get("deployment_flow"), "components": project.get("components"), "physical_elevators": project.get("physical_elevators"), "map_assets": project.get("map_assets"), "map_edits": project.get("map_edits"), "map_instances": project.get("map_instances"), "localization_bindings": project.get("localization_bindings"), "localization_routes": project.get("localization_routes"), "route_waypoints": _route_waypoint_facts(project), "lobby_task_transitions": lobby_transitions, "target_task_transitions": target_transitions, "map_stage_assignments": project.get("map_stage_assignments"), "derived": derived}
     return _sha(_json_bytes(payload))
 
 

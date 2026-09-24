@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from autodrive_console.case_store import CaseStore
 from autodrive_console.acceptance_catalog import AcceptanceTaskCatalog
+from autodrive_console.multi_task_catalog import MultiTaskCatalog
 from autodrive_console.acceptance_orchestrator import AcceptanceConflict, AcceptanceOrchestrator, AcceptanceValidationError
 from autodrive_console.acceptance_plan import AcceptancePlanStore
 from autodrive_console.autostart import AutostartError, AutostartManager
@@ -117,6 +118,7 @@ SCENARIO_SETUP = ScenarioSetupStore(CONFIG_DIR)
 RUNS = RunManager(WORKSPACE / "reports", RosTaskExecutor(), SETTINGS, SCENARIO_SETUP)
 ACCEPTANCE = AcceptanceOrchestrator(
     catalog=AcceptanceTaskCatalog(Path(SETTINGS.load().task_directory)),
+    multi_catalog=MultiTaskCatalog(Path("/opt/ry/data/tasks/multi_tasks")),
     plan_store=AcceptancePlanStore(CONFIG_DIR / "acceptance"),
     run_manager=RUNS,
     report_dir=WORKSPACE / "reports",
@@ -143,11 +145,61 @@ VUE_WEB_ROOT = ROOT / "autodrive_console" / "web-vue"
 UPGRADES = UpgradeManager(WORKSPACE, Path(sys.executable), getattr(sys, "frozen", False))
 LOGS = ToolLogStore(WORKSPACE / "logs")
 LOGGER = LOGS.configure()
+SYSTEMD_USER_SERVICE = "ry-aletheia.service"
 _LIVE_PREPROCESSOR = ROOT / "aletheia_live_cloud" if getattr(sys, "frozen", False) else ROOT / "build" / "live_preprocessor" / "aletheia_live_cloud"
 _VIDEO_INGEST = ROOT / "aletheia_video_ingest" if getattr(sys, "frozen", False) else ROOT / "build" / "live_preprocessor" / "aletheia_video_ingest"
 OBSERVATION = ObservationManager(WORKSPACE / "maps_cache", WORKSPACE / "logs", _LIVE_PREPROCESSOR)
 VIDEO = VideoManager(CONFIG_DIR / "video.json", ROOT / "config" / "video.json")
 SCENARIO_RUNTIME_LOCK = SCENARIO_SETUP.runtime_lock
+
+
+def _spawn_upgrade_restart(workspace: Path, executable: Path) -> bool:
+    """Hand the upgraded process back to its owner without a cgroup race.
+
+    A user systemd service uses ``KillMode=control-group`` by default.  A
+    child process started by the old service therefore dies when the old main
+    process exits, even when it has a new session.  Ask systemd to restart its
+    own unit in that case; direct launches keep the detached executable path.
+    """
+    restart_environment = os.environ.copy()
+    restart_environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    restart_environment.pop("INVOCATION_ID", None)
+    if os.environ.get("INVOCATION_ID"):
+        command = ["systemctl", "--user", "restart", "--no-block", SYSTEMD_USER_SERVICE]
+        try:
+            result = subprocess.run(
+                command,
+                cwd=workspace,
+                env=restart_environment,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            LOGGER.exception("离线升级后无法请求 systemd 重启：command=%s", command)
+            return False
+        if result.returncode != 0:
+            LOGGER.error("systemd 未接受离线升级重启请求：returncode=%s", result.returncode)
+            return False
+        return True
+    else:
+        command = [str(executable)]
+    try:
+        subprocess.Popen(
+            command,
+            cwd=workspace,
+            env=restart_environment,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        LOGGER.exception("离线升级后无法安排控制台重启：command=%s", command)
+        return False
+    return True
 
 
 def restore_scenario_runtime() -> dict:
@@ -693,6 +745,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 project_id = unquote(path.removeprefix("/api/deployments/").removesuffix("/map-instances").strip("/"))
                 instance = DEPLOYMENTS.add_map_instance(project_id, data)
                 self._json({"map_instance": instance, "project": DEPLOYMENTS.get(project_id)}, HTTPStatus.CREATED)
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/waypoints/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "waypoints":
+                    raise DeploymentError("部署 Waypoint 路径无效")
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                waypoint = DEPLOYMENTS.update_waypoint(unquote(parts[3]), unquote(parts[5]), data)
+                self._json({"waypoint": waypoint, "project": DEPLOYMENTS.get(unquote(parts[3]))})
             except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
@@ -1977,13 +2040,11 @@ def run_console() -> None:
         OBSERVATION.stop()
         server.server_close()
     if server.restart_command:
-        # 工具不再由系统服务托管。无论终端、双击还是历史环境中是否残留
-        # INVOCATION_ID，升级后一律派生新版本，避免误判后退出而不重启。
-        # onefile 程序会继承父进程的 _MEI 解包环境；不重置会错误复用即将删除的目录。
-        restart_environment = os.environ.copy()
-        restart_environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-        restart_environment.pop("INVOCATION_ID", None)
-        subprocess.Popen(server.restart_command, cwd=WORKSPACE, env=restart_environment, start_new_session=True)
+        restart_scheduled = _spawn_upgrade_restart(WORKSPACE, Path(server.restart_command[0]))
+        if not restart_scheduled and os.environ.get("INVOCATION_ID"):
+            # 让 Restart=on-failure 接管 systemctl 不可用的异常路径，避免
+            # 服务正常退出后留下“已替换但无人启动”的新二进制。
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

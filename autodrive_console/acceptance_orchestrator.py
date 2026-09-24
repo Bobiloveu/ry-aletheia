@@ -9,6 +9,7 @@ import threading
 from typing import Any
 
 from .acceptance_catalog import AcceptanceTaskCatalog
+from .multi_task_catalog import MultiTaskCatalog
 from .acceptance_plan import (
     ACTIVE_PLAN_STATUSES,
     AcceptanceCriteria,
@@ -36,8 +37,9 @@ class AcceptanceValidationError(ValueError):
 
 
 class AcceptanceOrchestrator:
-    def __init__(self, *, catalog: AcceptanceTaskCatalog, plan_store: AcceptancePlanStore, run_manager, report_dir: Path, scenario_setup=None, settings=None) -> None:
+    def __init__(self, *, catalog: AcceptanceTaskCatalog, plan_store: AcceptancePlanStore, run_manager, report_dir: Path, scenario_setup=None, settings=None, multi_catalog: MultiTaskCatalog | None = None) -> None:
         self.catalog = catalog
+        self.multi_catalog = multi_catalog or MultiTaskCatalog()
         self.plan_store = plan_store
         self.run_manager = run_manager
         self.scenario_setup = scenario_setup
@@ -61,10 +63,39 @@ class AcceptanceOrchestrator:
                 "physical_building_count": len({(item.parameters.building, item.parameters.unit) for item in selected}),
                 "floor_count": len({(item.parameters.building, item.parameters.unit, item.parameters.floor) for item in selected}),
             })
+        multi_snapshot = self.multi_catalog.scan()
+        multi_communities = []
+        for community in multi_snapshot.communities():
+            buildings = []
+            for building, unit in multi_snapshot.physical_buildings(community):
+                status = multi_snapshot.building_status(community, building, unit)
+                buildings.append({
+                    "building": building,
+                    "unit": unit,
+                    "label": f"{building}栋{unit}单元",
+                    "available": status.available,
+                    "issues": list(status.issues),
+                    "template_count": len(status.templates),
+                    "template_suffixes": [item.door_suffix for item in status.templates],
+                    "requires_floor_range": bool(status.templates),
+                    "special_point_count": len(status.special_points),
+                })
+            multi_communities.append({
+                "name": community,
+                "physical_buildings": buildings,
+                "gate_available": multi_snapshot.gate_status(community).available,
+            })
         return {
             "communities": communities,
             "valid_task_count": len(snapshot.valid_tasks),
             "issues": [{"filename": item.filename, "message": item.message} for item in snapshot.issues],
+            "modes": {
+                "single_r6s": {"communities": communities, "valid_task_count": len(snapshot.valid_tasks)},
+                "multi_r6b": {
+                    "communities": multi_communities,
+                    "issues": [{"filename": item.filename, "message": item.message} for item in multi_snapshot.issues],
+                },
+            },
         }
 
     def current(self) -> dict[str, Any] | None:
@@ -88,6 +119,7 @@ class AcceptanceOrchestrator:
         expected = {
             "scope_type", "community", "building", "unit", "mode", "sample_size",
             "scenario_profile_id", "use_dependency_plan", "use_automatic_return",
+            "execution_mode", "multi_options",
         }
         unexpected = set(document) - expected
         if unexpected:
@@ -104,6 +136,15 @@ class AcceptanceOrchestrator:
             raise AcceptanceValidationError("指定楼宇验收必须选择实际栋号和单元")
         if scope_type == "community":
             building, unit = None, None
+        execution_mode = document.get("execution_mode", "single_r6s")
+        if execution_mode not in {"single_r6s", "multi_r6b"}:
+            raise AcceptanceValidationError("任务执行模式无效")
+        if execution_mode == "single_r6s" and document.get("multi_options") is not None:
+            raise AcceptanceValidationError("单点任务计划不能包含多点任务配置")
+        if execution_mode == "multi_r6b" and not isinstance(document.get("multi_options"), dict):
+            raise AcceptanceValidationError("多点任务计划缺少多点任务配置")
+        if execution_mode == "multi_r6b" and document.get("use_automatic_return", False):
+            raise AcceptanceValidationError("R6B 多点任务使用 return_origin，不能提交 R6S 自动返程配置")
         sample_size = document.get("sample_size")
         if mode == "full":
             sample_size = None
@@ -117,11 +158,19 @@ class AcceptanceOrchestrator:
             if current and current.status in ACTIVE_PLAN_STATUSES:
                 raise AcceptanceConflict("当前验收计划正在执行，不能覆盖")
             try:
-                plan = AcceptancePlanFactory.create(
-                    self.catalog.scan(), scope_type=scope_type, community=community.strip(), building=building,
-                    unit=unit, mode=mode, sample_size=sample_size, random_seed=None, criteria=self.plan_store.load_criteria(),
-                    execution_preflight=execution_preflight,
-                )
+                if execution_mode == "multi_r6b":
+                    plan = AcceptancePlanFactory.create_multi(
+                        self.multi_catalog.scan(), scope_type=scope_type, community=community.strip(), building=building,
+                        unit=unit, mode=mode, sample_size=sample_size, random_seed=None,
+                        criteria=self.plan_store.load_criteria(), multi_options=document["multi_options"],
+                        execution_preflight=execution_preflight,
+                    )
+                else:
+                    plan = AcceptancePlanFactory.create(
+                        self.catalog.scan(), scope_type=scope_type, community=community.strip(), building=building,
+                        unit=unit, mode=mode, sample_size=sample_size, random_seed=None, criteria=self.plan_store.load_criteria(),
+                        execution_preflight=execution_preflight,
+                    )
                 plan.execution_preflight_status = default_execution_preflight_status(execution_preflight)
             except ValueError as exc:
                 raise AcceptanceValidationError(str(exc)) from exc
@@ -135,7 +184,15 @@ class AcceptanceOrchestrator:
                 raise AcceptanceConflict("验收计划不是可开始状态")
             self._verify_sources(plan)
             cases = [
-                TestCase(item.filename, item.filename, item.filename, item.parameters, item.source_path)
+                TestCase(
+                    item.filename,
+                    item.filename,
+                    item.filename,
+                    item.parameters,
+                    item.source_path,
+                    execution_mode=plan.execution_mode,
+                    multi_request=item.multi_request,
+                )
                 for item in plan.items if item.status == "planned"
             ]
             if not cases:
@@ -249,6 +306,27 @@ class AcceptanceOrchestrator:
         self.plan_store.save(plan)
 
     def _verify_sources(self, plan: AcceptancePlan) -> None:
+        if plan.execution_mode == "multi_r6b":
+            for item in plan.items:
+                paths = item.source_paths or (item.source_path,)
+                hashes = item.source_hashes or (item.sha256,)
+                if len(paths) != len(hashes):
+                    plan.status = "blocked"
+                    self._archive_terminal_report(plan)
+                    self.plan_store.save(plan)
+                    raise AcceptanceConflict("多点任务来源指纹不完整；为保护冻结验收计划，未开始执行")
+                for source_path, expected_hash in zip(paths, hashes):
+                    path = Path(source_path)
+                    try:
+                        actual_hash = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+                    except OSError:
+                        actual_hash = None
+                    if actual_hash != expected_hash:
+                        plan.status = "blocked"
+                        self._archive_terminal_report(plan)
+                        self.plan_store.save(plan)
+                        raise AcceptanceConflict("多点任务文件已变化或不可用；为保护冻结验收计划，未开始执行")
+            return
         live = {task.filename: task for task in self.catalog.scan().valid_tasks}
         for item in plan.items:
             task = live.get(item.filename)
@@ -337,6 +415,7 @@ class AcceptanceOrchestrator:
                 item.message = str(attempt.get("message", ""))
                 item.duration_s = float(attempt.get("duration_s", 0.0))
                 item.trajectory = attempt.get("trajectory") if isinstance(attempt.get("trajectory"), dict) else None
+                item.delivery_evidence = attempt.get("delivery_evidence") if isinstance(attempt.get("delivery_evidence"), list) else None
                 item.finished_at = now_iso()
                 if not lifecycle_locked:
                     plan.status = "running"

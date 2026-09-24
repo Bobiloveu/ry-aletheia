@@ -254,6 +254,20 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn(".readiness-summary", shell)
         self.assertIn(".readiness .sync-status", shell)
 
+    def test_execution_trend_keeps_many_rounds_inside_its_panel(self):
+        """高轮次趋势应在图表内横向查看，不能撑破监控卡片。"""
+        script = (web_console.WEB_ROOT / "app.js").read_text(encoding="utf-8")
+        css = (web_console.WEB_ROOT / "refinement.css").read_text(encoding="utf-8")
+
+        self.assertIn('class="chart-series"', script)
+        self.assertIn("--chart-series-min-width", script)
+        self.assertIn("可横向滚动查看全部", script)
+        self.assertIn("main:has(#caseSelect) .chart", css)
+        self.assertIn("overflow-x: auto", css)
+        self.assertIn("padding: 24px 8px 0", css)
+        self.assertIn("height: 100%", css)
+        self.assertIn("min-width: max(100%, var(--chart-series-min-width))", css)
+
     def test_dependency_orchestration_exposes_policy_and_stage_controls_to_assistive_technology(self):
         """依赖策略说明、节点列和阶段操作不能只依赖视觉样式或无名称图标。"""
         page = (web_console.WEB_ROOT / "index.html").read_text(encoding="utf-8")
@@ -1059,6 +1073,43 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("function waitForUpgradeRestart(expectedVersion)", source)
         _assert_source_contains(source, "body.current_version || '') === String(expectedVersion || '')")
         self.assertIn("waitForUpgradeRestart(data.version)", source)
+
+    def test_upgrade_restart_uses_systemd_for_user_service_autostart(self):
+        """systemd 自启必须由服务管理器重启，不能把子进程留在旧 cgroup。"""
+        workspace = Path("/tmp/ry-aletheia-upgrade-workspace")
+        executable = workspace / "dist" / "ry-aletheia"
+        with patch.dict(os.environ, {"INVOCATION_ID": "test-invocation"}, clear=False), patch(
+            "web_console.subprocess.run", return_value=subprocess.CompletedProcess([], 0)
+        ) as runner, patch("web_console.subprocess.Popen") as popen:
+            self.assertTrue(web_console._spawn_upgrade_restart(workspace, executable))
+        runner.assert_called_once_with(
+            ["systemctl", "--user", "restart", "--no-block", "ry-aletheia.service"],
+            cwd=workspace,
+            env=runner.call_args.kwargs["env"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        popen.assert_not_called()
+        self.assertNotIn("INVOCATION_ID", runner.call_args.kwargs["env"])
+
+    def test_upgrade_restart_keeps_direct_spawn_for_non_systemd_launch(self):
+        """终端/桌面启动没有 systemd 服务上下文时仍直接拉起新二进制。"""
+        workspace = Path("/tmp/ry-aletheia-upgrade-workspace")
+        executable = workspace / "dist" / "ry-aletheia"
+        with patch.dict(os.environ, {}, clear=True), patch("web_console.subprocess.Popen") as popen:
+            self.assertTrue(web_console._spawn_upgrade_restart(workspace, executable))
+        popen.assert_called_once_with(
+            [str(executable)],
+            cwd=workspace,
+            env=popen.call_args.kwargs["env"],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     def test_case_library_accepts_valid_case_and_reports_invalid_assets(self):
         with tempfile.TemporaryDirectory() as directory:

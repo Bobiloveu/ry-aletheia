@@ -46,6 +46,7 @@ def test_project_imports_a_snapshot_without_modifying_source(tmp_path: Path, mon
     store.delete_waypoint(project["id"], waypoint["id"])
     assert store.get(project["id"])["waypoints"] == []
 
+
     edited = store.update_map_edits(
         project["id"],
         {
@@ -68,6 +69,36 @@ def test_project_imports_a_snapshot_without_modifying_source(tmp_path: Path, mon
     assert len(edited["map_edits"]) == 1
     edited = store.update_map_edits(project["id"], {"action": "undo", "map_id": asset["id"]})
     assert edited["map_edits"] == []
+
+
+def test_transition_waypoint_defaults_to_single_point_and_rejects_reserved_speeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = tmp_path / "maps"
+    source = _map(root / "lobby")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("过渡点")
+    asset = store.import_map(project["id"], source, "大厅", "lobby")
+
+    transition = store.add_waypoint(project["id"], {
+        "map_id": asset["id"], "kind": "transition", "label": "过渡点", "x": -0.95, "y": -1.95,
+    })
+
+    assert transition["speed_mode"] == "single_point"
+    updated = store.update_waypoint(project["id"], transition["id"], {"speed_mode": "slow_point"})
+    assert updated["speed_mode"] == "slow_point"
+    updated = store.update_waypoint(project["id"], transition["id"], {"yaw": 0.75})
+    assert updated["yaw"] == 0.75
+    assert updated["speed_mode"] == "slow_point"
+    updated = store.update_waypoint(project["id"], transition["id"], {"speed_mode": "narrow_point", "yaw": -0.5})
+    assert updated["speed_mode"] == "narrow_point"
+    assert updated["yaw"] == -0.5
+    with pytest.raises(DeploymentError, match="朝向"):
+        store.update_waypoint(project["id"], transition["id"], {"yaw": "west"})
+    with pytest.raises(DeploymentError, match="过渡点速度模式"):
+        store.add_waypoint(project["id"], {
+            "map_id": asset["id"], "kind": "transition", "label": "过渡点", "x": -0.9, "y": -1.95,
+            "speed_mode": "elevator_in",
+        })
 
 
 def test_delete_project_removes_only_the_validated_project_directory(tmp_path: Path):
@@ -259,6 +290,73 @@ def test_elevator_landing_rejects_zero_as_a_panel_button(
                     "button_floor": 0,
                 },
             },
+        )
+
+
+def test_elevator_landing_rejects_a_configured_unavailable_panel_button(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Catches accepting a map landing for a button missing from the panel."""
+    map_root = tmp_path / "maps"
+    source = _map(map_root / "site" / "lobby")
+    source.write_text("image: map.pgm\nresolution: 1.0\norigin: [-1.0, -2.0, 0.0]\n", encoding="utf-8")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", map_root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("缺失电梯按键")
+    asset = store.import_map(project["id"], source, "大厅", "lobby")
+    elevator = store.add_physical_elevator(
+        project["id"],
+        {
+            "elevator_id": "A",
+            "elevator_protocol": "bluetooth",
+            "min_floor": -2,
+            "max_floor": 20,
+            "unavailable_button_floors": [11],
+        },
+    )
+
+    with pytest.raises(DeploymentError, match="缺失按键"):
+        store.add_component(
+            project["id"],
+            {
+                "map_id": asset["id"],
+                "kind": "elevator",
+                "x": 0.0,
+                "y": -1.0,
+                "attributes": {
+                    "physical_elevator_id": elevator["id"],
+                    "button_floor": 11,
+                },
+            },
+        )
+
+
+def test_updating_a_shared_panel_cannot_invalidate_an_existing_landing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Catches silently making an already placed landing unreachable."""
+    map_root = tmp_path / "maps"
+    source = _map(map_root / "site" / "lobby")
+    source.write_text("image: map.pgm\nresolution: 1.0\norigin: [-1.0, -2.0, 0.0]\n", encoding="utf-8")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", map_root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("共享电梯更新")
+    asset = store.import_map(project["id"], source, "大厅", "lobby")
+    elevator = store.add_physical_elevator(
+        project["id"],
+        {"elevator_id": "A", "elevator_protocol": "bluetooth", "min_floor": -2, "max_floor": 20},
+    )
+    store.add_component(
+        project["id"],
+        {"map_id": asset["id"], "kind": "elevator", "x": 0.0, "y": -1.0,
+         "attributes": {"physical_elevator_id": elevator["id"], "button_floor": 11}},
+    )
+
+    with pytest.raises(DeploymentError, match="已关联地图落点按钮层 11"):
+        store.update_physical_elevator(
+            project["id"], elevator["id"], {"unavailable_button_floors": [11]}
         )
 
 
@@ -656,14 +754,15 @@ def test_elevator_landings_must_reference_one_existing_shared_elevator(
         store.delete_physical_elevator(project["id"], elevator["id"])
 
 
-def test_deployment_editor_groups_side_rails_around_the_map_canvas():
+def test_deployment_editor_uses_the_single_task_console_around_the_map_workspace():
     root = Path(__file__).resolve().parents[1] / "autodrive_console/web"
     html = (root / "deployment.html").read_text(encoding="utf-8")
     css = (root / "deployment.css").read_text(encoding="utf-8")
 
-    assert 'class="deployment-left-rail"' in html
-    assert 'class="deployment-inspector-rail"' in html
-    assert "grid-template-columns: minmax(264px, 300px) minmax(0, 1fr) minmax(300px, 340px);" in css
+    assert 'class="deployment-task-console"' in html
+    assert 'class="deployment-task-main"' in html
+    assert 'class="deployment-task-progress"' in html
+    assert "grid-template-columns: minmax(0, 1fr) 292px;" in css
 
 
 def _project_with_distinct_maps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int):
@@ -1400,10 +1499,12 @@ def test_deployment_editor_offers_shared_elevator_landing_association():
     assert 'id="elevatorLandingDialog"' in html
     assert "关联已有电梯" in html
     assert "新建物理电梯" in html
+    assert 'id="newPhysicalElevatorUnavailableButtons"' in html
     assert "编辑共享电梯" in source
     assert "openElevatorLandingDialog" in source
     assert "physical_elevator_id" in source
     assert "/physical-elevators" in source
+    assert "unavailable_button_floors" in source
 
 
 def test_deployment_page_uses_component_task_compiler_routes():
@@ -1491,7 +1592,8 @@ def test_deployment_contract_documents_route_derived_init_poses_and_lift_list():
     assert "| 首项（包括唯一项） | `init_go` | 首项（包括唯一项）使用人工选择的任务起点 `task_start_waypoint_id`" in contract
     assert "| 仅非首项 | `init_go` | 后续地图统一使用采图电梯中心坐标系原点" in contract
     assert "| 非最终项 | `init_return` | 该图出向链接的受控锚点 |" in contract
-    assert "| 最终项 | `init_return` | 最终项自动使用目标层电梯门前呼梯点；不要求人工选择返程点 |" in contract
+    assert "| 最终项 | `init_return` | 存在用户楼层任务过渡点时使用最后一个去程过渡点的返程姿态；否则自动使用目标层电梯门前呼梯点 |" in contract
+    assert "任务 JSON 和 `runtime/loc_yaml_path.json` 必须消费同一条地图段过渡点链" in contract
     assert "定位 YAML 的 `system.init_pose.x`、`system.init_pose.y`、" in contract
     assert "必须与该路线条目的 `init_go` 完全一致" in contract
     assert '`{ "community": "…", "loc_yaml": [{ "building": "…", "unit": "…", "yaml_index": [ … ] }] }`' in contract
@@ -1542,15 +1644,15 @@ def test_deployment_empty_states_use_compact_layout_and_svg_brand_mark():
     assert "地图预览加载失败" in deployment_js
 
 
-def test_deployment_first_run_uses_one_connected_setup_rail_and_hides_later_stages():
-    """First-run should read as one workflow, not disconnected disabled cards."""
+def test_deployment_first_run_uses_one_connected_task_console_and_hides_later_stages():
+    """First-run should show one guided task, not disconnected disabled cards."""
     root = Path(__file__).resolve().parents[1] / "autodrive_console/web"
     html = (root / "deployment.html").read_text(encoding="utf-8")
     css = (root / "deployment.css").read_text(encoding="utf-8")
 
-    assert 'class="deployment-setup-rail"' in html
-    assert "body.deployment-no-project:has(#mapWorkspace) .deployment-setup-rail" in css
-    assert "> .deployment-setup-project" in css
+    assert 'id="deploymentTaskConsole"' in html
+    assert 'id="deploymentTaskWorkspace"' in html
+    assert ".deployment-task-workspace .page-grid" in css
     assert ".deployment-map-import" in css
     assert ".topology-panel" in css
     assert ".task-compiler-panel" in css

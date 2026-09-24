@@ -13,11 +13,23 @@ function pointer(value) {
   if (!value || typeof value !== "object" || value.version !== 1 || !validId(value.projectId)) {
     return null;
   }
+  const storedDraft = value.deploymentTaskDraft && typeof value.deploymentTaskDraft === "object"
+    ? value.deploymentTaskDraft
+    : {};
+  const viewedDeploymentStage = value.viewedDeploymentStage ?? value.viewedStage;
   return {
     version: 1,
     projectId: value.projectId,
     mapId: validId(value.mapId) ? value.mapId : null,
-    viewedStage: validId(value.viewedStage) ? value.viewedStage : null,
+    viewedDeploymentStage: validId(viewedDeploymentStage) ? viewedDeploymentStage : null,
+    deploymentTaskDraft: {
+      mapSource: ["import", "mapping"].includes(storedDraft.mapSource)
+        ? storedDraft.mapSource
+        : null,
+      mapLabel: typeof storedDraft.mapLabel === "string"
+        ? storedDraft.mapLabel.slice(0, 80)
+        : "",
+    },
   };
 }
 

@@ -27,20 +27,22 @@ function storage() {
   };
 }
 
-test("deployment session restores only the active project, map and stage pointer", () => {
+test("deployment session restores only view pointers and safe task drafts", () => {
   const store = storage();
 
   writeDeploymentSession(store, {
     projectId: "site-1",
     mapId: "map-2",
-    viewedStage: "localization",
+    viewedDeploymentStage: "localization",
+    deploymentTaskDraft: { mapSource: "import", mapLabel: "电梯大厅" },
   });
 
   assert.deepEqual(readDeploymentSession(store), {
     version: 1,
     projectId: "site-1",
     mapId: "map-2",
-    viewedStage: "localization",
+    viewedDeploymentStage: "localization",
+    deploymentTaskDraft: { mapSource: "import", mapLabel: "电梯大厅" },
   });
   assert.doesNotMatch(store.raw(SESSION_STORAGE_KEY), /components|routes|scene_model/);
 });
@@ -64,7 +66,7 @@ test("deployment session clamps a requested stage to the server-unlocked stage",
 
 test("deployment session can be cleared when the saved project no longer exists", () => {
   const store = storage();
-  writeDeploymentSession(store, { projectId: "deleted", mapId: "map-1", viewedStage: "maps" });
+  writeDeploymentSession(store, { projectId: "deleted", mapId: "map-1", viewedDeploymentStage: "maps" });
 
   clearDeploymentSession(store);
 

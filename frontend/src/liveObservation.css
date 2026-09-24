@@ -332,16 +332,6 @@ html.mobile-console #vehicleLayer i {
   opacity: 0;
   pointer-events: none;
 }
-.webrtc-video-card p {
-  min-height: 16px;
-  margin: 0;
-  padding: 6px 10px;
-  overflow: hidden;
-  color: #8fb4ca;
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .theme-light .local-viewer-workspace {
   background: #dfeaf2;
 }
@@ -383,7 +373,6 @@ html.mobile-console #vehicleLayer i {
 .theme-light .webrtc-video-card h3 {
   color: #294962;
 }
-.theme-light .webrtc-video-card p,
 .theme-light .webrtc-video-card header span {
   color: #365671;
 }
@@ -817,9 +806,6 @@ html.mobile-console .webrtc-video-card-toggle {
 html.mobile-console .webrtc-video-surface {
   min-height: 0;
   aspect-ratio: auto;
-}
-html.mobile-console .webrtc-video-card p {
-  display: none;
 }
 html.mobile-console .webrtc-video-empty {
   display: grid;

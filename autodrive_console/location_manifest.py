@@ -16,6 +16,12 @@ import re
 from typing import Any
 
 from .localization_assets import LocalizationMapError, read_localization_map
+from .task_path import (
+    TaskPathError,
+    return_task_transition_points,
+    task_segment_transitions,
+    task_transition_pose,
+)
 
 
 class LocationManifestError(ValueError):
@@ -31,26 +37,70 @@ def elevator_inward_yaw(component_yaw: float) -> float:
     return atan2(-cos(component_yaw), sin(component_yaw))
 
 
-def button_sequence(min_floor: int, max_floor: int) -> tuple[int, ...]:
+def normalise_unavailable_button_floors(
+    min_floor: int, max_floor: int, values: object = (),
+) -> tuple[int, ...]:
+    """Validate explicitly absent panel buttons in stable physical order."""
+    if values is None:
+        values = ()
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        raise LocationManifestError("缺失按键必须为整数列表")
+    missing: list[int] = []
+    for value in values:
+        if isinstance(value, bool):
+            raise LocationManifestError("缺失按键必须为整数")
+        try:
+            button = int(value)
+        except (TypeError, ValueError) as exc:
+            raise LocationManifestError("缺失按键必须为整数") from exc
+        if button == 0:
+            raise LocationManifestError("缺失按键不应包含 0；0 会自动排除")
+        if button < min_floor or button > max_floor:
+            raise LocationManifestError("缺失按键不在电梯服务范围")
+        if button in missing:
+            raise LocationManifestError("缺失按键不能重复")
+        missing.append(button)
+    return tuple(sorted(missing))
+
+
+def button_sequence(
+    min_floor: int, max_floor: int, unavailable_button_floors: object = (),
+) -> tuple[int, ...]:
     """Return served elevator buttons in their physical travel order.
 
-    Floor button ``0`` is intentionally omitted: real panels use the signed
-    basement labels followed directly by floor 1, while the physical index is
-    zero based.
+    Floor button ``0`` and explicitly unavailable panel buttons are omitted:
+    real panels use the signed basement labels followed directly by floor 1,
+    while the physical index is zero based.
     """
     if min_floor > max_floor:
         raise LocationManifestError("电梯按钮范围无效")
-    values = tuple(value for value in range(min_floor, max_floor + 1) if value != 0)
+    missing = set(normalise_unavailable_button_floors(
+        min_floor, max_floor, unavailable_button_floors,
+    ))
+    values = tuple(
+        value for value in range(min_floor, max_floor + 1)
+        if value != 0 and value not in missing
+    )
     if not values:
         raise LocationManifestError("电梯按钮范围不能只包含 0")
     return values
 
 
-def physical_floor_index(min_floor: int, max_floor: int, button_floor: int) -> int:
+def physical_floor_index(
+    min_floor: int,
+    max_floor: int,
+    button_floor: int,
+    unavailable_button_floors: object = (),
+) -> int:
     """Resolve one elevator button label to its zero-based physical level."""
-    values = button_sequence(min_floor, max_floor)
+    unavailable = normalise_unavailable_button_floors(
+        min_floor, max_floor, unavailable_button_floors,
+    )
+    values = button_sequence(min_floor, max_floor, unavailable)
     if button_floor == 0:
         raise LocationManifestError("电梯按钮 0 不参与物理楼层编号")
+    if button_floor in unavailable:
+        raise LocationManifestError("电梯按钮层为缺失按键")
     if button_floor not in values:
         raise LocationManifestError("电梯按钮层不在服务范围内")
     return values.index(button_floor)
@@ -231,15 +281,15 @@ def compile_location_manifest(
                     ).encode("utf-8"),
                 )
             )
-            entry: dict[str, Any] = {
-                "type": binding["type"],
+            entry: dict[str, Any] = {"type": binding["type"]}
+            if binding["type"] == "floor":
+                entry["floor"] = binding["floor_template"]
+            entry.update({
                 "yaml": localization.installed,
                 "2D_yaml": map_yaml.installed,
                 "init_go": resolved["init_go"],
                 "init_return": resolved["init_return"],
-            }
-            if binding["type"] == "floor":
-                entry["floor"] = binding["floor_template"]
+            })
             locations.setdefault((building, unit), []).append(entry)
             summaries.append({
                 "building": building,
@@ -379,9 +429,26 @@ def _resolve_route(
     components = _indexed_items(project.get("components"), "组件")
     start = _route_waypoint(route.get("task_start_waypoint_id"), waypoints, bindings[0], "任务起点")
     target = _route_waypoint(route.get("task_target_waypoint_id"), waypoints, bindings[-1], "任务目标")
-    return_point = _final_elevator_call_pose(
-        project, bindings[-1], waypoints, components,
-        legacy_id=route.get("task_return_waypoint_id"),
+    try:
+        target_transitions = task_segment_transitions(
+            project, bindings[-1]["map_asset_id"],
+        )
+        target_return_transitions = return_task_transition_points(target_transitions)
+    except TaskPathError as exc:
+        raise LocationManifestError(str(exc)) from exc
+    for transition in target_transitions:
+        _validate_pose(
+            assets[bindings[-1]["map_asset_id"]],
+            task_transition_pose(transition),
+            "目标层任务过渡点",
+        )
+    return_point = (
+        task_transition_pose(target_return_transitions[0])
+        if target_return_transitions
+        else _final_elevator_call_pose(
+            project, bindings[-1], waypoints, components,
+            legacy_id=route.get("task_return_waypoint_id"),
+        )
     )
     links = route.get("links")
     if not isinstance(links, list) or len(links) != len(bindings) - 1:

@@ -67,8 +67,39 @@ def _item_status(status: str) -> tuple[str, str]:
         "planned": ("未执行", "planned"),
         "running": ("执行中", "running"),
         "blocked": ("已拦截", "failed"),
+        "skipped": ("未执行", "planned"),
     }
     return labels.get(status, (status or "未知", "unknown"))
+
+
+def _mode_text(plan: AcceptancePlan) -> str:
+    return "R6B 多点配送" if plan.execution_mode == "multi_r6b" else "R6S 单点任务"
+
+
+def _cargo_type_text(value: int) -> str:
+    return {1: "上舱自动", 2: "下舱自动", 0: "双舱自动", -1: "不自动"}.get(value, str(value))
+
+
+def _delivery_evidence_html(item) -> str:
+    if item.multi_request is None:
+        return ""
+    evidence = {
+        str(entry.get("delivery_code", "")): entry
+        for entry in item.delivery_evidence or []
+        if isinstance(entry, dict)
+    }
+    rows = []
+    for destination in item.multi_request.destinations:
+        event = evidence.get(destination.delivery_code, {})
+        status, status_class = _item_status(str(event.get("status", "skipped")))
+        message = str(event.get("message", "未收到配送码事件"))
+        rows.append(
+            "<li>"
+            f"{escape(destination.floor)} 层 {escape(destination.door)} 户 · {_cargo_type_text(destination.cargo_type)} · "
+            f"配送码 {escape(destination.delivery_code)} · <span class=\"{status_class}\">{escape(status)}</span>"
+            f"<br><small>{escape(message)}</small></li>"
+        )
+    return "<ul class=\"delivery-evidence\">" + "".join(rows) + "</ul>"
 
 
 class AcceptanceReportWriter:
@@ -123,10 +154,26 @@ class AcceptanceReportWriter:
         result = evaluate_conclusion(plan, AcceptanceCriteria.from_dict(plan.criteria_snapshot))
         with (self.report_dir / csv_filename).open("w", newline="", encoding="utf-8-sig") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["Plan_ID", "Filename", "Community", "Building", "Unit", "Floor", "Door", "Status", "Message", "SHA256", "Started_At", "Finished_At", "Duration_s"])
+            writer.writerow(["Plan_ID", "Execution_Mode", "Chain_UUID", "Filename", "Community", "Building", "Unit", "Floor", "Door", "Cargo_Type", "Delivery_Code", "Delivery_Status", "Delivery_Message", "Status", "Message", "SHA256", "Started_At", "Finished_At", "Duration_s"])
             for item in plan.items:
                 p = item.parameters
-                writer.writerow([plan.plan_id, item.filename, p.community, p.building, p.unit, p.floor, p.door, item.status, item.message, item.sha256, item.started_at, item.finished_at, item.duration_s])
+                evidence = {
+                    str(entry.get("delivery_code", "")): entry
+                    for entry in item.delivery_evidence or []
+                    if isinstance(entry, dict)
+                }
+                if item.multi_request is None:
+                    writer.writerow([plan.plan_id, plan.execution_mode, "", item.filename, p.community, p.building, p.unit, p.floor, p.door, "", "", "", "", item.status, item.message, item.sha256, item.started_at, item.finished_at, item.duration_s])
+                    continue
+                for destination in item.multi_request.destinations:
+                    event = evidence.get(destination.delivery_code, {})
+                    writer.writerow([
+                        plan.plan_id, plan.execution_mode, item.multi_request.task_uuid, item.filename,
+                        p.community, destination.building, destination.unit, destination.floor, destination.door,
+                        _cargo_type_text(destination.cargo_type), destination.delivery_code,
+                        event.get("status", "skipped"), event.get("message", "未收到配送码事件"),
+                        item.status, item.message, item.sha256, item.started_at, item.finished_at, item.duration_s,
+                    ])
 
         coverage = result.coverage.to_dict()["planned"]
         completed = sum(item.status in {"passed", "failed", "cancelled"} for item in plan.items)
@@ -156,12 +203,15 @@ class AcceptanceReportWriter:
         rows = "".join(
             "<tr>"
             f"<td>#{index:02d}<br><small>{escape(item.filename)}</small></td>"
-            f"<td>{item.parameters.building} 栋 {item.parameters.unit} 单元<br>{item.parameters.floor} 层 {item.parameters.door} 户</td>"
+            f"<td>{item.parameters.building} 栋 {item.parameters.unit} 单元<br>{item.parameters.floor} 层 {item.parameters.door} 户"
+            f"{('<br><small>链路 ' + escape(item.multi_request.task_uuid) + ' · ' + str(len(item.multi_request.destinations)) + ' 个配送点</small>') if item.multi_request is not None else ''}</td>"
             f"<td>{_local_time(item.started_at)}</td><td>{_local_time(item.finished_at)}</td><td>{_duration(item.duration_s)}</td>"
             f"<td class=\"{_item_status(item.status)[1]}\">{_item_status(item.status)[0]}</td>"
-            f"<td>{escape(item.message or '—')}</td></tr>"
+            f"<td>{escape(item.message or '—')}{_delivery_evidence_html(item)}</td></tr>"
             for index, item in enumerate(plan.items, start=1)
         ) or '<tr><td colspan="7">验收计划中没有可归档的任务。</td></tr>'
+        chain_count = sum(item.multi_request is not None for item in plan.items)
+        delivery_count = sum(len(item.multi_request.destinations) for item in plan.items if item.multi_request is not None)
 
         status_color = {
             "passed": "var(--success)",
@@ -178,7 +228,7 @@ class AcceptanceReportWriter:
 <header class="report-header"><div><p class="eyebrow">RY ALETHEIA / DEPLOYMENT ACCEPTANCE</p><h1>部署验收报告</h1><p class="header-copy">验收范围：{escape(_scope_text(plan))} · 计划创建：{_local_time(plan.created_at)}</p></div><span class="status-badge {status_class}">{status_label}</span></header>
 <section class="report-summary"><article class="summary-metric"><small>验收任务</small><strong>{len(plan.items)}</strong><span class="metric-detail">已完成 {completed} 项</span></article><article class="summary-metric"><small>通过 / 未通过</small><strong>{passed} / {result.failed_tasks}</strong><span class="metric-detail">人工干预 {plan.manual_interventions} 次</span></article><article class="summary-metric"><small>本次通过率</small><strong>{result.pass_rate:.1f}%</strong><span class="metric-detail">按冻结任务自动计算</span></article><article class="summary-metric"><small>累计执行时长</small><strong>{_duration(elapsed)}</strong><span class="metric-detail">不含等待人工恢复时间</span></article></section>
 <section class="conclusion"><b>{escape(result.status or '尚未完成')}</b><p>{escape(result.message)}</p></section>
-<section class="section-card"><div class="section-title"><h2>验收信息</h2><p>随报告归档 CSV：{escape(csv_filename)}</p></div><dl class="context-grid"><div class="context-item"><dt>验收范围</dt><dd>{escape(_scope_text(plan))}</dd></div><div class="context-item"><dt>计划方式</dt><dd>{'抽样验收' if plan.mode == 'sample' else '全量验收'}</dd></div><div class="context-item"><dt>运行准备</dt><dd>{escape(preparation)}</dd></div><div class="context-item"><dt>开始时间</dt><dd>{_local_time(min(started) if started else None)}</dd></div><div class="context-item"><dt>结束时间</dt><dd>{_local_time(max(finished) if finished else None)}</dd></div><div class="context-item"><dt>计划覆盖</dt><dd>{coverage['physical_building']:.1f}% 物理楼宇单元 · {coverage['floor']:.1f}% 楼层 · {coverage['door']:.1f}% 户</dd></div></dl></section>
+<section class="section-card"><div class="section-title"><h2>验收信息</h2><p>随报告归档 CSV：{escape(csv_filename)}</p></div><dl class="context-grid"><div class="context-item"><dt>验收范围</dt><dd>{escape(_scope_text(plan))}</dd></div><div class="context-item"><dt>任务模式</dt><dd>{_mode_text(plan)}</dd></div><div class="context-item"><dt>计划方式</dt><dd>{'抽样验收' if plan.mode == 'sample' else '全量验收'}</dd></div><div class="context-item"><dt>配送链路</dt><dd>{chain_count} 条 · {delivery_count} 个配送点</dd></div><div class="context-item"><dt>运行准备</dt><dd>{escape(preparation)}</dd></div><div class="context-item"><dt>开始时间</dt><dd>{_local_time(min(started) if started else None)}</dd></div><div class="context-item"><dt>结束时间</dt><dd>{_local_time(max(finished) if finished else None)}</dd></div><div class="context-item"><dt>计划覆盖</dt><dd>{coverage['physical_building']:.1f}% 物理楼宇单元 · {coverage['floor']:.1f}% 楼层 · {coverage['door']:.1f}% 户</dd></div></dl></section>
 <section class="section-card"><div class="section-title"><h2>冻结任务与结果</h2><p>每项均保留执行时间、结果与服务反馈</p></div><div class="table-scroll"><table><thead><tr><th>任务</th><th>位置</th><th>开始</th><th>结束</th><th>耗时</th><th>结果</th><th>反馈</th></tr></thead><tbody>{rows}</tbody></table></div></section>
 <section class="section-card"><div class="section-title"><h2>地图运行轨迹证据</h2><p>实际轨迹、理想路线与虚拟墙以采集结果为准</p></div>{evidence_html}</section>
 <footer class="report-footer">由 RY Aletheia 自动生成。该文件与 CSV 可独立离线归档。</footer></main><script>{REPORT_TRAJECTORY_SCRIPT}</script></body></html>'''

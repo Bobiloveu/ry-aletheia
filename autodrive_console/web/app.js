@@ -118,7 +118,17 @@ function renderRun(run) {
   $('statusBadge').textContent = hasRun ? run.status.toUpperCase() : 'IDLE'; $('statusBadge').className = `badge ${run?.status === 'running' || run?.status === 'preparing' ? '' : 'muted'}`;
   $('progressBar').style.width = `${hasRun ? summary.completed / run.requestedCount * 100 : 0}%`; $('progressText').textContent = hasRun ? `${statusText(run.status)} · ${summary.completed}/${run.requestedCount} 次 · ${summary.passed} 通过 / ${summary.failed} 失败${summary.cancelled ? ` / ${summary.cancelled} 已取消` : ''}` : '暂无执行任务'; $('durationText').textContent = run?.attempts?.length ? `最近 ${minutes(run.attempts.at(-1).duration_s)}` : '—';
   $('resultBody').innerHTML = run?.attempts?.length ? run.attempts.slice().reverse().map(item => `<tr><td>T-${String(item.index).padStart(3, '0')}</td><td>${new Date(item.started_at).toLocaleTimeString('zh-CN', { hour12: false })}</td><td class="status ${item.status}">${item.status.toUpperCase()}</td><td>${escapeHtml(item.message)}</td><td>${minutes(item.duration_s)}</td><td>${item.trajectory?.visualizations?.length ? `<button class="trajectory-view" data-attempt="${item.index}" type="button">查看轨迹</button>` : '—'}</td></tr>`).join('') : `<tr><td colspan="6" class="empty">${escapeHtml(run?.error || '等待测试任务')}</td></tr>`;
-  $('chart').innerHTML = run?.attempts?.length ? run.attempts.map(item => `<div class="bar ${item.status === 'failed' ? 'failed' : ''}" data-tip="${minutes(item.duration_s)}" style="height:${Math.min(100, Math.max(12, item.duration_s * 12))}%"></div>`).join('') : '<div class="chart-empty">执行后显示单次耗时趋势</div>';
+  const attempts = run?.attempts || [], chart = $('chart');
+  chart.setAttribute('role', 'region');
+  chart.tabIndex = 0;
+  if (attempts.length) {
+    const seriesMinWidth = attempts.length * 15 + Math.max(0, attempts.length - 1) * 8;
+    chart.setAttribute('aria-label', `单次耗时趋势：可横向滚动查看全部 ${attempts.length} 轮`);
+    chart.innerHTML = `<div class="chart-series" role="list" style="--chart-series-min-width:${seriesMinWidth}px">${attempts.map(item => `<div class="bar ${item.status === 'failed' ? 'failed' : ''}" role="listitem" data-tip="${minutes(item.duration_s)}" style="height:${Math.min(100, Math.max(12, item.duration_s * 12))}%"></div>`).join('')}</div>`;
+  } else {
+    chart.setAttribute('aria-label', '单次耗时趋势：暂无执行轮次');
+    chart.innerHTML = '<div class="chart-empty">执行后显示单次耗时趋势</div>';
+  }
   renderNodes(run?.preflight); renderLiveProgress(run); const active = ['running', 'queued', 'preparing', 'awaiting_recovery', 'recovering', 'cancelling'].includes(run?.status); $('startButton').disabled = active || !cases.length; $('cancelButton').disabled = !['queued', 'preparing', 'running', 'awaiting_recovery', 'recovering'].includes(run?.status); $('recoveryAction').hidden = run?.status !== 'awaiting_recovery'; $('resumeButton').disabled = run?.status !== 'awaiting_recovery'; $('serviceState').textContent = run?.error || (run?.preflight?.ros_service?.ok ? '本机依赖与 ROS2 服务均已就绪' : '等待本机节点预检');
 }
 async function loadSettings() {

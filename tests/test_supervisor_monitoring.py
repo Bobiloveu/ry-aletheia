@@ -8,6 +8,39 @@ from autodrive_console.supervisor import SupervisorProcess
 
 
 class SupervisorMonitoringTests(unittest.TestCase):
+    def test_health_nodes_follow_dependency_stage_order_before_monitor_only_nodes(self):
+        """仪表盘节点顺序必须与已保存编排阶段一致，并且防御性去重。"""
+        settings = RobotSettings(
+            monitor_nodes=[
+                "MODULES:211-navigate_todoor_server",
+                "MODULES:212-task_execute_server",
+                "MODULES:209-lightning",
+                "MODULES:214-fcrp_bringup",
+                "DRIVERS:110-elevator_mqtt",
+                "DRIVERS:110-elevator_mqtt",
+            ],
+            dependency_plan={
+                "enabled": True,
+                "steps": [
+                    {"nodes": ["MODULES:209-lightning"], "wait_seconds": 0},
+                    {"nodes": ["MODULES:214-fcrp_bringup"], "wait_seconds": 0},
+                    {"nodes": ["MODULES:211-navigate_todoor_server", "MODULES:212-task_execute_server"], "wait_seconds": 0},
+                ],
+            },
+        )
+        gateway = RobotGateway(settings)
+
+        self.assertEqual(
+            [item["supervisor"] for item in gateway._health_nodes()],
+            [
+                "MODULES:209-lightning",
+                "MODULES:214-fcrp_bringup",
+                "MODULES:211-navigate_todoor_server",
+                "MODULES:212-task_execute_server",
+                "DRIVERS:110-elevator_mqtt",
+            ],
+        )
+
     def test_each_supervisor_query_publishes_current_snapshot(self):
         snapshots = []
         settings = RobotSettings(monitor_nodes=["MODULES:209-lightning"])
@@ -104,6 +137,44 @@ class SupervisorMonitoringTests(unittest.TestCase):
             {"name": "MODULES:209-lightning", "status": "RUNNING"},
         ])
         self.assertEqual(updates[-1]["stages"][0]["state"], "ready")
+
+    def test_dependency_orchestration_controls_each_node_once_per_preparation(self):
+        """完整编排结束后的总闸只能复查状态，不能再次发起重启。"""
+        actions = []
+        settings = RobotSettings(
+            dependency_plan={
+                "enabled": True,
+                "steps": [
+                    {"nodes": ["MODULES:209-lightning"], "wait_seconds": 0},
+                    {"nodes": ["MODULES:214-fcrp_bringup"], "wait_seconds": 0},
+                ],
+            }
+        )
+        gateway = RobotGateway(settings)
+
+        class FakeClient:
+            @staticmethod
+            def discover():
+                return [
+                    SupervisorProcess("MODULES:209-lightning", "RUNNING", ""),
+                    SupervisorProcess("MODULES:214-fcrp_bringup", "RUNNING", ""),
+                ]
+
+            @staticmethod
+            def restart(name):
+                actions.append(("restart", name))
+
+            @staticmethod
+            def start(name):
+                actions.append(("start", name))
+
+        with patch("autodrive_console.robot_gateway.SupervisorClient", return_value=FakeClient()), patch.object(
+            gateway, "_wait_stage_running", return_value=(True, "连续 5 次检查均为 RUNNING")
+        ), patch.object(gateway, "_wait_all_dependencies_running", return_value=(True, "全部节点 RUNNING")):
+            ok, _message = gateway.restart_configured_dependencies()
+
+        self.assertTrue(ok)
+        self.assertEqual(actions, [("restart", "MODULES:209-lightning"), ("restart", "MODULES:214-fcrp_bringup")])
 
 
 if __name__ == "__main__":

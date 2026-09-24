@@ -770,6 +770,7 @@ function createWebRtcPlayer(stream) {
   video.playsInline = true;
   video.setAttribute("aria-hidden", "true");
   const detail = document.createElement("p");
+  detail.className = "webrtc-video-detail visually-hidden";
   detail.textContent = "等待网关状态。";
   surface.append(video);
   card.append(header, surface, detail);

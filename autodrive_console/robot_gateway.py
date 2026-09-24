@@ -362,16 +362,25 @@ class RobotGateway:
         return self._wait_stage_running(client, nodes, cancel_event, progress_callback=progress_callback)
 
     def _health_nodes(self) -> list[dict]:
-        """优先使用操作者选择的默认监控节点，兼容旧版本配置。"""
+        """按编排顺序输出健康节点，并兼容旧版本的独立监控配置。"""
         plan = self.settings.dependency_plan
-        if self.settings.monitor_nodes:
-            return [{"id": name, "label": name, "supervisor": name, "required": True} for name in self.settings.monitor_nodes]
+        plan_order: list[str] = []
+        seen_plan: set[str] = set()
         if plan.get("enabled") and plan.get("steps"):
-            return [
-                {"id": name, "label": name, "supervisor": name, "required": True}
-                for step in plan["steps"]
-                for name in step["nodes"]
-            ]
+            for step in plan["steps"]:
+                for name in step["nodes"]:
+                    if name not in seen_plan:
+                        plan_order.append(name)
+                        seen_plan.add(name)
+        monitor_order = list(dict.fromkeys(self.settings.monitor_nodes))
+        if monitor_order:
+            monitored = set(monitor_order)
+            # 编排阶段是运行顺序的唯一来源；只把未加入编排的监控节点追加到末尾。
+            ordered = [name for name in plan_order if name in monitored]
+            ordered.extend(name for name in monitor_order if name not in seen_plan)
+            return [{"id": name, "label": name, "supervisor": name, "required": True} for name in ordered]
+        if plan_order:
+            return [{"id": name, "label": name, "supervisor": name, "required": True} for name in plan_order]
         return self.settings.nodes
 
     @contextmanager

@@ -423,13 +423,17 @@ class VideoManagerTests(unittest.TestCase):
 
     def test_native_video_ingest_is_latest_wins_and_uses_private_vaapi_gstreamer(self):
         source = (ROOT / "live_preprocessor" / "src" / "video_ingest.cpp").read_text(encoding="utf-8")
+        abi = (ROOT / "live_preprocessor" / "src" / "shmsdk_camera_abi.hpp").read_text(encoding="utf-8")
         cmake = (ROOT / "live_preprocessor" / "CMakeLists.txt").read_text(encoding="utf-8")
         build = (ROOT / "build_binary.sh").read_text(encoding="utf-8")
         self.assertIn('rclcpp::SensorDataQoS().keep_last(1)', source)
         self.assertIn('"--node-name"', source)
         self.assertIn('"--input-kind"', source)
         self.assertIn('"--shm-channel"', source)
-        self.assertIn('GetLastCamImage', source)
+        self.assertIn('GetCamImage', abi)
+        self.assertIn('getParm(GET_LAST, 0, 0)', abi)
+        self.assertIn('_Z11GetCamImageiR8CamImage7getParm', abi)
+        self.assertNotIn('GetLastCamImage', source + abi)
         self.assertIn('std::thread shm_reader_', source)
         self.assertIn('find_package(JPEG REQUIRED)', cmake)
         self.assertIn('Node(options.node_name)', source)

@@ -723,32 +723,48 @@ body.theme-light .map-workspace {
   margin: 0;
 }
 .project-row-actions {
-  margin-left: auto;
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 82px;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  justify-self: end;
 }
 .project-row {
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 20px;
+  min-height: 72px;
+  padding: 14px 16px;
+}
+.project-row > :first-child {
+  min-width: 0;
+}
+.project-row small {
+  overflow-wrap: anywhere;
 }
 .project-row-actions button {
   margin-left: 0;
+}
+.project-delete-slot {
+  display: inline-flex;
+  width: 82px;
 }
 .project-delete-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  width: 38px;
-  height: 38px;
-  padding: 0;
+  width: 82px;
+  height: 36px;
+  margin: 0;
+  padding: 0 10px;
   overflow: hidden;
-  border: 1px solid rgba(255, 69, 58, 0.34);
-  border-radius: 999px;
-  background: rgba(255, 69, 58, 0.1);
-  color: #ffb4ad;
+  border: 1px solid rgba(255, 69, 58, 0.54);
+  border-radius: 9px;
+  background: rgba(255, 69, 58, 0.12);
+  color: #ff7f78;
   cursor: pointer;
-  transition: width 180ms ease, background 180ms ease, color 180ms ease, box-shadow 180ms ease;
+  transition: background 160ms ease, color 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
 }
 .project-delete-button .project-delete-icon {
   width: 16px;
@@ -762,24 +778,18 @@ body.theme-light .map-workspace {
   transition: transform 180ms ease;
 }
 .project-delete-button span {
-  max-width: 0;
-  opacity: 0;
-  overflow: hidden;
+  float: none;
   white-space: nowrap;
   font-size: 12px;
-  transition: max-width 180ms ease, opacity 120ms ease;
+  font-weight: 650;
+  line-height: 1.2;
 }
 .project-delete-button:hover,
 .project-delete-button:focus-visible {
-  width: 82px;
   background: #ff453a;
+  border-color: #ff453a;
   color: #fff;
   box-shadow: 0 8px 20px rgba(255, 69, 58, 0.22);
-}
-.project-delete-button:hover span,
-.project-delete-button:focus-visible span {
-  max-width: 34px;
-  opacity: 1;
 }
 .project-delete-button:hover .project-delete-lid,
 .project-delete-button:focus-visible .project-delete-lid {
@@ -789,6 +799,16 @@ body.theme-light .map-workspace {
 .project-delete-button:disabled {
   cursor: wait;
   opacity: 0.55;
+}
+@media (max-width: 560px) {
+  .project-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+  .project-row-actions {
+    justify-self: stretch;
+    justify-content: end;
+  }
 }
 .map-workspace {
   position: relative;
@@ -1155,10 +1175,100 @@ body.theme-light .map-workspace {
   min-width: 0;
   margin: 0;
 }
+.localization-topology-summary {
+  grid-column: 1 / -1;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-sunken);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.localization-identity-fields { display: contents; }
+.localization-binding-panel > .page-muted {
+  margin-bottom: 4px;
+}
+.localization-flow-step {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.localization-flow-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.localization-flow-heading h3,
+.localization-flow-heading p {
+  margin: 0;
+}
+.localization-flow-heading h3 {
+  color: var(--text);
+  font-size: 13px;
+}
+.localization-flow-heading p {
+  max-width: 56ch;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+.localization-step-progress {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+.localization-flow-step > .page-top-action {
+  width: 100%;
+  margin: 0;
+}
+.localization-flow-step.is-waiting {
+  background: color-mix(in srgb, var(--surface-sunken) 62%, transparent);
+}
+.localization-flow-step.is-waiting .localization-step-progress {
+  border-color: var(--line);
+}
+.localization-template-settings {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.localization-template-settings summary {
+  cursor: pointer;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+.localization-template-settings > p {
+  max-width: 60ch;
+  margin: 8px 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
+}
+.localization-template-settings .localization-template-picker {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.localization-template-settings .inline-message {
+  min-height: 0;
+  margin: 8px 0 0;
+}
 .localization-binding-list {
   display: grid;
   gap: 8px;
-  margin-top: 12px;
+  margin-top: 0;
 }
 .localization-binding-row {
   display: flex;
@@ -1227,6 +1337,9 @@ body.theme-light .map-workspace {
   margin-top: 12px;
   padding-top: 14px;
   border-top: 1px solid var(--line-strong);
+}
+.localization-route-dialog.deployment-hidden {
+  display: none !important;
 }
 .localization-route-dialog > header,
 .localization-route-card > header {
@@ -1758,7 +1871,17 @@ body.theme-light:has(#mapWorkspace) .physical-floor strong {
   border-radius: 10px;
   background: var(--surface-sunken);
 }
-.map-stage-summary span {
+.map-stage-target {
+  display: grid;
+  gap: 3px;
+  padding: 1px 0 10px;
+  border-bottom: 1px solid var(--line);
+}
+.map-stage-target strong { color: var(--ink); font-size: 13px; }
+.map-stage-target > span { color: var(--muted); font-size: 11px; line-height: 1.45; }
+.map-stage-target small { color: var(--accent); font-size: 11px; font-weight: 700; }
+.map-stage-target.complete small { color: var(--success, #2fa86f); }
+.map-stage-summary > span {
   display: grid;
   grid-template-columns: 19px minmax(0, 1fr);
   gap: 7px;
@@ -1766,10 +1889,10 @@ body.theme-light:has(#mapWorkspace) .physical-floor strong {
   color: var(--muted);
   font-size: 10px;
 }
-.map-stage-summary .active { color: var(--ink); }
-.map-stage-summary .active b { border-color: var(--accent); color: var(--accent); }
-.map-stage-summary .done { color: var(--ink); }
-.map-stage-summary .done b { border-color: #2fa86f; background: #2fa86f; color: #fff; }
+.map-stage-summary > .active { color: var(--ink); }
+.map-stage-summary > .active b { border-color: var(--accent); color: var(--accent); }
+.map-stage-summary > .done { color: var(--ink); }
+.map-stage-summary > .done b { border-color: #2fa86f; background: #2fa86f; color: #fff; }
 .mapping-session-panel .panel-title { margin-bottom: 8px; }
 .mapping-session-panel .page-muted { margin: 0 0 12px; font-size: 11px; line-height: 1.5; }
 .mapping-actions { display: flex; flex-wrap: wrap; gap: 7px; }
@@ -2861,4 +2984,446 @@ body.theme-light .task-preview-button { color: #1d1d1f; border-color: rgba(29,29
   body.theme-light .task-preview-topbar,
   body.theme-light .task-preview-inspector,
   body.theme-light .task-preview-footer { background: #fff; }
+}
+
+/* Single-task deployment console. The workflow owns sequencing; the
+   workspace only exposes the controls required by the current task. */
+.deployment-guide,
+.deployment-task-console {
+  width: min(100%, 1480px);
+  max-width: 1480px;
+  margin-right: auto;
+  margin-left: auto;
+}
+
+.deployment-guide {
+  padding: 16px 18px;
+  box-shadow: none;
+}
+
+.deployment-task-console {
+  display: grid;
+  max-width: 1480px;
+  grid-template-columns: minmax(0, 1fr) 292px;
+  align-items: start;
+  gap: 18px;
+}
+
+.deployment-task-main {
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+}
+
+.deployment-task-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 24px;
+  min-height: 132px;
+  padding: 22px 24px;
+  border: 1px solid color-mix(in srgb, var(--accent, #0a84ff) 72%, var(--line-strong, #354249));
+  border-radius: var(--radius, 14px);
+  background: var(--surface, #171c1e);
+}
+
+.deployment-task-sequence {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--accent, #0a84ff);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.deployment-task-copy h2 {
+  margin: 0;
+  font-size: clamp(20px, 1.55vw, 26px);
+  letter-spacing: -.02em;
+}
+
+.deployment-task-copy > p {
+  max-width: 760px;
+  margin: 8px 0 0;
+  color: var(--muted, #8f9aa0);
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+#deploymentTaskCriterion {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+#deploymentTaskCriterion span {
+  color: var(--text, #f5f5f7);
+  font-weight: 700;
+}
+
+.deployment-task-action .page-top-action {
+  min-width: 168px;
+  min-height: 44px;
+}
+
+.deployment-task-workspace {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--line, #2a3439);
+  border-radius: var(--radius, 14px);
+  background: var(--surface, #171c1e);
+}
+
+.deployment-task-workspace .page-grid {
+  display: grid !important;
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 12px !important;
+}
+
+.deployment-task-workspace .page-grid > .panel {
+  grid-column: 1 !important;
+  grid-row: auto !important;
+  min-width: 0;
+  margin: 0;
+}
+
+.deployment-task-hidden { display: none !important; }
+
+.deployment-task-after {
+  padding: 10px 14px;
+  border: 1px solid var(--line, #2a3439);
+  border-radius: 10px;
+  color: var(--muted, #8f9aa0);
+  background: var(--surface, #171c1e);
+  font-size: 12px;
+}
+
+.deployment-task-progress {
+  position: sticky;
+  top: 18px;
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  gap: 0;
+  padding: 18px;
+  border: 1px solid var(--line, #2a3439);
+  border-radius: var(--radius, 14px);
+  background: var(--surface, #171c1e);
+}
+
+.deployment-task-progress h2 {
+  margin: 0 0 10px;
+  font-size: 16px;
+}
+
+.deployment-task-progress > p {
+  margin: 0;
+  color: var(--muted, #8f9aa0);
+  font-size: 12px;
+}
+
+.deployment-task-progress-item {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 13px 0;
+  border-top: 1px solid var(--line, #2a3439);
+}
+
+.deployment-task-progress-mark {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--line-strong, #354249);
+  border-radius: 50%;
+  color: var(--muted, #8f9aa0);
+  font-size: 11px;
+}
+
+.deployment-task-progress-item b,
+.deployment-task-progress-item small {
+  display: block;
+}
+
+.deployment-task-progress-item b { font-size: 12px; }
+.deployment-task-progress-item small {
+  margin-top: 3px;
+  color: var(--muted, #8f9aa0);
+  font-size: 11px;
+}
+
+.deployment-task-progress-item.current .deployment-task-progress-mark {
+  border-color: var(--accent, #0a84ff);
+  background: var(--accent, #0a84ff);
+  color: #fff;
+}
+
+.deployment-task-progress-item.complete .deployment-task-progress-mark {
+  border-color: #12a150;
+  color: #12a150;
+}
+
+.deployment-task-receipt {
+  margin-bottom: 10px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, #12a150 58%, var(--line, #2a3439));
+  border-radius: 10px;
+  color: #31c46c;
+  background: color-mix(in srgb, var(--surface, #171c1e) 90%, #12a150 10%);
+  font-size: 12px;
+}
+
+.deployment-map-source-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 16px 0;
+  padding: 0;
+  border: 0;
+}
+
+.deployment-map-source-choices legend {
+  grid-column: 1 / -1;
+  margin-bottom: 2px;
+  font-weight: 700;
+}
+
+.deployment-map-source-choices label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 48px;
+  padding: 0 14px;
+  border: 1px solid var(--line-strong, #354249);
+  border-radius: 10px;
+  background: var(--surface-sunken, #101416);
+  cursor: pointer;
+}
+
+.deployment-map-source-choices input { width: auto; margin: 0; }
+
+.deployment-review-readonly {
+  display: grid;
+  gap: 18px;
+  padding: 22px 24px;
+  border: 1px solid var(--line-strong, #354249);
+  border-radius: var(--radius, 14px);
+  background: var(--surface, #171c1e);
+}
+
+.deployment-review-state {
+  display: block;
+  margin-bottom: 7px;
+  color: #31c46c;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.deployment-review-readonly h2 { margin: 0; font-size: 24px; }
+.deployment-review-readonly p { margin: 7px 0 0; color: var(--muted, #8f9aa0); line-height: 1.55; }
+.deployment-review-readonly dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.deployment-review-readonly dl > div { padding: 12px 14px; border: 1px solid var(--line, #2a3439); border-radius: 9px; }
+.deployment-review-readonly dt { color: var(--muted, #8f9aa0); font-size: 12px; }
+.deployment-review-readonly dd { margin: 4px 0 0; font-weight: 700; }
+.deployment-review-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+.deployment-edit-impact {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, .58);
+}
+
+.deployment-edit-impact.deployment-hidden { display: none !important; }
+
+.deployment-edit-impact-card {
+  width: min(100%, 560px);
+  padding: 24px;
+  border: 1px solid var(--line-strong, #354249);
+  border-radius: 16px;
+  background: var(--surface, #171c1e);
+  box-shadow: 0 22px 70px rgba(0, 0, 0, .34);
+}
+
+.deployment-edit-impact-card h2 { margin: 0; font-size: 22px; }
+.deployment-edit-impact-card > p { margin: 10px 0 18px; color: var(--muted, #8f9aa0); line-height: 1.55; }
+.deployment-edit-impact-card ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.deployment-edit-impact-card li { display: flex; justify-content: space-between; gap: 16px; padding: 11px 12px; border: 1px solid var(--line, #2a3439); border-radius: 9px; }
+.deployment-edit-impact-card li span { color: var(--muted, #8f9aa0); font-size: 12px; text-align: right; }
+.deployment-edit-impact-card li.invalid span { color: #ff899a; }
+.deployment-edit-impact-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+body.deployment-edit-impact-open { overflow: hidden; }
+body.deployment-edit-impact-open > main,
+body.deployment-edit-impact-open > aside { pointer-events: none; }
+
+body.theme-light .deployment-review-readonly,
+body.theme-light .deployment-edit-impact-card { background: var(--surface, #fff) !important; }
+
+body.theme-light .deployment-task-card,
+body.theme-light .deployment-task-workspace,
+body.theme-light .deployment-task-after,
+body.theme-light .deployment-task-progress {
+  border-color: var(--line, #d9dce2) !important;
+  background: var(--surface, #fff) !important;
+  color: var(--ink, #1d1d1f) !important;
+}
+
+.deployment-edit-impact button:focus-visible,
+.deployment-review-readonly button:focus-visible,
+.deployment-task-card button:focus-visible {
+  outline: 2px solid var(--accent, #0a84ff);
+  outline-offset: 3px;
+}
+
+@media (max-width: 1040px) {
+  .deployment-task-console {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .deployment-task-progress {
+    position: static;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+  .deployment-task-progress h2 { grid-column: 1 / -1; }
+  .deployment-task-progress-item { padding: 10px 6px; }
+}
+
+@media (max-width: 760px) {
+  .deployment-task-card {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 18px;
+  }
+  .deployment-task-action .page-top-action { width: 100%; }
+  .deployment-guide-steps {
+    grid-template-columns: repeat(5, minmax(154px, 1fr));
+    overflow-x: auto;
+  }
+  .deployment-task-console input,
+  .deployment-task-console select,
+  .deployment-task-console textarea { font-size: 16px; }
+}
+
+@media (max-width: 680px) {
+  .deployment-task-progress { grid-template-columns: minmax(0, 1fr); }
+  .deployment-task-progress h2 { grid-column: auto; }
+  .deployment-map-source-choices { grid-template-columns: minmax(0, 1fr); }
+  .deployment-review-readonly dl { grid-template-columns: minmax(0, 1fr); }
+  .deployment-review-actions,
+  .deployment-edit-impact-actions { align-items: stretch; flex-direction: column-reverse; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .deployment-task-receipt,
+  .deployment-edit-impact,
+  .deployment-task-card,
+  .deployment-task-progress-item { transition: none !important; }
+}
+
+/* Final console authority: legacy stage selectors are intentionally more
+   specific, so the task workspace wins with an equally explicit scope. */
+body:has(#deploymentTaskConsole)[data-deployment-stage] main.page-main > .page-header,
+body:has(#deploymentTaskConsole)[data-deployment-stage] #deploymentGuide,
+body:has(#deploymentTaskConsole)[data-deployment-stage] #deploymentTaskConsole {
+  width: min(100%, 1480px) !important;
+  max-width: 1480px !important;
+  margin-right: auto !important;
+  margin-left: auto !important;
+}
+
+body:has(#deploymentTaskConsole)[data-deployment-stage] #deploymentGuide {
+  padding: 16px 0;
+}
+
+body:has(#deploymentTaskConsole)[data-deployment-stage] #deploymentTaskWorkspace #deploymentTaskPanels {
+  display: grid !important;
+  width: 100% !important;
+  max-width: none !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  justify-content: stretch !important;
+}
+
+body:has(#deploymentTaskConsole)[data-deployment-stage] #deploymentTaskWorkspace #deploymentTaskPanels > .panel {
+  display: block;
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: none !important;
+  grid-column: 1 !important;
+  grid-row: auto !important;
+}
+
+body:has(#deploymentTaskConsole)[data-deployment-stage] #deploymentTaskWorkspace #deploymentTaskPanels > .deployment-task-hidden {
+  display: none !important;
+}
+
+body[data-deployment-task="project.createProject"] #createProject,
+body[data-deployment-task="project.confirmScene"] #saveDeploymentFlow,
+body[data-deployment-task="maps.source"] #importMap,
+body[data-deployment-task="maps.source"] #prepareMapping,
+body[data-deployment-task="maps.source"] #openMappingWorkbench,
+body[data-deployment-task="maps.import"] #importMap,
+body[data-deployment-task="maps.describe"] #importMap,
+body[data-deployment-task="maps.mapping_prepare"] #prepareMapping,
+body[data-deployment-task="maps.mapping_continue"] #openMappingWorkbench,
+body[data-deployment-task="maps.assign"] #assignMapStage,
+body[data-deployment-task="export.saveCompilerIdentity"] #saveTaskCompilerConfig,
+body[data-deployment-task="export.preview"] #generateTaskCompilerPreview,
+body[data-deployment-task="export.export"] #downloadTaskCompilerBundle {
+  display: none !important;
+}
+
+/* Edit mode may expose several existing save controls, but the task card
+   remains the only visually primary route through the workflow. */
+body[data-deployment-task$=".edit"] #deploymentTaskWorkspace .page-top-action {
+  border: 1px solid var(--line-strong, #354249);
+  color: var(--text, #f5f5f7);
+  background: transparent;
+  box-shadow: none;
+}
+
+body.theme-light[data-deployment-task$=".edit"] #deploymentTaskWorkspace .page-top-action {
+  color: var(--ink, #1d1d1f);
+}
+
+/* Project rows are a compact action list, not a map-editor asset row. Keep
+   their insets and action columns independent from the generic asset rules. */
+body:has(#deploymentTaskConsole) .project-row {
+  grid-template-columns: minmax(0, 1fr) max-content !important;
+  align-items: center;
+  gap: 20px;
+  min-height: 72px;
+  padding: 14px 16px !important;
+  border: 1px solid var(--line, #2a3439);
+  border-radius: 10px;
+  background: var(--surface-sunken, #101416);
+}
+
+body:has(#deploymentTaskConsole) .project-row-actions {
+  display: grid;
+  grid-template-columns: auto 82px;
+  align-items: center;
+  gap: 10px;
+  justify-self: end;
+}
+
+@media (max-width: 560px) {
+  body:has(#deploymentTaskConsole) .project-row {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 12px;
+  }
+  body:has(#deploymentTaskConsole) .project-row-actions {
+    justify-self: stretch;
+    justify-content: end;
+  }
 }
