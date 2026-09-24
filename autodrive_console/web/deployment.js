@@ -2600,13 +2600,18 @@ function renderElevatorLandingDialog() {
     ? `编号 ${linked.elevator_id} · ${protocolTitle(selectedProject, linked.elevator_protocol)} · 服务 ${linked.min_floor}F 至 ${linked.max_floor}F${unavailableElevatorButtons(linked).length ? ` · 缺失按键 ${unavailableElevatorButtons(linked).join("、")}` : ""}。各楼层分别确认门方向。`
     : "请先新建一部物理电梯，再在其他楼层关联它。";
   const isNew = editing || elevatorLandingMode() === "new";
+  const showLocalButtonFloor = !editing;
   $("elevatorLandingDialogTitle").textContent = editing ? "编辑共享电梯" : "放置电梯落点";
   $("elevatorLandingDialogDescription").textContent = editing
-    ? "此处修改的是同一部实体电梯的编号、协议和服务范围；各地图的门向不会被改动。"
-    : "共享硬件信息只维护一次；本层只确认门向与候梯距离。";
+    ? "这里只编辑实体电梯的共享属性；当前地图的按钮层、门向和候梯距离请在右侧组件面板维护。"
+    : "先关联或新建共享电梯，再填写当前地图的实际面板按键层。";
   $("elevatorLandingDialog").querySelector(".elevator-landing-mode").classList.toggle("deployment-hidden", editing);
   $("existingElevatorLandingFields").classList.toggle("deployment-hidden", isNew);
   $("newElevatorLandingFields").classList.toggle("deployment-hidden", !isNew);
+  $("elevatorLandingButtonFloorField").classList.toggle("deployment-hidden", !showLocalButtonFloor);
+  $("elevatorLandingButtonFloorLabel").textContent = activeMap?.label
+    ? `当前地图“${activeMap.label}”的电梯面板按键层`
+    : "本地图电梯按钮层";
   $("confirmElevatorLanding").textContent = editing ? "保存共享配置" : "确认放置";
   $("confirmElevatorLanding").disabled = !elevatorLandingDraft || (!isNew && !linked);
   $("elevatorLandingMessage").textContent = isNew

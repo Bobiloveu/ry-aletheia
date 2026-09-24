@@ -1507,6 +1507,17 @@ def test_deployment_editor_offers_shared_elevator_landing_association():
     assert "unavailable_button_floors" in source
 
 
+def test_shared_elevator_editor_hides_the_current_map_button_floor_field():
+    """Catches presenting an editable local button value that shared saves ignore."""
+    root = Path(__file__).resolve().parents[1] / "autodrive_console/web"
+    html = (root / "deployment.html").read_text(encoding="utf-8")
+    source = (root / "deployment.js").read_text(encoding="utf-8")
+
+    assert 'id="elevatorLandingButtonFloorField"' in html
+    assert "const showLocalButtonFloor = !editing;" in source
+    assert '"elevatorLandingButtonFloorField").classList.toggle("deployment-hidden", !showLocalButtonFloor)' in source
+
+
 def test_deployment_page_uses_component_task_compiler_routes():
     """The PC deployment workflow must stay component-first and export-only."""
     root = Path(__file__).resolve().parents[1]

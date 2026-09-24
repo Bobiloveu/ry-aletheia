@@ -1138,6 +1138,10 @@ body.theme-light .map-workspace {
   min-width: 0;
   margin: 0;
 }
+.elevator-button-floor small {
+  color: var(--muted);
+  line-height: 1.45;
+}
 .elevator-shared-summary {
   margin: 0;
   padding: 9px 10px;

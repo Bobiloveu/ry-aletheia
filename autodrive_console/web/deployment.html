@@ -492,7 +492,7 @@
                 <label>最高服务楼层<input id="newPhysicalElevatorMaxFloor" type="number" step="1" value="1" /></label>
                 <label class="elevator-missing-buttons">缺失按键（可选）<input id="newPhysicalElevatorUnavailableButtons" type="text" inputmode="numeric" placeholder="例如：11；多个用逗号分隔" /><small>只填面板实际不存在的按键；服务范围已在上方设置，无需重复填写。</small></label>
               </div>
-              <label class="elevator-button-floor">本地图电梯按钮层<input id="elevatorLandingButtonFloor" type="number" step="1" placeholder="例如：1（不允许 0）" /></label>
+              <label id="elevatorLandingButtonFloorField" class="elevator-button-floor"><span id="elevatorLandingButtonFloorLabel">本地图电梯按钮层</span><input id="elevatorLandingButtonFloor" type="number" step="1" placeholder="例如：1（不允许 0）" /><small>只填写当前地图实际对应的电梯面板按键；共享电梯属性无需重复填写。</small></label>
               <p id="elevatorLandingMessage" class="inline-message">选择要关联的物理电梯。</p>
               <div class="component-actions">
                 <button id="confirmElevatorLanding" class="page-top-action" type="button">确认放置</button>
