@@ -1134,6 +1134,9 @@ body.theme-light .map-workspace {
   color: var(--muted);
   font-size: 10px;
 }
+.elevator-button-floor.deployment-hidden {
+  display: none;
+}
 .elevator-button-floor input {
   min-width: 0;
   margin: 0;
