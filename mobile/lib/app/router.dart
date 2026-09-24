@@ -8,6 +8,7 @@ import 'motion/aletheia_motion.dart';
 import '../debug_ui/debug_ui_gallery_screen.dart';
 import '../features/robot_connection/presentation/robot_connection_screen.dart';
 import '../features/reports/presentation/reports_screen.dart';
+import '../features/reports/presentation/report_detail_screen.dart';
 import '../features/live_observation/presentation/live_observation_screen.dart';
 import '../features/manual_control/presentation/manual_control_screen.dart';
 import '../features/test_cases/presentation/test_cases_screen.dart';
@@ -127,6 +128,15 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             pageBuilder: (context, state) => AletheiaMotion.detailPage(
               key: state.pageKey,
               child: const ReportsScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '${ReportsScreen.routePath}/:reportId',
+            pageBuilder: (context, state) => AletheiaMotion.detailPage(
+              key: state.pageKey,
+              child: ReportDetailScreen(
+                reportId: state.pathParameters['reportId']!,
+              ),
             ),
           ),
           GoRoute(

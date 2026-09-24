@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../app/motion/aletheia_interaction.dart';
 import '../../../app/theme/aletheia_theme.dart';
 import '../../../core/connection/robot_connection_controller.dart';
 import '../../robot_connection/presentation/robot_connection_screen.dart';
@@ -101,7 +102,7 @@ class ToolsScreen extends ConsumerWidget {
                   icon: Icons.description_outlined,
                   title: '测试报告',
                   detail: connected
-                      ? '查看已生成的测试报告，并在浏览器中打开。'
+                      ? '在 App 内查看已生成报告的结论、指标和任务明细。'
                       : '连接机器人后即可查看测试报告。',
                   actionLabel: connected ? '查看报告' : '连接机器人',
                   onTap: () => context.go(
@@ -179,73 +180,75 @@ class _ToolEntry extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: AletheiaTheme.surface,
-      borderRadius: BorderRadius.circular(AletheiaTheme.sectionRadius),
-      child: InkWell(
+    return AletheiaPressFeedback(
+      child: Material(
+        color: AletheiaTheme.surface,
         borderRadius: BorderRadius.circular(AletheiaTheme.sectionRadius),
-        onTap: onTap,
-        child: Container(
-          constraints: BoxConstraints(minHeight: 128),
-          padding: EdgeInsets.all(18),
-          decoration: BoxDecoration(
-            border: Border.all(color: AletheiaTheme.border),
-            borderRadius: BorderRadius.circular(AletheiaTheme.sectionRadius),
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: 42,
-                height: 42,
-                decoration: BoxDecoration(
-                  color: AletheiaTheme.cyan.withValues(alpha: .12),
-                  borderRadius: BorderRadius.circular(
-                    AletheiaTheme.controlRadius,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(AletheiaTheme.sectionRadius),
+          onTap: onTap,
+          child: Container(
+            constraints: BoxConstraints(minHeight: 128),
+            padding: EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              border: Border.all(color: AletheiaTheme.border),
+              borderRadius: BorderRadius.circular(AletheiaTheme.sectionRadius),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: AletheiaTheme.cyan.withValues(alpha: .12),
+                    borderRadius: BorderRadius.circular(
+                      AletheiaTheme.controlRadius,
+                    ),
+                  ),
+                  child: Icon(icon, color: AletheiaTheme.cyan),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w700),
+                      ),
+                      SizedBox(height: 6),
+                      Text(
+                        detail,
+                        style: TextStyle(
+                          color: AletheiaTheme.textSecondary,
+                          height: 1.4,
+                        ),
+                      ),
+                      SizedBox(height: 14),
+                      Text(
+                        actionLabel,
+                        style: TextStyle(
+                          color: AletheiaTheme.cyan,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                child: Icon(icon, color: AletheiaTheme.cyan),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: Theme.of(context).textTheme.titleMedium
-                          ?.copyWith(fontWeight: FontWeight.w700),
-                    ),
-                    SizedBox(height: 6),
-                    Text(
-                      detail,
-                      style: TextStyle(
-                        color: AletheiaTheme.textSecondary,
-                        height: 1.4,
-                      ),
-                    ),
-                    SizedBox(height: 14),
-                    Text(
-                      actionLabel,
-                      style: TextStyle(
-                        color: AletheiaTheme.cyan,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ],
+                SizedBox(width: 8),
+                Padding(
+                  padding: EdgeInsets.only(top: 10),
+                  child: Icon(
+                    Icons.arrow_forward_ios_rounded,
+                    color: AletheiaTheme.textTertiary,
+                    size: 16,
+                  ),
                 ),
-              ),
-              SizedBox(width: 8),
-              Padding(
-                padding: EdgeInsets.only(top: 10),
-                child: Icon(
-                  Icons.arrow_forward_ios_rounded,
-                  color: AletheiaTheme.textTertiary,
-                  size: 16,
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

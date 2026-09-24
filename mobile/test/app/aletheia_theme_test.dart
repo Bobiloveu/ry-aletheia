@@ -20,6 +20,20 @@ void main() {
     );
   });
 
+  test('daylight major map grid remains discernible over white free space', () {
+    AletheiaTheme.light();
+
+    final compositedLine = Color.alphaBlend(
+      AletheiaTheme.mapGridMajor,
+      Colors.white,
+    );
+
+    expect(
+      _contrastRatio(compositedLine, Colors.white),
+      greaterThanOrEqualTo(1.2),
+    );
+  });
+
   test('the default HMI treatment remains dark', () {
     final theme = AletheiaTheme.dark();
 
@@ -30,4 +44,14 @@ void main() {
       Brightness.dark,
     );
   });
+}
+
+double _contrastRatio(Color first, Color second) {
+  final lighter = first.computeLuminance() > second.computeLuminance()
+      ? first.computeLuminance()
+      : second.computeLuminance();
+  final darker = first.computeLuminance() > second.computeLuminance()
+      ? second.computeLuminance()
+      : first.computeLuminance();
+  return (lighter + .05) / (darker + .05);
 }

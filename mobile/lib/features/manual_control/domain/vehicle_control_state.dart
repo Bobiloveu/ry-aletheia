@@ -36,7 +36,11 @@ class VehicleControlVector {
     if (math.sqrt(x * x + y * y) < deadZone.clamp(0.0, 1.0)) return stop;
 
     // Screen Y increases downwards. Right is a clockwise (negative) turn.
-    return VehicleControlVector(y == 0 ? 0 : -y, x == 0 ? 0 : -x);
+    // When backing up, the same body yaw bends the ground track to the
+    // opposite side. Flip the steering component so the car's travel path
+    // remains aligned with the side of the joystick that the operator chose.
+    final angular = x == 0 ? 0 : (y > 0 ? x : -x);
+    return VehicleControlVector(y == 0 ? 0 : -y, angular.toDouble());
   }
 
   final double linearRatio;
@@ -103,6 +107,7 @@ class VehicleControlState {
     required this.manualReady,
     required this.canBeginManual,
     required this.session,
+    required this.safety,
     required this.speed,
     required this.emergency,
     required this.chassisParameters,
@@ -118,6 +123,7 @@ class VehicleControlState {
       manualReady: json['manual_ready'] == true,
       canBeginManual: json['can_begin_manual'] == true,
       session: VehicleControlSession.fromJson(json['session']),
+      safety: VehicleControlSafety.fromJson(json['safety']),
       speed: VehicleSpeed.fromJson(json['speed']),
       emergency: EmergencyStop.fromJson(json['emergency_stop']),
       chassisParameters: ChassisParameters.fromJson(json['chassis_parameters']),
@@ -132,6 +138,7 @@ class VehicleControlState {
   final bool manualReady;
   final bool canBeginManual;
   final VehicleControlSession session;
+  final VehicleControlSafety safety;
   final VehicleSpeed speed;
   final EmergencyStop emergency;
   final ChassisParameters chassisParameters;
@@ -140,6 +147,40 @@ class VehicleControlState {
   /// also prove that it still owns the opaque session ID returned by enter.
   bool get motionPermittedByBackend =>
       manualReady && emergency.state == EmergencyStopState.normal;
+}
+
+/// Timing limits published by the current vehicle-control runtime.
+///
+/// Mobile does not own the watchdog. It only uses the authoritative input
+/// deadline to detect a transport delay early and fail closed locally rather
+/// than continue queuing stale joystick intent.
+class VehicleControlSafety {
+  const VehicleControlSafety({
+    required this.publishHz,
+    required this.inputTimeout,
+    required this.heartbeatTimeout,
+  });
+
+  factory VehicleControlSafety.fromJson(Object? value) {
+    final json = _map(value);
+    final inputTimeoutMs = _finiteInteger(json['input_timeout_ms']);
+    final heartbeatTimeoutMs = _finiteInteger(json['heartbeat_timeout_ms']);
+    return VehicleControlSafety(
+      publishHz: _finiteDouble(json['publish_hz']),
+      inputTimeout: inputTimeoutMs > 0
+          ? Duration(milliseconds: inputTimeoutMs)
+          : null,
+      heartbeatTimeout: heartbeatTimeoutMs > 0
+          ? Duration(milliseconds: heartbeatTimeoutMs)
+          : null,
+    );
+  }
+
+  final double publishHz;
+  final Duration? inputTimeout;
+  final Duration? heartbeatTimeout;
+
+  bool get hasInputTimeout => inputTimeout != null;
 }
 
 class VehicleControlSession {

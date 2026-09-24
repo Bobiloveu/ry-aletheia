@@ -10,14 +10,46 @@ abstract final class AletheiaMotion {
   static const fast = Duration(milliseconds: 140);
   static const standard = Duration(milliseconds: 180);
 
+  /// Mathematical timing tokens for low-frequency, semantic interaction.
+  /// They deliberately do not apply to live telemetry, map/video rendering,
+  /// root navigation, or any vehicle-control transport path.
+  static const pressDuration = Duration(milliseconds: 120);
+  static const stateDuration = Duration(milliseconds: 180);
+  static const surfaceDuration = Duration(milliseconds: 240);
+
+  static const pressCurve = Cubic(0.23, 1, 0.32, 1);
+  static const stateCurve = Cubic(0.23, 1, 0.32, 1);
+  static const surfaceCurve = Cubic(0.23, 1, 0.32, 1);
+
   /// A strong, short ease-out that settles without the bounce or visual
   /// weight that would distract from a live robot workspace.
-  static const easeOut = Cubic(0.23, 1, 0.32, 1);
+  static const easeOut = stateCurve;
+
+  static bool isReducedMotion(BuildContext context) =>
+      MediaQuery.disableAnimationsOf(context);
 
   static Duration durationFor(BuildContext context, Duration duration) =>
-      MediaQuery.disableAnimationsOf(context)
-      ? const Duration(milliseconds: 100)
-      : duration;
+      isReducedMotion(context) ? const Duration(milliseconds: 100) : duration;
+
+  /// A theme replacement affects every HMI surface at once. Keep it direct:
+  /// cross-fading the entire app can expose unrelated outgoing route content
+  /// and mixes the palette while a live workspace is still visible.
+  static Duration themeAnimationDuration(BuildContext context) => Duration.zero;
+
+  /// Uses the platform bottom-sheet/dialog transition machinery while keeping
+  /// both directions short and mathematically curved. The reduced-motion
+  /// variant retains a short transition but removes the longer travel time.
+  static AnimationStyle surfaceAnimationStyle(BuildContext context) =>
+      AnimationStyle(
+        duration: isReducedMotion(context)
+            ? const Duration(milliseconds: 120)
+            : surfaceDuration,
+        reverseDuration: isReducedMotion(context)
+            ? const Duration(milliseconds: 120)
+            : surfaceDuration,
+        curve: surfaceCurve,
+        reverseCurve: surfaceCurve.flipped,
+      );
 
   /// Root destinations are high-frequency HMI workspaces. They replace
   /// immediately instead of cross-fading: keeping the old route visible for
@@ -29,6 +61,10 @@ abstract final class AletheiaMotion {
       NoTransitionPage<void>(key: key, child: child);
 
   /// Secondary tools preserve a small spatial cue for drill-in and back.
+  ///
+  /// The arriving route remains fully opaque. Fading a complete page would
+  /// show the outgoing route underneath it, which is especially distracting
+  /// when the previous page contains dense operational content.
   static Page<void> detailPage({
     required LocalKey key,
     required Widget child,
@@ -39,16 +75,27 @@ abstract final class AletheiaMotion {
     reverseTransitionDuration: standard,
     transitionsBuilder: (context, animation, secondaryAnimation, child) {
       final curved = CurvedAnimation(parent: animation, curve: easeOut);
-      final opacity = FadeTransition(opacity: curved, child: child);
+      final canvas = Theme.of(context).scaffoldBackgroundColor;
+      final opaqueSurface = ColoredBox(color: canvas, child: child);
       if (MediaQuery.disableAnimationsOf(context)) {
-        return opacity;
+        return opaqueSurface;
       }
-      return SlideTransition(
-        position: Tween<Offset>(
-          begin: const Offset(.015, 0),
-          end: Offset.zero,
-        ).animate(curved),
-        child: opacity,
+      // Keep an opaque route canvas stationary, then move only the incoming
+      // content. A page body commonly starts with SafeArea/scroll content and
+      // therefore does not paint its own background; translating that body
+      // directly lets the prior route's labels remain visible underneath.
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          ColoredBox(color: canvas),
+          SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(.015, 0),
+              end: Offset.zero,
+            ).animate(curved),
+            child: child,
+          ),
+        ],
       );
     },
   );

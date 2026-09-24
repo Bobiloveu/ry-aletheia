@@ -7,6 +7,52 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets(
+    'Gallery exposes every native-report migration and detail state',
+    (tester) async {
+      for (final id in [
+        'reports_native_ready',
+        'reports_native_failed',
+        'reports_native_legacy',
+        'report_native_detail',
+        'report_native_detail_loading',
+        'report_native_detail_error',
+      ]) {
+        expect(
+          galleryScreenManifest.where((spec) => spec.id == id),
+          hasLength(1),
+          reason: id,
+        );
+      }
+
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            theme: AletheiaTheme.light(),
+            home: DebugGalleryPreview(
+              spec: galleryScreenById('reports_native_failed'),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.text('失败'), findsOneWidget);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            theme: AletheiaTheme.dark(),
+            home: DebugGalleryPreview(
+              spec: galleryScreenById('report_native_detail'),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('全部任务'), findsOneWidget);
+    },
+  );
+
   testWidgets('phone Gallery starts from a full-size mock production page', (
     tester,
   ) async {
@@ -103,6 +149,29 @@ void main() {
       expect(find.byIcon(Icons.lock_outline_rounded), findsOneWidget);
     },
   );
+
+  testWidgets('manual-control Gallery renders a recoverable link delay', (
+    tester,
+  ) async {
+    final latencySpecs = galleryScreenManifest
+        .where((spec) => spec.id == 'manual_control_latency_delayed')
+        .toList();
+    expect(latencySpecs, hasLength(1));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: AletheiaTheme.light(),
+          home: DebugGalleryPreview(spec: latencySpecs.single),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('链路延迟'), findsAtLeastNWidgets(1));
+    expect(find.text('控制已锁定'), findsNothing);
+    expect(find.byIcon(Icons.sync_problem_rounded), findsAtLeastNWidgets(1));
+  });
 
   testWidgets(
     'phone landscape renders the selected production page at device size',

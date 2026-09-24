@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../app/motion/aletheia_motion.dart';
 import '../../../app/theme/aletheia_theme.dart';
 import '../../../core/connection/robot_connection_controller.dart';
 import '../../robot_connection/presentation/robot_connection_screen.dart';
@@ -87,6 +88,7 @@ class _ScenarioEditorState extends ConsumerState<_ScenarioEditor> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      sheetAnimationStyle: AletheiaMotion.surfaceAnimationStyle(context),
       builder: (context) => _ProfileEditorSheet(
         profile: profile,
         endpoint: ref.read(robotConnectionControllerProvider).endpoint,
@@ -123,6 +125,7 @@ class _ScenarioEditorState extends ConsumerState<_ScenarioEditor> {
         context: context,
         isScrollControlled: true,
         backgroundColor: Colors.transparent,
+        sheetAnimationStyle: AletheiaMotion.surfaceAnimationStyle(context),
         builder: (context) => _PreviewSheet(preview: preview),
       );
     } catch (error) {
@@ -194,6 +197,7 @@ class _ScenarioEditorState extends ConsumerState<_ScenarioEditor> {
   }) async =>
       await showDialog<bool>(
         context: context,
+        animationStyle: AletheiaMotion.surfaceAnimationStyle(context),
         builder: (context) => AlertDialog(
           title: Text(title),
           content: Text(detail, style: const TextStyle(height: 1.4)),
@@ -405,6 +409,7 @@ class _ProfileEditorSheetState extends ConsumerState<_ProfileEditorSheet> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      sheetAnimationStyle: AletheiaMotion.surfaceAnimationStyle(context),
       builder: (context) => _FileBrowserSheet(
         kind: kind,
         initialPath: target.text,
@@ -541,6 +546,7 @@ class _FileBrowserSheetState extends ConsumerState<_FileBrowserSheet> {
       final selected = await showModalBottomSheet<bool>(
         context: context,
         isScrollControlled: true,
+        sheetAnimationStyle: AletheiaMotion.surfaceAnimationStyle(context),
         builder: (context) => ScenarioFilePreviewSheet(preview: preview),
       );
       if (selected == true && mounted) {

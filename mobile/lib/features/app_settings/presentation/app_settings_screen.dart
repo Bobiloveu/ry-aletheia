@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../app/motion/aletheia_interaction.dart';
+import '../../../app/motion/aletheia_motion.dart';
 import '../../../app/theme/aletheia_theme.dart';
 import '../application/app_preferences_controller.dart';
 import '../domain/app_preferences.dart';
@@ -124,6 +126,7 @@ class AppSettingsScreen extends ConsumerWidget {
     final value = await showModalBottomSheet<AppLanguage>(
       context: context,
       showDragHandle: true,
+      sheetAnimationStyle: AletheiaMotion.surfaceAnimationStyle(context),
       builder: (context) => _ChoiceSheet<AppLanguage>(
         title: copy.language,
         options: [
@@ -148,6 +151,7 @@ class AppSettingsScreen extends ConsumerWidget {
     final value = await showModalBottomSheet<AppThemePreference>(
       context: context,
       showDragHandle: true,
+      sheetAnimationStyle: AletheiaMotion.surfaceAnimationStyle(context),
       builder: (context) => _ChoiceSheet<AppThemePreference>(
         title: copy.theme,
         options: [
@@ -229,36 +233,42 @@ class _SettingsRow extends StatelessWidget {
   final VoidCallback? onTap;
 
   @override
-  Widget build(BuildContext context) => Material(
-    color: Colors.transparent,
-    child: InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(AletheiaTheme.sectionRadius),
-      child: ConstrainedBox(
-        constraints: BoxConstraints(minHeight: 64),
-        child: Padding(
-          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          child: Row(
-            children: [
-              Icon(icon, color: AletheiaTheme.cyan, size: 21),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title, style: Theme.of(context).textTheme.titleMedium),
-                    SizedBox(height: 3),
-                    Text(value, style: Theme.of(context).textTheme.bodySmall),
-                  ],
+  Widget build(BuildContext context) => AletheiaPressFeedback(
+    enabled: onTap != null,
+    child: Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(AletheiaTheme.sectionRadius),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: 64),
+          child: Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            child: Row(
+              children: [
+                Icon(icon, color: AletheiaTheme.cyan, size: 21),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      SizedBox(height: 3),
+                      Text(value, style: Theme.of(context).textTheme.bodySmall),
+                    ],
+                  ),
                 ),
-              ),
-              if (onTap != null)
-                Icon(
-                  Icons.chevron_right_rounded,
-                  color: AletheiaTheme.textTertiary,
-                ),
-            ],
+                if (onTap != null)
+                  Icon(
+                    Icons.chevron_right_rounded,
+                    color: AletheiaTheme.textTertiary,
+                  ),
+              ],
+            ),
           ),
         ),
       ),

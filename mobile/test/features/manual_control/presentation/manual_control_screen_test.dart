@@ -1,4 +1,5 @@
 import 'package:aletheia_mobile/app/theme/aletheia_theme.dart';
+import 'package:aletheia_mobile/app/motion/aletheia_interaction.dart';
 import 'package:aletheia_mobile/core/connection/robot_connection_controller.dart';
 import 'package:aletheia_mobile/core/connection/robot_connection_state.dart';
 import 'package:aletheia_mobile/core/connection/robot_endpoint.dart';
@@ -99,46 +100,44 @@ void main() {
       await tester.pump();
 
       expect(find.bySemanticsLabel(RegExp('连续方向摇杆，当前停止')), findsOneWidget);
+      expect(find.byType(AletheiaStatusTransition), findsWidgets);
       expect(repository.calls, ['status', 'enter']);
       semantics.dispose();
     },
   );
 
-  testWidgets('backgrounding an active manual page releases only this session', (
-    tester,
-  ) async {
-    final repository = _ManualControlFakeRepository();
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          robotConnectionControllerProvider.overrideWith(
-            _ConnectedController.new,
+  testWidgets(
+    'backgrounding an active manual page releases only this session',
+    (tester) async {
+      final repository = _ManualControlFakeRepository();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            robotConnectionControllerProvider.overrideWith(
+              _ConnectedController.new,
+            ),
+            manualControlRepositoryProvider.overrideWithValue(repository),
+          ],
+          child: MaterialApp(
+            theme: AletheiaTheme.light(),
+            home: const Scaffold(body: ManualControlScreen()),
           ),
-          manualControlRepositoryProvider.overrideWithValue(repository),
-        ],
-        child: MaterialApp(
-          theme: AletheiaTheme.light(),
-          home: const Scaffold(body: ManualControlScreen()),
         ),
-      ),
-    );
-    await tester.pump();
-    await tester.tap(find.text('开始手动控制'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('进入控制'));
-    await tester.pump();
+      );
+      await tester.pump();
+      await tester.tap(find.text('开始手动控制'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('进入控制'));
+      await tester.pump();
 
-    WidgetsBinding.instance.handleAppLifecycleStateChanged(
-      AppLifecycleState.paused,
-    );
-    await tester.pump();
+      WidgetsBinding.instance.handleAppLifecycleStateChanged(
+        AppLifecycleState.paused,
+      );
+      await tester.pump();
 
-    expect(repository.calls, [
-      'status',
-      'enter',
-      'release:manual-session',
-    ]);
-  });
+      expect(repository.calls, ['status', 'enter', 'release:manual-session']);
+    },
+  );
 
   testWidgets('returning a held joystick to center requests STOP immediately', (
     tester,
@@ -347,6 +346,11 @@ VehicleControlState _status({String? sessionId}) =>
         'present': sessionId != null,
         'state': sessionId == null ? 'none' : 'active',
         ...(sessionId == null ? const <String, Object?>{} : {'id': sessionId}),
+      },
+      'safety': {
+        'publish_hz': 20,
+        'input_timeout_ms': 350,
+        'heartbeat_timeout_ms': 1200,
       },
       'speed': {'linear_mps': .2, 'angular_radps': .3, 'min': .1, 'max': 1.0},
       'emergency_stop': {'state': 'normal', 'release': 'idle'},

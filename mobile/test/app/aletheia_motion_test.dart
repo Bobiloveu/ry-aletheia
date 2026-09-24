@@ -12,4 +12,49 @@ void main() {
 
     expect(page, isA<NoTransitionPage<void>>());
   });
+
+  testWidgets('detail pages keep their surface opaque while entering', (
+    tester,
+  ) async {
+    final page = AletheiaMotion.detailPage(
+      key: const ValueKey('detail'),
+      child: const SizedBox.expand(),
+    ) as CustomTransitionPage<void>;
+
+    late Widget transition;
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(),
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          child: Theme(
+            data: ThemeData(scaffoldBackgroundColor: Colors.deepPurple),
+            child: Builder(
+              builder: (context) {
+                transition = page.transitionsBuilder(
+                  context,
+                  kAlwaysCompleteAnimation,
+                  kAlwaysDismissedAnimation,
+                  page.child,
+                );
+                return transition;
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+
+    // A detail route may translate slightly for spatial context, but the
+    // current page must paint an opaque canvas first. Otherwise the outgoing
+    // settings/tool page shows through the incoming page's unpainted areas.
+    expect(
+      find.byWidgetPredicate(
+        (widget) => widget is ColoredBox && widget.color == Colors.deepPurple,
+      ),
+      findsOneWidget,
+    );
+    expect(find.byType(FadeTransition), findsNothing);
+    expect(find.byType(SlideTransition), findsOneWidget);
+  });
 }

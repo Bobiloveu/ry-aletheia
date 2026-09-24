@@ -8,6 +8,7 @@ import '../features/app_settings/data/app_diagnostic_log.dart';
 import '../features/app_settings/domain/app_preferences.dart';
 import '../features/test_runs/application/test_runs_controller.dart';
 import 'router.dart';
+import 'motion/aletheia_motion.dart';
 import 'theme/aletheia_theme.dart';
 
 class AletheiaApp extends ConsumerStatefulWidget {
@@ -65,8 +66,8 @@ class _AletheiaAppState extends ConsumerState<AletheiaApp>
       // The palette transition is deliberately short and non-bouncy: a
       // display preference should feel continuous without making HMI content
       // appear to move or become temporarily unreadable.
-      themeAnimationDuration: const Duration(milliseconds: 180),
-      themeAnimationCurve: Curves.easeOutCubic,
+      themeAnimationDuration: AletheiaMotion.themeAnimationDuration(context),
+      themeAnimationCurve: AletheiaMotion.stateCurve,
       theme: switch (preferences.theme) {
         AppThemePreference.hmiDark => AletheiaTheme.dark(),
         AppThemePreference.daylight => AletheiaTheme.light(),
