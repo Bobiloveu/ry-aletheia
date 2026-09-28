@@ -9,6 +9,21 @@
 
 `GET /api/observation`、`GET /api/observation/active-map` 和 `GET /api/observation/maps/{id}/layers` 暴露活动地图、世界元数据、虚拟墙和遥测数据。当前会话生命周期使用 `POST /api/observation/start`、`/heartbeat` 和 `/stop`。
 
+`GET /api/observation/localization-status` 是 PC 实时页使用的只读定位健康快照；它不下发重定位、Node Manager 或车辆控制命令。响应为：
+
+```json
+{
+  "phase": "relocalizing",
+  "label": "重定位中",
+  "detail": "NDT 匹配质量低",
+  "updated_at": 12345.67
+}
+```
+
+`phase` 的闭集为 `initializing`、`normal`、`warning`、`error`、`relocalizing` 与 `unavailable`。Backend 只读订阅既有 `/localization/status`（`master_interfaces/msg/LocalizationStatus`），将原始 `state`/`error_code` 转换为可读文本；不公开 `fault_id` 或原始数值。接口由车辆运行时提供：该车未提供 `LocalizationStatus` 时，必须返回 `unavailable` 与“该车不支持实时定位状态”，不得暴露 Python 路径或原始异常。超过新鲜度窗口、其他 ROS 模块不可用或未收到首条状态时同样必须返回 `unavailable`，不得假定正常。一次重定位证据以同一非空 `fault_id` 首次进入 `state=4` 计数；它仅在自动测试运行中以已验证的地图坐标附到轨迹及离线报告，坐标不可验证时保留次数而不渲染地图标记。
+
+当前消费者为 `robot_backend` 与 PC `web_console`；Mobile 不是该端点消费者。该接口是增量控制面 API，既有客户端可忽略。
+
 ## 实时传输
 
 机器人侧预处理器以 `RALT` 格式发送本机接入的 UDP 帧。网关在端口 **8768** 暴露二进制 WebSocket 通道：
