@@ -36,12 +36,26 @@ def prepend_runtime_interface_paths(
     python_version: str,
 ) -> None:
     """Put declared vehicle interface paths before PyInstaller extraction paths."""
-    for path in reversed(
-        runtime_interface_paths(ament_prefix_path, python_version=python_version)
-    ):
+    approved_paths = runtime_interface_paths(
+        ament_prefix_path, python_version=python_version
+    )
+    approved_normalized = {os.path.abspath(path) for path in approved_paths}
+    sys.path[:] = [
+        path
+        for path in sys.path
+        if not _is_unapproved_interface_path(path, approved_normalized)
+    ]
+    for path in reversed(approved_paths):
         if path in sys.path:
             sys.path.remove(path)
         sys.path.insert(0, path)
+
+
+def _is_unapproved_interface_path(path: str, approved_paths: set[str]) -> bool:
+    """Reject another environment's master_interfaces package from import lookup."""
+    return bool(path) and os.path.abspath(path) not in approved_paths and os.path.isdir(
+        os.path.join(path, "master_interfaces")
+    )
 
 
 prepend_runtime_interface_paths(

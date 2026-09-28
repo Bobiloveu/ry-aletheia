@@ -50,3 +50,29 @@ def test_prepend_runtime_interface_paths_precedes_frozen_path(
     prepend_runtime_interface_paths(str(prefix), python_version="python3.10")
 
     assert sys.path == [str(package.parent), "/tmp/_MEI/frozen"]
+
+
+def test_prepend_runtime_interface_paths_removes_unapproved_interface_path(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A stray PYTHONPATH package must not become the vehicle interface fallback."""
+    approved_prefix = tmp_path / "vehicle"
+    approved = (
+        approved_prefix
+        / "local"
+        / "lib"
+        / "python3.10"
+        / "dist-packages"
+        / "master_interfaces"
+    )
+    approved.mkdir(parents=True)
+    unapproved = tmp_path / "pythonpath" / "master_interfaces"
+    unapproved.mkdir(parents=True)
+    monkeypatch.setenv("AMENT_PREFIX_PATH", str(approved_prefix))
+    monkeypatch.setattr(sys, "path", [str(unapproved.parent), "/tmp/_MEI/frozen"])
+
+    namespace = _hook_namespace()
+    prepend_runtime_interface_paths = namespace["prepend_runtime_interface_paths"]
+    prepend_runtime_interface_paths(str(approved_prefix), python_version="python3.10")
+
+    assert sys.path == [str(approved.parent), "/tmp/_MEI/frozen"]
