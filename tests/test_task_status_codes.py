@@ -70,6 +70,29 @@ def test_onefile_release_builder_embeds_the_runtime_status_registry() -> None:
     assert '--add-data "autodrive_console/task_templates/indoor_elevator_v1/task-status-codes.json:autodrive_console/task_templates/indoor_elevator_v1"' in builder
 
 
+def test_onefile_release_builder_uses_vehicle_runtime_for_localization_interface() -> None:
+    """Vehicle ROS interfaces must win over a frozen, version-specific package."""
+    builder = (Path(__file__).resolve().parents[1] / "build_binary.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert '--runtime-hook "$BUILD_ROOT/packaging/runtime_hooks/ros_runtime_interfaces.py"' in builder
+    assert "--exclude-module master_interfaces" in builder
+    assert "--collect-all master_interfaces" not in builder
+    assert "--hidden-import master_interfaces.msg._localization_status" not in builder
+    assert "for package in tf2_msgs; do" in builder
+
+
+def test_robot_dependency_export_does_not_require_optional_localization_message() -> None:
+    """An optional status message cannot make the generic build overlay unusable."""
+    exporter = (Path(__file__).resolve().parents[1] / "export_robot_build_deps.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "from master_interfaces.msg import LocalizationStatus" not in exporter
+    assert "python3 -c 'import master_interfaces.srv'" in exporter
+
+
 def test_registry_reloads_a_controlled_file_change(monkeypatch, tmp_path: Path) -> None:
     """Catches stale in-process caching after a controlled registry update."""
     config = _copy_registry(tmp_path)

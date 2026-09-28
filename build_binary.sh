@@ -4,7 +4,7 @@ set -euo pipefail
 # 在机器人小车本机离线执行；优先使用小车真实 /opt/ry/install 环境。
 # 产物为 dist/ry-aletheia 单文件核心程序。运行阶段不需要 PyInstaller、源码或网络。
 # 任务 JSON、.autodrive_console.json 和 reports/ 均是二进制外部的运行数据，不会被打包。
-# 必须加载包含 master_interfaces 的机器人工作空间；否则生成的程序无法调用任务服务。
+# 必须加载包含 master_interfaces 服务定义的机器人工作空间；运行时消息接口由车辆提供。
 BUILD_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 FRONTEND_ROOT="$BUILD_ROOT/frontend"
 VIDEO_CONFIG_DEFAULT="${RY_ALETHEIA_VIDEO_CONFIG:-$BUILD_ROOT/config/video.ros.json}"
@@ -57,7 +57,7 @@ if ! python3 -c 'import PyInstaller' >/dev/null 2>&1; then
   export PYTHONPATH="$OFFLINE_PYINSTALLER${PYTHONPATH:+:$PYTHONPATH}"
 fi
 python3 -c 'import rclpy; import master_interfaces.srv; import tf2_msgs.msg' || {
-  echo "缺少 ROS2 接口包 master_interfaces 或 tf2_msgs。请确认工程内 install/ 完整，或先加载匹配的小车 install/setup.bash。" >&2
+  echo "当前 ROS2 构建环境缺少任务服务或 TF 基础接口。请加载完整的小车 ROS2 环境后再构建。" >&2
   exit 1
 }
 echo "正在构建实时点云预处理节点..."
@@ -82,14 +82,14 @@ fi
 }
 ROSIDL_LIBRARIES=()
 # Python 的 --collect-all 不会稳定收集 ROS2 运行时动态选择的类型支持库。
-# 任务服务和 TF 监听均需要它们；从所有已 source 的 prefix 收集，兼容接口包位于
-# 工作空间 install 或系统 /opt/ros 下的两种部署。
+# 只固化通用 TF 类型支持；master_interfaces 必须从目标车已 source 的运行时加载，
+# 否则一台车的接口版本会覆盖另一台车。
 AMENT_PREFIXES=("$ROS_INSTALL_PREFIX")
 if [[ -n "${AMENT_PREFIX_PATH:-}" ]]; then
   IFS=: read -r -a SOURCED_PREFIXES <<< "$AMENT_PREFIX_PATH"
   AMENT_PREFIXES+=("${SOURCED_PREFIXES[@]}")
 fi
-for package in master_interfaces tf2_msgs; do
+for package in tf2_msgs; do
   found=false
   for prefix in "${AMENT_PREFIXES[@]}"; do
     # 工作空间的 isolated install 常用 <prefix>/<package>/lib；系统 ROS2
@@ -127,14 +127,14 @@ python3 -m PyInstaller \
   --add-data "$VIDEO_RUNTIME:runtime/video" \
   --add-binary "$LIVE_PREPROCESSOR:." \
   --add-binary "$VIDEO_INGEST:." \
+  --runtime-hook "$BUILD_ROOT/packaging/runtime_hooks/ros_runtime_interfaces.py" \
   --hidden-import rclpy \
-  --hidden-import master_interfaces.srv \
+  --exclude-module master_interfaces \
   --collect-all rclpy \
   --collect-all tf2_ros \
   --collect-all tf2_py \
   --collect-all tf2_msgs \
   --collect-all rpyutils \
-  --collect-all master_interfaces \
   --collect-all rosidl_parser \
   --collect-all rosidl_runtime_py \
   --collect-all rcl_interfaces \
