@@ -85,6 +85,13 @@
                 </svg>
               </div>
               <div id="mapInteraction" class="map-interaction-layer" aria-label="地图缩放与拖动交互"></div>
+              <div class="localization-status" id="localizationStatus" data-phase="unavailable" role="status" aria-live="polite" aria-atomic="true">
+                <span class="localization-status-dot" aria-hidden="true"></span>
+                <span class="localization-status-copy">
+                  <strong id="localizationStatusLabel">定位状态检查中</strong>
+                  <small id="localizationStatusDetail">正在读取定位状态</small>
+                </span>
+              </div>
               <div class="local-map-empty" id="mapEmpty">正在获取当前地图…</div>
               <div class="map-diagnostics" id="mapDiagnostics">
                 等待地图、定位与点云数据

@@ -38,7 +38,7 @@ class TrajectorySession:
     # 可能明显落后于车辆真实位姿，仍拒绝该点而不猜测坐标。
     LATEST_TF_MAX_LAG_NS = 500_000_000
 
-    def __init__(self, maps: list[CachedMapAsset], route_plan: list[dict[str, Any]] | None = None, progress_callback: Callable[[dict[str, Any]], None] | None = None, sample_hz: float = 5.0, stagnation_timeout_s: float = 30.0, movement_threshold_m: float = 0.15, elevator_wait_timeout_s: float = 180.0, map_cache_dir=None) -> None:
+    def __init__(self, maps: list[CachedMapAsset], route_plan: list[dict[str, Any]] | None = None, progress_callback: Callable[[dict[str, Any]], None] | None = None, sample_hz: float = 5.0, stagnation_timeout_s: float = 30.0, movement_threshold_m: float = 0.15, elevator_wait_timeout_s: float = 180.0, map_cache_dir=None, localization_monitor=None) -> None:
         self.maps = list(maps)
         self.route_plan = [dict(item) for item in (route_plan or [])]
         self._map_cache = MapAssetCache(map_cache_dir) if map_cache_dir else None
@@ -83,6 +83,12 @@ class TrajectorySession:
         self._map_unmatched = 0
         self._map_last_error = ""
         self._map_epoch = 0
+        # 重定位事件由全局只读监控器统一接收；每个轮次在创建时记下游标，
+        # 避免将前一轮或空闲期间的历史事件误归入当前报告。
+        self._localization_monitor = localization_monitor
+        self._localization_cursor = _localization_cursor(localization_monitor)
+        self._relocalizations: list[dict[str, Any]] = []
+        self._last_verified_map_sample: dict[str, Any] | None = None
 
     def start(self) -> None:
         try:
@@ -121,6 +127,9 @@ class TrajectorySession:
         except Exception:
             # 收尾采样只能补充证据，绝不能让已有轨迹因一次 TF 瞬态失败而丢失。
             pass
+        # 最后一条有效轨迹点之后才到达的重定位仍属于本轮；保留该事件的统计，
+        # 但没有可信坐标时绝不能虚构地图位置。
+        self._record_relocalizations_for_sample(self._last_verified_map_sample)
         if self._executor:
             self._executor.shutdown()
         if self._thread:
@@ -135,6 +144,8 @@ class TrajectorySession:
                 "segments": segments,
                 "maps": [item.to_dict() for item in self.maps],
                 "route_plan": self.route_plan,
+                "relocalizations": list(self._relocalizations),
+                "relocalization_count": len(self._relocalizations),
                 "diagnostics": {
                     "odom_received": self._odom_received,
                     "odom_processed": self._processed_odom_sequence,
@@ -282,7 +293,10 @@ class TrajectorySession:
                     "map": {"resolution": active.resolution, "width": active.width, "height": active.height, "origin": [active.origin_x, active.origin_y], "frame_id": active.frame_id}, "points": [],
                 })
                 stamp = odom["stamp"]
-                segment["points"].append({"timestamp_ns": int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec), "x": x, "y": y})
+                point = {"timestamp_ns": int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec), "x": x, "y": y}
+                segment["points"].append(point)
+                self._last_verified_map_sample = {**point, "map_id": active.asset_id}
+                self._record_relocalizations_for_sample(self._last_verified_map_sample)
                 self._samples_processed += 1
                 progress = self._estimate_progress(active, x, y, sum(len(item["points"]) for item in self._segments.values())) or {}
                 progress.update(stall)
@@ -290,6 +304,36 @@ class TrajectorySession:
                 self._last_progress = dict(progress)
         if progress and self.progress_callback:
             self.progress_callback(progress)
+
+    def _record_relocalizations_for_sample(self, sample: dict[str, Any] | None) -> None:
+        """Drain only this round's reset edges, optionally anchoring them to a verified point."""
+        monitor = self._localization_monitor
+        if monitor is None:
+            return
+        try:
+            next_cursor, events = monitor.events_since(self._localization_cursor)
+        except Exception:
+            # 定位观测只是报告证据；监控异常不得干扰轨迹采样或任务执行。
+            return
+        self._localization_cursor = int(next_cursor)
+        for event in events if isinstance(events, list) else []:
+            if not isinstance(event, dict):
+                continue
+            record = dict(event)
+            if sample is None:
+                record["position_available"] = False
+            else:
+                try:
+                    record.update({
+                        "timestamp_ns": int(sample["timestamp_ns"]),
+                        "x": float(sample["x"]),
+                        "y": float(sample["y"]),
+                        "map_id": str(sample["map_id"]),
+                        "position_available": True,
+                    })
+                except (KeyError, TypeError, ValueError):
+                    record["position_available"] = False
+            self._relocalizations.append(record)
 
     def _to_map_coordinates(self, active: ActiveMap, source_frame: str, stamp, x: float, y: float) -> tuple[float, float] | None:
         """将 /odom 位姿严格转换到当前 OccupancyGrid 的 frame_id。
@@ -455,6 +499,16 @@ def _apply_planar_transform(translation, rotation, x: float, y: float) -> tuple[
     """应用 map←source 的二维刚体变换；独立函数便于离线校验坐标方向。"""
     yaw = atan2(2.0 * (rotation.w * rotation.z + rotation.x * rotation.y), 1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z))
     return translation.x + cos(yaw) * x - sin(yaw) * y, translation.y + sin(yaw) * x + cos(yaw) * y
+
+
+def _localization_cursor(monitor: object | None) -> int:
+    """Read a monitor cursor defensively so optional report evidence stays optional."""
+    if monitor is None:
+        return 0
+    try:
+        return int(monitor.cursor())
+    except Exception:
+        return 0
 
 
 def _is_future_extrapolation(error: Exception) -> bool:

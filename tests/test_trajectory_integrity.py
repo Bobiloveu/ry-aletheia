@@ -235,6 +235,29 @@ class TrajectoryIntegrityTests(unittest.TestCase):
             self.assertIn('<g transform="translate(0 110)">', svg)
             self.assertNotIn('>1S</text>', svg)
 
+    def test_relocalization_marker_is_a_separate_lightweight_evidence_layer(self):
+        """A reset marker must identify the point without changing the actual path geometry."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "map.pgm"
+            image.write_bytes(b"P5\n10 10\n255\n" + bytes([255]) * 100)
+            target = root / "result.svg"
+            asset = CachedMapAsset("map", "P1", "", "", str(image), 1.0, [0.0, 0.0], 10, 10)
+            render_svg(
+                asset,
+                {
+                    "paths": [{"map_epoch": 1, "route_index": 0, "points": [{"x": 1, "y": 1}, {"x": 4, "y": 1}]}],
+                    "relocalizations": [{"map_id": "map", "x": 3, "y": 1, "position_available": True}],
+                },
+                target,
+            )
+            svg = target.read_text(encoding="utf-8")
+
+        self.assertIn('class="relocalization-marker"', svg)
+        self.assertIn('cx="3.00" cy="9.00"', svg)
+        self.assertIn("重定位", svg)
+        self.assertIn('points="1.00,9.00 4.00,9.00" fill="none" stroke="#168cff" stroke-width="2.5"', svg)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -60,15 +60,16 @@ def render_svg(asset: CachedMapAsset, segment: dict, target: Path, ideal_routes:
         if len(wall_points) > 1:
             wall_paths.append(" ".join(f"{x:.2f},{y:.2f}" for x, y in wall_points))
     actual_defs, actual_layer, visit_layer, visit_legend = _actual_trajectory_layers(paths)
+    relocalization_layer, relocalization_legend = _relocalization_layers(segment.get("relocalizations"), asset, height, len(paths))
     # 理想路线刻意比实际轨迹细且稀疏；不使用描边，避免遮挡重合处的蓝色实际轨迹。
     ideal_layer = "".join(f'<polyline points="{item}" fill="none" stroke="#f5c84b" stroke-width="1.35" stroke-dasharray="5 8" stroke-linejoin="round" stroke-linecap="round"/>' for item in ideal_paths)
     wall_layer = "".join(f'<polyline points="{item}" fill="none" stroke="#d63142" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" opacity="0.96"/>' for item in wall_paths)
     # 图例放在地图画面之外：避免遮挡墙体/轨迹，也避免边缘箭头与文字越界。
     # 图例组本身有 10px 顶部偏移，最后一项基线为 54 + N*17；
     # 这里按文本下降沿额外预留 9px，避免第二条及之后的说明越出深色图例框。
-    evidence_height = 76 + len(paths) * 17
+    evidence_height = 76 + (len(paths) + (1 if relocalization_legend else 0)) * 17
     legend_width = min(218, max(132, width - 24))
-    legend = f'''<g transform="translate(12 10)"><rect width="{legend_width}" height="{evidence_height - 16}" rx="5" fill="#172337" fill-opacity="0.92"/><line x1="12" y1="17" x2="38" y2="17" stroke="#d63142" stroke-width="3"/><text x="47" y="21" fill="#ff9aa5" font-family="sans-serif" font-size="11">虚拟墙</text><line x1="12" y1="35" x2="38" y2="35" stroke="#d8ad38" stroke-width="1.2" stroke-dasharray="4 6"/><text x="47" y="39" fill="#f2ca58" font-family="sans-serif" font-size="11">理想路线</text>{visit_legend}</g>'''
+    legend = f'''<g transform="translate(12 10)"><rect width="{legend_width}" height="{evidence_height - 16}" rx="5" fill="#172337" fill-opacity="0.92"/><line x1="12" y1="17" x2="38" y2="17" stroke="#d63142" stroke-width="3"/><text x="47" y="21" fill="#ff9aa5" font-family="sans-serif" font-size="11">虚拟墙</text><line x1="12" y1="35" x2="38" y2="35" stroke="#d8ad38" stroke-width="1.2" stroke-dasharray="4 6"/><text x="47" y="39" fill="#f2ca58" font-family="sans-serif" font-size="11">理想路线</text>{visit_legend}{relocalization_legend}</g>'''
     escaped_label = html.escape(asset.label)
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height + evidence_height}" viewBox="0 0 {width} {height + evidence_height}">
 <title>{escaped_label} 运行轨迹</title>
@@ -81,6 +82,7 @@ def render_svg(asset: CachedMapAsset, segment: dict, target: Path, ideal_routes:
 {ideal_layer}
 {actual_layer}
 {visit_layer}
+{relocalization_layer}
 </g>
 </svg>'''
     target.write_text(svg, encoding="utf-8")
@@ -102,6 +104,29 @@ def _actual_trajectory_layers(paths: list[dict]) -> tuple[str, str, str, str]:
         route_text = f"任务段 {int(route_index) + 1}" if isinstance(route_index, int) and route_index >= 0 else "独立轨迹段"
         legend.append(f'<line x1="12" y1="{y - 4}" x2="38" y2="{y - 4}" stroke="{color}" stroke-width="2.5"/><text x="47" y="{y}" fill="{color}" font-family="sans-serif" font-size="11">轨迹 {index} · {route_text}</text>')
     return "", "".join(lines), "", "".join(legend)
+
+
+def _relocalization_layers(events: object, asset: CachedMapAsset, height: int, path_count: int) -> tuple[str, str]:
+    """Draw reset evidence as a small independent layer, never as a path vertex."""
+    markers = []
+    for event in events if isinstance(events, list) else []:
+        if not isinstance(event, dict) or event.get("position_available") is not True:
+            continue
+        if str(event.get("map_id") or "") != asset.id:
+            continue
+        try:
+            x = (float(event["x"]) - float(asset.origin[0])) / float(asset.resolution)
+            y = height - (float(event["y"]) - float(asset.origin[1])) / float(asset.resolution)
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        markers.append(
+            f'<g class="relocalization-event"><circle class="relocalization-halo" cx="{x:.2f}" cy="{y:.2f}" r="6.4" fill="#6d5dfc" fill-opacity=".16"/><circle class="relocalization-marker" cx="{x:.2f}" cy="{y:.2f}" r="3.25" fill="#fff" stroke="#6d5dfc" stroke-width="1.7"><title>重定位</title></circle></g>'
+        )
+    if not markers:
+        return "", ""
+    y = 54 + (path_count + 1) * 17
+    legend = f'<circle cx="25" cy="{y - 4}" r="3.2" fill="#fff" stroke="#8c7dff" stroke-width="1.5"/><text x="47" y="{y}" fill="#c7c0ff" font-family="sans-serif" font-size="11">重定位</text>'
+    return f'<g class="relocalization-markers">{"".join(markers)}</g>', legend
 
 
 def _read_pgm(path: Path) -> tuple[int, int, bytes]:

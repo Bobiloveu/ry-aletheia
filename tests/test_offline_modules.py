@@ -18,7 +18,7 @@ from unittest.mock import Mock, patch
 import web_console
 from autodrive_console.case_store import CaseStore
 from autodrive_console.models import AttemptResult, RunRecord, TaskParameters, TestCase
-from autodrive_console.map_assets import MapAssetCache
+from autodrive_console.map_assets import CachedMapAsset, MapAssetCache
 from autodrive_console.map_snapshot import ObservationMapSnapshot
 from autodrive_console.observation import ObservationError, ObservationManager
 from autodrive_console.telemetry import TelemetryGateway
@@ -205,6 +205,24 @@ class OfflineModuleTests(unittest.TestCase):
         expected = {"phase": "riding_elevator", "label": "乘梯中"}
 
         with patch.object(web_console.VEHICLE_EXECUTION_STATUS, "status", return_value=expected):
+            handler.do_GET()
+
+        handler._json.assert_called_once_with(expected)
+
+    def test_localization_status_api_returns_the_read_only_monitor_snapshot(self):
+        """The live map receives only the normalized localization snapshot."""
+        handler = object.__new__(web_console.ConsoleHandler)
+        handler.path = "/api/observation/localization-status"
+        handler.headers = {"User-Agent": "desktop-test"}
+        handler._json = Mock()
+        expected = {
+            "phase": "relocalizing",
+            "label": "重定位中",
+            "detail": "NDT 匹配质量低",
+            "updated_at": 123.0,
+        }
+
+        with patch.object(web_console.LOCALIZATION_STATUS, "status", return_value=expected):
             handler.do_GET()
 
         handler._json.assert_called_once_with(expected)
@@ -1326,7 +1344,7 @@ class OfflineModuleTests(unittest.TestCase):
             svg.write_text('<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/png;base64,AA=="/></svg>', encoding="utf-8")
             case = TestCase("园区_1_2_3_4.json", "园区_1_2_3_4.json", "测试", TaskParameters("园区", 1, 2, 3, 4), "unused.json")
             run = RunRecord("123456789abc", case, 1, 0, status="completed", started_at="2026-08-13T09:00:00+08:00", finished_at="2026-08-13T09:01:00+08:00")
-            run.attempts.append(AttemptResult(1, "passed", "服务成功", 60.0, run.started_at, {"visualizations": [{"map_id": "map", "label": "测试地图", "file": str(svg)}], "segments": [{"map_id": "map", "map": {"resolution": 1, "width": 10, "height": 10, "origin": [0, 0]}, "points": [{"x": 1, "y": 2, "timestamp_ns": 1755046800000000000}]}]}))
+            run.attempts.append(AttemptResult(1, "passed", "服务成功", 60.0, run.started_at, {"visualizations": [{"map_id": "map", "label": "测试地图", "file": str(svg)}], "segments": [{"map_id": "map", "map": {"resolution": 1, "width": 10, "height": 10, "origin": [0, 0]}, "points": [{"x": 1, "y": 2, "timestamp_ns": 1755046800000000000}]}]}, relocalization_count=2))
             settings = SettingsStore(root / "console.json")
             settings.save({"case_aliases": {case.id: "电梯往返验证"}})
             manager = RunManager(report_dir, object(), settings)
@@ -1345,10 +1363,35 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn('class="status-badge completed"', contents)
         self.assertIn('trajectory-report-tooltip', contents)
         self.assertIn('data-trajectory-points', contents)
+        self.assertIn("重定位次数", contents)
+        self.assertIn("本次运行累计", contents)
+        self.assertIn("<td>2</td>", contents)
         self.assertNotIn('偏差', contents)
         self.assertIn("@media print", contents)
         self.assertIn("print-color-adjust: exact", contents)
         self.assertNotIn("https://", contents)
+
+    def test_saved_round_trajectory_propagates_relocalization_marker_to_its_map(self):
+        """A reset event must render only on the matching evidence map."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "map.pgm"
+            image.write_bytes(b"P5\n10 10\n255\n" + bytes([255]) * 100)
+            report_dir = root / "reports"
+            settings = SettingsStore(root / "console.json")
+            case = TestCase("case", "case.json", "测试", TaskParameters("园区", 1, 1, 1, 1), "unused.json")
+            run = RunRecord("123456789abc", case, 1, 0)
+            asset = CachedMapAsset("map", "P1", "", "", str(image), 1.0, [0.0, 0.0], 10, 10)
+            trajectory = {
+                "route_plan": [],
+                "segments": [{"map_id": "map", "map_label": "P1", "map_epoch": 1, "route_index": 0, "points": [{"x": 1, "y": 1, "timestamp_ns": 1}]}],
+                "relocalizations": [{"map_id": "map", "x": 1, "y": 1, "position_available": True}],
+            }
+
+            RunManager(report_dir, object(), settings)._write_trajectory(run, 1, trajectory, [asset])
+            svg = next((report_dir / "run_123456789abc_trajectory").glob("*.svg")).read_text(encoding="utf-8")
+
+        self.assertIn('class="relocalization-marker"', svg)
 
     def test_report_filename_prefers_alias_and_keeps_run_id(self):
         with tempfile.TemporaryDirectory() as directory:

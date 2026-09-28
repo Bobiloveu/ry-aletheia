@@ -29,6 +29,7 @@ from autodrive_console.case_workspace import CasePackageError, CaseWorkspace
 from autodrive_console.deployment import DeploymentError, DeploymentStore
 from autodrive_console.component_defaults import ComponentDefaultsError, component_speed_defaults
 from autodrive_console.mapping import MappingError, MappingSessionController, MappingUnavailable
+from autodrive_console.localization_status import LocalizationStatusMonitor
 from autodrive_console.observation import ObservationError, ObservationManager
 from autodrive_console.task_compiler import CompilationError
 from autodrive_console.robot_gateway import RobotGateway
@@ -100,6 +101,7 @@ STORE = CaseStore(TASK_DIR)
 CASE_WORKSPACE = CaseWorkspace(CONFIG_DIR, TASK_DIR)
 DEPLOYMENTS = DeploymentStore(WORKSPACE / "deployments")
 SETTINGS = SettingsStore(CONFIG_DIR / "console.json")
+LOCALIZATION_STATUS = LocalizationStatusMonitor()
 
 
 def _autostart_launcher() -> list[str]:
@@ -116,7 +118,7 @@ AUTOSTART = AutostartManager(WORKSPACE, launcher=_autostart_launcher())
 ROBOT_LOGS = RobotLogStore(SETTINGS)
 ROBOT_LOG_DOWNLOADS = RobotLogDownloadTracker()
 SCENARIO_SETUP = ScenarioSetupStore(CONFIG_DIR)
-RUNS = RunManager(WORKSPACE / "reports", RosTaskExecutor(), SETTINGS, SCENARIO_SETUP)
+RUNS = RunManager(WORKSPACE / "reports", RosTaskExecutor(), SETTINGS, SCENARIO_SETUP, localization_monitor=LOCALIZATION_STATUS)
 ACCEPTANCE = AcceptanceOrchestrator(
     catalog=AcceptanceTaskCatalog(Path(SETTINGS.load().task_directory)),
     multi_catalog=MultiTaskCatalog(Path("/opt/ry/data/tasks/multi_tasks")),
@@ -444,6 +446,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             # 地图切换标记只有一个短 ID，供实时页快速发现 map_server 生命周期
             # 切换；绝不通过此接口传输或轮询 OccupancyGrid 栅格数据。
             self._json({"active_map_id": OBSERVATION.active_map_id()})
+        elif path == "/api/observation/localization-status":
+            self._json(LOCALIZATION_STATUS.status())
         elif path == "/api/observation":
             self._json(OBSERVATION.status(SETTINGS.load()))
         elif path == "/api/video/status":
@@ -2038,6 +2042,7 @@ def run_console() -> None:
         LOGGER.warning("车辆控制 ROS2 模块预热失败：%s", exc)
     # 状态监控始终只读；ROS 不可用时页面安全显示“状态暂不可用”，不能阻塞控制台。
     VEHICLE_EXECUTION_STATUS.start()
+    LOCALIZATION_STATUS.start()
     try:
         server = ThreadingHTTPServer(("0.0.0.0", 8087), ConsoleHandler)
     except OSError as exc:
@@ -2071,6 +2076,7 @@ def run_console() -> None:
         MAPPING.close()
         VEHICLE_CONTROL.close()
         VEHICLE_EXECUTION_STATUS.close()
+        LOCALIZATION_STATUS.close()
         OBSERVATION.stop()
         server.server_close()
     if server.restart_command:

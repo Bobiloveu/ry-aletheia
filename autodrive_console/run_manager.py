@@ -54,6 +54,14 @@ def _format_report_time(value: object) -> str:
         return raw
 
 
+def _relocalization_count(value: object) -> int:
+    """Normalize optional trajectory evidence without making report output fragile."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 class RunManager:
     def __init__(
         self,
@@ -62,12 +70,14 @@ class RunManager:
         settings: SettingsStore,
         scenario_setup: ScenarioSetupStore | None = None,
         return_signal_factory: Callable[[], object] | None = None,
+        localization_monitor: object | None = None,
     ) -> None:
         self.report_dir = report_dir
         self.executor = executor
         self.settings = settings
         self.scenario_setup = scenario_setup
         self._return_signal_factory = return_signal_factory or RosReturnSignalBridge
+        self._localization_monitor = localization_monitor
         self._scenario_apply_settle_seconds = SCENARIO_APPLY_SETTLE_SECONDS
         self._runs: dict[str, RunRecord] = {}
         self._cancel_events: dict[str, threading.Event] = {}
@@ -691,7 +701,7 @@ class RunManager:
                     trajectory_start_error = ""
                     if run.prepare_trajectory_maps:
                         try:
-                            trajectory_session = TrajectorySession(trajectory_assets, route_plan, lambda progress, attempt=index: self._update_live_progress(run, attempt, progress), elevator_wait_timeout_s=self.settings.load().elevator_wait_timeout_s, map_cache_dir=self.report_dir.parent / "maps_cache")
+                            trajectory_session = TrajectorySession(trajectory_assets, route_plan, lambda progress, attempt=index: self._update_live_progress(run, attempt, progress), elevator_wait_timeout_s=self.settings.load().elevator_wait_timeout_s, map_cache_dir=self.report_dir.parent / "maps_cache", localization_monitor=self._localization_monitor)
                             trajectory_session.start()
                         except Exception as exc:
                             # 轨迹是测试证据，而不是任务下发的前置条件。比如 PyInstaller
@@ -750,6 +760,7 @@ class RunManager:
                             except Exception:
                                 LOGGER.exception("撤销自动返程监听失败：run=%s attempt=%s", run.id, index)
                     trajectory = None
+                    relocalization_count = 0
                     if trajectory_session:
                         try:
                             trajectory = trajectory_session.stop()
@@ -760,6 +771,7 @@ class RunManager:
                             # 绑定，下一轮会拿旧 ID 与新 active map 比较，持续停在
                             # “等待切图”，进度因而始终无法从 0% 开始投影。
                             route_plan = [dict(item) for item in trajectory_session.route_plan]
+                            relocalization_count = _relocalization_count(trajectory.get("relocalization_count"))
                         except Exception as exc:
                             trajectory_start_error = f"轨迹采集停止失败：{exc}"
                             LOGGER.exception("轨迹采集停止失败：run=%s attempt=%s", run.id, index)
@@ -768,10 +780,13 @@ class RunManager:
                             "sample_hz": 5.0,
                             "points": 0,
                             "segments": [],
+                            "relocalizations": [],
+                            "relocalization_count": 0,
                             "diagnostics": {"recorder_error": trajectory_start_error, "points_rejected": 0, "tf_errors": 0, "map_unmatched": 0},
                             "integrity_warning": f"轨迹证据不完整：{trajectory_start_error}",
                         }
                     if trajectory is not None:
+                        relocalization_count = _relocalization_count(trajectory.get("relocalization_count"))
                         try:
                             diagnostics = trajectory.get("diagnostics", {})
                             if not trajectory.get("integrity_warning") and (diagnostics.get("tf_errors") or diagnostics.get("map_unmatched")):
@@ -791,17 +806,17 @@ class RunManager:
                     existing = next((item for item in run.attempts if item.index == index), None)
                     if cancel_event.is_set():
                         if existing:
-                            existing.status, existing.message, existing.duration_s, existing.trajectory, existing.delivery_evidence = "cancelled", message, duration, trajectory, delivery_evidence
+                            existing.status, existing.message, existing.duration_s, existing.trajectory, existing.delivery_evidence, existing.relocalization_count = "cancelled", message, duration, trajectory, delivery_evidence, relocalization_count
                         else:
-                            run.attempts.append(AttemptResult(index, "cancelled", message, duration, started, trajectory, run.case.id, run.case.filename, delivery_evidence))
+                            run.attempts.append(AttemptResult(index, "cancelled", message, duration, started, trajectory, run.case.id, run.case.filename, delivery_evidence, relocalization_count))
                         run.active_attempt = None
                         run.forced_attempt_failure = None
                         run.status = "cancelled"
                         break
                     if existing:
-                        existing.status, existing.message, existing.duration_s, existing.trajectory, existing.delivery_evidence = "failed", message, duration, trajectory, delivery_evidence
+                        existing.status, existing.message, existing.duration_s, existing.trajectory, existing.delivery_evidence, existing.relocalization_count = "failed", message, duration, trajectory, delivery_evidence, relocalization_count
                     else:
-                        run.attempts.append(AttemptResult(index, "passed" if ok else "failed", message, duration, started, trajectory, run.case.id, run.case.filename, delivery_evidence))
+                        run.attempts.append(AttemptResult(index, "passed" if ok else "failed", message, duration, started, trajectory, run.case.id, run.case.filename, delivery_evidence, relocalization_count))
                     run.active_attempt = None
                     run.forced_attempt_failure = None
                     if not ok:
@@ -1057,10 +1072,10 @@ class RunManager:
         csv_target = self.report_dir / f"{stem}.csv"
         with csv_target.open("w", newline="", encoding="utf-8-sig") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["Run_ID", "Test_ID", "Config_File", "Community", "Building", "Unit", "Floor", "Door", "Status", "Message", "Duration_s", "Started_At"])
+            writer.writerow(["Run_ID", "Test_ID", "Config_File", "Community", "Building", "Unit", "Floor", "Door", "Status", "Message", "Duration_s", "Started_At", "Relocalization_Count"])
             for item in run.attempts:
                 p = run.case.parameters
-                writer.writerow([run.id, f"T-{item.index:03d}", run.case.filename, p.community, p.building, p.unit, p.floor, p.door, item.status, item.message, item.duration_s, item.started_at])
+                writer.writerow([run.id, f"T-{item.index:03d}", run.case.filename, p.community, p.building, p.unit, p.floor, p.door, item.status, item.message, item.duration_s, item.started_at, _relocalization_count(item.relocalization_count)])
         self._write_html_report(run, self.report_dir / f"{stem}.html", csv_target.name)
 
     def _report_stem(self, run: RunRecord) -> str:
@@ -1083,10 +1098,11 @@ class RunManager:
         case_alias = self._case_alias(run.case.id)
         case_display_name = case_alias or run.case.filename
         status_text = {"completed": "已完成", "failed": "失败已终止", "cancelled": "已取消", "blocked": "已拦截"}.get(run.status, run.status)
+        total_relocalizations = sum(_relocalization_count(item.relocalization_count) for item in run.attempts)
         rows = "".join(
-            f"<tr><td>T-{item.index:03d}</td><td>{esc(_format_report_time(item.started_at))}</td><td class=\"{esc(item.status)}\">{esc(item.status.upper())}</td><td>{item.duration_s / 60:.2f} 分钟</td><td>{esc(item.message)}</td></tr>"
+            f"<tr><td>T-{item.index:03d}</td><td>{esc(_format_report_time(item.started_at))}</td><td class=\"{esc(item.status)}\">{esc(item.status.upper())}</td><td>{item.duration_s / 60:.2f} 分钟</td><td>{_relocalization_count(item.relocalization_count)}</td><td>{esc(item.message)}</td></tr>"
             for item in run.attempts
-        ) or "<tr><td colspan=\"5\">未执行到任务调用阶段。</td></tr>"
+        ) or "<tr><td colspan=\"6\">未执行到任务调用阶段。</td></tr>"
         action_labels = {
             "released_estop": "解除急停后继续",
             "continue_observing": "关闭提醒并继续观察",
@@ -1161,7 +1177,7 @@ class RunManager:
     .status-badge.failed, .status-badge.blocked {{ color: var(--danger); background: var(--danger-soft); }}
     .status-badge.cancelled {{ color: var(--warning); background: var(--warning-soft); }}
     .status-badge.unknown {{ color: var(--muted); background: var(--surface-subtle); }}
-    .report-summary {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }}
+    .report-summary {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }}
     .summary-metric {{ min-height: 116px; padding: 18px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); }}
     .summary-metric small {{ display: block; color: var(--muted); font-size: 12px; }}
     .summary-metric strong {{ display: block; margin-top: 8px; font-size: 28px; line-height: 1; letter-spacing: -.035em; font-variant-numeric: tabular-nums; }}
@@ -1236,6 +1252,7 @@ class RunManager:
       <article class="summary-metric"><small>已执行轮次</small><strong>{summary['completed']}</strong><span class="metric-detail">已产生结果的轮次</span></article>
       <article class="summary-metric"><small>通过 / 失败</small><strong>{summary['passed']} / {summary['failed']}</strong><span class="metric-detail">取消 {summary['cancelled']} 轮</span></article>
       <article class="summary-metric"><small>通过率</small><strong>{summary['passRate']}%</strong><span class="metric-detail">取消与未执行不计入</span></article>
+      <article class="summary-metric"><small>重定位次数</small><strong>{total_relocalizations}</strong><span class="metric-detail">本次运行累计</span></article>
     </section>
 
     <section class="pass-rate" aria-label="通过率构成">
@@ -1257,8 +1274,8 @@ class RunManager:
     </section>
 
     <section class="section-card">
-      <div class="section-title"><h2>轮次结果</h2><p>每轮服务反馈与执行耗时</p></div>
-      <div class="table-scroll"><table><thead><tr><th>轮次</th><th>开始时间</th><th>结果</th><th>耗时</th><th>服务反馈</th></tr></thead><tbody>{rows}</tbody></table></div>
+      <div class="section-title"><h2>轮次结果</h2><p>每轮服务反馈、执行耗时与重定位次数</p></div>
+      <div class="table-scroll"><table><thead><tr><th>轮次</th><th>开始时间</th><th>结果</th><th>耗时</th><th>重定位次数</th><th>服务反馈</th></tr></thead><tbody>{rows}</tbody></table></div>
     </section>
 
     <section class="section-card">
@@ -1302,7 +1319,7 @@ class RunManager:
             map_id = source_segment.get("map_id")
             if map_id not in asset_by_id:
                 continue
-            aggregate = segments_by_asset.setdefault(map_id, {"map_id": map_id, "map_label": source_segment.get("map_label"), "paths": []})
+            aggregate = segments_by_asset.setdefault(map_id, {"map_id": map_id, "map_label": source_segment.get("map_label"), "paths": [], "relocalizations": []})
             points = source_segment.get("points", [])
             if points:
                 # 保留地图进入批次及 JSON 路线段。渲染器据此分别着色，
@@ -1315,11 +1332,22 @@ class RunManager:
                     "started_ns": points[0].get("timestamp_ns", 0),
                     "ended_ns": points[-1].get("timestamp_ns", 0),
                 })
+        for event in trajectory.get("relocalizations", []):
+            if not isinstance(event, dict) or event.get("position_available") is not True:
+                continue
+            map_id = event.get("map_id")
+            if map_id not in asset_by_id:
+                continue
+            aggregate = segments_by_asset.setdefault(
+                map_id,
+                {"map_id": map_id, "map_label": asset_by_id[map_id].label, "paths": [], "relocalizations": []},
+            )
+            aggregate.setdefault("relocalizations", []).append(dict(event))
         for aggregate in segments_by_asset.values():
             aggregate["paths"].sort(key=lambda item: (item.get("started_ns", 0), item.get("map_epoch", 0)))
         # 即使 /odom 尚未出现有效点，也输出地图、理想路线和虚拟墙图层，确保报告有可审阅的轨迹证据版面。
         for asset in assets:
-            segment = segments_by_asset.get(asset.id, {"map_id": asset.id, "map_label": asset.label, "paths": []})
+            segment = segments_by_asset.get(asset.id, {"map_id": asset.id, "map_label": asset.label, "paths": [], "relocalizations": []})
             svg_target = target_dir / f"T-{index:03d}_{asset.id}.svg"
             try:
                 walls = MapAssetCache.virtual_walls(asset)

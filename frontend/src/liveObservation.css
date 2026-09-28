@@ -157,6 +157,69 @@
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+.localization-status {
+  --localization-tone: #93a0ac;
+  position: absolute;
+  z-index: 5;
+  top: 12px;
+  right: 12px;
+  display: inline-flex;
+  max-width: min(260px, calc(100% - 142px));
+  min-height: 42px;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 11px 8px 9px;
+  border: 1px solid color-mix(in srgb, var(--localization-tone) 56%, #355064);
+  border-radius: 10px;
+  background: rgb(9 22 35 / 92%);
+  color: #edf4f8;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  backdrop-filter: blur(7px);
+}
+.localization-status-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.localization-status strong {
+  color: #f6fbff;
+  font-size: 12px;
+  font-weight: 690;
+  letter-spacing: -.01em;
+  line-height: 1.15;
+}
+.localization-status small {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--localization-tone) 72%, #dce8ee);
+  font-size: 11px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.localization-status-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--localization-tone);
+}
+.localization-status[data-phase="initializing"] { --localization-tone: #75a7d4; }
+.localization-status[data-phase="normal"] { --localization-tone: #42c779; }
+.localization-status[data-phase="warning"] { --localization-tone: #f2ba57; }
+.localization-status[data-phase="error"] { --localization-tone: #f06b70; }
+.localization-status[data-phase="relocalizing"] { --localization-tone: #9c8cff; }
+.localization-status[data-phase="unavailable"] { --localization-tone: #a1aab4; }
+.localization-status[data-phase="relocalizing"] .localization-status-dot {
+  animation: localization-status-pulse 1.25s cubic-bezier(.2, .8, .2, 1) infinite;
+}
+@keyframes localization-status-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(.72); opacity: .52; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .localization-status[data-phase="relocalizing"] .localization-status-dot { animation: none; }
+}
 .webrtc-video-section {
   margin-top: 18px;
   padding: 16px;
@@ -349,6 +412,15 @@
   border-color: rgb(86 120 150 / 38%);
   background: rgb(255 255 255 / 92%);
   color: #27435a;
+}
+.theme-light .localization-status {
+  border-color: color-mix(in srgb, var(--localization-tone) 48%, #b6c7d5);
+  background: rgb(255 255 255 / 94%);
+  color: #21394d;
+}
+.theme-light .localization-status strong { color: #1f3446; }
+.theme-light .localization-status small {
+  color: color-mix(in srgb, var(--localization-tone) 68%, #486278);
 }
 .theme-light .webrtc-video-section,
 .theme-light .webrtc-video-card {
@@ -663,6 +735,9 @@ html.mobile-console .map-diagnostics {
   line-height: 1.35;
 }
 html.mobile-console .map-layer-toggle {
+  display: none;
+}
+html.mobile-console .localization-status {
   display: none;
 }
 

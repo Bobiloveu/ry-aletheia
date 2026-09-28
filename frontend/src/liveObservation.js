@@ -48,6 +48,7 @@ const MAP_RENDER_INTERVAL_MS = 16;
 // 超采样的渲染目标，显著降低主视图卡顿，同时不压缩或修改原始地图数据。
 // active_map.json 是地图缓存的轻量标记；点云、位姿重构不改变地图加载机制。
 const ACTIVE_MAP_SYNC_MS = 1000;
+const LOCALIZATION_STATUS_REFRESH_MS = 1000;
 const VIDEO_INPUT_READINESS_TIMEOUT_MS = 8000;
 const DEFAULT_VIEW_METERS = 16;
 const MIN_PIXELS_PER_METER = 8;
@@ -214,6 +215,7 @@ let mobileConsoleView = "map";
 const activeObservationDiagnostics = new Set();
 const videoWaitingSince = new Map();
 let videoGatewayOfflineSince = 0;
+let localizationStatusTimer;
 
 function mobileConsoleEnabled() {
   return document.documentElement.classList.contains("mobile-console");
@@ -248,6 +250,40 @@ function request(url, options = {}) {
       return body;
     },
   );
+}
+function applyLocalizationStatus(snapshot) {
+  const root = $("localizationStatus");
+  if (!root) return;
+  const supportedPhases = new Set([
+    "initializing",
+    "normal",
+    "warning",
+    "error",
+    "relocalizing",
+    "unavailable",
+  ]);
+  const phase = supportedPhases.has(snapshot?.phase)
+    ? snapshot.phase
+    : "unavailable";
+  const label = String(snapshot?.label || "定位状态暂不可用");
+  const detail = String(snapshot?.detail || "等待新的定位状态");
+  root.dataset.phase = phase;
+  root.setAttribute("aria-label", `${label}：${detail}`);
+  setText("localizationStatusLabel", label);
+  setText("localizationStatusDetail", detail);
+}
+async function refreshLocalizationStatus() {
+  try {
+    applyLocalizationStatus(
+      await request("/api/observation/localization-status"),
+    );
+  } catch {
+    applyLocalizationStatus({
+      phase: "unavailable",
+      label: "定位状态暂不可用",
+      detail: "等待定位状态接口恢复",
+    });
+  }
 }
 function reportObservation(level, message) {
   const body = JSON.stringify({
@@ -2580,6 +2616,13 @@ async function main() {
       setText("connectionDetail", "请先在运行配置启用实时运行观测。");
       return;
     }
+    if (!mobileConsoleEnabled()) {
+      refreshLocalizationStatus();
+      localizationStatusTimer = window.setInterval(
+        refreshLocalizationStatus,
+        LOCALIZATION_STATUS_REFRESH_MS,
+      );
+    }
     const models = Array.isArray(settings.live_observation?.vehicle_models)
       ? settings.live_observation.vehicle_models
       : [];
@@ -2646,6 +2689,7 @@ window.addEventListener("unhandledrejection", (event) => {
   );
 });
 window.addEventListener("beforeunload", () => {
+  window.clearInterval(localizationStatusTimer);
   window.clearInterval(webrtcStatusTimer);
   [...webrtcPlayers.keys()].forEach(destroyWebRtcPlayer);
   stopRenderScheduling();

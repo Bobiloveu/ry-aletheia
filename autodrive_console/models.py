@@ -144,6 +144,7 @@ class AttemptResult:
     case_id: str | None = None
     case_filename: str | None = None
     delivery_evidence: list[dict[str, str]] | None = None
+    relocalization_count: int = 0
 
 
 @dataclass
