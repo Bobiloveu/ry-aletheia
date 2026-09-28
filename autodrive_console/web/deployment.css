@@ -577,6 +577,14 @@ body.theme-light .map-workspace {
 .deployment-hidden {
   display: none;
 }
+
+.task-compiler-completion-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
 .deployment-stage-hidden {
   display: none !important;
 }

@@ -627,7 +627,10 @@
           <div id="taskCompilerPreview" class="compiler-empty" aria-live="polite">
             保存后可生成只读预览；由服务端检查当前地图、组件与来源文件。
           </div>
-          <button id="downloadTaskCompilerBundle" class="compact-action" type="button" disabled>下载实验包</button>
+              <div class="task-compiler-completion-actions">
+                <button id="downloadTaskCompilerBundle" class="compact-action" type="button" disabled>下载实验包</button>
+                <button id="startAnotherDeployment" class="compact-action deployment-hidden" type="button">新建其他项目</button>
+              </div>
         </article>
         <article class="panel span-6" data-deployment-stage="maps" data-deployment-tasks="maps.assign maps.instance maps.edit">
           <div class="panel-title">

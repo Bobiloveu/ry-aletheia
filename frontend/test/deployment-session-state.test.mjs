@@ -6,6 +6,7 @@ import {
   clearDeploymentSession,
   clampDeploymentStage,
   readDeploymentSession,
+  shouldRestoreNewProjectDraft,
   writeDeploymentSession,
 } from "../../autodrive_console/web/deployment/session-state.js";
 
@@ -45,6 +46,28 @@ test("deployment session restores only view pointers and safe task drafts", () =
     deploymentTaskDraft: { mapSource: "import", mapLabel: "电梯大厅" },
   });
   assert.doesNotMatch(store.raw(SESSION_STORAGE_KEY), /components|routes|scene_model/);
+});
+
+test("deployment session preserves an explicit request to start another project", () => {
+  const store = storage();
+
+  writeDeploymentSession(store, {
+    projectId: "site-1",
+    creatingAnotherProject: true,
+  });
+
+  assert.equal(readDeploymentSession(store)?.creatingAnotherProject, true);
+});
+
+test("only session restoration, not an explicit project open, resumes a new-project draft", () => {
+  const session = {
+    projectId: "site-1",
+    creatingAnotherProject: true,
+  };
+
+  assert.equal(shouldRestoreNewProjectDraft(session, "site-1", true), true);
+  assert.equal(shouldRestoreNewProjectDraft(session, "site-1", false), false);
+  assert.equal(shouldRestoreNewProjectDraft(session, "site-2", true), false);
 });
 
 test("deployment session ignores malformed or incomplete persisted values", () => {

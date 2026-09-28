@@ -51,8 +51,15 @@ import {
   clampDeploymentStage,
   clearDeploymentSession,
   readDeploymentSession,
+  shouldRestoreNewProjectDraft,
   writeDeploymentSession,
 } from "./deployment/session-state.js";
+import {
+  hasPersistedPreview,
+  isActivePreviewRequest,
+  previewMatchesProject,
+  projectWithPreviewHash,
+} from "./deployment/task-compiler-preview.js";
 import {
   createFlowNode,
   flowForProject,
@@ -112,6 +119,7 @@ let deploymentTaskDraft = {
 };
 let viewedDeploymentStage = null;
 let editingDeploymentStage = null;
+let creatingAnotherProject = false;
 let pendingEditStage = null;
 let deploymentEditReturnFocus = null;
 let annotationDeleteInFlight = false;
@@ -186,6 +194,7 @@ function persistDeploymentSession() {
     projectId: selectedProject.id,
     mapId: activeMap?.id || null,
     viewedDeploymentStage: viewedDeploymentStage || deploymentWorkflow?.current?.id || null,
+    creatingAnotherProject,
     deploymentTaskDraft: {
       mapSource: deploymentTaskDraft.mapSource,
       mapLabel: deploymentTaskDraft.mapLabel,
@@ -379,6 +388,11 @@ function closeTaskPreview() {
   });
   $("generateTaskCompilerPreview")?.focus();
 }
+function renderTaskCompilerCompletionAction() {
+  const completedPreview = taskCompilerPreview?.status === "ready";
+  $("startAnotherDeployment").classList.toggle("deployment-hidden", !completedPreview);
+  $("startAnotherDeployment").disabled = !completedPreview;
+}
 function renderTaskCompilerState(project) {
   const compiler = project?.task_compiler || {};
   const identity = compiler.identity || {};
@@ -400,6 +414,7 @@ function renderTaskCompilerState(project) {
     taskCompilerPreview = null;
     taskCompilerProjectId = project?.id || null;
   }
+  renderTaskCompilerCompletionAction();
   renderTaskCompilerPreview(taskCompilerPreview);
   renderDeploymentGuide();
   if (project && !taskCompilerPreview) {
@@ -408,6 +423,23 @@ function renderTaskCompilerState(project) {
         ? "任务信息已保存；可生成实验预览。"
         : "填写并保存小区名称后，才可请求服务端预览。",
     );
+  }
+}
+async function restoreTaskCompilerPreview(projectId) {
+  const project = selectedProject;
+  if (!project || project.id !== projectId || !hasPersistedPreview(project)) return;
+  try {
+    const data = await request(
+      `/api/deployments/${encodeURIComponent(projectId)}/task-compiler/preview`,
+    );
+    if (selectedProject?.id !== projectId || data.preview?.status !== "ready") return;
+    selectedProject = projectWithPreviewHash(selectedProject, data.preview);
+    if (!previewMatchesProject(selectedProject, data.preview)) return;
+    taskCompilerPreview = data.preview;
+    taskCompilerProjectId = projectId;
+    renderTaskCompilerState(selectedProject);
+  } catch (error) {
+    taskCompilerMessage("已保存的实验预览暂时无法恢复；可重新生成预览后继续。", true);
   }
 }
 async function saveTaskCompilerConfig() {
@@ -441,31 +473,41 @@ async function saveTaskCompilerConfig() {
 }
 async function refreshTaskCompilerPreview() {
   if (!selectedProject) return;
+  const projectId = selectedProject.id;
   const button = $("generateTaskCompilerPreview");
   button.disabled = true;
   taskCompilerMessage("正在由服务端校验组件并生成实验预览…");
   try {
     const data = await request(
-      `/api/deployments/${encodeURIComponent(selectedProject.id)}/task-compiler/preview`,
+      `/api/deployments/${encodeURIComponent(projectId)}/task-compiler/preview`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: "{}",
       },
     );
+    if (!isActivePreviewRequest(projectId, selectedProject)) return;
     taskCompilerPreview = data.preview;
-    taskCompilerProjectId = selectedProject.id;
+    taskCompilerProjectId = projectId;
+    selectedProject = projectWithPreviewHash(selectedProject, data.preview);
     renderTaskCompilerPreview(data.preview);
+    renderTaskCompilerCompletionAction();
+    renderDeploymentGuide();
     openTaskPreview(data.preview);
   } catch (error) {
+    if (!isActivePreviewRequest(projectId, selectedProject)) return;
     taskCompilerPreview = {
       status: "blocked",
       errors: [error.message],
       recovery: "请检查小区名称、地图阶段、组件属性和机器人地图来源后重试。",
     };
     renderTaskCompilerPreview(taskCompilerPreview);
+    renderTaskCompilerCompletionAction();
+    renderDeploymentGuide();
   } finally {
-    button.disabled = !selectedProject?.task_compiler?.identity?.community;
+    if (isActivePreviewRequest(projectId, selectedProject)) {
+      button.disabled = !selectedProject.task_compiler?.identity?.community;
+    }
   }
 }
 async function downloadTaskCompilerBundle() {
@@ -612,7 +654,10 @@ function guideTargetForStep(stepId) {
 function renderDeploymentGuide() {
   const guide = $("deploymentGuide");
   if (!guide) return;
-  deploymentWorkflow = deriveDeploymentWorkflow(selectedProject, topology, taskCompilerPreview);
+  const workflowProject = creatingAnotherProject ? null : selectedProject;
+  const workflowTopology = creatingAnotherProject ? null : topology;
+  const workflowPreview = creatingAnotherProject ? null : taskCompilerPreview;
+  deploymentWorkflow = deriveDeploymentWorkflow(workflowProject, workflowTopology, workflowPreview);
   const { steps, current, completed, total, percent } = deploymentWorkflow;
   if (viewedDeploymentStage && (topology || !(selectedProject?.map_assets || []).length)) {
     viewedDeploymentStage = clampDeploymentStage(current.id, viewedDeploymentStage);
@@ -669,10 +714,12 @@ function renderDeploymentTaskConsole() {
     applyDeploymentTaskGating();
     return;
   }
+  const workflowProject = creatingAnotherProject ? null : selectedProject;
+  const workflowTopology = creatingAnotherProject ? null : topology;
   deploymentTask = deriveDeploymentTask({
     workflow: deploymentWorkflow,
-    project: selectedProject,
-    topology,
+    project: workflowProject,
+    topology: workflowTopology,
     mappingSession,
     draft: deploymentTaskDraft,
     viewedStage: viewedDeploymentStage,
@@ -994,7 +1041,7 @@ function updateLivePreview() {
   };
   liveMapImage.src = `/api/mapping/sessions/${encodeURIComponent(mappingSession.id)}/preview.png?revision=${preview.revision}`;
 }
-function renderProject(project) {
+function renderProject(project, { restoringSession = false } = {}) {
   // A save can make the workflow facts sufficient for the next stage. Keep the
   // operator in map marking until they explicitly confirm completion instead
   // of letting that refresh turn a mouse-up into a workflow transition.
@@ -1010,7 +1057,16 @@ function renderProject(project) {
     $("waypointPopover").classList.add("deployment-hidden");
     const session = readDeploymentSession();
     const canRestore = session?.projectId === project.id;
-    viewedDeploymentStage = canRestore ? session.viewedDeploymentStage : null;
+    creatingAnotherProject = shouldRestoreNewProjectDraft(
+      session,
+      project.id,
+      restoringSession,
+    );
+    viewedDeploymentStage = creatingAnotherProject
+      ? null
+      : canRestore
+        ? session.viewedDeploymentStage
+        : null;
     deploymentTaskDraft = {
       mapSource: canRestore ? session.deploymentTaskDraft?.mapSource || null : null,
       mapLabel: canRestore ? session.deploymentTaskDraft?.mapLabel || "" : "",
@@ -1069,6 +1125,7 @@ function renderProject(project) {
     selectMap(restoredMap || maps[0]);
   }
   else drawMap();
+  if (creatingAnotherProject) revealNewProjectForm();
 }
 function localizationBindings() {
   return Array.isArray(selectedProject?.localization_bindings)
@@ -2149,7 +2206,7 @@ async function loadProjects() {
       ? data.projects.find((item) => item.id === session.projectId)
       : null;
     if (restoredProject && !selectedProject) {
-      await openProject(restoredProject.id);
+      await openProject(restoredProject.id, { restoringSession: true });
     } else if (session?.projectId && !restoredProject) {
       clearDeploymentSession();
     }
@@ -2162,13 +2219,15 @@ async function loadComponentSpeedDefaults() {
   const data = await request("/api/deployment-component-defaults");
   componentSpeedDefaults = data.component_speed_defaults || {};
 }
-async function openProject(id) {
+async function openProject(id, { restoringSession = false } = {}) {
   const data = await request(`/api/deployments/${encodeURIComponent(id)}`);
   topology = null;
-  renderProject(data.project);
+  if (!restoringSession) creatingAnotherProject = false;
+  renderProject(data.project, { restoringSession });
   persistDeploymentSession();
   await refreshMappingStatus();
   await refreshTopology();
+  await restoreTaskCompilerPreview(id);
 }
 async function saveCurrentDeploymentFlow() {
   if (!selectedProject || !validateFlow(deploymentFlow).valid) return;
@@ -2322,12 +2381,30 @@ async function createDeploymentProject() {
   }
 }
 $("createProject").addEventListener("click", createDeploymentProject);
-$("showNewProjectForm").addEventListener("click", () => {
+function revealNewProjectForm() {
   $("newProjectForm").classList.remove("deployment-hidden");
   $("currentProjectCard").classList.add("deployment-hidden");
   $("projectName").focus();
-  note("projectMessage", `仍在编辑“${selectedProject?.name || "当前项目"}”；创建新项目后才会切换。`);
-});
+}
+function startAnotherDeploymentProject() {
+  if (!selectedProject) return;
+  creatingAnotherProject = true;
+  viewedDeploymentStage = null;
+  editingDeploymentStage = null;
+  deploymentTaskDraft = {
+    mapSource: null,
+    fileSummary: null,
+    mapLabel: "",
+    latestCreatedMapId: null,
+    receipt: null,
+  };
+  persistDeploymentSession();
+  renderDeploymentGuide();
+  revealNewProjectForm();
+  note("projectMessage", `“${selectedProject.name}”已保留。填写新项目后才会切换。`);
+}
+$("showNewProjectForm").addEventListener("click", startAnotherDeploymentProject);
+$("startAnotherDeployment").addEventListener("click", startAnotherDeploymentProject);
 function renderMapFolderSelection(files) {
   const manifest = $("mapFolderManifest");
   const importButton = $("importMap");

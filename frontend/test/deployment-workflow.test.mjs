@@ -834,6 +834,18 @@ test("workflow marks export ready only after server preview succeeds", () => {
   assert.equal(ready.steps.at(-1).status, "complete");
 });
 
+test("completed export keeps a visible path to start another deployment project", () => {
+  assert.match(deploymentPage, /id="startAnotherDeployment"/);
+  assert.match(deploymentPage, />新建其他项目</);
+  assert.match(deploymentSource, /function startAnotherDeploymentProject\(\)/);
+  assert.match(deploymentSource, /\$\("startAnotherDeployment"\)\.addEventListener\("click", startAnotherDeploymentProject\)/);
+  assert.match(deploymentSource, /creatingAnotherProject\s*=\s*true/);
+  assert.match(deploymentSource, /if \(!restoringSession\) creatingAnotherProject = false;/);
+  assert.match(deploymentSource, /deriveDeploymentWorkflow\(workflowProject, workflowTopology, workflowPreview\)/);
+  assert.match(deploymentSource, /renderTaskCompilerCompletionAction\(\);\s*renderDeploymentGuide\(\);/);
+  assert.match(deploymentSource, /\$\("newProjectForm"\)\.classList\.remove\("deployment-hidden"\)/);
+});
+
 test("deployment page exposes a guided next-action surface", () => {
   for (const id of [
     "deploymentGuide",

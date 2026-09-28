@@ -17,7 +17,7 @@ function pointer(value) {
     ? value.deploymentTaskDraft
     : {};
   const viewedDeploymentStage = value.viewedDeploymentStage ?? value.viewedStage;
-  return {
+  const session = {
     version: 1,
     projectId: value.projectId,
     mapId: validId(value.mapId) ? value.mapId : null,
@@ -31,6 +31,8 @@ function pointer(value) {
         : "",
     },
   };
+  if (value.creatingAnotherProject === true) session.creatingAnotherProject = true;
+  return session;
 }
 
 export function readDeploymentSession(store = globalThis.localStorage) {
@@ -63,6 +65,14 @@ export function clearDeploymentSession(store = globalThis.localStorage) {
   } catch {
     // Storage can be disabled by browser policy. The page still works in memory.
   }
+}
+
+export function shouldRestoreNewProjectDraft(session, projectId, restoringSession = false) {
+  return Boolean(
+    restoringSession
+    && session?.projectId === projectId
+    && session.creatingAnotherProject === true,
+  );
 }
 
 export function clampDeploymentStage(currentStage, requestedStage) {
