@@ -11,13 +11,14 @@ PC Web 继续使用现有 HTML/CSV 预览、下载与 filename 删除行为，�
 - 自动测试报告的唯一历史来源是 `run_<id>_trajectory` 中的结构化轨迹 JSON；验收报告的唯一历史来源是其 `.assets.json` 声明的受控轨迹目录及其中的结构化记录。
 - 回填绝不解析 HTML 或 SVG，不从当前 Observation/Deployment 地图重新推断历史证据，也不接受客户端提供的路径、地图、坐标或报告内容。
 - 每份可验证报告生成一个受控的 native sidecar。sidecar 保存随机、不透明的 `report_id`、稳定 `item_id`/`trajectory_id`、已验证的报告摘要、项目、轨迹段元数据、显示级路径和样本分页信息；不包含文件系统路径或 URL。
-- 每个轨迹段在归档时复制/冻结其底图为受限 PNG，并记录其受限资源引用。所有 sidecar 与 PNG 先写临时文件、`fsync` 后原子替换，避免 Mobile 读到半份归档。
+- 新轨迹在采集时从受控 PGM 缓存生成独立、受限的冻结 PNG，并把同级资源名与地图元数据写入结构化轨迹 JSON；归档时仅复制该已验证 PNG。所有 sidecar 与 PNG 先写临时文件、`fsync` 后原子替换，避免 Mobile 读到半份归档。
+- 历史结构化 JSON 在此前没有独立冻结 PNG；由于禁止解析 SVG，也禁止从当前地图补造，历史回填只能保留可验证的报告摘要和任务结果。缺少独立冻结 PNG 的轨迹引用必须明确标为 `unavailable`，不提供轨迹详情或地图端点，绝不伪造可导航历史地图。
 
 ## 新报告与历史报告
 
-新自动测试/验收报告完成 HTML/CSV 写入后，调用同一 `NativeReportArchive` 将同源结构化轨迹、地图元数据、理想路线、虚拟墙和采样归档为 schema v1。归档失败不回滚既有 HTML/CSV，但该报告不出现在原生索引，并记录受控诊断。
+新自动测试/验收报告先在轨迹采集阶段完成冻结 PNG 与结构化资源引用，再在 HTML/CSV 写入后调用同一 `NativeReportArchive` 将同源轨迹、地图元数据、理想路线、虚拟墙和采样归档为 schema v1。归档失败不回滚既有 HTML/CSV，但该报告不出现在原生索引，并记录受控诊断。
 
-控制台启动后启动一个单线程、低优先级的回填 worker。它只枚举 reports 根目录下已验证的报告名，逐份检查是否已有有效 sidecar；缺失时从上述结构化来源创建归档。每批次工作量受时间/数量限制并让出执行权，不能延迟 HTTP 监听、测试执行或报告生成。无法验证的历史资料跳过并留下可审计的受控日志；Mobile 在回填完成前保持迁移状态，不接触旧文件格式。
+控制台启动后启动一个单线程、低优先级的回填 worker。它只枚举 reports 根目录下已验证的报告名，逐份检查是否已有有效 sidecar；缺失时从上述结构化来源创建摘要/任务归档，并仅为具备独立冻结 PNG 的轨迹提供可用地图段。每批次工作量受时间/数量限制并让出执行权，不能延迟 HTTP 监听、测试执行或报告生成。无法验证的历史资料跳过并留下可审计的受控日志；Mobile 在回填完成前保持迁移状态，不接触旧文件格式。
 
 ## 只读 API
 
@@ -33,10 +34,10 @@ PC Web 继续使用现有 HTML/CSV 预览、下载与 filename 删除行为，�
 
 既有报告删除继续以 filename 为唯一入口；删除成功时同一事务范围内删除其 native sidecar 和受控冻结 PNG。`report_id` 永不替代 filename 删除接口。
 
-旧报告、无轨迹报告或无法验证的历史记录没有 `native_report`；既有 PC、下载与 HTML/CSV 流程不受影响。Mobile 将缺失或畸形原生数据视为不可导航的迁移状态，不回退解析文件。新接口不调用 ROS、任务、定位、地图或控制服务。
+无结构化来源或无法验证的历史记录没有 `native_report`；有结构化来源但缺少独立冻结 PNG 的旧报告可提供原生摘要/任务结果，并把相关轨迹引用标记为 `unavailable`。既有 PC、下载与 HTML/CSV 流程不受影响。Mobile 将缺失、畸形或不可用轨迹视为不可导航的迁移状态，不回退解析文件。新接口不调用 ROS、任务、定位、地图或控制服务。
 
 ## 验证与契约升级
 
-Backend 测试覆盖新报告归档、历史回填、冻结底图、显示路径上限、样本稳定分页、JSON 和 PNG 边界、无路径泄漏、400/404、删除联动及 Existing `GET /api/reports` 兼容。PC Web 测试确认忽略增量字段后原有报告流程不变。Mobile 侧以锁定 Flutter 环境验证模型、Repository 和轨迹工作区的缺失、畸形、分页、错误与多地图状态。
+Backend 测试覆盖新轨迹冻结 PNG、完整新报告归档、历史摘要回填及其 `unavailable` 轨迹、显示路径上限、样本稳定分页、JSON 和 PNG 边界、无路径泄漏、400/404、删除联动及 Existing `GET /api/reports` 兼容。PC Web 测试确认忽略增量字段后原有报告流程不变。Mobile 侧以锁定 Flutter 环境验证模型、Repository 和轨迹工作区的缺失、畸形、不可用、分页、错误与多地图状态。
 
 所有 Backend、PC 和 Mobile 证据完成后，将 `Mobile Native Reports` 及地图轨迹端点从 `Planned` 提升为 `Existing`，记录 runtime producer、Mobile consumer、PC 非消费者和验证命令。
