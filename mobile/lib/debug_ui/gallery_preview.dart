@@ -33,6 +33,7 @@ import '../features/manual_control/domain/vehicle_control_state.dart';
 import '../features/manual_control/presentation/manual_control_screen.dart';
 import '../features/reports/application/reports_controller.dart';
 import '../features/reports/domain/aletheia_report.dart';
+import '../features/reports/domain/native_report_trajectory.dart';
 import '../features/reports/presentation/report_detail_screen.dart';
 import '../features/reports/presentation/reports_screen.dart';
 import '../features/robot_connection/presentation/robot_connection_screen.dart';
@@ -179,6 +180,18 @@ class _GalleryPreviewScope extends StatelessWidget {
         reportsProvider.overrideWith((ref) => _reportsFor(spec)),
         nativeReportDetailProvider('rpt_01J8')
             .overrideWith(() => _GalleryNativeReportDetailController(spec)),
+        nativeReportTrajectoryProvider(
+          const NativeReportTrajectoryKey(
+            reportId: 'rpt_01J8',
+            trajectoryId: 'traj_gallery_01',
+          ),
+        ).overrideWith(() => _GalleryNativeReportTrajectoryController()),
+        nativeReportTrajectoryMapImageProvider(
+          const NativeReportTrajectoryKey(
+            reportId: 'rpt_01J8',
+            trajectoryId: 'traj_gallery_01',
+          ),
+        ).overrideWith((ref) => MemoryImage(_galleryTrajectoryPng)),
         runtimeSettingsProvider.overrideWith((ref) async => _gallerySettings),
         supervisorProcessesProvider.overrideWith(
           (ref) async => _gallerySupervisorProcesses,
@@ -1220,6 +1233,22 @@ class _GalleryNativeReportDetailController
   };
 }
 
+class _GalleryNativeReportTrajectoryController
+    extends NativeReportTrajectoryController {
+  _GalleryNativeReportTrajectoryController()
+    : super(
+        const NativeReportTrajectoryKey(
+          reportId: 'rpt_01J8',
+          trajectoryId: 'traj_gallery_01',
+        ),
+      );
+
+  @override
+  Future<NativeReportTrajectoryState> build() => Future.value(
+    NativeReportTrajectoryState.fromTrajectory(_galleryTrajectory),
+  );
+}
+
 final _galleryNativeReport = NativeReportSummary(
   reportId: 'rpt_01J8',
   kind: ReportKind.test,
@@ -1310,6 +1339,14 @@ final _galleryNativeDetail = NativeReportDetailState(
       duration: Duration(seconds: 90),
       summary: '定位未在阈值内收敛。',
       detail: '车端仅返回受控诊断摘要。',
+      trajectoryRefs: [
+        NativeReportTrajectoryRef(
+          trajectoryId: 'traj_gallery_01',
+          label: 'T-003 · 一层大厅',
+          availability: NativeTrajectoryAvailability.available,
+          sampleCount: 3,
+        ),
+      ],
     ),
     NativeReportItem(
       itemId: 'task_02',
@@ -1321,6 +1358,116 @@ final _galleryNativeDetail = NativeReportDetailState(
   ],
   nextCursor: null,
 );
+
+const _galleryTrajectory = NativeReportTrajectory(
+  trajectoryId: 'traj_gallery_01',
+  itemId: 'task_01',
+  label: 'T-003 · 一层大厅',
+  map: NativeTrajectoryMap(
+    label: '一层大厅',
+    resolutionM: 0.5,
+    widthCells: 24,
+    heightCells: 16,
+    originXM: -2,
+    originYM: -2,
+  ),
+  displayPaths: [
+    NativeTrajectoryPath(
+      routeName: '理想路线',
+      kind: NativeTrajectoryPathKind.ideal,
+      points: [
+        NativeTrajectoryPoint(xM: -1, yM: -1),
+        NativeTrajectoryPoint(xM: 6, yM: 4),
+      ],
+    ),
+    NativeTrajectoryPath(
+      routeName: '实际轨迹',
+      kind: NativeTrajectoryPathKind.actual,
+      points: [
+        NativeTrajectoryPoint(xM: -1, yM: -1),
+        NativeTrajectoryPoint(xM: 2, yM: 1),
+        NativeTrajectoryPoint(xM: 6, yM: 4),
+      ],
+    ),
+  ],
+  virtualWalls: [
+    [NativeTrajectoryPoint(xM: 4, yM: -1), NativeTrajectoryPoint(xM: 4, yM: 3)],
+  ],
+  sampleCount: 3,
+);
+
+final _galleryTrajectoryPng = Uint8List.fromList(const [
+  137,
+  80,
+  78,
+  71,
+  13,
+  10,
+  26,
+  10,
+  0,
+  0,
+  0,
+  13,
+  73,
+  72,
+  68,
+  82,
+  0,
+  0,
+  0,
+  1,
+  0,
+  0,
+  0,
+  1,
+  8,
+  6,
+  0,
+  0,
+  0,
+  31,
+  21,
+  196,
+  137,
+  0,
+  0,
+  0,
+  13,
+  73,
+  68,
+  65,
+  84,
+  8,
+  215,
+  99,
+  248,
+  255,
+  255,
+  255,
+  127,
+  0,
+  9,
+  251,
+  3,
+  253,
+  42,
+  134,
+  233,
+  250,
+  0,
+  0,
+  0,
+  0,
+  73,
+  69,
+  78,
+  68,
+  174,
+  66,
+  96,
+  130,
+]);
 
 Widget _mockVideoFrame({required Uri endpoint, required String resolution}) =>
     const _MockVideoFrame();

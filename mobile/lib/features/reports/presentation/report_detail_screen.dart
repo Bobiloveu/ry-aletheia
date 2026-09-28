@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../app/theme/aletheia_theme.dart';
 import '../application/reports_controller.dart';
 import '../domain/aletheia_report.dart';
+import '../domain/native_report_trajectory.dart';
+import 'report_trajectory_workspace.dart';
 
 class ReportDetailScreen extends ConsumerWidget {
   const ReportDetailScreen({required this.reportId, super.key});
@@ -109,7 +111,11 @@ class _ReportDetailBody extends ConsumerWidget {
                   ...exceptions.map(
                     (item) => Padding(
                       padding: const EdgeInsets.only(bottom: 8),
-                      child: _TaskRow(item: item, emphasize: true),
+                      child: _TaskRow(
+                        item: item,
+                        reportId: reportId,
+                        emphasize: true,
+                      ),
                     ),
                   ),
                 ],
@@ -119,7 +125,7 @@ class _ReportDetailBody extends ConsumerWidget {
                 ...normal.map(
                   (item) => Padding(
                     padding: const EdgeInsets.only(bottom: 8),
-                    child: _TaskRow(item: item),
+                    child: _TaskRow(item: item, reportId: reportId),
                   ),
                 ),
                 if (state.items.isEmpty)
@@ -221,8 +227,13 @@ class _Metric extends StatelessWidget {
 }
 
 class _TaskRow extends StatelessWidget {
-  const _TaskRow({required this.item, this.emphasize = false});
+  const _TaskRow({
+    required this.item,
+    required this.reportId,
+    this.emphasize = false,
+  });
   final NativeReportItem item;
+  final String reportId;
   final bool emphasize;
 
   @override
@@ -240,46 +251,245 @@ class _TaskRow extends StatelessWidget {
       ),
       child: Padding(
         padding: const EdgeInsets.all(14),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Icon(_statusIcon(item.status), color: color, size: 20),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    item.title,
-                    style: Theme.of(context).textTheme.titleMedium,
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(_statusIcon(item.status), color: color, size: 20),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        item.title,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      if (item.summary != null) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          item.summary!,
+                          style: Theme.of(context).textTheme.bodyMedium,
+                        ),
+                      ],
+                      if (item.detail != null) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          item.detail!,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ],
                   ),
-                  if (item.summary != null) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                      item.summary!,
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                  ],
-                  if (item.detail != null) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                      item.detail!,
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
-                ],
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  _formatDuration(item.duration),
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ),
+            if (item.trajectoryRefs.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              ...item.trajectoryRefs.map(
+                (trajectory) => Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: _TrajectoryEvidenceCard(
+                    reportId: reportId,
+                    reference: trajectory,
+                  ),
+                ),
               ),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              _formatDuration(item.duration),
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
+            ],
           ],
         ),
       ),
     );
   }
+}
+
+class _TrajectoryEvidenceCard extends ConsumerWidget {
+  const _TrajectoryEvidenceCard({
+    required this.reportId,
+    required this.reference,
+  });
+
+  final String reportId;
+  final NativeReportTrajectoryRef reference;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    switch (reference.availability) {
+      case NativeTrajectoryAvailability.unavailable:
+        return _EvidenceMessage(
+          icon: Icons.route_outlined,
+          title: '未采集到可验证轨迹',
+          detail: reference.integrityWarning ?? '本任务没有可供复核的地图轨迹。',
+        );
+      case NativeTrajectoryAvailability.incomplete:
+        return _EvidenceMessage(
+          icon: Icons.warning_amber_rounded,
+          title: '轨迹证据不完整',
+          detail: reference.integrityWarning ?? '轨迹采样未完整归档，不能作为完整复核依据。',
+          warning: true,
+        );
+      case NativeTrajectoryAvailability.available:
+        break;
+    }
+
+    final key = NativeReportTrajectoryKey(
+      reportId: reportId,
+      trajectoryId: reference.trajectoryId,
+    );
+    final trajectory = ref.watch(nativeReportTrajectoryProvider(key));
+    final mapImage = ref.watch(nativeReportTrajectoryMapImageProvider(key));
+    return _Section(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.map_outlined, color: AletheiaTheme.cyan, size: 19),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '地图运行轨迹证据',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(reference.label, style: Theme.of(context).textTheme.bodyMedium),
+          if (reference.integrityWarning != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              reference.integrityWarning!,
+              style: Theme.of(context).textTheme.bodySmall
+                  ?.copyWith(color: AletheiaTheme.warning),
+            ),
+          ],
+          const SizedBox(height: 12),
+          trajectory.when(
+            loading: () => const SizedBox(
+              height: 260,
+              child: Center(child: CircularProgressIndicator()),
+            ),
+            error: (_, _) => _TrajectoryLoadError(
+              onRetry: () =>
+                  ref.invalidate(nativeReportTrajectoryProvider(key)),
+            ),
+            data: (state) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  SizedBox(
+                    height: 270,
+                    child: ReportTrajectoryWorkspace(
+                      trajectory: state.trajectory,
+                      samples: state.samples,
+                      mapImage: mapImage,
+                      hasMoreSamples:
+                          state.nextCursor != null && !state.isLoadingMore,
+                      onRequestMoreSamples: () => ref
+                          .read(nativeReportTrajectoryProvider(key).notifier)
+                          .loadMoreSamples(),
+                    ),
+                  ),
+                  if (state.isLoadingMore) ...[
+                    const SizedBox(height: 10),
+                    const LinearProgressIndicator(),
+                  ] else if (state.loadMoreError != null) ...[
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        const Expanded(child: Text('精确采样点暂时未能读取，已展示的轨迹仍可查看。')),
+                        TextButton(
+                          onPressed: () => ref
+                              .read(
+                                nativeReportTrajectoryProvider(key).notifier,
+                              )
+                              .loadMoreSamples(),
+                          child: const Text('重试'),
+                        ),
+                      ],
+                    ),
+                  ] else if (state.nextCursor != null) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      '轻点轨迹附近以读取精确采样点。',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ],
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EvidenceMessage extends StatelessWidget {
+  const _EvidenceMessage({
+    required this.icon,
+    required this.title,
+    required this.detail,
+    this.warning = false,
+  });
+
+  final IconData icon;
+  final String title;
+  final String detail;
+  final bool warning;
+
+  @override
+  Widget build(BuildContext context) => _Section(
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(
+          icon,
+          color: warning ? AletheiaTheme.warning : AletheiaTheme.textTertiary,
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 3),
+              Text(detail, style: Theme.of(context).textTheme.bodySmall),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _TrajectoryLoadError extends StatelessWidget {
+  const _TrajectoryLoadError({required this.onRetry});
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    height: 180,
+    child: Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.sync_problem_outlined, color: AletheiaTheme.warning),
+          const SizedBox(height: 8),
+          const Text('轨迹证据暂时不可用'),
+          TextButton(onPressed: onRetry, child: const Text('重试')),
+        ],
+      ),
+    ),
+  );
 }
 
 class _LoadMoreError extends StatelessWidget {

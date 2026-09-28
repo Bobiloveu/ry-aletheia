@@ -1,3 +1,5 @@
+import 'native_report_trajectory.dart';
+
 enum ReportStatus { passed, failed, blocked, cancelled, incomplete, unknown }
 
 enum ReportKind { test, acceptance, unknown }
@@ -212,6 +214,7 @@ class NativeReportItem {
     required this.title,
     required this.status,
     required this.duration,
+    this.trajectoryRefs = const [],
     this.summary,
     this.detail,
   });
@@ -220,11 +223,13 @@ class NativeReportItem {
     final itemId = _safeIdentifier(json['item_id']);
     final title = _boundedTextOrNull(json['title'], maxLength: 200);
     final duration = _nonNegativeInt(json['duration_ms']);
+    final trajectoryRefs = _trajectoryRefs(json['trajectory_refs']);
     final summary = _optionalBoundedText(json['summary'], maxLength: 500);
     final detail = _optionalBoundedText(json['detail'], maxLength: 2000);
     if (itemId == null ||
         title == null ||
         duration == null ||
+        trajectoryRefs == null ||
         summary.isInvalid ||
         detail.isInvalid) {
       return null;
@@ -234,6 +239,7 @@ class NativeReportItem {
       title: title,
       status: _reportStatusOrUnknown(json['status']),
       duration: Duration(milliseconds: duration),
+      trajectoryRefs: trajectoryRefs,
       summary: summary.value,
       detail: detail.value,
     );
@@ -243,8 +249,19 @@ class NativeReportItem {
   final String title;
   final ReportStatus status;
   final Duration duration;
+  final List<NativeReportTrajectoryRef> trajectoryRefs;
   final String? summary;
   final String? detail;
+}
+
+List<NativeReportTrajectoryRef>? _trajectoryRefs(Object? value) {
+  if (value == null) return const [];
+  if (value is! List) return null;
+  final references = value
+      .map(NativeReportTrajectoryRef.tryFromJson)
+      .whereType<NativeReportTrajectoryRef>()
+      .toList(growable: false);
+  return references.length == value.length ? references : null;
 }
 
 final _identifierExpression = RegExp(r'^[A-Za-z0-9_-]{1,128}$');

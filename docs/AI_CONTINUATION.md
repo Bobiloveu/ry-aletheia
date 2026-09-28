@@ -142,6 +142,15 @@
 - 主要文件：`shared/contracts/task_execution.md`、`mobile/lib/features/reports/**`、`mobile/lib/app/router.dart`、`mobile/lib/debug_ui/{gallery_manifest,gallery_preview}.dart`、对应 `mobile/test/features/reports/**` 与 Gallery 测试。
 - Resume Prompt：`阅读 AGENTS.md、mobile/AGENTS.md、Shared task_execution 原生报告 Planned 段落和本节；保持范围为 Mobile + 必要契约。先运行 reports/Gallery 定向测试与 analyze，再在 iPhone 18 Pro 的 Debug Gallery 审查六个 native-report 状态。不要触碰 frontend、Backend 或 PNG/Photos 导出。`
 
+## 2026-09-28：Mobile 原生报告地图轨迹证据（Planned Backend 依赖）
+
+- 范围仅为 `mobile/`、`shared/contracts/task_execution.md` 与必要 Mobile 文档；没有修改 Backend、PC Web、ROS、现有 HTML/CSV 报告或实时观测地图。
+- Shared 的 `Mobile Native Reports` 保持 **Planned**，并新增报告作用域的 `trajectory_refs`、轨迹详情、冻结 `map.png` 与按需 samples 固定路由。后端必须从与既有 HTML 相同的报告时刻归档证据生成结构化数据；客户端不解析 HTML/SVG、不接收 JSON URL/路径，也不使用当前实时地图回填历史报告。
+- App 已实现 fail-closed 模型与 ID/几何/有限坐标/路径上限/样本严格递增校验。每一张可用证据卡仅按 `report_id + trajectory_id` 读取，显示冻结 PNG、米制格栅、虚拟墙、理想路线、实际路线与点选的精确样本；缩放维持焦点对应世界坐标，所有图层共用同一变换。
+- 样本只在操作者点选路线附近时按页读取。分页网络错误、重复或倒序样本都保留已经显示的路径和可重试 cursor，不会影响报告结论或任务清单。
+- 已验证：`env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY fvm flutter test --no-pub test/features/reports -r compact`（全部通过）与 `fvm flutter analyze lib/features/reports test/features/reports`（无问题）。尚未启动含后端实现的真实轨迹接口，也未生成或提交任何地图、报告、签名或 Golden 产物。
+- 后续：Backend 获得单独授权后实现 Shared Planned 端点并保留 400/404 与大小限制语义；随后在 iPhone 18 Pro 以实际归档报告完成暗色/日光、窄屏、双指缩放、点选、PNG 失败重试及多地图段人工验收。整份报告长图 PNG/相册保存仍后置，不能借此轨迹能力提前实现。
+
 ## 2026-09-23：Mobile 核心交互动效第一期（最新）
 
 ### 目标与已完成

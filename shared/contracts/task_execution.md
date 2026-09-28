@@ -148,10 +148,48 @@ GET /api/reports/{report_id}/native?cursor=<opaque>&limit=<1..100>
 
 `item_id` 与 `report_id` 使用相同的 opaque identifier 约束；单项 `status` 可为上述固定值，未知的未来状态由客户端显示为 `unknown`。`summary` 与 `detail` 仅允许受控纯文本诊断摘要，必须受长度限制；不得返回或渲染本机路径、文件 URL、HTML、CSV、SVG、任意富文本、原始 ROS 消息、指令、凭据或未脱敏现场数据。无效或不属于当前授权报告的 `report_id` 必须返回 `404`；无效 cursor/limit 必须返回受控 `400`，不得泄露报告目录或其他报告的存在性。
 
+#### 地图轨迹证据（Planned）
+
+为了让 Mobile 原生报告与既有 HTML 报告使用同一份已归档的运行证据，`items` 中可以增量包含 `trajectory_refs`。缺失等价于空数组，表示该项尚未归档原生轨迹，不影响原有任务结果展示：
+
+```json
+{
+  "item_id": "task_01",
+  "trajectory_refs": [
+    {
+      "trajectory_id": "traj_01J8A",
+      "label": "T-003 · 一层大厅",
+      "status": "available",
+      "sample_count": 624,
+      "integrity_warning": null
+    }
+  ]
+}
+```
+
+`trajectory_id` 与 `report_id` 都是服务端签发的不透明标识；`label` 与 `integrity_warning` 是长度受限的受控纯文本。`status` 只允许 `available`、`incomplete`、`unavailable`；`sample_count` 必须为非负有限整数。未知枚举、非法 identifier 或畸形数据表示该条引用不可安全展示，Mobile 不得猜测、补全或读取报告文件。
+
+Backend 完成实现后提供以下只读报告专属端点：
+
+```text
+GET /api/reports/{report_id}/native/trajectories/{trajectory_id}
+GET /api/reports/{report_id}/native/trajectories/{trajectory_id}/map.png
+GET /api/reports/{report_id}/native/trajectories/{trajectory_id}/samples?cursor=<opaque>&limit=<1..1000>
+```
+
+第一端点返回一个历史地图段：`schema_version: 1`、其 `trajectory_id`/`item_id`、受控 `label`、`map`、`display_paths`、`virtual_walls`、`sample_count`、可选 `integrity_warning` 与可选 `samples_next_cursor`。`map` 必须包含受控 `label`、有限且严格大于零的 `resolution_m`、`width_cells`、`height_cells`，以及有限的 `origin_x_m`/`origin_y_m`。每条 `display_paths` 只能为 `actual` 或 `ideal`，包含长度受限 `route_name` 和不超过 2,000 个有限 `x_m`/`y_m` 点；每条路径必须保持同一地图段内的顺序，绝不跨地图连接。`virtual_walls` 是每条至少两个有限点的多段线。显示级路径从同一份完整归档样本确定性生成，只为首屏渲染优化，不能替代原始样本证据。
+
+`map.png` 只返回报告生成时冻结的该地图段底图，必须是受 Backend 尺寸/字节上限约束的 `image/png`；它不是当前 Observation 地图或 Deployment 地图的通用下载入口。JSON 响应绝不包含 URL、文件名、本机路径或文件系统标识，Mobile 只能由已验证 ID 构造上述固定请求路径。
+
+样本端点默认 limit 为 1,000，最大为 1,000；其响应返回 `samples` 与可选不透明 `next_cursor`。每个样本必须包含有限 `x_m`/`y_m`、非负整数 `timestamp_ns`、受控 `route_name` 和严格递增的稳定 `sample_index`。分页不得重复、遗漏或重排样本；Mobile 只在需要精确点选或继续查看时按需读取，不能把当前实时地图或未经验证的点与报告轨迹混合。
+
+无效 report/trajectory identifier、cursor 或 limit 返回受控 `400`。未知、已删除、无权读取或不属于报告的 `trajectory_id` 返回受控 `404`，不得泄露运行目录、其它报告或部署项目的存在性。Backend 必须在报告生成时从既有 HTML 报告使用的轨迹记录与冻结地图资产校验/归档这些数据；不得在请求时解析 HTML、SVG 或从当前运行时地图重新推断历史证据。
+
 #### 迁移、影响与升级条件
 
 - Backend 先在生成新报告时写入受控的结构化 sidecar/存储记录，并仅在完整校验通过时向索引添加 `native_report`；历史 HTML/CSV 可以按需回填，但不是客户端解析历史文件的理由。
 - Mobile 在 `native_report` 缺失或不安全时保持不可导航的迁移状态；只在 summary 有效时请求 Planned 详情端点。它不读取、下载、保存或导出报告文件。
+- Mobile 仅在已验证的 `trajectory_refs` 存在时按需请求报告专属轨迹端点；它使用冻结底图及同一报告的坐标元数据进行原生渲染，不读取 HTML/SVG、当前 Observation 地图或 Deployment 地图。
 - PC Web 不消费此字段或详情端点，不改变现有报告页面、下载与删除行为。
 - 既有 `DELETE /api/reports/{filename}` 的 filename 受控删除路径保持不变；`report_id` 不能替代、扩展或绕过它。
 - 将本节端点从 Planned 提升为 Existing 前，Backend 必须完成输入/输出校验、404/400 安全语义、旧索引兼容与迁移说明；Mobile 必须验证缺失/畸形/分页/错误状态；PC Web 必须确认忽略新增字段仍保持既有流程。然后在本文档记录三方验证证据与实际权威实现。

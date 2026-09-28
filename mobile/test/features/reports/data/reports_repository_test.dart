@@ -48,6 +48,61 @@ void main() {
   );
 
   test(
+    'requests fixed native trajectory routes without accepting server URLs',
+    () async {
+      final requests = <http.Request>[];
+      final repository = ReportsRepository(
+        AletheiaApiClient(
+          MockClient((request) async {
+            requests.add(request);
+            final isSamples = request.url.path.endsWith('/samples');
+            return http.Response(
+              jsonEncode(isSamples ? _nativeSamples() : _nativeTrajectory()),
+              200,
+              headers: const {
+                'content-type': 'application/json; charset=utf-8',
+              },
+            );
+          }),
+        ),
+      );
+
+      final trajectory = await repository.loadNativeTrajectory(
+        endpoint,
+        'rpt_01J8',
+        'traj_01J8',
+      );
+      final samples = await repository.loadNativeTrajectorySamples(
+        endpoint,
+        'rpt_01J8',
+        'traj_01J8',
+        cursor: 'cursor_01',
+        limit: 1001,
+      );
+      final mapUri = repository.nativeTrajectoryMapUri(
+        endpoint,
+        'rpt_01J8',
+        'traj_01J8',
+      );
+
+      expect(trajectory.trajectoryId, 'traj_01J8');
+      expect(samples.samples.single.sampleIndex, 1);
+      expect(requests.map((request) => request.url.path), [
+        '/api/reports/rpt_01J8/native/trajectories/traj_01J8',
+        '/api/reports/rpt_01J8/native/trajectories/traj_01J8/samples',
+      ]);
+      expect(requests.last.url.queryParameters, {
+        'cursor': 'cursor_01',
+        'limit': '1000',
+      });
+      expect(
+        mapUri.path,
+        '/api/reports/rpt_01J8/native/trajectories/traj_01J8/map.png',
+      );
+    },
+  );
+
+  test(
     'rejects an unsafe report identifier before issuing a network request',
     () async {
       var requestCount = 0;
@@ -142,4 +197,45 @@ Map<String, dynamic> _nativeDetail({required String? cursor}) => {
   },
   'items': const [],
   'next_cursor': cursor,
+};
+
+Map<String, dynamic> _nativeTrajectory() => {
+  'schema_version': 1,
+  'trajectory_id': 'traj_01J8',
+  'item_id': 'task_003',
+  'label': 'T-003 · 一层大厅',
+  'map': {
+    'label': '一层大厅',
+    'resolution_m': 0.05,
+    'width_cells': 2048,
+    'height_cells': 1536,
+    'origin_x_m': -25.0,
+    'origin_y_m': -18.0,
+  },
+  'display_paths': [
+    {
+      'route_name': '实际轨迹',
+      'kind': 'actual',
+      'points': [
+        {'x_m': 1.2, 'y_m': 3.4},
+        {'x_m': 1.6, 'y_m': 3.8},
+      ],
+    },
+  ],
+  'virtual_walls': const [],
+  'sample_count': 2,
+  'samples_next_cursor': 'cursor_01',
+};
+
+Map<String, dynamic> _nativeSamples() => {
+  'samples': [
+    {
+      'sample_index': 1,
+      'x_m': 1.2,
+      'y_m': 3.4,
+      'timestamp_ns': 1727058600000000000,
+      'route_name': '实际轨迹',
+    },
+  ],
+  'next_cursor': null,
 };

@@ -6,6 +6,7 @@ import 'package:aletheia_mobile/core/network/aletheia_api_client.dart';
 import 'package:aletheia_mobile/features/reports/application/reports_controller.dart';
 import 'package:aletheia_mobile/features/reports/data/reports_repository.dart';
 import 'package:aletheia_mobile/features/reports/domain/aletheia_report.dart';
+import 'package:aletheia_mobile/features/reports/domain/native_report_trajectory.dart';
 import 'package:aletheia_mobile/features/reports/presentation/report_detail_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -69,6 +70,34 @@ void main() {
     expect(find.text('车端暂时未返回原生报告详情，请检查连接后重试。'), findsOneWidget);
     expect(find.textContaining('Bad state:'), findsNothing);
   });
+
+  testWidgets(
+    'shows a native map trajectory evidence card without browser fallback',
+    (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            robotConnectionControllerProvider.overrideWith(
+              _ConnectedController.new,
+            ),
+            reportsRepositoryProvider.overrideWithValue(
+              _FakeReportsRepository(includeTrajectory: true),
+            ),
+          ],
+          child: MaterialApp(
+            theme: AletheiaTheme.light(),
+            home: const ReportDetailScreen(reportId: 'rpt_01J8'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('地图运行轨迹证据'), findsOneWidget);
+      expect(find.text('T-003 · 一层大厅'), findsOneWidget);
+      expect(find.textContaining('HTML'), findsNothing);
+      expect(find.textContaining('浏览器'), findsNothing);
+    },
+  );
 }
 
 class _ConnectedController extends RobotConnectionController {
@@ -80,12 +109,14 @@ class _ConnectedController extends RobotConnectionController {
 }
 
 class _FakeReportsRepository extends ReportsRepository {
-  _FakeReportsRepository()
+  _FakeReportsRepository({this.includeTrajectory = false})
     : super(
         AletheiaApiClient(
           MockClient((_) async => throw StateError('unexpected HTTP request')),
         ),
       );
+
+  final bool includeTrajectory;
 
   @override
   Future<NativeReportDetailPage> loadNativeDetail(
@@ -110,13 +141,23 @@ class _FakeReportsRepository extends ReportsRepository {
       ),
       headline: '定位收敛超时。',
     ),
-    items: const [
+    items: [
       NativeReportItem(
         itemId: 'task_failure',
         title: '定位检查',
         status: ReportStatus.failed,
         duration: Duration(seconds: 90),
         summary: '定位未在阈值内收敛。',
+        trajectoryRefs: includeTrajectory
+            ? const [
+                NativeReportTrajectoryRef(
+                  trajectoryId: 'traj_01J8',
+                  label: 'T-003 · 一层大厅',
+                  availability: NativeTrajectoryAvailability.available,
+                  sampleCount: 2,
+                ),
+              ]
+            : const [],
       ),
       NativeReportItem(
         itemId: 'task_passed',
@@ -126,6 +167,34 @@ class _FakeReportsRepository extends ReportsRepository {
       ),
     ],
     nextCursor: null,
+  );
+
+  @override
+  Future<NativeReportTrajectory> loadNativeTrajectory(
+    RobotEndpoint endpoint,
+    String reportId,
+    String trajectoryId,
+  ) async => const NativeReportTrajectory(
+    trajectoryId: 'traj_01J8',
+    itemId: 'task_failure',
+    label: 'T-003 · 一层大厅',
+    map: NativeTrajectoryMap(
+      label: '一层大厅',
+      resolutionM: 0.5,
+      widthCells: 20,
+      heightCells: 10,
+      originXM: 0,
+      originYM: 0,
+    ),
+    displayPaths: [
+      NativeTrajectoryPath(
+        routeName: '实际轨迹',
+        kind: NativeTrajectoryPathKind.actual,
+        points: [NativeTrajectoryPoint(xM: 2, yM: 2)],
+      ),
+    ],
+    virtualWalls: [],
+    sampleCount: 2,
   );
 }
 

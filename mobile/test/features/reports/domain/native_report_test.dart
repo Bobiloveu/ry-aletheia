@@ -146,4 +146,34 @@ void main() {
       expect(page.items.single.status, ReportStatus.unknown);
     },
   );
+
+  test(
+    'keeps missing trajectory references compatible and rejects malformed ones',
+    () {
+      final legacyItem = NativeReportItem.tryFromJson({
+        'item_id': 'task_01',
+        'title': '兼容历史任务',
+        'status': 'passed',
+        'duration_ms': 180,
+      });
+      final malformedItem = NativeReportItem.tryFromJson({
+        'item_id': 'task_02',
+        'title': '轨迹数据损坏',
+        'status': 'failed',
+        'duration_ms': 180,
+        'trajectory_refs': [
+          {
+            'trajectory_id': '../unsafe',
+            'label': '不安全轨迹',
+            'status': 'available',
+            'sample_count': 1,
+          },
+        ],
+      });
+
+      expect(legacyItem, isNotNull);
+      expect(legacyItem!.trajectoryRefs, isEmpty);
+      expect(malformedItem, isNull);
+    },
+  );
 }
