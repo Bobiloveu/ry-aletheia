@@ -34,6 +34,8 @@ TEMPLATE_ROOT = (
 APPROVED_STATUS_TEMPLATES = (
     "start_task.xml",
     "task_complete.xml",
+    "place_water.xml",
+    "auto_cargo.xml",
     "elevator_in_n_x.xml",
     "elevator_in_x_n.xml",
     "elevator_out_n_x.xml",
@@ -193,6 +195,8 @@ def test_compiler_rejects_a_literal_status_code_in_an_approved_template(
 @pytest.mark.parametrize(("name", "expected"), [
     ("start_task.xml", ["STATUS_TASK_START", "STATUS_INDOOR_TASKING"]),
     ("task_complete.xml", ["STATUS_TASK_COMPLETE"]),
+    ("place_water.xml", ["STATUS_CLAMP_WATER_WAITING", "STATUS_CLAMP_WATER", "STATUS_PLACE_WATER_WAITING", "STATUS_PLACE_WATER", "STATUS_PHOTO_UPLOAD", "STATUS_TASK_RETURN_WAITING"]),
+    ("auto_cargo.xml", ["STATUS_MULTI_TASK_START", "STATUS_MULTI_TASK_ARRIVED"]),
     ("elevator_in_n_x.xml", ["STATUS_ELEVATOR_WAITING", "STATUS_ELEVATOR_ARRIVED", "STATUS_ELEVATOR_IN"]),
     ("elevator_in_x_n.xml", ["STATUS_ELEVATOR_WAITING", "STATUS_ELEVATOR_ARRIVED", "STATUS_ELEVATOR_IN"]),
     ("elevator_out_n_x.xml", ["STATUS_ELEVATOR_TAKING", "STATUS_ELEVATOR_WAITING", "STATUS_ELEVATOR_ARRIVED"]),
@@ -356,6 +360,40 @@ def two_map_project(tmp_path: Path) -> dict:
 
 def _compile(project: dict):
     return compile_indoor_elevator(project, map_root=Path(project["_test_map_root"]))
+
+
+def test_target_arrival_action_selects_and_exports_the_matching_behavior_tree(two_map_project):
+    """The stored target action must control the runtime task ID and exported XML."""
+    target = next(item for item in two_map_project["components"] if item["id"] == "target")
+    target["attributes"]["arrival_action"] = "auto_cargo"
+
+    preview = _compile(two_map_project)
+
+    target_subtask = next(item for item in preview.task_json["subtasks"] if item["subtask_name"] == "1509")
+    assert target_subtask["waypoints"][-1]["waypoint_task_id"] == "auto_cargo"
+    cargo_tree = _artifact_text(preview, "waypoint_tasks/gk1/auto_cargo.xml")
+    assert 'status_code="700"' in cargo_tree
+    assert 'status_code="701"' in cargo_tree
+    assert 'status_code="109"' not in cargo_tree
+
+
+@pytest.mark.parametrize("invalid", [False, 0, [], {}])
+def test_compiler_rejects_falsy_non_string_target_arrival_actions(two_map_project, invalid):
+    target = next(item for item in two_map_project["components"] if item["id"] == "target")
+    target["attributes"]["arrival_action"] = invalid
+
+    with pytest.raises(CompilationError, match="目标点到达动作不受支持"):
+        _compile(two_map_project)
+
+
+def test_auto_cargo_template_preserves_the_reference_runtime_blackboard_inputs():
+    text = _template("auto_cargo.xml")
+    tokens = re.findall(r"(?<!\{)\{([a-z_]+)\}(?!\})", text)
+
+    assert tokens == [
+        "delivery_code", "task_target_success", "delivery_code",
+        "cargo_id", "cargo_operation_code", "delivery_code",
+    ]
 
 
 def test_single_task_mode_generates_a_complete_task_for_each_target(two_map_project):
@@ -1598,6 +1636,7 @@ def test_gk1_store_preview_and_download_have_the_approved_indoor_structure(
             "waypoint_tasks/gk1/1_1_elevator_out_x_n.xml",
                 "waypoint_tasks/gk1/1_1_close_elevdoor_n.xml",
                 "waypoint_tasks/gk1/start_task.xml",
+                "waypoint_tasks/gk1/place_water.xml",
                 "waypoint_tasks/gk1/task_complete.xml",
                 "runtime/loc_yaml_path.json",
                 "runtime/lift_id_list.json",

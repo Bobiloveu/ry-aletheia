@@ -28,6 +28,8 @@ from .localization_assets import LocalizationMapError, read_localization_map
 from .map_assets import MapAssetCache, MapAssetError
 from .task_compiler import (
     CompilationPreview,
+    TARGET_ARRIVAL_ACTION_DEFAULT,
+    TARGET_ARRIVAL_ACTIONS,
     bundle_zip,
     compile_multi_task_points,
     compile_single_task_points,
@@ -102,6 +104,7 @@ class DeploymentStore:
     TASK_TRANSITION_SPEED_MODES = frozenset({
         "task_point", "single_point", "slow_point", "narrow_point",
     })
+    LEGACY_TARGET_ARRIVAL_ACTIONS = frozenset({"", "deliver", "wait", "return"})
     EXECUTION_NODE_KINDS = frozenset({"transition", "component"})
     FIXED_EXECUTION_COMPONENT_KINDS = frozenset({"start", "target", "elevator"})
     TASK_COMPILER_DOOR = re.compile(r"[A-Za-z0-9_-]{1,32}\Z")
@@ -662,6 +665,27 @@ class DeploymentStore:
             if component.get("kind") == "target" and "door" not in attributes:
                 attributes["door"] = ""
                 migrated = True
+            if component.get("kind") == "target":
+                raw_action = attributes.get("arrival_action")
+                if raw_action is None:
+                    attributes["arrival_action"] = TARGET_ARRIVAL_ACTION_DEFAULT
+                    migrated = True
+                elif not isinstance(raw_action, str):
+                    raise DeploymentError("目标点到达动作仅支持泄水或卸货")
+                else:
+                    action = raw_action.strip()
+                    if action in self.LEGACY_TARGET_ARRIVAL_ACTIONS:
+                        # The previous editor offered three labels but the
+                        # compiler always emitted place_water. Preserve that
+                        # deployed behavior while bringing snapshots onto the
+                        # two-action contract.
+                        attributes["arrival_action"] = TARGET_ARRIVAL_ACTION_DEFAULT
+                        migrated = True
+                    elif action not in TARGET_ARRIVAL_ACTIONS:
+                        raise DeploymentError("目标点到达动作仅支持泄水或卸货")
+                    elif raw_action != action:
+                        attributes["arrival_action"] = action
+                        migrated = True
             try:
                 configured_speed = component_speed_profile(
                     str(component.get("kind") or ""), attributes.get("speed_profile"),
@@ -2176,7 +2200,7 @@ class DeploymentStore:
             "narrow_passage": {},
             "ramp": {},
             "slow_zone": {},
-            "target": {"arrival_action": "deliver", "door": ""},
+            "target": {"arrival_action": TARGET_ARRIVAL_ACTION_DEFAULT, "door": ""},
             "start": {"start_action": "dispatch"},
         }
         attributes = {**defaults, **profiles.get(kind, {}), **source}
@@ -2209,6 +2233,10 @@ class DeploymentStore:
             if door and not cls.TASK_COMPILER_DOOR.fullmatch(door):
                 raise DeploymentError("目标门牌号应为 1 至 32 个字母、数字、连字符或下划线")
             attributes["door"] = door
+            arrival_action = str(attributes.get("arrival_action") or "").strip()
+            if arrival_action not in TARGET_ARRIVAL_ACTIONS:
+                raise DeploymentError("目标点到达动作仅支持泄水或卸货")
+            attributes["arrival_action"] = arrival_action
         if kind in {"gate", "auto_door"}:
             for key, label in (
                 ("pre_open_distance_m", "开门前距离"),

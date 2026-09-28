@@ -106,6 +106,43 @@ def test_transition_waypoint_defaults_to_single_point_and_rejects_reserved_speed
         })
 
 
+def test_target_arrival_action_defaults_migrates_legacy_values_and_rejects_unknown_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    root = tmp_path / "maps"
+    source = _map(root / "floor")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("目标动作")
+    asset = store.import_map(project["id"], source, "用户楼层", "typical_floor")
+
+    target = store.add_component(project["id"], {
+        "map_id": asset["id"], "kind": "target", "x": -0.95, "y": -1.95,
+    })
+    assert target["attributes"]["arrival_action"] == "place_water"
+
+    cargo_target = store.update_component(project["id"], target["id"], {
+        "attributes": {"arrival_action": "auto_cargo"},
+    })
+    assert cargo_target["attributes"]["arrival_action"] == "auto_cargo"
+
+    document = store.get(project["id"])
+    document["components"][0]["attributes"]["arrival_action"] = "return"
+    store._write_json(store._document_path(project["id"]), document)
+    assert store.get(project["id"])["components"][0]["attributes"]["arrival_action"] == "place_water"
+
+    document = store.get(project["id"])
+    document["components"][0]["attributes"]["arrival_action"] = "unexpected"
+    store._write_json(store._document_path(project["id"]), document)
+    with pytest.raises(DeploymentError, match="仅支持泄水或卸货"):
+        store.get(project["id"])
+
+    with pytest.raises(DeploymentError, match="仅支持泄水或卸货"):
+        store.update_component(project["id"], target["id"], {
+            "attributes": {"arrival_action": "deliver"},
+        })
+
+
 def test_delete_project_removes_only_the_validated_project_directory(tmp_path: Path):
     store = DeploymentStore(tmp_path / "deployments")
     project = store.create("可删除项目")

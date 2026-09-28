@@ -1,0 +1,21 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence name="PlaceWaterAndWaitReturn">
+      <PublishTaskStatus status_code="{{STATUS_CLAMP_WATER_WAITING}}" />
+      <ClampWater name="{clamp_water_service}" />
+      <PublishTaskStatus status_code="{{STATUS_CLAMP_WATER}}" />
+      <PublishTaskStatus status_code="{{STATUS_PLACE_WATER_WAITING}}" />
+      <PlaceWater name="{place_water_service}" server_timeout="{place_water_timeout_seconds}" />
+      <PublishTaskStatus status_code="{{STATUS_PLACE_WATER}}" />
+      <MoveForward forward_dist="{post_place_forward_distance}" forward_speed="{post_place_forward_speed}" server_timeout="{post_place_timeout_seconds}" />
+      <RetryUntilSuccessful num_attempts="{photo_retry_attempts}">
+        <Sequence name="UploadProof">
+          <PhotoUpload file_url="{photo_url}" />
+          <PublishTaskStatus status_code="{{STATUS_PHOTO_UPLOAD}}" message="{photo_url}" />
+        </Sequence>
+      </RetryUntilSuccessful>
+      <PublishTaskStatus status_code="{{STATUS_TASK_RETURN_WAITING}}" />
+      <WaitForReturnSignal timeout_sec="{return_timeout_seconds}" />
+    </Sequence>
+  </BehaviorTree>
+</root>

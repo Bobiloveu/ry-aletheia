@@ -1,0 +1,12 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence name="DeliverCargoAtDestination">
+      <GetTaskTargetInfo delivery_code="{delivery_code}" success="{task_target_success}" />
+      <PublishTaskStatus status_code="{{STATUS_MULTI_TASK_START}}" message="{delivery_code}" />
+      <!-- cargo_id: 1=上舱自动卸货，2=下舱自动卸货，0=双舱自动卸货，-1=不自动卸货。 -->
+      <!-- cargo_operation_code: 当前自动卸货动作使用 2。 -->
+      <CargoSingleCommand caogo_id="{cargo_id}" operation_code="{cargo_operation_code}" />
+      <PublishTaskStatus status_code="{{STATUS_MULTI_TASK_ARRIVED}}" message="{delivery_code}" />
+    </Sequence>
+  </BehaviorTree>
+</root>

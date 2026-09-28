@@ -15,6 +15,17 @@ test("component definitions preserve deployment labels and fallback labels", () 
   assert.equal(componentName({ kind: "unknown" }), "unknown");
 });
 
+test("target points expose only the two runtime behavior-tree actions", () => {
+  const field = COMPONENT_SPECS.target.fields.find((item) => item.key === "arrival_action");
+  assert.deepEqual(field, {
+    key: "arrival_action",
+    label: "到达动作",
+    type: "select",
+    options: [["place_water", "泄水"], ["auto_cargo", "卸货"]],
+    default: "place_water",
+  });
+});
+
 test("protocol options use project templates before the MQTT and LORA lift defaults", () => {
   assert.deepEqual(
     protocolOptions(

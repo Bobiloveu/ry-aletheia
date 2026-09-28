@@ -206,6 +206,8 @@ Backend 校验具有权威性：客户端展示并提交用户意图，但不得
 
 受控设备的默认速度模式只定义在 `autodrive_console/task_templates/indoor_elevator_v1/components/component-defaults.json`。其中 `auto_door` 固定为 `task_point`，`gate` 固定为 `narrow_point`；浏览器只读展示，不提供人工选择。Backend 在创建、更新、读取旧项目和编译任务时均加载该文件，锁定项会覆盖历史项目属性，因此修改该 JSON 是后续调整默认策略的唯一入口。`GET /api/deployment-component-defaults` 只读返回当前已验证配置，供 PC Web 展示；Mobile 不是消费者。
 
+目标点 `attributes.arrival_action` 是 Backend 与 PC Web 的 Existing 共享字段，只允许 `place_water`（界面“泄水”）或 `auto_cargo`（界面“卸货”），新建默认 `place_water`。编译器必须令最终目标路点的 `waypoint_task_id` 与此值完全一致，并在预览/ZIP 内生成同名 XML。两份行为树由 `task_templates/indoor_elevator_v1/` 受管：状态码通过 `task-status-codes.json` 解析；`{delivery_code}`、`{cargo_id}` 等单花括号字段则保留给运行时黑板。`auto_cargo` 在目标完成后发布到达状态 `701`，但不得发布整体完成 `109`，因为当前任务仍须执行返程子任务，最终完成只能由末尾 `task_complete.xml` 发出。升级旧项目时，历史的 `deliver`、`wait`、`return` 或缺失值统一迁移为 `place_water`，因为旧编译器无论界面选择为何都实际输出该动作；未知的新写入必须拒绝，不能猜测动作。Mobile 不消费此字段。
+
 任务 JSON 和 `runtime/loc_yaml_path.json` 必须消费同一条地图段执行链，不能分别推导返程。定位清单最终 `floor` 条目的 `init_return` 始终等于该图**返程子任务的首个实际节点**（最后一个去程非固定节点的返程姿态；可能是过渡点、区域边界或设备动作点）；没有任何非固定节点时，才回退为目标层电梯门前呼梯点。大厅执行链同样写入大厅的去/返任务段，但不替代进入大厅时由电梯行为树控制的定位切换锚点。
 
 任务过渡点持久化 `speed_mode`，缺省为 `single_point`；只允许 `task_point`、`single_point`、`slow_point` 和 `narrow_point`。`elevator_in` 与 `backward` 属于受控电梯行为，不能被手动过渡点使用。旧 `kind: "return"` 兼容迁移为不参与任务导出的过渡记录，避免把历史返程选择误插到去程。修改任何任务过渡点都会使现有实验预览失效，必须重新由 Backend 编译。

@@ -44,6 +44,8 @@ PROFILE_VERSION = 1
 DEFAULT_MAP_ROOT = Path("/opt/ry/data/maps")
 TEMPLATE_ROOT = Path(__file__).with_name("task_templates") / PROFILE
 SPEED_MODES = frozenset({"task_point", "single_point", "elevator_in", "backward", "narrow_point", "slow_point"})
+TARGET_ARRIVAL_ACTIONS = frozenset({"place_water", "auto_cargo"})
+TARGET_ARRIVAL_ACTION_DEFAULT = "place_water"
 _ROUTE_STAGE_LABELS = {
     "ferry": "摆渡层",
     "outdoor": "户外图",
@@ -75,6 +77,7 @@ class CompilationInput:
     unit: str
     target_floor: int
     door: str
+    arrival_action: str
     lobby_map_url: str
     target_map_url: str
 
@@ -851,6 +854,7 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
     start = _lobby_start_component(components, lobby_asset["id"], project)
     target = _one_component(components, target_asset["id"], "target", "目标点")
     door = _door(target)
+    arrival_action = _target_arrival_action(target)
     if "physical_elevators" in project:
         lobby_elevator, target_elevator, physical_elevator = _shared_elevator_pair(
             project, components, lobby_asset["id"], target_asset["id"]
@@ -931,6 +935,7 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
         unit=unit,
         target_floor=target_physical_floor,
         door=door,
+        arrival_action=arrival_action,
         lobby_map_url=source_map_yaml,
         target_map_url=target_map_yaml,
     )
@@ -974,6 +979,7 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
         "elevator_out_x_n.xml": f"{building}_{unit}_elevator_out_x_n.xml",
         "close_elevdoor_n.xml": f"{building}_{unit}_close_elevdoor_n.xml",
         "close_elevdoor_x.xml": f"{building}_{unit}_close_elevdoor_x.xml",
+        f"{arrival_action}.xml": f"{arrival_action}.xml",
     }
     for template_name, output_name in xml_names.items():
         template = _template(template_name)
@@ -1229,6 +1235,20 @@ def _door(target: dict[str, Any]) -> str:
     return door
 
 
+def _target_arrival_action(target: dict[str, Any]) -> str:
+    """Resolve the only two approved target behaviors from persisted metadata."""
+    attributes = target.get("attributes")
+    if not isinstance(attributes, dict) or "arrival_action" not in attributes:
+        return TARGET_ARRIVAL_ACTION_DEFAULT
+    raw = attributes["arrival_action"]
+    if not isinstance(raw, str):
+        raise CompilationError("目标点到达动作不受支持")
+    action = raw.strip()
+    if action not in TARGET_ARRIVAL_ACTIONS:
+        raise CompilationError("目标点到达动作不受支持")
+    return action
+
+
 def _elevator_pair(components: list[dict[str, Any]], lobby_id: str, target_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
     elevators = [item for item in components if item.get("kind") == "elevator"]
     lobby = [item for item in elevators if item.get("map_asset_id") == lobby_id]
@@ -1397,7 +1417,7 @@ def _task_json(
             {"change_loc": False, "map_url": value.target_map_url, "pcd_url": "", "subtask_name": value.door, "waypoints": [
                 _waypoint("target_wait", points["target_wait"], "backward", f"{b}_{u}_close_elevdoor_x"),
                 *_execution_waypoints(value.door, target_plan.outbound_nodes, b, u),
-                _waypoint("target", points["target"], "single_point", "place_water"),
+                _waypoint("target", points["target"], "single_point", value.arrival_action),
             ]},
             {"change_loc": False, "map_url": value.target_map_url, "pcd_url": "", "subtask_name": f"{value.door}_r", "waypoints": [
                 *_execution_waypoints(f"{value.door}_r", target_plan.return_nodes, b, u),
@@ -1569,6 +1589,7 @@ def _template(name: str) -> str:
         "localization_base.yaml", "start_task.xml", "task_complete.xml",
         "elevator_in_n_x.xml", "elevator_in_x_n.xml", "elevator_out_n_x.xml",
         "elevator_out_x_n.xml", "close_elevdoor_n.xml", "close_elevdoor_x.xml",
+        "place_water.xml", "auto_cargo.xml",
         *(f"components/{kind}_{action}.xml" for kind in ("gate", "auto_door")
           for action in ("open_go", "close_go", "open_back", "close_back")),
     }
