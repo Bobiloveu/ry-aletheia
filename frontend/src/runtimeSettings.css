@@ -315,8 +315,8 @@ body.theme-light .page-main .eyebrow {
 }
 
 /* Configuration is an operations surface, not a marketing form. The frequently
-   edited runtime and vehicle model controls stay in the primary lane; policy
-   explanations and upgrade safety live in a quieter verification rail. */
+   edited runtime and vehicle model controls stay in the primary lane; upgrade
+   verification and its safety boundary remain one coherent operation. */
 @media (min-width: 1100px) {
   .page-main:has(.vehicle-library-panel) .page-grid {
     grid-template-columns: minmax(0, 1fr) 350px;
@@ -345,11 +345,6 @@ body.theme-light .page-main .eyebrow {
   .page-main:has(.vehicle-library-panel) .page-grid > .upgrade-panel {
     grid-column: 2;
     grid-row: 3;
-    padding: 19px;
-  }
-  .page-main:has(.vehicle-library-panel) .page-grid > .panel:last-child {
-    grid-column: 2;
-    grid-row: 4;
     padding: 19px;
   }
   .page-main:has(.vehicle-library-panel) .settings-form {
@@ -401,4 +396,36 @@ body.theme-light .page-main .eyebrow {
     flex: 0 1 auto;
     white-space: nowrap;
   }
+}
+
+.upgrade-safety-note {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.upgrade-safety-note .eyebrow {
+  margin: 0 0 4px;
+}
+.upgrade-safety-note h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+}
+.upgrade-safety-note > p {
+  max-width: 34ch;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+@media (max-width: 850px) {
+  .upgrade-safety-note {
+    grid-template-columns: 1fr;
+    gap: 7px;
+  }
+  .upgrade-safety-note > p { max-width: none; }
 }

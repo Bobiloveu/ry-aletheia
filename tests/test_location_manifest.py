@@ -13,6 +13,7 @@ from autodrive_console.location_manifest import (
     compile_location_manifest,
     physical_floor_index,
 )
+from autodrive_console.virtual_walls import render_virtual_wall_file
 
 
 def test_button_sequence_skips_zero_and_uses_zero_based_physical_indexes():
@@ -58,6 +59,23 @@ def test_runtime_layout_rejects_path_like_project_identities():
     """Catches path traversal through deployment metadata."""
     with pytest.raises(LocationManifestError):
         RuntimeLayout("site-a", "../unsafe")
+
+
+def test_location_manifest_exports_generated_virtual_wall_next_to_map_yaml(tmp_path: Path):
+    project, map_root = _route_project(tmp_path, kinds=("indoor", "floor"))
+    indoor = Path(project["map_assets"][0]["source_yaml"])
+    indoor.with_name("map_walls.yaml").write_bytes(render_virtual_wall_file(
+        project["map_assets"][0]["origin"],
+        [{"start": {"x": 1.0, "y": 2.0}, "end": {"x": 3.0, "y": 2.0}}],
+    ))
+
+    rendered = compile_location_manifest(project, map_root=map_root)
+
+    artifacts = {item.relative_path: item.content for item in rendered.artifacts}
+    assert "runtime/maps/高科一号/1_1/indoor/map_walls.yaml" in artifacts
+    assert b"coordinate_mode: image_relative" in artifacts[
+        "runtime/maps/高科一号/1_1/indoor/map_walls.yaml"
+    ]
 
 
 def test_location_manifest_renders_floor_template_before_runtime_paths(
@@ -226,14 +244,21 @@ def test_manifest_uses_manual_start_then_elevator_center_origin_and_route_return
     assert entries[2]["init_return"] == {"x": 22.0, "y": 23.0, "z": 0.0, "yaw": 0.4}
 
 
-def test_final_floor_manifest_uses_the_last_task_transition_as_return_start(tmp_path: Path):
-    """Direct manifest callers must share the compiler's target return chain."""
+def test_final_floor_manifest_uses_the_last_derived_transition_as_return_start(tmp_path: Path):
+    """Manifest rendering consumes the persisted, system-derived execution chain."""
     project, map_root = _route_project(tmp_path, kinds=("indoor", "floor"))
     floor_map_id = project["map_assets"][-1]["id"]
     project["waypoints"].extend([
         {"id": "floor-transition-first", "map_asset_id": floor_map_id, "kind": "transition", "x": 12.0, "y": 13.0, "yaw": 0.4, "speed_mode": "slow_point"},
         {"id": "floor-transition-last", "map_asset_id": floor_map_id, "kind": "transition", "x": 14.0, "y": 15.0, "yaw": -0.2, "speed_mode": "narrow_point"},
     ])
+    project["localization_routes"][0]["execution_nodes"] = [
+        {"binding_id": "binding-0", "node_refs": []},
+        {"binding_id": "binding-1", "node_refs": [
+            {"kind": "transition", "id": "floor-transition-first"},
+            {"kind": "transition", "id": "floor-transition-last"},
+        ]},
+    ]
 
     rendered = compile_location_manifest(project, map_root=map_root)
     floor_entry = json.loads(rendered.json_bytes)["loc_yaml"][0]["yaml_index"][-1]

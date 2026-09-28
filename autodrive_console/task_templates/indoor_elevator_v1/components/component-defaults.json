@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "component_speed_defaults": {
+    "auto_door": {"speed_profile": "task_point", "locked": true},
+    "gate": {"speed_profile": "narrow_point", "locked": true},
+    "narrow_passage": {"speed_profile": "narrow_point", "locked": false},
+    "ramp": {"speed_profile": "slow_point", "locked": false},
+    "slow_zone": {"speed_profile": "slow_point", "locked": false}
+  }
+}

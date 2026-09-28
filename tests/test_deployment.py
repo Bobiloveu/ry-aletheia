@@ -1,5 +1,6 @@
 import io
 import json
+from hashlib import sha256
 from email.message import Message
 from http import HTTPStatus
 from pathlib import Path
@@ -10,7 +11,8 @@ import pytest
 
 import web_console
 from autodrive_console.deployment import DeploymentError, DeploymentStore
-from autodrive_console.task_compiler import CompilationError
+from autodrive_console.task_compiler import Artifact, CompilationError, CompilationPreview
+from autodrive_console.virtual_walls import parse_virtual_wall_segments
 
 
 def _map(directory: Path) -> Path:
@@ -42,6 +44,9 @@ def test_project_imports_a_snapshot_without_modifying_source(tmp_path: Path, mon
     instance = store.add_map_instance(project["id"], {"map_id": asset["id"], "role": "lobby", "building": "2", "unit": "1", "floor": 1})
     waypoint = store.add_waypoint(project["id"], {"map_id": asset["id"], "kind": "start", "label": "起点", "x": -0.95, "y": -1.95})
     assert instance["map_asset_id"] == asset["id"]
+    # The map stage precedes component annotation; a client-supplied floor
+    # must never become an unverified physical-floor fact.
+    assert instance["floor"] is None
     assert waypoint["kind"] == "start"
     store.delete_waypoint(project["id"], waypoint["id"])
     assert store.get(project["id"])["waypoints"] == []
@@ -240,6 +245,36 @@ def test_localization_binding_allows_distinct_floor_templates_but_not_duplicate_
     assert second_floor["floor_template"] == "3"
 
 
+def test_topology_owned_localization_binding_derives_role_and_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Catches a topology map asking an operator to resupply its already-known role or unit."""
+    map_root = tmp_path / "maps"
+    source = _map(map_root / "site" / "lobby")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", map_root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("自动定位身份")
+    asset = store.import_map(project["id"], source, "电梯大厅", "lobby")
+    store.add_map_instance(project["id"], {
+        "map_id": asset["id"], "role": "lobby", "building": "5", "unit": "2",
+    })
+
+    binding = store.create_localization_binding(project["id"], {"map_asset_id": asset["id"]})
+
+    assert binding == {
+        "id": binding["id"],
+        "map_asset_id": asset["id"],
+        "building": "5",
+        "unit": "2",
+        "type": "indoor",
+    }
+    with pytest.raises(DeploymentError, match="运行角色由部署拓扑自动确定"):
+        store.update_localization_binding(project["id"], binding["id"], {
+            "map_asset_id": asset["id"], "type": "floor", "floor_template": "2",
+        })
+
+
 def test_localization_binding_rejects_legacy_manual_initialization_fields(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -274,7 +309,7 @@ def test_elevator_landing_rejects_zero_as_a_panel_button(
     asset = store.import_map(project["id"], source, "大厅", "lobby")
     elevator = store.add_physical_elevator(
         project["id"],
-        {"elevator_id": "A", "elevator_protocol": "bluetooth", "min_floor": -2, "max_floor": 25},
+        {"elevator_id": "A", "elevator_protocol": "mqtt", "min_floor": -2, "max_floor": 25},
     )
 
     with pytest.raises(DeploymentError, match="按钮 0"):
@@ -309,7 +344,7 @@ def test_elevator_landing_rejects_a_configured_unavailable_panel_button(
         project["id"],
         {
             "elevator_id": "A",
-            "elevator_protocol": "bluetooth",
+            "elevator_protocol": "mqtt",
             "min_floor": -2,
             "max_floor": 20,
             "unavailable_button_floors": [11],
@@ -346,7 +381,7 @@ def test_updating_a_shared_panel_cannot_invalidate_an_existing_landing(
     asset = store.import_map(project["id"], source, "大厅", "lobby")
     elevator = store.add_physical_elevator(
         project["id"],
-        {"elevator_id": "A", "elevator_protocol": "bluetooth", "min_floor": -2, "max_floor": 20},
+        {"elevator_id": "A", "elevator_protocol": "mqtt", "min_floor": -2, "max_floor": 20},
     )
     store.add_component(
         project["id"],
@@ -417,9 +452,274 @@ def test_semantic_component_derives_task_points_and_virtual_wall(tmp_path: Path,
     asset = store.import_map(project["id"], source, "大厅", "lobby")
     elevator = store.add_component(project["id"], {"map_id": asset["id"], "kind": "start", "label": "出发点", "x": -0.95, "y": -1.95})
     assert len(elevator["generated_waypoint_ids"]) == 1
-    wall = store.add_virtual_wall(project["id"], {"map_id": asset["id"], "points": [{"x": -0.99, "y": -1.99}, {"x": -0.9, "y": -1.99}, {"x": -0.9, "y": -1.9}]})
-    assert wall["kind"] == "forbidden_zone"
+    wall = store.add_virtual_wall(project["id"], {
+        "map_id": asset["id"],
+        "start": {"x": -0.99, "y": -1.99},
+        "end": {"x": -0.9, "y": -1.99},
+    })
+    assert wall["start"] == {"x": -0.99, "y": -1.99}
     assert len(store.get(project["id"])["waypoints"]) == 1
+
+
+def test_virtual_wall_crud_regenerates_map_relative_wall_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    root = tmp_path / "maps"
+    source = _map(root / "P1")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("测试")
+    asset = store.import_map(project["id"], source, "大厅", "lobby")
+
+    wall = store.add_virtual_wall(project["id"], {
+        "map_id": asset["id"],
+        "start": {"x": -0.99, "y": -1.99},
+        "end": {"x": -0.9, "y": -1.99},
+    })
+    wall_path = Path(asset["source_yaml"]).with_name("map_walls.yaml")
+    assert parse_virtual_wall_segments(wall_path.read_bytes(), asset["origin"]) == [{
+        "start": {"x": -0.99, "y": -1.99},
+        "end": {"x": -0.9, "y": -1.99},
+    }]
+
+    updated = store.update_virtual_wall(project["id"], wall["id"], {
+        "start": {"x": -0.98, "y": -1.98},
+        "end": {"x": -0.9, "y": -1.98},
+    })
+    assert updated["start"] == {"x": -0.98, "y": -1.98}
+    assert parse_virtual_wall_segments(wall_path.read_bytes(), asset["origin"])[0] == {
+        "start": {"x": -0.98, "y": -1.98},
+        "end": {"x": -0.9, "y": -1.98},
+    }
+
+    store.delete_virtual_wall(project["id"], wall["id"])
+    assert parse_virtual_wall_segments(wall_path.read_bytes(), asset["origin"]) == []
+    assert store.get(project["id"])["map_assets"][0]["files"]["walls"].endswith("/map_walls.yaml")
+
+
+def test_virtual_wall_rejects_missing_or_out_of_bounds_endpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    root = tmp_path / "maps"
+    source = _map(root / "P1")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("测试")
+    asset = store.import_map(project["id"], source, "大厅", "lobby")
+
+    with pytest.raises(DeploymentError, match="起点"):
+        store.add_virtual_wall(project["id"], {
+            "map_id": asset["id"],
+            "end": {"x": -0.9, "y": -1.99},
+        })
+    with pytest.raises(DeploymentError, match="地图边界"):
+        store.add_virtual_wall(project["id"], {
+            "map_id": asset["id"],
+            "start": {"x": -0.99, "y": -1.99},
+            "end": {"x": 0.0, "y": -1.99},
+        })
+
+
+def test_virtual_wall_polyline_writes_one_runtime_segment_per_adjacent_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    root = tmp_path / "maps"
+    source = _map(root / "P1")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("测试")
+    asset = store.import_map(project["id"], source, "大厅", "lobby")
+
+    wall = store.add_virtual_wall(project["id"], {
+        "map_id": asset["id"],
+        "points": [
+            {"x": -0.99, "y": -1.99},
+            {"x": -0.9, "y": -1.99},
+            {"x": -0.9, "y": -1.9},
+        ],
+    })
+
+    assert wall["points"][-1] == {"x": -0.9, "y": -1.9}
+    wall_path = Path(asset["source_yaml"]).with_name("map_walls.yaml")
+    assert len(parse_virtual_wall_segments(wall_path.read_bytes(), asset["origin"])) == 2
+
+
+def test_legacy_virtual_wall_polygon_migrates_to_closed_segments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    root = tmp_path / "maps"
+    source = _map(root / "P1")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("测试")
+    asset = store.import_map(project["id"], source, "大厅", "lobby")
+    document_path = store._document_path(project["id"])
+    document = json.loads(document_path.read_text(encoding="utf-8"))
+    document["virtual_walls"] = [{
+        "id": "legacy-zone",
+        "kind": "forbidden_zone",
+        "map_asset_id": asset["id"],
+        "points": [
+            {"x": -0.99, "y": -1.99},
+            {"x": -0.9, "y": -1.99},
+            {"x": -0.9, "y": -1.9},
+        ],
+    }]
+    document_path.write_text(json.dumps(document), encoding="utf-8")
+
+    migrated = store.get(project["id"])["virtual_walls"]
+
+    assert len(migrated) == 3
+    assert all(item["id"].startswith("virtual-wall-") for item in migrated)
+    assert migrated[-1]["end"] == {"x": -0.99, "y": -1.99}
+
+
+@pytest.mark.parametrize(
+    ("kind", "attributes"),
+    [
+        ("start", {}),
+        ("target", {}),
+        ("building_entrance", {}),
+        ("elevator", {"physical_elevator_id": "shared-elevator", "button_floor": 1}),
+        ("gate", {"controller_device_id": "10044"}),
+        ("auto_door", {"controller_device_id": "10045"}),
+        ("narrow_passage", {}),
+        ("ramp", {}),
+        ("slow_zone", {}),
+    ],
+)
+def test_delete_component_removes_every_supported_component_kind_and_its_generated_points(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    attributes: dict[str, object],
+):
+    """Catches a newly added component kind escaping the generic delete lifecycle."""
+    root = tmp_path / "maps"
+    source = _map(root / "P1")
+    source.with_name("map.pgm").write_bytes(b"P5\n100 100\n255\n" + bytes(100 * 100))
+    source.write_text(
+        "image: map.pgm\nresolution: 0.05\norigin: [-2.0, -2.0, 0.0]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create(f"删除{kind}")
+    asset = store.import_map(project["id"], source, "大厅", "lobby")
+    if kind == "elevator":
+        physical = store.add_physical_elevator(
+            project["id"],
+            {
+                "elevator_id": "10044",
+                "elevator_protocol": "mqtt",
+                "min_floor": 1,
+                "max_floor": 20,
+            },
+        )
+        attributes = {**attributes, "physical_elevator_id": physical["id"]}
+    component = store.add_component(
+        project["id"],
+        {"map_id": asset["id"], "kind": kind, "x": 0.0, "y": 0.0, "attributes": attributes},
+    )
+
+    store.delete_component(project["id"], component["id"])
+
+    document = store.get(project["id"])
+    assert component["id"] not in {item["id"] for item in document["components"]}
+    assert not {
+        item["id"] for item in document["waypoints"] if item.get("generated_by") == component["id"]
+    }
+
+
+@pytest.mark.parametrize(
+    ("kind", "display_key", "speed_profile"),
+    [("gate", "gate_id", "narrow_point"), ("auto_door", "door_id", "task_point")],
+)
+def test_access_components_keep_display_identity_separate_from_numeric_controller_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, display_key: str, speed_profile: str,
+):
+    """Catches using the human label as a DoorControl device identifier."""
+    root = tmp_path / "maps"
+    source = _map(root / "P1")
+    source.with_name("map.pgm").write_bytes(b"P5\n100 100\n255\n" + bytes(100 * 100))
+    source.write_text(
+        "image: map.pgm\nresolution: 0.05\norigin: [-2.0, -2.0, 0.0]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("门禁设备号")
+    asset = store.import_map(project["id"], source, "大厅", "lobby")
+
+    component = store.add_component(project["id"], {
+        "map_id": asset["id"], "kind": kind, "x": 0.0, "y": 0.0,
+        "attributes": {display_key: "G-01", "controller_device_id": "10044"},
+    })
+    draft = store.add_component(project["id"], {
+        "map_id": asset["id"], "kind": kind, "x": 0.1, "y": 0.1,
+        "attributes": {display_key: "待配置设备号"},
+    })
+
+    assert component["attributes"][display_key] == "G-01"
+    assert component["attributes"]["controller_device_id"] == "10044"
+    assert component["attributes"]["speed_profile"] == speed_profile
+    assert component["attributes"]["pre_open_distance_m"] == 1.5
+    assert component["attributes"]["post_open_distance_m"] == 1.5
+    assert draft["attributes"]["controller_device_id"] == ""
+    updated_draft = store.update_component(project["id"], draft["id"], {
+        "attributes": {
+            "controller_device_id": "10046",
+            "pre_open_distance_m": 0.8,
+            "post_open_distance_m": 1.2,
+        },
+    })
+    assert updated_draft["attributes"]["controller_device_id"] == "10046"
+    assert updated_draft["attributes"]["speed_profile"] == speed_profile
+    assert updated_draft["attributes"]["pre_open_distance_m"] == 0.8
+    assert updated_draft["attributes"]["post_open_distance_m"] == 1.2
+    with pytest.raises(DeploymentError, match="纯数字"):
+        store.update_component(project["id"], component["id"], {
+            "attributes": {"controller_device_id": "G-01"},
+        })
+    with pytest.raises(DeploymentError, match="距离"):
+        store.update_component(project["id"], component["id"], {
+            "attributes": {"pre_open_distance_m": 5.1},
+        })
+
+
+@pytest.mark.parametrize(
+    ("kind", "speed_profile"),
+    [("gate", "narrow_point"), ("auto_door", "task_point")],
+)
+def test_old_access_component_without_attributes_is_restored_with_its_locked_template_speed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, speed_profile: str,
+):
+    root = tmp_path / "maps"
+    source = _map(root / "P1")
+    source.with_name("map.pgm").write_bytes(b"P5\n100 100\n255\n" + bytes(100 * 100))
+    source.write_text(
+        "image: map.pgm\nresolution: 0.05\norigin: [-2.0, -2.0, 0.0]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("旧门禁组件")
+    asset = store.import_map(project["id"], source, "大厅", "lobby")
+    component = store.add_component(project["id"], {
+        "map_id": asset["id"], "kind": kind, "x": 0.0, "y": 0.0,
+    })
+    legacy = store.get(project["id"])
+    next(item for item in legacy["components"] if item["id"] == component["id"]).pop("attributes")
+    store._write_json(store._document_path(project["id"]), legacy)
+
+    loaded = store.get(project["id"])
+    restored = next(item for item in loaded["components"] if item["id"] == component["id"])
+
+    assert restored["attributes"]["speed_profile"] == speed_profile
+    assert restored["attributes"]["width_m"] > 0
+    assert restored["attributes"]["height_m"] > 0
+    assert restored["attributes"]["pre_open_distance_m"] == 1.5
+    assert restored["attributes"]["post_open_distance_m"] == 1.5
 
 
 def test_elevator_landing_keeps_local_geometry_and_references_shared_elevator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -438,7 +738,7 @@ def test_elevator_landing_keeps_local_geometry_and_references_shared_elevator(tm
         project["id"],
         {
             "elevator_id": "E-01",
-            "elevator_protocol": "bluetooth",
+            "elevator_protocol": "mqtt",
             "min_floor": -2,
             "max_floor": 32,
         },
@@ -471,22 +771,25 @@ def test_elevator_landing_keeps_local_geometry_and_references_shared_elevator(tm
         )
 
 
-def test_project_protocol_templates_start_with_bluetooth_and_4g(tmp_path: Path):
+def test_project_protocol_templates_keep_access_defaults_and_start_lifts_with_mqtt_and_lora(tmp_path: Path):
     store = DeploymentStore(tmp_path / "deployments")
     project = store.create("协议模板测试")
 
     templates = project["component_templates"]
     assert [item["id"] for item in templates["access_protocols"]] == ["bluetooth", "4g"]
-    assert [item["label"] for item in templates["elevator_protocols"]] == ["蓝牙", "4G"]
+    assert templates["elevator_protocols"] == [
+        {"id": "mqtt", "label": "MQTT"},
+        {"id": "lora", "label": "LORA"},
+    ]
 
     updated = store.add_component_protocol(project["id"], "elevator_protocols", "厂商专线")
     added = updated["component_templates"]["elevator_protocols"][-1]
     assert added["label"] == "厂商专线"
     updated = store.remove_component_protocol(project["id"], "elevator_protocols", added["id"])
-    assert [item["id"] for item in updated["component_templates"]["elevator_protocols"]] == ["bluetooth", "4g"]
+    assert [item["id"] for item in updated["component_templates"]["elevator_protocols"]] == ["mqtt", "lora"]
 
 
-def test_new_elevator_uses_the_first_configured_lift_protocol(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_new_elevator_uses_mqtt_when_no_lift_protocol_is_supplied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root = tmp_path / "maps"
     source = _map(root / "P1")
     (source.parent / "map.pgm").write_bytes(b"P5\n40 40\n255\n" + bytes(40 * 40))
@@ -496,19 +799,13 @@ def test_new_elevator_uses_the_first_configured_lift_protocol(tmp_path: Path, mo
     )
     monkeypatch.setattr(DeploymentStore, "MAP_ROOT", root.resolve())
     store = DeploymentStore(tmp_path / "deployments")
-    project = store.create("自定义梯控协议")
-    mqtt = store.add_component_protocol(project["id"], "elevator_protocols", "MQTT")
-    mqtt_id = mqtt["component_templates"]["elevator_protocols"][-1]["id"]
-    store.add_component_protocol(project["id"], "elevator_protocols", "LoRa")
-    store.remove_component_protocol(project["id"], "elevator_protocols", "bluetooth")
-    store.remove_component_protocol(project["id"], "elevator_protocols", "4g")
+    project = store.create("默认梯控协议")
     asset = store.import_map(project["id"], source, "15F", "typical_floor")
 
     shared = store.add_physical_elevator(
         project["id"],
         {
             "elevator_id": "E-01",
-            "elevator_protocol": mqtt_id,
             "min_floor": 1,
             "max_floor": 15,
         },
@@ -525,7 +822,7 @@ def test_new_elevator_uses_the_first_configured_lift_protocol(tmp_path: Path, mo
     )
 
     assert elevator["attributes"]["physical_elevator_id"] == shared["id"]
-    assert store.get(project["id"])["physical_elevators"][0]["elevator_protocol"] == mqtt_id
+    assert store.get(project["id"])["physical_elevators"][0]["elevator_protocol"] == "mqtt"
 
 
 def test_legacy_elevator_landings_migrate_to_one_shared_physical_elevator(
@@ -538,6 +835,10 @@ def test_legacy_elevator_landings_migrate_to_one_shared_physical_elevator(
     project = store.create("旧项目电梯迁移")
     asset = store.import_map(project["id"], source, "大厅", "lobby")
     document = store.get(project["id"])
+    document["component_templates"]["elevator_protocols"] = [
+        {"id": "bluetooth", "label": "蓝牙"},
+        {"id": "4g", "label": "4G"},
+    ]
     document["components"] = [
         {
             "id": "component-lobby-elevator",
@@ -582,6 +883,11 @@ def test_legacy_elevator_landings_migrate_to_one_shared_physical_elevator(
     migrated = store.get(project["id"])
 
     assert len(migrated["physical_elevators"]) == 1
+    assert migrated["component_templates"]["elevator_protocols"] == [
+        {"id": "bluetooth", "label": "蓝牙"},
+        {"id": "4g", "label": "4G"},
+    ]
+    assert migrated["physical_elevators"][0]["elevator_protocol"] == "bluetooth"
     shared_id = migrated["physical_elevators"][0]["id"]
     assert {
         item["attributes"]["physical_elevator_id"]
@@ -610,7 +916,7 @@ def test_migration_links_one_unambiguous_legacy_landing_to_the_only_shared_eleva
     second_map = store.import_map(project["id"], second, "目标层", "typical_floor")
     shared = store.add_physical_elevator(
         project["id"],
-        {"elevator_id": "10014", "elevator_protocol": "bluetooth", "min_floor": 1, "max_floor": 15},
+        {"elevator_id": "10014", "elevator_protocol": "mqtt", "min_floor": 1, "max_floor": 15},
     )
     linked = store.add_component(
         project["id"],
@@ -648,7 +954,7 @@ def test_physical_elevator_identifier_is_unique_within_a_project(tmp_path: Path)
         project["id"],
         {
             "elevator_id": "10014",
-            "elevator_protocol": "bluetooth",
+            "elevator_protocol": "mqtt",
             "min_floor": 1,
             "max_floor": 15,
         },
@@ -660,7 +966,7 @@ def test_physical_elevator_identifier_is_unique_within_a_project(tmp_path: Path)
             project["id"],
             {
                 "elevator_id": "10014",
-                "elevator_protocol": "bluetooth",
+                "elevator_protocol": "mqtt",
                 "min_floor": 1,
                 "max_floor": 15,
             },
@@ -674,7 +980,7 @@ def test_updating_a_physical_elevator_requires_an_object_payload(tmp_path: Path)
         project["id"],
         {
             "elevator_id": "10014",
-            "elevator_protocol": "bluetooth",
+            "elevator_protocol": "mqtt",
             "min_floor": 1,
             "max_floor": 15,
         },
@@ -705,7 +1011,7 @@ def test_elevator_landings_must_reference_one_existing_shared_elevator(
         project["id"],
         {
             "elevator_id": "10014",
-            "elevator_protocol": "bluetooth",
+            "elevator_protocol": "mqtt",
             "min_floor": 1,
             "max_floor": 15,
         },
@@ -749,7 +1055,7 @@ def test_elevator_landings_must_reference_one_existing_shared_elevator(
             },
         )
     with pytest.raises(DeploymentError, match="正在被物理电梯使用"):
-        store.remove_component_protocol(project["id"], "elevator_protocols", "bluetooth")
+        store.remove_component_protocol(project["id"], "elevator_protocols", "mqtt")
     with pytest.raises(DeploymentError, match="物理电梯仍有地图落点"):
         store.delete_physical_elevator(project["id"], elevator["id"])
 
@@ -850,6 +1156,87 @@ def _route_fixture(store: DeploymentStore, project: dict, assets: list[dict]) ->
     return payload, bindings, {"outdoor_anchor": outdoor_anchor, "lobby_elevator": lobby_elevator}
 
 
+def _persist_automatic_route_fixture(store: DeploymentStore, project: dict) -> dict:
+    """Persist the smallest complete two-map deployment for route-refresh tests."""
+    document = store.get(project["id"])
+    document.update({
+        "deployment_flow": [
+            {"id": "lobby", "type": "lobby", "label": "电梯大厅"},
+            {"id": "target_floor", "type": "target_floor", "label": "用户楼层"},
+        ],
+        "map_stage_assignments": [
+            {"stage": "lobby", "map_asset_id": "lobby-map"},
+            {"stage": "target_floor", "map_asset_id": "floor-map"},
+        ],
+        "map_assets": [
+            {"id": "lobby-map", "label": "大厅", "origin": [-10, -10, 0], "width": 40, "height": 40, "resolution_m": 1.0},
+            {"id": "floor-map", "label": "1509", "origin": [-10, -10, 0], "width": 40, "height": 40, "resolution_m": 1.0},
+        ],
+        "localization_bindings": [
+            {"id": "lobby-binding", "map_asset_id": "lobby-map", "building": "1", "unit": "1", "type": "indoor"},
+            {"id": "floor-binding", "map_asset_id": "floor-map", "building": "1", "unit": "1", "type": "floor", "floor_template": "1"},
+        ],
+        "components": [
+            {"id": "start", "map_asset_id": "lobby-map", "kind": "start", "label": "起点", "x": -6.0, "y": 0.0, "yaw": 0.0, "generated_waypoint_ids": ["start-point"]},
+            {"id": "lobby-lift", "map_asset_id": "lobby-map", "kind": "elevator", "label": "大厅电梯", "x": 6.0, "y": 0.0, "yaw": 0.0, "attributes": {"physical_elevator_id": "lift-a", "height_m": 2.0, "wait_distance_m": 1.5}},
+            {"id": "floor-lift", "map_asset_id": "floor-map", "kind": "elevator", "label": "楼层电梯", "x": -6.0, "y": 0.0, "yaw": -1.57079632679, "attributes": {"physical_elevator_id": "lift-a", "height_m": 2.0, "wait_distance_m": 1.5}},
+            {"id": "target", "map_asset_id": "floor-map", "kind": "target", "label": "目标", "x": 6.0, "y": 0.0, "yaw": 0.0, "generated_waypoint_ids": ["target-point"]},
+            {"id": "slow", "map_asset_id": "floor-map", "kind": "slow_zone", "label": "减速区", "x": -1.0, "y": 0.0, "yaw": 0.0, "attributes": {"width_m": 2.0, "height_m": 2.0}},
+        ],
+        "waypoints": [
+            {"id": "start-point", "map_asset_id": "lobby-map", "kind": "start", "generated_by": "start", "x": -6.0, "y": 0.0, "yaw": 0.0},
+            {"id": "target-point", "map_asset_id": "floor-map", "kind": "target", "generated_by": "target", "x": 6.0, "y": 0.0, "yaw": 0.0},
+            {"id": "transition-late", "map_asset_id": "floor-map", "kind": "transition", "label": "后过渡点", "x": 3.0, "y": 0.0, "yaw": 0.0},
+            {"id": "transition-early", "map_asset_id": "floor-map", "kind": "transition", "label": "先过渡点", "x": -3.0, "y": 0.0, "yaw": 0.0},
+        ],
+    })
+    store._write_json(store._document_path(project["id"]), document)
+    return document
+
+
+def test_deleting_a_route_referenced_transition_rederives_the_route(tmp_path: Path):
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("删除后重算")
+    _persist_automatic_route_fixture(store, project)
+    store.derive_localization_routes(project["id"])
+
+    store.delete_waypoint(project["id"], "transition-early")
+
+    route = store.get(project["id"])["localization_routes"][0]
+    assert route["execution_nodes"][1]["node_refs"] == [
+        {"kind": "component", "id": "slow"},
+        {"kind": "transition", "id": "transition-late"},
+    ]
+
+
+def test_deleting_a_route_referenced_component_rederives_the_route(tmp_path: Path):
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("删除组件后重算")
+    _persist_automatic_route_fixture(store, project)
+    store.derive_localization_routes(project["id"])
+
+    store.delete_component(project["id"], "slow")
+
+    route = store.get(project["id"])["localization_routes"][0]
+    assert route["execution_nodes"][1]["node_refs"] == [
+        {"kind": "transition", "id": "transition-early"},
+        {"kind": "transition", "id": "transition-late"},
+    ]
+
+
+def test_deleting_a_required_marker_clears_stale_routes_and_keeps_the_delete(tmp_path: Path):
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("删除核心标记")
+    _persist_automatic_route_fixture(store, project)
+    store.derive_localization_routes(project["id"])
+
+    store.delete_component(project["id"], "start")
+
+    document = store.get(project["id"])
+    assert not any(component["id"] == "start" for component in document["components"])
+    assert document["localization_routes"] == []
+
+
 def test_localization_route_allows_ferry_anywhere_and_derives_references(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -931,7 +1318,7 @@ def test_localization_route_allows_auto_door_component_center(
 ):
     """Catches rejecting a map-owned automatic-door cut-over center as non-elevator."""
     store, project, assets = _project_with_four_maps(tmp_path, monkeypatch)
-    payload, _, _ = _route_fixture(store, project, assets)
+    payload, bindings, _ = _route_fixture(store, project, assets)
     auto_door = {
         "id": "component-route-auto-door", "map_asset_id": assets[2]["id"], "kind": "auto_door",
     }
@@ -939,12 +1326,155 @@ def test_localization_route_allows_auto_door_component_center(
     document["components"].append(auto_door)
     store._write_json(store._document_path(project["id"]), document)
     payload["links"][-1]["anchor"] = {"kind": "component_center", "component_id": auto_door["id"]}
+    payload["execution_nodes"] = [
+        {"binding_id": binding["id"], "node_refs": [
+            {"kind": "component", "id": auto_door["id"]},
+        ] if binding["id"] == bindings[2]["id"] else []}
+        for binding in bindings
+    ]
 
     route = store.create_localization_route(project["id"], payload)
 
     assert route["links"][-1]["anchor"] == {
         "kind": "component_center", "component_id": "component-route-auto-door",
     }
+
+
+def test_localization_route_persists_an_explicit_execution_chain_per_bound_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """Catches silently accepting a component without an operator-defined travel order."""
+    store, project, assets = _project_with_four_maps(tmp_path, monkeypatch)
+    payload, bindings, _ = _route_fixture(store, project, assets)
+    lobby_transition = store.add_waypoint(project["id"], {
+        "map_id": assets[2]["id"], "kind": "transition", "label": "大厅过渡",
+        "x": -0.95, "y": -1.95,
+    })
+    slow_zone = {
+        "id": "component-floor-slow-zone", "map_asset_id": assets[3]["id"],
+        "kind": "slow_zone", "label": "走廊减速区", "x": -0.95, "y": -1.95,
+        "yaw": 0.0, "attributes": {"width_m": 0.05},
+    }
+    document = store.get(project["id"])
+    document["components"].append(slow_zone)
+    store._write_json(store._document_path(project["id"]), document)
+    payload["execution_nodes"] = [
+        {"binding_id": bindings[0]["id"], "node_refs": []},
+        {"binding_id": bindings[1]["id"], "node_refs": []},
+        {"binding_id": bindings[2]["id"], "node_refs": [
+            {"kind": "transition", "id": lobby_transition["id"]},
+        ]},
+        {"binding_id": bindings[3]["id"], "node_refs": [
+            {"kind": "component", "id": slow_zone["id"]},
+        ]},
+    ]
+
+    route = store.create_localization_route(project["id"], payload)
+
+    assert route["execution_nodes"] == payload["execution_nodes"]
+
+
+@pytest.mark.parametrize(
+    "execution_nodes, error",
+    [
+        (
+            [
+                {"binding_id": "localization-1", "node_refs": []},
+                {"binding_id": "localization-2", "node_refs": []},
+                {"binding_id": "localization-3", "node_refs": [
+                    {"kind": "transition", "id": "foreign-transition"},
+                ]},
+                {"binding_id": "localization-4", "node_refs": []},
+            ],
+            "必须位于该定位绑定地图",
+        ),
+        (
+            [
+                {"binding_id": "localization-1", "node_refs": []},
+                {"binding_id": "localization-2", "node_refs": []},
+                {"binding_id": "localization-3", "node_refs": [
+                    {"kind": "transition", "id": "same-transition"},
+                    {"kind": "transition", "id": "same-transition"},
+                ]},
+                {"binding_id": "localization-4", "node_refs": []},
+            ],
+            "不能重复",
+        ),
+    ],
+)
+def test_localization_route_rejects_cross_map_or_duplicate_execution_nodes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, execution_nodes: list[dict], error: str,
+):
+    """Catches persisting a chain the compiler would otherwise have to guess how to run."""
+    store, project, assets = _project_with_four_maps(tmp_path, monkeypatch)
+    payload, _, _ = _route_fixture(store, project, assets)
+    foreign = store.add_waypoint(project["id"], {
+        "map_id": assets[0]["id"], "kind": "transition", "label": "外图过渡",
+        "x": -0.95, "y": -1.95,
+    })
+    same = store.add_waypoint(project["id"], {
+        "map_id": assets[2]["id"], "kind": "transition", "label": "大厅过渡",
+        "x": -0.95, "y": -1.95,
+    })
+    for entry in execution_nodes:
+        for ref in entry["node_refs"]:
+            if ref["id"] == "foreign-transition":
+                ref["id"] = foreign["id"]
+            if ref["id"] == "same-transition":
+                ref["id"] = same["id"]
+    payload["execution_nodes"] = execution_nodes
+
+    with pytest.raises(DeploymentError, match=error):
+        store.create_localization_route(project["id"], payload)
+
+
+def test_localization_route_rejects_a_nonfixed_component_omitted_from_its_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """Catches falling back to component creation order when the operator has not chosen one."""
+    store, project, assets = _project_with_four_maps(tmp_path, monkeypatch)
+    payload, bindings, _ = _route_fixture(store, project, assets)
+    gate = {
+        "id": "component-lobby-gate", "map_asset_id": assets[2]["id"], "kind": "gate",
+        "label": "大厅闸机", "x": -0.95, "y": -1.95, "yaw": 0.0, "attributes": {},
+    }
+    document = store.get(project["id"])
+    document["components"].append(gate)
+    store._write_json(store._document_path(project["id"]), document)
+    payload["execution_nodes"] = [
+        {"binding_id": binding["id"], "node_refs": []} for binding in bindings
+    ]
+
+    with pytest.raises(DeploymentError, match="未编排任务节点"):
+        store.create_localization_route(project["id"], payload)
+
+
+def test_component_delete_removes_a_stale_execution_chain_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """Catches a delete preserving a stale, browser-visible execution chain."""
+    store, project, assets = _project_with_four_maps(tmp_path, monkeypatch)
+    payload, bindings, _ = _route_fixture(store, project, assets)
+    gate = {
+        "id": "component-lobby-gate", "map_asset_id": assets[2]["id"], "kind": "gate",
+        "label": "大厅闸机", "x": -0.95, "y": -1.95, "yaw": 0.0, "attributes": {},
+    }
+    document = store.get(project["id"])
+    document["components"].append(gate)
+    store._write_json(store._document_path(project["id"]), document)
+    payload["execution_nodes"] = [
+        {"binding_id": binding["id"], "node_refs": [
+            {"kind": "component", "id": gate["id"]},
+        ] if binding["id"] == bindings[2]["id"] else []}
+        for binding in bindings
+    ]
+    store.create_localization_route(project["id"], payload)
+
+    store.delete_component(project["id"], gate["id"])
+
+    document = store.get(project["id"])
+    assert not any(item.get("id") == gate["id"] for item in document["components"])
+    assert document["localization_routes"] == []
 
 
 def test_localization_route_rejects_missing_component_center(
@@ -996,10 +1526,10 @@ def test_localization_route_rejects_updates_to_referenced_bindings(
         )
 
 
-def test_localization_route_protects_component_generated_waypoints_from_cascade_delete(
+def test_component_delete_removes_route_referenced_generated_waypoints(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Catches a component delete cascading through a route endpoint it generated."""
+    """Catches a component delete leaving its generated route endpoint behind."""
     store, project, assets = _project_with_four_maps(tmp_path, monkeypatch)
     payload, _, _ = _route_fixture(store, project, assets)
     generated_component = {
@@ -1016,8 +1546,12 @@ def test_localization_route_protects_component_generated_waypoints_from_cascade_
     payload["task_start_waypoint_id"] = generated_waypoint["id"]
     store.create_localization_route(project["id"], payload)
 
-    with pytest.raises(DeploymentError, match="Waypoint"):
-        store.delete_component(project["id"], generated_component["id"])
+    store.delete_component(project["id"], generated_component["id"])
+
+    document = store.get(project["id"])
+    assert not any(item.get("id") == generated_component["id"] for item in document["components"])
+    assert not any(item.get("id") == generated_waypoint["id"] for item in document["waypoints"])
+    assert document["localization_routes"] == []
 
 
 def test_stage_plan_assigns_maps_in_scene_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1036,6 +1570,27 @@ def test_stage_plan_assigns_maps_in_scene_order(tmp_path: Path, monkeypatch: pyt
         "target_floor",
     ]
     assert plan["current_stage"] is None
+
+
+def test_stage_plan_summarises_multiple_unit_maps_without_reordering_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store, project, assets = _project_with_distinct_maps(tmp_path, monkeypatch, 3)
+    store.set_scene_model(project["id"], "indoor")
+    store.assign_map_stage(project["id"], assets[0]["id"], "lobby")
+    store.assign_map_stage(project["id"], assets[1]["id"], "target_floor")
+    store.add_map_instance(project["id"], {
+        "map_id": assets[0]["id"], "role": "lobby", "building": "1", "unit": "1", "floor": 1,
+    })
+    store.add_map_instance(project["id"], {
+        "map_id": assets[2]["id"], "role": "lobby", "building": "2", "unit": "1", "floor": 1,
+    })
+
+    lobby = next(item for item in store.stage_plan(project["id"])["stages"] if item["stage"] == "lobby")
+
+    assert lobby["map_count"] == 2
+    assert lobby["map_labels"] == [assets[0]["label"], assets[2]["label"]]
+    assert lobby["map_asset_id"] == assets[0]["id"]
 
 
 def test_stage_assignment_rejects_duplicate_map_and_invalid_stage(
@@ -1271,6 +1826,17 @@ def test_topology_http_request_uses_store_without_ros():
     assert handler._json.call_args.args == ({"topology": expected},)
 
 
+def test_component_speed_defaults_http_reads_the_task_template_configuration():
+    handler = _deployment_handler("/api/deployment-component-defaults")
+    expected = {"auto_door": {"speed_profile": "task_point", "locked": True}}
+
+    with patch.object(web_console, "component_speed_defaults", return_value=expected) as defaults:
+        handler.do_GET()
+
+    defaults.assert_called_once_with()
+    assert handler._json.call_args.args == ({"component_speed_defaults": expected},)
+
+
 def test_project_delete_http_removes_the_requested_project_only():
     handler = _deployment_handler("/api/deployments/site-demo")
 
@@ -1297,6 +1863,43 @@ def test_project_delete_http_reports_missing_project():
     )
 
 
+def test_virtual_wall_update_and_delete_routes_return_authoritative_project():
+    wall = {
+        "id": "virtual-wall-a",
+        "map_asset_id": "map-a",
+        "start": {"x": 0.1, "y": 0.2},
+        "end": {"x": 0.4, "y": 0.2},
+    }
+    payload = {"start": wall["start"], "end": wall["end"]}
+    update_handler = _deployment_handler(
+        "/api/deployments/site/virtual-walls/virtual-wall-a", payload,
+    )
+    project = {"id": "site", "virtual_walls": [wall]}
+
+    with patch.object(web_console.DEPLOYMENTS, "update_virtual_wall", return_value=wall) as update, patch.object(
+        web_console.DEPLOYMENTS, "get", return_value=project,
+    ) as get:
+        update_handler.do_POST()
+
+    update.assert_called_once_with("site", "virtual-wall-a", payload)
+    get.assert_called_once_with("site")
+    assert update_handler._json.call_args.args == ({"virtual_wall": wall, "project": project},)
+
+    delete_handler = _deployment_handler(
+        "/api/deployments/site/virtual-walls/virtual-wall-a",
+    )
+    with patch.object(web_console.DEPLOYMENTS, "delete_virtual_wall") as delete, patch.object(
+        web_console.DEPLOYMENTS, "get", return_value={"id": "site", "virtual_walls": []},
+    ) as deleted_get:
+        delete_handler.do_DELETE()
+
+    delete.assert_called_once_with("site", "virtual-wall-a")
+    deleted_get.assert_called_once_with("site")
+    assert delete_handler._json.call_args.args == (
+        {"deleted": True, "project": {"id": "site", "virtual_walls": []}},
+    )
+
+
 def test_transition_http_rejects_invalid_store_input():
     """Fails if a malformed transition bypasses DeploymentStore validation."""
     handler = _deployment_handler(
@@ -1316,7 +1919,7 @@ def test_transition_http_rejects_invalid_store_input():
 def test_physical_elevator_http_creates_project_owned_shared_entity():
     payload = {
         "elevator_id": "10014",
-        "elevator_protocol": "bluetooth",
+        "elevator_protocol": "mqtt",
         "min_floor": 1,
         "max_floor": 15,
     }
@@ -1359,21 +1962,31 @@ def test_localization_binding_http_persists_only_project_owned_binding(
     assert store.get(project["id"])["localization_bindings"] == [body["localization_binding"]]
 
 
-def test_localization_route_http_forwards_only_project_owned_payload():
-    """Catches a route collection URL falling through to the generic deployment routes."""
+def test_localization_route_http_rejects_manual_route_payloads():
+    """Catches reintroducing a browser-owned route ordering API."""
     payload = {
         "building": "1", "unit": "1", "binding_ids": ["a"],
         "task_start_waypoint_id": "s", "task_target_waypoint_id": "t", "links": [],
     }
     handler = _deployment_handler("/api/deployments/site/localization-routes", payload)
 
-    with patch.object(web_console.DEPLOYMENTS, "create_localization_route", return_value={"id": "route-a"}) as create, patch.object(
-        web_console.DEPLOYMENTS, "get", return_value={"id": "site"}
-    ):
+    with patch.object(web_console.DEPLOYMENTS, "create_localization_route") as create:
         handler.do_POST()
 
-    create.assert_called_once_with("site", payload)
-    assert handler._json.call_args.args[0]["localization_route"] == {"id": "route-a"}
+    create.assert_not_called()
+    assert handler._json.call_args.args[1] == HTTPStatus.BAD_REQUEST
+    assert "自动派生" in handler._json.call_args.args[0]["error"]
+
+
+def test_automatic_localization_route_http_only_accepts_an_empty_request():
+    handler = _deployment_handler("/api/deployments/site/localization-routes/derive", {})
+    expected = {"id": "site", "localization_routes": [{"id": "auto-1-1"}]}
+
+    with patch.object(web_console.DEPLOYMENTS, "derive_localization_routes", return_value=expected) as derive:
+        handler.do_POST()
+
+    derive.assert_called_once_with("site")
+    assert handler._json.call_args.args == ({"project": expected, "localization_routes": expected["localization_routes"]},)
 
 
 def test_task_compiler_http_preview_returns_store_preview():
@@ -1386,6 +1999,32 @@ def test_task_compiler_http_preview_returns_store_preview():
 
     preview.assert_called_once_with("site")
     assert handler._json.call_args.args == ({"preview": {"status": "ready"}},)
+
+
+def test_create_deployment_http_requires_explicit_task_mode():
+    handler = _deployment_handler("/api/deployments", {"name": "高科一号", "task_mode": "multi"})
+    expected = {"id": "gk1", "name": "高科一号", "task_mode": "multi"}
+
+    with patch.object(web_console.DEPLOYMENTS, "create", return_value=expected) as create:
+        handler.do_POST()
+
+    create.assert_called_once_with("高科一号", "multi")
+    assert handler._json.call_args.args == ({"project": expected}, HTTPStatus.CREATED)
+
+
+@pytest.mark.parametrize("payload", (
+    {"name": "高科一号"},
+    {"name": "高科一号", "task_mode": "other"},
+    {"name": "高科一号", "task_mode": "multi", "extra": True},
+))
+def test_create_deployment_http_rejects_invalid_task_mode_payload(payload: dict):
+    handler = _deployment_handler("/api/deployments", payload)
+
+    with patch.object(web_console.DEPLOYMENTS, "create") as create:
+        handler.do_POST()
+
+    create.assert_not_called()
+    assert handler._json.call_args.args[1] == HTTPStatus.BAD_REQUEST
 
 
 def test_task_compiler_http_config_requires_exact_community_payload():
@@ -1560,15 +2199,18 @@ def test_deployment_page_uses_generic_map_import_and_has_no_manual_localization_
     assert 'id="localizationRouteDialog"' in html
 
 
-def test_route_editor_markup_exposes_derived_sources_and_not_raw_runtime_paths():
-    """Catches hiding derived pose provenance or restoring a runtime-path input."""
+def test_route_review_markup_is_read_only_and_not_a_manual_order_editor():
+    """Catches restoring human map/endpoint/order controls in the route review."""
     html = (Path(__file__).resolve().parents[1] / "autodrive_console/web/deployment.html").read_text(
         encoding="utf-8"
     )
 
     assert 'id="localizationRouteDialog"' in html
     assert 'id="localizationRouteLinks"' in html
-    assert "电梯中心 0,0" in html
+    assert "系统自动派生路线核验" in html
+    assert "重新派生并检查" in html
+    assert "选择路线地图" not in html
+    assert "清空草稿" not in html
     assert "定位 YAML 路径" not in html
 
 
@@ -1578,22 +2220,21 @@ def test_deployment_contract_documents_identity_only_bindings_and_route_derived_
         encoding="utf-8"
     )
 
-    assert "绑定身份字段只有 `map_asset_id`、`building`、`unit`、`type`" in contract
-    assert "定位位姿由 `localization_routes` 推导" in contract
-    assert "首图使用人工选择的任务起点" in contract
+    assert "Backend 会从实例角色自动派生绑定 `type`" in contract
+    assert "PC 不显示、提交或允许修改" in contract
+    assert "Backend 从项目事实生成的审计快照" in contract
+    assert "浏览器不提交路线对象、端点、锚点或节点顺序" in contract
     assert "后续地图使用电梯中心坐标系原点" in contract
     assert "旧记录中的 `init_go` / `init_return` 只读兼容" in contract
 
 
-def test_deployment_contract_documents_route_derived_init_poses_and_lift_list():
-    """Catches a contract that weakens route payload or export safety boundaries."""
+def test_deployment_contract_documents_automatic_route_derivation_and_lift_list():
+    """Catches restoring a browser-owned route persistence contract."""
     contract = (Path(__file__).resolve().parents[1] / "shared/contracts/deployment.md").read_text(
         encoding="utf-8"
     )
 
-    assert "| `POST` | `/api/deployments/{project_id}/localization-routes` |" in contract
-    assert "| `POST` | `/api/deployments/{project_id}/localization-routes/{route_id}` |" in contract
-    assert "| `DELETE` | `/api/deployments/{project_id}/localization-routes/{route_id}` |" in contract
+    assert "| `POST` | `/api/deployments/{project_id}/localization-routes/derive` |" in contract
     assert '''{
   "building": "1",
   "unit": "1",
@@ -1601,12 +2242,13 @@ def test_deployment_contract_documents_route_derived_init_poses_and_lift_list():
   "task_start_waypoint_id": "waypoint-start",
   "task_target_waypoint_id": "waypoint-target",
   "links": [''' in contract
-    assert "除上述六个键外不接受其他键" in contract
-    assert "| 首项（包括唯一项） | `init_go` | 首项（包括唯一项）使用人工选择的任务起点 `task_start_waypoint_id`" in contract
+    assert '"execution_nodes": [' in contract
+    assert "该形状由 Backend 生成" in contract
+    assert "地图成员与顺序来自创建项目时的 `deployment_flow`" in contract
     assert "| 仅非首项 | `init_go` | 后续地图统一使用采图电梯中心坐标系原点" in contract
     assert "| 非最终项 | `init_return` | 该图出向链接的受控锚点 |" in contract
-    assert "| 最终项 | `init_return` | 存在用户楼层任务过渡点时使用最后一个去程过渡点的返程姿态；否则自动使用目标层电梯门前呼梯点 |" in contract
-    assert "任务 JSON 和 `runtime/loc_yaml_path.json` 必须消费同一条地图段过渡点链" in contract
+    assert "| 最终项 | `init_return` | 该图返程子任务的首个实际节点；无非固定节点时使用目标层电梯门前呼梯点 |" in contract
+    assert "任务 JSON 和 `runtime/loc_yaml_path.json` 必须消费同一条地图段执行链" in contract
     assert "定位 YAML 的 `system.init_pose.x`、`system.init_pose.y`、" in contract
     assert "必须与该路线条目的 `init_go` 完全一致" in contract
     assert '`{ "community": "…", "loc_yaml": [{ "building": "…", "unit": "…", "yaml_index": [ … ] }] }`' in contract
@@ -1614,14 +2256,20 @@ def test_deployment_contract_documents_route_derived_init_poses_and_lift_list():
     assert "包含 `floor`，其值等于绑定的 `floor_template`" in contract
     assert '"lifts": [{ "lift_id": "…", "building": "…", "unit": "…" }]' in contract
     assert "排序并去重" in contract
-    assert (
-        "后端在绑定仍被路线引用时阻止更新或删除；在 Waypoint、组件中心或组件生成的 Waypoint 仍被路线\n"
-        "引用时也阻止删除，必须先更新或删除路线。"
-    ) in contract
+    assert "均可直接删除，即使当前自动路线引用它们" in contract
     assert "旧记录中的 `init_go` / `init_return` 只读兼容" in contract
     assert "旧手填位姿而没有 `localization_routes` 的项目不能导出新的定位\n清单，必须先迁移为路线" in contract
-    assert "`robot_backend` 校验、派生并生成清单；PC `web_console` 仅提交和编辑项目意图。Mobile 不是消费者" in contract
+    assert "PC `web_console` 只展示自动推导结果" in contract
     assert "不写机器人运行时目录、不调用 ROS 或 Supervisor" in contract
+
+
+def test_deployment_contract_documents_virtual_walls_as_route_passability_boundaries():
+    contract = (Path(__file__).resolve().parents[1] / "shared/contracts/deployment.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "虚拟墙会参与所属地图的自动路线可通行性判断" in contract
+    assert "不得跨越虚拟墙" in contract
 
 
 def test_deployment_binding_panel_is_hidden_before_a_map_is_selected():
@@ -1682,18 +2330,20 @@ def _task_compiler_source_map(root: Path, floor: str) -> Path:
     return source
 
 
-def _compiler_ready_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def _compiler_ready_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, task_mode: str = "single",
+):
     map_root = tmp_path / "robot-maps"
     monkeypatch.setattr(DeploymentStore, "MAP_ROOT", map_root.resolve())
     store = DeploymentStore(tmp_path / "deployments")
-    project = store.create("任务编译器")
+    project = store.create("任务编译器", task_mode)
     store.set_scene_model(project["id"], "indoor")
     lobby = store.import_map(project["id"], _task_compiler_source_map(map_root, "P1"), "大厅", "lobby")
     target = store.import_map(project["id"], _task_compiler_source_map(map_root, "P2"), "目标层", "typical_floor")
     store.add_map_instance(project["id"], {"map_id": lobby["id"], "role": "lobby", "building": "1", "unit": "1", "floor": 1})
     store.add_map_instance(project["id"], {"map_id": target["id"], "role": "typical_floor", "building": "1", "unit": "1", "floor": 15})
     store.add_component(project["id"], {"map_id": lobby["id"], "kind": "start", "x": -1.0, "y": -1.0})
-    elevator = store.add_physical_elevator(project["id"], {"elevator_id": "A", "elevator_protocol": "bluetooth", "min_floor": 1, "max_floor": 15})
+    elevator = store.add_physical_elevator(project["id"], {"elevator_id": "A", "elevator_protocol": "mqtt", "min_floor": 1, "max_floor": 15})
     lobby_elevator = store.add_component(project["id"], {"map_id": lobby["id"], "kind": "elevator", "x": 0.0, "y": 0.0, "attributes": {"physical_elevator_id": elevator["id"], "button_floor": 1}})
     store.add_component(project["id"], {"map_id": target["id"], "kind": "elevator", "x": 0.0, "y": 1.0, "yaw": 3.141592653589793, "attributes": {"physical_elevator_id": elevator["id"], "button_floor": 15}})
     target_component = store.add_component(project["id"], {"map_id": target["id"], "kind": "target", "x": 1.0, "y": 1.0})
@@ -1739,6 +2389,140 @@ def test_task_compiler_migrates_legacy_project_and_persists_safe_identity(tmp_pa
     for invalid in ("", "../gk1", "高" * 81):
         with pytest.raises(DeploymentError):
             store.update_task_compiler_config(project["id"], {"community": invalid})
+
+
+def test_task_mode_is_selected_at_creation_and_legacy_projects_migrate_to_single(tmp_path: Path):
+    store = DeploymentStore(tmp_path / "deployments")
+    multi = store.create("多点项目", "multi")
+    assert multi["task_mode"] == "multi"
+
+    legacy = store.create("旧项目")
+    path = store._document_path(legacy["id"])
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document.pop("task_mode")
+    path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+
+    assert store.get(legacy["id"])["task_mode"] == "single"
+    with pytest.raises(DeploymentError, match="任务编译器配置仅接受小区名称"):
+        store.update_task_compiler_config(
+            legacy["id"], {"community": "高科一号", "task_mode": "multi"}
+        )
+
+
+@pytest.mark.parametrize("mode", ("", "other", 1, None))
+def test_project_creation_rejects_unknown_task_mode(tmp_path: Path, mode: object):
+    store = DeploymentStore(tmp_path / "deployments")
+    with pytest.raises(DeploymentError, match="项目模式"):
+        store.create("模式校验", mode)
+
+
+def test_ferry_map_instance_is_a_flow_derived_global_map_role(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source_root = tmp_path / "robot-maps"
+    source = _map(source_root / "site" / "P1")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", source_root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("摆渡层项目")
+    asset = store.import_map(project["id"], source, "摆渡层", "custom")
+
+    instance = store.add_map_instance(project["id"], {"map_id": asset["id"], "role": "ferry"})
+
+    assert {key: instance[key] for key in ("role", "building", "unit", "floor")} == {
+        "role": "ferry", "building": "", "unit": "", "floor": None,
+    }
+
+
+def test_map_instance_persists_derived_global_or_unit_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source_root = tmp_path / "robot-maps"
+    source = _map(source_root / "site" / "P1")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", source_root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("全小区")
+    asset = store.import_map(project["id"], source, "地图", "custom")
+
+    ferry = store.add_map_instance(project["id"], {"map_id": asset["id"], "role": "ferry"})
+    outdoor = store.add_map_instance(project["id"], {
+        "map_id": asset["id"], "role": "outdoor", "building": "2", "unit": "1", "floor": 1,
+    })
+    lobby = store.add_map_instance(project["id"], {
+        "map_id": asset["id"], "role": "lobby", "building": "2", "unit": "1", "floor": 1,
+    })
+
+    assert ferry["scope"] == "global"
+    assert outdoor["scope"] == "unit"
+    assert lobby["scope"] == "unit"
+
+
+def test_multi_mode_store_preview_and_zip_publish_only_project_owned_task_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """Exercise the real multi compiler through the project preview boundary."""
+    store, project, target = _compiler_ready_store(tmp_path, monkeypatch, task_mode="multi")
+    store.update_component(project["id"], target["id"], {"attributes": {"door": "1509"}})
+    store.update_task_compiler_config(project["id"], {"community": "高科一号"})
+    runtime_root = tmp_path / "runtime" / "multi_tasks"
+    runtime_root.mkdir(parents=True)
+    sentinel = runtime_root / "must-not-change.json"
+    sentinel.write_text("runtime untouched", encoding="utf-8")
+    monkeypatch.setattr(DeploymentStore, "RUNTIME_TASK_ROOT", runtime_root.resolve())
+
+    preview = store.task_compiler_preview(project["id"])
+    filename, bundle = store.task_compiler_bundle(project["id"])
+
+    assert preview["task_mode"] == "multi"
+    assert filename == "高科一号_multi_experimental.zip"
+    expected = {
+        "multi_tasks/高科一号/indoor/1_1.json",
+        "multi_tasks/高科一号/indoor/1_1_r.json",
+        "multi_tasks/高科一号/floor/1_1_n_n09.json",
+        "multi_tasks/高科一号/floor/1_1_n_n09_r.json",
+    }
+    assert expected <= {item["path"] for item in preview["artifacts"]}
+    with ZipFile(io.BytesIO(bundle)) as archive:
+        assert expected <= set(archive.namelist())
+        assert not any(name.startswith("/opt/") for name in archive.namelist())
+    assert sentinel.read_text(encoding="utf-8") == "runtime untouched"
+
+
+def test_multi_mode_preview_uses_the_multi_compiler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("多点项目", "multi")
+    preview = CompilationPreview(
+        "a" * 64,
+        {"mode": "multi"},
+        (),
+        {"task_mode": "multi", "route_families": [{"building": "1", "unit": "1", "targets": [{"physical_floor": 15, "door": "01"}]}]},
+        {},
+    )
+    multi = Mock(return_value=preview)
+    monkeypatch.setattr("autodrive_console.deployment.compile_multi_task_points", multi)
+    monkeypatch.setattr("autodrive_console.deployment.compile_single_task_points", Mock(side_effect=AssertionError("wrong compiler")))
+    monkeypatch.setattr(store, "_derive_and_persist_localization_routes", lambda project_id: store.get(project_id))
+
+    response = store.task_compiler_preview(project["id"])
+
+    assert response["task_json"] == {"mode": "multi"}
+    assert response["task_mode"] == "multi"
+    assert response["route_families"] == [{"building": "1", "unit": "1", "targets": [{"physical_floor": 15, "door": "01"}]}]
+    multi.assert_called_once()
+
+
+def test_multi_mode_bundle_name_uses_the_validated_community(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("多点项目", "multi")
+    store.update_task_compiler_config(project["id"], {"community": "高科一号"})
+    preview = CompilationPreview(
+        "a" * 64,
+        {"mode": "multi"},
+        (Artifact("multi_tasks/高科一号/indoor/1_1.json", b"{}", "b" * 64),),
+        {"task_mode": "multi", "route_families": []},
+        {},
+    )
+    monkeypatch.setattr(store, "_derive_and_persist_localization_routes", lambda project_id: store.get(project_id))
+    monkeypatch.setattr(store, "_compile_task_preview", lambda project_id, document: preview)
+
+    filename, _ = store.task_compiler_bundle(project["id"])
+
+    assert filename == "高科一号_multi_experimental.zip"
 
 
 def test_task_compiler_component_attributes_invalidate_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1817,3 +2601,66 @@ def test_task_compiler_preview_writes_only_project_owned_exports(tmp_path: Path,
     assert (export_root / "tasks" / "高科一号_1_1_15_1509.json").is_file()
     assert sentinel.read_bytes() == b"runtime task must remain unchanged"
     assert store.get(project["id"])["task_compiler"]["identity"]["last_preview_input_sha256"] == preview["input_sha256"]
+
+
+def test_task_compiler_preview_never_publishes_a_partial_export_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """A failed artifact write must not expose a half-built SHA export tree."""
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("原子预览")
+    document = store.get(project["id"])
+    digest = "a" * 64
+    preview = CompilationPreview(
+        digest,
+        {"mode": "single"},
+        (
+            Artifact("tasks/first.json", b"first", "1" * 64),
+            Artifact("tasks/second.json", b"second", "2" * 64),
+        ),
+        {"task_mode": "single", "artifacts": []},
+        {},
+    )
+    real_write = store._write_bytes
+    writes = 0
+
+    def fail_second_write(target: Path, contents: bytes) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise OSError("injected artifact write failure")
+        real_write(target, contents)
+
+    monkeypatch.setattr(store, "_write_bytes", fail_second_write)
+
+    with pytest.raises(OSError, match="injected artifact"):
+        store._persist_task_compiler_preview(project["id"], document, preview)
+
+    export_root = store._compiler_export_directory(project["id"], digest)
+    assert not export_root.exists()
+    assert not list(export_root.parent.glob(f".{digest}.*"))
+    assert store.get(project["id"])["task_compiler"]["identity"]["last_preview_input_sha256"] is None
+
+
+def test_task_compiler_preview_replaces_a_corrupt_prior_content_addressed_export(tmp_path: Path):
+    """A completion marker alone is insufficient if an artifact no longer matches it."""
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("导出完整性")
+    document = store.get(project["id"])
+    contents = b"verified task"
+    digest = "b" * 64
+    preview = CompilationPreview(
+        digest,
+        {"mode": "single"},
+        (Artifact("tasks/task.json", contents, sha256(contents).hexdigest()),),
+        {"task_mode": "single", "input_sha256": digest, "artifacts": []},
+        {},
+    )
+
+    store._persist_task_compiler_preview(project["id"], document, preview)
+    export_root = store._compiler_export_directory(project["id"], digest)
+    (export_root / "tasks" / "task.json").write_bytes(b"corrupt")
+
+    store._persist_task_compiler_preview(project["id"], store.get(project["id"]), preview)
+
+    assert (export_root / "tasks" / "task.json").read_bytes() == contents

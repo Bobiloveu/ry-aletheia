@@ -9,6 +9,7 @@ export function drawDeploymentCanvas({
   view,
   drawGrid,
   drawMapEdits,
+  drawVirtualWalls,
   drawMapRoutes,
   drawWaypointSymbol,
   drawComponentSymbol,
@@ -46,6 +47,7 @@ export function drawDeploymentCanvas({
   context.rect(view.x, view.y, activeMap.width * pixels, activeMap.height * pixels);
   context.clip();
   drawMapEdits();
+  drawVirtualWalls?.();
   context.restore();
   // The world coordinate (0, 0) can sit just outside the raster bounds when
   // a YAML origin is negative. Draw it after the map clip so the operator can

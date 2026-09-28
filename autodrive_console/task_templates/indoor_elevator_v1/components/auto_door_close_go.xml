@@ -1,0 +1,9 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence name="AutoDoorCloseGo">
+      <ChangeUssStatus status="false" />
+      <RetryUntilSuccessful num_attempts="10"><Sequence name="CallAndCheckDoor"><PublishTaskStatus status_code="{{STATUS_DOOR_WAITING}}" /><DoorControl service_name="/door_control" doorid="{{CONTROLLER_DEVICE_ID}}" executeid="3" success="{door_success}" stateid="{door_state}" /></Sequence></RetryUntilSuccessful>
+      <PublishTaskStatus status_code="{{STATUS_AUTO_DOOR_OUT}}" />
+    </Sequence>
+  </BehaviorTree>
+</root>

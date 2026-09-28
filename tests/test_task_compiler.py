@@ -1,16 +1,287 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import zipfile
+from copy import deepcopy
+from hashlib import sha256
 from io import BytesIO
-from math import cos, isclose, pi, sin
+from math import atan2, cos, isclose, pi, sin
 from pathlib import Path
 from xml.etree import ElementTree
 
 import pytest
 
+import autodrive_console.task_compiler as task_compiler_module
+import autodrive_console.task_status_codes as task_status_codes_module
 from autodrive_console.deployment import DeploymentStore
-from autodrive_console.task_compiler import CompilationError, bundle_zip, compile_indoor_elevator
+from autodrive_console.task_compiler import (
+    CompilationError,
+    bundle_zip,
+    compile_indoor_elevator,
+    compile_multi_task_points,
+    compile_single_task_points,
+)
+
+
+TEMPLATE_ROOT = (
+    Path(__file__).resolve().parents[1]
+    / "autodrive_console"
+    / "task_templates"
+    / "indoor_elevator_v1"
+)
+APPROVED_STATUS_TEMPLATES = (
+    "start_task.xml",
+    "task_complete.xml",
+    "elevator_in_n_x.xml",
+    "elevator_in_x_n.xml",
+    "elevator_out_n_x.xml",
+    "elevator_out_x_n.xml",
+    "close_elevdoor_n.xml",
+    "close_elevdoor_x.xml",
+    "components/gate_open_go.xml",
+    "components/gate_close_go.xml",
+    "components/gate_open_back.xml",
+    "components/gate_close_back.xml",
+    "components/auto_door_open_go.xml",
+    "components/auto_door_close_go.xml",
+    "components/auto_door_open_back.xml",
+    "components/auto_door_close_back.xml",
+)
+
+
+def _template(name: str) -> str:
+    return (TEMPLATE_ROOT / name).read_text(encoding="utf-8")
+
+
+def _status_tokens(text: str) -> list[str]:
+    return [
+        node.attrib["status_code"].removeprefix("{{").removesuffix("}}")
+        for node in ElementTree.fromstring(text).iter("PublishTaskStatus")
+    ]
+
+
+def _artifact_text(preview, relative_path: str) -> str:
+    return next(
+        artifact.content.decode("utf-8")
+        for artifact in preview.artifacts
+        if artifact.relative_path == relative_path
+    )
+
+
+def _copy_registry(tmp_path: Path) -> Path:
+    registry = tmp_path / "task-status-codes.json"
+    registry.write_bytes(task_status_codes_module.STATUS_CODE_PATH.read_bytes())
+    return registry
+
+
+def _replace_registry_code(path: Path, name: str, value: int) -> None:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["codes"][name] = value
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+
+def _registry_sha() -> str:
+    return sha256(task_status_codes_module.STATUS_CODE_PATH.read_bytes()).hexdigest()
+
+
+def test_compiler_renders_current_registry_values_and_records_its_sha(two_map_project) -> None:
+    """Catches preview XML retaining tokens or omitting its status-code provenance."""
+    preview = _compile(two_map_project)
+
+    rendered = _artifact_text(preview, "waypoint_tasks/gk1/1_1_elevator_in_n_x.xml")
+    assert 'status_code="200"' in rendered
+    assert 'status_code="209"' in rendered
+    assert "STATUS_" not in rendered
+    assert preview.manifest["task_status_codes_sha256"] == _registry_sha()
+    assert preview.manifest["template_sha256"]["task-status-codes.json"] == _registry_sha()
+
+
+def test_compiler_reacts_to_a_registry_code_change(monkeypatch, two_map_project, tmp_path: Path) -> None:
+    """Catches a new registry value being ignored by rendered XML or preview identity."""
+    config = _copy_registry(tmp_path)
+    monkeypatch.setattr(task_status_codes_module, "STATUS_CODE_PATH", config)
+    before = _compile(two_map_project)
+
+    _replace_registry_code(config, "elevator_waiting", 811)
+    after = _compile(two_map_project)
+
+    assert before.input_sha256 != after.input_sha256
+    assert 'status_code="811"' in _artifact_text(after, "waypoint_tasks/gk1/1_1_elevator_in_n_x.xml")
+
+
+def test_compiler_uses_one_status_registry_snapshot(monkeypatch, two_map_project, tmp_path: Path) -> None:
+    """A changed file after its snapshot cannot split XML values from provenance."""
+    config = _copy_registry(tmp_path)
+    monkeypatch.setattr(task_status_codes_module, "STATUS_CODE_PATH", config)
+    expected_sha = _registry_sha()
+    original_snapshot = task_status_codes_module.task_status_code_snapshot
+
+    def snapshot_then_change():
+        snapshot = original_snapshot()
+        _replace_registry_code(config, "elevator_waiting", 811)
+        return snapshot
+
+    monkeypatch.setattr(task_status_codes_module, "task_status_code_snapshot", snapshot_then_change)
+    preview = _compile(two_map_project)
+
+    rendered = _artifact_text(preview, "waypoint_tasks/gk1/1_1_elevator_in_n_x.xml")
+    assert 'status_code="200"' in rendered
+    assert 'status_code="811"' not in rendered
+    assert preview.manifest["task_status_codes_sha256"] == expected_sha
+    assert preview.manifest["template_sha256"]["task-status-codes.json"] == expected_sha
+    assert task_status_codes_module.task_status_code("elevator_waiting") == "811"
+
+
+def test_compiler_renders_changed_registry_value_in_component_action_xml(
+    monkeypatch, two_map_project, tmp_path: Path,
+) -> None:
+    """Component actions must receive the same registry-backed token values as base XML."""
+    config = _copy_registry(tmp_path)
+    monkeypatch.setattr(task_status_codes_module, "STATUS_CODE_PATH", config)
+    gate = {
+        "id": "component-target-gate", "map_asset_id": "target-map", "kind": "gate",
+        "label": "东侧闸机", "x": 3.0, "y": 0.0, "yaw": pi / 2,
+        "attributes": {
+            "width_m": 2.0, "height_m": 1.0, "speed_profile": "single_point",
+            "controller_device_id": "10044",
+        },
+    }
+    two_map_project["components"].append(gate)
+    _set_execution_nodes(two_map_project, target=[{"kind": "component", "id": gate["id"]}])
+    _replace_registry_code(config, "gate_in", 811)
+
+    preview = _compile(two_map_project)
+
+    rendered = _artifact_text(preview, "waypoint_tasks/gk1/e_guard_open_go.xml")
+    assert 'status_code="811"' in rendered
+    assert "STATUS_" not in rendered
+
+
+def test_compiler_blocks_preview_when_invalid_registry(monkeypatch, two_map_project, tmp_path: Path) -> None:
+    """Catches an invalid profile registry being silently compiled into a preview."""
+    config = _copy_registry(tmp_path)
+    monkeypatch.setattr(task_status_codes_module, "STATUS_CODE_PATH", config)
+    document = json.loads(config.read_text(encoding="utf-8"))
+    del document["codes"]["task_start"]
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(CompilationError, match="任务状态码配置"):
+        _compile(two_map_project)
+
+
+def test_compiler_rejects_a_literal_status_code_in_an_approved_template(
+    monkeypatch, two_map_project, tmp_path: Path,
+) -> None:
+    """Catches a future approved template bypassing the registry token boundary."""
+    template_root = tmp_path / "templates"
+    shutil.copytree(TEMPLATE_ROOT, template_root)
+    template = template_root / "task_complete.xml"
+    template.write_text(
+        template.read_text(encoding="utf-8").replace(
+            "{{STATUS_TASK_COMPLETE}}", "109",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(task_compiler_module, "TEMPLATE_ROOT", template_root)
+
+    with pytest.raises(CompilationError, match="任务状态码"):
+        _compile(two_map_project)
+
+
+@pytest.mark.parametrize(("name", "expected"), [
+    ("start_task.xml", ["STATUS_TASK_START", "STATUS_INDOOR_TASKING"]),
+    ("task_complete.xml", ["STATUS_TASK_COMPLETE"]),
+    ("elevator_in_n_x.xml", ["STATUS_ELEVATOR_WAITING", "STATUS_ELEVATOR_ARRIVED", "STATUS_ELEVATOR_IN"]),
+    ("elevator_in_x_n.xml", ["STATUS_ELEVATOR_WAITING", "STATUS_ELEVATOR_ARRIVED", "STATUS_ELEVATOR_IN"]),
+    ("elevator_out_n_x.xml", ["STATUS_ELEVATOR_TAKING", "STATUS_ELEVATOR_WAITING", "STATUS_ELEVATOR_ARRIVED"]),
+    ("elevator_out_x_n.xml", ["STATUS_ELEVATOR_TAKING", "STATUS_ELEVATOR_WAITING", "STATUS_ELEVATOR_ARRIVED"]),
+    ("close_elevdoor_n.xml", ["STATUS_ELEVATOR_OUTING", "STATUS_ELEVATOR_OUTED"]),
+    ("close_elevdoor_x.xml", ["STATUS_ELEVATOR_OUTING", "STATUS_ELEVATOR_OUTED"]),
+    ("components/gate_open_go.xml", ["STATUS_DOOR_WAITING", "STATUS_GATE_IN"]),
+    ("components/gate_open_back.xml", ["STATUS_DOOR_WAITING", "STATUS_GATE_IN"]),
+    ("components/gate_close_go.xml", ["STATUS_DOOR_WAITING", "STATUS_GATE_OUT"]),
+    ("components/gate_close_back.xml", ["STATUS_DOOR_WAITING", "STATUS_GATE_OUT"]),
+    ("components/auto_door_open_go.xml", ["STATUS_DOOR_WAITING", "STATUS_AUTO_DOOR_IN"]),
+    ("components/auto_door_open_back.xml", ["STATUS_DOOR_WAITING", "STATUS_AUTO_DOOR_IN"]),
+    ("components/auto_door_close_go.xml", ["STATUS_DOOR_WAITING", "STATUS_AUTO_DOOR_OUT"]),
+    ("components/auto_door_close_back.xml", ["STATUS_DOOR_WAITING", "STATUS_AUTO_DOOR_OUT"]),
+])
+def test_approved_templates_have_only_registry_status_tokens(name: str, expected: list[str]) -> None:
+    """Catches a profile template retaining a literal or semantically wrong status code."""
+    text = _template(name)
+    assert _status_tokens(text) == expected
+    assert not re.search(r'status_code="[0-9]+"', text)
+
+
+@pytest.mark.parametrize("name", [
+    "elevator_in_n_x.xml",
+    "elevator_in_x_n.xml",
+    "elevator_out_n_x.xml",
+    "elevator_out_x_n.xml",
+])
+def test_elevator_caller_statuses_are_adjacent_to_the_caller(name: str) -> None:
+    """Catches waiting or arrival publication moving away from its caller action."""
+    root = ElementTree.fromstring(_template(name))
+    sequence = root.find(".//Sequence[@name='CallAndCheckDoor']")
+    assert sequence is not None
+    children = list(sequence)
+    caller_index = next(index for index, child in enumerate(children) if child.tag == "ElevatorCaller")
+    assert children[caller_index - 1].attrib["status_code"] == "{{STATUS_ELEVATOR_WAITING}}"
+    assert children[caller_index + 1].attrib["status_code"] == "{{STATUS_ELEVATOR_ARRIVED}}"
+
+
+@pytest.mark.parametrize(("name", "before_retry", "after_retry"), [
+    ("elevator_in_n_x.xml", None, "STATUS_ELEVATOR_IN"),
+    ("elevator_in_x_n.xml", None, "STATUS_ELEVATOR_IN"),
+    ("elevator_out_n_x.xml", "STATUS_ELEVATOR_TAKING", None),
+    ("elevator_out_x_n.xml", "STATUS_ELEVATOR_TAKING", None),
+])
+def test_elevator_travel_statuses_are_adjacent_to_the_retry(name: str, before_retry: str | None, after_retry: str | None) -> None:
+    """Catches travel status publication occurring before a retry succeeds or after unrelated work."""
+    root = ElementTree.fromstring(_template(name))
+    main_sequence = root.find(".//BehaviorTree/Sequence")
+    assert main_sequence is not None
+    children = list(main_sequence)
+    retry_index = next(index for index, child in enumerate(children) if child.tag == "RetryUntilSuccessful")
+    if before_retry:
+        assert children[retry_index - 1].attrib["status_code"] == f"{{{{{before_retry}}}}}"
+    if after_retry:
+        assert children[retry_index + 1].attrib["status_code"] == f"{{{{{after_retry}}}}}"
+
+
+@pytest.mark.parametrize(("name", "expected_after_retry"), [
+    ("components/gate_open_go.xml", "STATUS_GATE_IN"),
+    ("components/gate_open_back.xml", "STATUS_GATE_IN"),
+    ("components/gate_close_go.xml", "STATUS_GATE_OUT"),
+    ("components/gate_close_back.xml", "STATUS_GATE_OUT"),
+    ("components/auto_door_open_go.xml", "STATUS_AUTO_DOOR_IN"),
+    ("components/auto_door_open_back.xml", "STATUS_AUTO_DOOR_IN"),
+    ("components/auto_door_close_go.xml", "STATUS_AUTO_DOOR_OUT"),
+    ("components/auto_door_close_back.xml", "STATUS_AUTO_DOOR_OUT"),
+])
+def test_access_statuses_wrap_only_the_door_control(name: str, expected_after_retry: str) -> None:
+    """Catches access status publication detached from the controlled door action."""
+    root = ElementTree.fromstring(_template(name))
+    action_sequence = root.find(".//Sequence[@name='CallAndCheckDoor']")
+    assert action_sequence is not None
+    action_children = list(action_sequence)
+    door_index = next(index for index, child in enumerate(action_children) if child.tag == "DoorControl")
+    assert action_children[door_index - 1].attrib["status_code"] == "{{STATUS_DOOR_WAITING}}"
+    main_sequence = root.find(".//BehaviorTree/Sequence")
+    assert main_sequence is not None
+    main_children = list(main_sequence)
+    retry_index = next(index for index, child in enumerate(main_children) if child.tag == "RetryUntilSuccessful")
+    assert main_children[retry_index + 1].attrib["status_code"] == f"{{{{{expected_after_retry}}}}}"
+
+
+@pytest.mark.parametrize("name", APPROVED_STATUS_TEMPLATES)
+def test_approved_templates_do_not_publish_unimplemented_door_waiting_codes(name: str) -> None:
+    """Catches adding an unused 305 status publication without a real behavior."""
+    text = _template(name)
+    assert "STATUS_DOOR_WAITING_OPEN" not in text
+    assert "STATUS_DOOR_WAITING_CLOSE" not in text
 
 
 @pytest.fixture
@@ -45,7 +316,7 @@ def two_map_project(tmp_path: Path) -> dict:
             {
                 "id": "physical-elevator-a",
                 "elevator_id": "10014",
-                "elevator_protocol": "bluetooth",
+                "elevator_protocol": "mqtt",
                 "min_floor": -2,
                 "max_floor": 25,
             }
@@ -70,6 +341,10 @@ def two_map_project(tmp_path: Path) -> dict:
             "id": "route-1", "building": "1", "unit": "1",
             "binding_ids": ["lobby-binding", "floor-binding"],
             "task_start_waypoint_id": "route-start", "task_target_waypoint_id": "route-target", "task_return_waypoint_id": "route-return",
+            "execution_nodes": [
+                {"binding_id": "lobby-binding", "node_refs": []},
+                {"binding_id": "floor-binding", "node_refs": []},
+            ],
             "links": [{
                 "from_binding_id": "lobby-binding", "to_binding_id": "floor-binding",
                 "anchor": {"kind": "component_center", "component_id": "lobby-elevator"},
@@ -81,6 +356,328 @@ def two_map_project(tmp_path: Path) -> dict:
 
 def _compile(project: dict):
     return compile_indoor_elevator(project, map_root=Path(project["_test_map_root"]))
+
+
+def test_single_task_mode_generates_a_complete_task_for_each_target(two_map_project):
+    second = {
+        "id": "target-1508", "map_asset_id": "target-map", "kind": "target",
+        "x": 6.0, "y": 3.0, "yaw": 0.25, "attributes": {"door": "1508"},
+        "generated_waypoint_ids": ["route-target-1508"],
+    }
+    two_map_project["components"].append(second)
+    two_map_project["waypoints"].append({
+        "id": "route-target-1508", "map_asset_id": "target-map", "x": 6.0, "y": 3.0, "yaw": 0.25,
+    })
+    route = dict(two_map_project["localization_routes"][0])
+    route.update({"id": "route-1508", "task_target_waypoint_id": "route-target-1508"})
+    two_map_project["localization_routes"].append(route)
+
+    preview = compile_single_task_points(two_map_project, map_root=Path(two_map_project["_test_map_root"]))
+
+    paths = [item.relative_path for item in preview.artifacts if item.relative_path.startswith("tasks/")]
+    assert paths == ["tasks/高科一号_1_1_15_1508.json", "tasks/高科一号_1_1_15_1509.json"]
+    assert all(len(json.loads(next(item.content for item in preview.artifacts if item.relative_path == path))["subtasks"]) == 4 for path in paths)
+
+
+def test_single_task_filename_uses_target_elevator_button_when_map_floor_is_derived(two_map_project):
+    """Map instances carry identity only; filenames keep the real panel floor."""
+    for instance in two_map_project["map_instances"]:
+        instance["floor"] = None
+
+    preview = compile_single_task_points(two_map_project, map_root=Path(two_map_project["_test_map_root"]))
+
+    assert "tasks/高科一号_1_1_15_1509.json" in {
+        artifact.relative_path for artifact in preview.artifacts
+    }
+
+
+def test_single_task_mode_marks_legacy_single_target_preview(two_map_project):
+    preview = compile_single_task_points(two_map_project, map_root=Path(two_map_project["_test_map_root"]))
+
+    assert preview.manifest["task_mode"] == "single"
+    assert len(preview.task_json["subtasks"]) == 4
+
+
+def test_single_task_mode_keeps_indoor_flow_on_the_existing_compiler(two_map_project, monkeypatch):
+    """Indoor-only flow metadata must not invoke public-route family validation."""
+    two_map_project["deployment_flow"] = [
+        {"id": "lobby", "type": "lobby"},
+        {"id": "target_floor", "type": "target_floor"},
+    ]
+    monkeypatch.setattr(
+        task_compiler_module,
+        "derive_task_route_families",
+        lambda _project: (_ for _ in ()).throw(AssertionError("不应推导公共路线族")),
+    )
+
+    preview = compile_single_task_points(two_map_project, map_root=Path(two_map_project["_test_map_root"]))
+
+    assert preview.manifest["task_mode"] == "single"
+    assert len(preview.task_json["subtasks"]) == 4
+
+
+def test_multi_task_mode_splits_shared_indoor_and_each_target_floor_pair(two_map_project):
+    """Lobby-to-floor topology must not create ferry/outdoor directories."""
+    two_map_project["deployment_flow"] = [
+        {"id": "lobby", "type": "lobby"},
+        {"id": "target_floor", "type": "target_floor"},
+    ]
+    second = {
+        "id": "target-1508", "map_asset_id": "target-map", "kind": "target",
+        "x": 6.0, "y": 3.0, "yaw": 0.25, "attributes": {"door": "1508"},
+        "generated_waypoint_ids": ["route-target-1508"],
+    }
+    two_map_project["components"].append(second)
+    two_map_project["waypoints"].append({
+        "id": "route-target-1508", "map_asset_id": "target-map", "x": 6.0, "y": 3.0, "yaw": 0.25,
+    })
+    route = dict(two_map_project["localization_routes"][0])
+    route.update({"id": "route-1508", "task_target_waypoint_id": "route-target-1508"})
+    two_map_project["localization_routes"].append(route)
+
+    preview = compile_multi_task_points(two_map_project, map_root=Path(two_map_project["_test_map_root"]))
+
+    paths = [item.relative_path for item in preview.artifacts if item.relative_path.startswith("multi_tasks/")]
+    assert paths == [
+        "multi_tasks/高科一号/floor/1_1_n_n08.json",
+        "multi_tasks/高科一号/floor/1_1_n_n08_r.json",
+        "multi_tasks/高科一号/floor/1_1_n_n09.json",
+        "multi_tasks/高科一号/floor/1_1_n_n09_r.json",
+        "multi_tasks/高科一号/indoor/1_1.json",
+        "multi_tasks/高科一号/indoor/1_1_r.json",
+    ]
+    assert all("/ferry/" not in path and "/outdoor/" not in path for path in paths)
+    assert [json.loads(next(item.content for item in preview.artifacts if item.relative_path == path))["subtask_name"] for path in paths] == [
+        "1508", "1508_r", "1509", "1509_r", "elevator_hall", "elevator_hall_r",
+    ]
+    assert all(
+        set(json.loads(next(item.content for item in preview.artifacts if item.relative_path == path)))
+        == {"change_loc", "map_url", "pcd_url", "subtask_name", "waypoints"}
+        for path in paths
+    )
+    assert all(
+        "component_id" not in target
+        for family in preview.manifest["route_families"]
+        for target in family["targets"]
+    )
+    family_manifest = preview.manifest["route_families"][0]
+    assert family_manifest["targets"] == [
+        {
+            "full_room_number": "1508",
+                "physical_floor": 16,
+            "button_floor": 15,
+            "door": "08",
+            "floor_stem": "1_1_n_n08",
+        },
+        {
+            "full_room_number": "1509",
+                "physical_floor": 16,
+            "button_floor": 15,
+            "door": "09",
+            "floor_stem": "1_1_n_n09",
+        },
+    ]
+    assert family_manifest["stages"] == [
+        {"type": "lobby", "label": "电梯大厅"},
+        {"type": "target_floor", "label": "用户楼层"},
+    ]
+    assert all("map_asset_id" not in stage for stage in family_manifest["stages"])
+    assert set(preview.manifest["input_fingerprints"]) == {
+        "deployment_flow", "map_assets", "map_instances", "components",
+        "virtual_walls", "map_edits", "localization_bindings",
+        "localization_routes", "physical_elevators", "localization_template",
+        "component_templates", "behavior_templates", "task_status_codes",
+    }
+    assert preview.manifest["task_status_codes_sha256"] == _registry_sha()
+    assert preview.manifest["input_sha256"] == preview.input_sha256
+
+
+def test_multi_task_mode_uses_explicit_override_floor_stem(two_map_project):
+    """A non-standard map must never be packaged under the reusable n_n name."""
+    two_map_project["deployment_flow"] = [
+        {"id": "lobby", "type": "lobby"},
+        {"id": "target_floor", "type": "target_floor"},
+    ]
+    target_instance = next(item for item in two_map_project["map_instances"] if item["role"] == "typical_floor")
+    target_instance.update({"role": "floor_override", "floor": None})
+    target_elevator = next(item for item in two_map_project["components"] if item["id"] == "target-elevator")
+    target_elevator["attributes"]["button_floor"] = 5
+    target = next(item for item in two_map_project["components"] if item["kind"] == "target")
+    target["attributes"] = {"door": "501"}
+
+    preview = compile_multi_task_points(two_map_project, map_root=Path(two_map_project["_test_map_root"]))
+
+    paths = {item.relative_path for item in preview.artifacts}
+    assert "multi_tasks/高科一号/floor/1_1_5_501.json" in paths
+    assert "multi_tasks/高科一号/floor/1_1_5_501_r.json" in paths
+    assert not any("n_n" in path for path in paths if path.startswith("multi_tasks/高科一号/floor/"))
+
+
+def test_multi_task_mode_compiles_every_unit_from_its_own_automatic_route(two_map_project):
+    """A second unit must not reuse the first import-guide stage assignment."""
+    two_map_project["deployment_flow"] = [
+        {"id": "lobby", "type": "lobby"},
+        {"id": "target_floor", "type": "target_floor"},
+    ]
+    lobby_asset = deepcopy(next(item for item in two_map_project["map_assets"] if item["id"] == "lobby-map"))
+    target_asset = deepcopy(next(item for item in two_map_project["map_assets"] if item["id"] == "target-map"))
+    lobby_asset["id"], target_asset["id"] = "lobby-map-2", "target-map-2"
+    two_map_project["map_assets"].extend([lobby_asset, target_asset])
+    two_map_project["map_instances"].extend([
+        {"map_asset_id": "lobby-map-2", "role": "lobby", "building": "2", "unit": "1", "floor": 1},
+        {"map_asset_id": "target-map-2", "role": "typical_floor", "building": "2", "unit": "1", "floor": 15},
+    ])
+    two_map_project["physical_elevators"].append({
+        "id": "physical-elevator-b", "elevator_id": "10015", "elevator_protocol": "mqtt", "min_floor": -2, "max_floor": 25,
+    })
+    two_map_project["components"].extend([
+        {"id": "start-2", "map_asset_id": "lobby-map-2", "kind": "start", "x": 0.0, "y": -2.0, "yaw": 0.0, "attributes": {}},
+        {"id": "lobby-elevator-2", "map_asset_id": "lobby-map-2", "kind": "elevator", "x": 0.0, "y": 0.0, "yaw": 0.0, "attributes": {"physical_elevator_id": "physical-elevator-b", "button_floor": 1, "width_m": 2.0, "height_m": 2.0, "wait_distance_m": 1.5}},
+        {"id": "target-elevator-2", "map_asset_id": "target-map-2", "kind": "elevator", "x": 2.0, "y": 0.0, "yaw": pi, "attributes": {"physical_elevator_id": "physical-elevator-b", "button_floor": 15, "width_m": 2.0, "height_m": 2.0, "wait_distance_m": 1.5}},
+        {"id": "target-2", "map_asset_id": "target-map-2", "kind": "target", "x": 5.0, "y": 3.0, "yaw": 0.25, "attributes": {"door": "1501"}},
+    ])
+    two_map_project["localization_bindings"].extend([
+        {"id": "lobby-binding-2", "map_asset_id": "lobby-map-2", "building": "2", "unit": "1", "type": "indoor"},
+        {"id": "floor-binding-2", "map_asset_id": "target-map-2", "building": "2", "unit": "1", "type": "floor", "floor_template": "2"},
+    ])
+    two_map_project["waypoints"].extend([
+        {"id": "route-start-2", "map_asset_id": "lobby-map-2", "x": 0.0, "y": -2.0, "yaw": 0.0},
+        {"id": "route-target-2", "map_asset_id": "target-map-2", "x": 5.0, "y": 3.0, "yaw": 0.25},
+    ])
+    two_map_project["localization_routes"].append({
+        "id": "route-2", "building": "2", "unit": "1",
+        "binding_ids": ["lobby-binding-2", "floor-binding-2"],
+        "task_start_waypoint_id": "route-start-2", "task_target_waypoint_id": "route-target-2",
+        "execution_nodes": [
+            {"binding_id": "lobby-binding-2", "node_refs": []},
+            {"binding_id": "floor-binding-2", "node_refs": []},
+        ],
+        "links": [{
+            "from_binding_id": "lobby-binding-2", "to_binding_id": "floor-binding-2",
+            "anchor": {"kind": "component_center", "component_id": "lobby-elevator-2"},
+        }],
+    })
+
+    preview = compile_multi_task_points(two_map_project, map_root=Path(two_map_project["_test_map_root"]))
+
+    task_paths = {item.relative_path for item in preview.artifacts if item.relative_path.startswith("multi_tasks/")}
+    assert task_paths == {
+        "multi_tasks/高科一号/indoor/1_1.json",
+        "multi_tasks/高科一号/indoor/1_1_r.json",
+        "multi_tasks/高科一号/floor/1_1_n_n09.json",
+        "multi_tasks/高科一号/floor/1_1_n_n09_r.json",
+        "multi_tasks/高科一号/indoor/2_1.json",
+        "multi_tasks/高科一号/indoor/2_1_r.json",
+        "multi_tasks/高科一号/floor/2_1_n_n01.json",
+        "multi_tasks/高科一号/floor/2_1_n_n01_r.json",
+    }
+
+    single = compile_single_task_points(two_map_project, map_root=Path(two_map_project["_test_map_root"]))
+    assert {item.relative_path for item in single.artifacts if item.relative_path.startswith("tasks/")} == {
+        "tasks/高科一号_1_1_15_1509.json",
+        "tasks/高科一号_2_1_15_1501.json",
+    }
+
+
+def test_multi_task_mode_rejects_optional_stages_without_a_derived_public_route(two_map_project):
+    two_map_project["deployment_flow"] = [
+        {"id": "ferry", "type": "ferry"},
+        {"id": "lobby", "type": "lobby"},
+        {"id": "target_floor", "type": "target_floor"},
+    ]
+    two_map_project["map_instances"].append({"map_asset_id": "ferry-map", "role": "ferry"})
+
+    with pytest.raises(CompilationError, match="摆渡"):
+        compile_multi_task_points(two_map_project, map_root=Path(two_map_project["_test_map_root"]))
+
+
+def test_multi_task_mode_emits_only_required_public_route_files(two_map_project):
+    """Ferry is emitted once; outdoor is emitted for its owning building/unit."""
+    ferry = deepcopy(next(item for item in two_map_project["map_assets"] if item["id"] == "lobby-map"))
+    outdoor = deepcopy(ferry)
+    ferry["id"], ferry["label"] = "ferry-map", "摆渡层"
+    outdoor["id"], outdoor["label"] = "outdoor-map", "一栋户外"
+    two_map_project["map_assets"].extend([ferry, outdoor])
+    two_map_project["deployment_flow"] = [
+        {"id": "ferry", "type": "ferry"},
+        {"id": "outdoor", "type": "outdoor"},
+        {"id": "lobby", "type": "lobby"},
+        {"id": "target_floor", "type": "target_floor"},
+    ]
+    two_map_project["map_instances"].extend([
+        {"map_asset_id": "ferry-map", "role": "ferry", "scope": "global", "building": "", "unit": "", "floor": None},
+        {"map_asset_id": "outdoor-map", "role": "outdoor", "scope": "unit", "building": "1", "unit": "1", "floor": 1},
+    ])
+    two_map_project["localization_bindings"] = [
+        {"id": "ferry-binding", "map_asset_id": "ferry-map", "building": "", "unit": "", "type": "ferry"},
+        {"id": "outdoor-binding", "map_asset_id": "outdoor-map", "building": "1", "unit": "1", "type": "outdoor"},
+        *two_map_project["localization_bindings"],
+    ]
+    two_map_project["components"].extend([
+        {"id": "ferry-start", "map_asset_id": "ferry-map", "kind": "start", "x": 0.0, "y": -2.0, "yaw": 0.0, "generated_waypoint_ids": ["ferry-start-point"]},
+        {"id": "outdoor-start", "map_asset_id": "outdoor-map", "kind": "start", "x": 0.0, "y": -2.0, "yaw": 0.0, "generated_waypoint_ids": ["outdoor-start-point"]},
+        {"id": "outdoor-gate", "map_asset_id": "outdoor-map", "kind": "gate", "x": 0.0, "y": -1.0, "yaw": 0.0, "attributes": {"width_m": 2.0, "height_m": 1.0, "controller_device_id": "10044", "pre_open_distance_m": 1.0, "post_open_distance_m": 1.0}},
+        {"id": "lobby-entry", "map_asset_id": "lobby-map", "kind": "building_entrance", "x": 0.0, "y": -2.0, "yaw": 0.0, "generated_waypoint_ids": ["lobby-entry-point"]},
+    ])
+    two_map_project["waypoints"].extend([
+        {"id": "ferry-start-point", "map_asset_id": "ferry-map", "kind": "start", "generated_by": "ferry-start", "x": 0.0, "y": -2.0, "yaw": 0.0},
+        {"id": "ferry-handoff", "map_asset_id": "ferry-map", "kind": "map_transition", "x": 0.0, "y": 0.0, "yaw": 0.0},
+        {"id": "outdoor-start-point", "map_asset_id": "outdoor-map", "kind": "start", "generated_by": "outdoor-start", "x": 0.0, "y": -2.0, "yaw": 0.0},
+        {"id": "outdoor-handoff", "map_asset_id": "outdoor-map", "kind": "map_transition", "x": 0.0, "y": 0.0, "yaw": 0.0},
+        {"id": "lobby-entry-point", "map_asset_id": "lobby-map", "kind": "building_entrance", "generated_by": "lobby-entry", "x": 0.0, "y": -2.0, "yaw": 0.0},
+    ])
+    route = two_map_project["localization_routes"][0]
+    route.update({
+        "binding_ids": ["ferry-binding", "outdoor-binding", "lobby-binding", "floor-binding"],
+        "links": [
+            {"from_binding_id": "ferry-binding", "to_binding_id": "outdoor-binding", "anchor": {"kind": "waypoint", "waypoint_id": "ferry-handoff"}},
+            {"from_binding_id": "outdoor-binding", "to_binding_id": "lobby-binding", "anchor": {"kind": "waypoint", "waypoint_id": "outdoor-handoff"}},
+            {"from_binding_id": "lobby-binding", "to_binding_id": "floor-binding", "anchor": {"kind": "component_center", "component_id": "lobby-elevator"}},
+        ],
+        "entry_anchors": [
+            {"binding_id": "outdoor-binding", "anchor": {"kind": "waypoint", "waypoint_id": "outdoor-start-point"}},
+            {"binding_id": "lobby-binding", "anchor": {"kind": "component_center", "component_id": "lobby-entry"}},
+            {"binding_id": "floor-binding", "anchor": {"kind": "component_center", "component_id": "target-elevator"}},
+        ],
+        "task_start_waypoint_id": "ferry-start-point",
+        "execution_nodes": [
+            {"binding_id": "ferry-binding", "node_refs": []},
+            {"binding_id": "outdoor-binding", "node_refs": [{"kind": "component", "id": "outdoor-gate"}]},
+            {"binding_id": "lobby-binding", "node_refs": []},
+            {"binding_id": "floor-binding", "node_refs": []},
+        ],
+    })
+
+    preview = compile_multi_task_points(two_map_project, map_root=Path(two_map_project["_test_map_root"]))
+
+    paths = {item.relative_path for item in preview.artifacts if item.relative_path.startswith("multi_tasks/")}
+    assert paths == {
+        "multi_tasks/高科一号/sub_outdoor_eguard.json",
+        "multi_tasks/高科一号/sub_outdoor_eguard_r.json",
+        "multi_tasks/高科一号/outdoor/1_1.json",
+        "multi_tasks/高科一号/outdoor/1_1_r.json",
+        "multi_tasks/高科一号/indoor/1_1.json",
+        "multi_tasks/高科一号/indoor/1_1_r.json",
+        "multi_tasks/高科一号/floor/1_1_n_n09.json",
+        "multi_tasks/高科一号/floor/1_1_n_n09_r.json",
+    }
+    assert json.loads(_artifact_text(preview, "multi_tasks/高科一号/sub_outdoor_eguard.json"))["subtask_name"] == "outdoor"
+    assert json.loads(_artifact_text(preview, "multi_tasks/高科一号/outdoor/1_1.json"))["subtask_name"] == "outdoor_1_1"
+    assert "waypoint_tasks/gk1/e_guard_open_go.xml" in {item.relative_path for item in preview.artifacts}
+
+    single = compile_single_task_points(two_map_project, map_root=Path(two_map_project["_test_map_root"]))
+    single_task = single.task_json["tasks"][0]
+    assert [item["subtask_name"] for item in single_task["subtasks"]] == [
+        "outdoor", "outdoor_1_1", "elevator_hall", "1509", "1509_r", "elevator_hall_r", "outdoor_1_1_r", "outdoor_r",
+    ]
+
+
+def _set_execution_nodes(project: dict, *, lobby: list[dict] | None = None, target: list[dict] | None = None) -> None:
+    """Declare operator intent explicitly; never let a compiler test use save order."""
+    project["localization_routes"][0]["execution_nodes"] = [
+        {"binding_id": "lobby-binding", "node_refs": lobby or []},
+        {"binding_id": "floor-binding", "node_refs": target or []},
+    ]
 
 
 def _add_store_localization_route(
@@ -136,6 +733,375 @@ def test_compiler_keeps_outbound_target_and_return_handoff_distinct(two_map_proj
     assert (return_origin["x"], return_origin["y"]) != (outbound["x"], outbound["y"])
 
 
+def test_compiler_rejects_a_route_target_that_does_not_match_the_delivery_target(two_map_project):
+    """A route endpoint and the generated task cannot silently describe different destinations."""
+    route_target = next(item for item in two_map_project["waypoints"] if item["id"] == "route-target")
+    route_target["x"] = 4.5
+
+    with pytest.raises(CompilationError, match="定位路线的去程终点必须与目标点一致"):
+        _compile(two_map_project)
+
+
+def test_compiler_generates_controlled_gate_actions_for_both_travel_directions(two_map_project):
+    """Catches a configured gate being visible on the map yet absent from JSON/XML output."""
+    gate = {
+        "id": "component-target-gate", "map_asset_id": "target-map", "kind": "gate",
+        "label": "东侧闸机", "x": 3.0, "y": 0.0, "yaw": pi / 2,
+        "attributes": {
+            "width_m": 2.0, "height_m": 1.0, "speed_profile": "single_point",
+            "controller_device_id": "10044",
+        },
+    }
+    two_map_project["components"].append(gate)
+    _set_execution_nodes(two_map_project, target=[{"kind": "component", "id": gate["id"]}])
+
+    preview = _compile(two_map_project)
+    subtasks = {item["subtask_name"]: item["waypoints"] for item in preview.task_json["subtasks"]}
+    artifact_text = {
+        item.relative_path: item.content.decode("utf-8")
+        for item in preview.artifacts if item.relative_path.endswith(".xml")
+    }
+
+    assert [point["waypoint_id"] for point in subtasks["1509"]] == [
+        "target_wait", "1509_component-target-gate_open_go", "1509_component-target-gate_close_go", "target",
+    ]
+    assert [point["waypoint_id"] for point in subtasks["1509_r"]] == [
+        "1509_r_component-target-gate_open_back", "1509_r_component-target-gate_close_back",
+        "target_return_wait", "target_return_elevator_center",
+    ]
+    action_trees = {
+        path: text for path, text in artifact_text.items() if "/e_guard_" in path
+    }
+    assert len(action_trees) == 4
+    assert all('doorid="10044"' in text for text in action_trees.values())
+    assert all("/home/bob/" not in text and "SetUseWheelOdom" not in text for text in action_trees.values())
+    task_action_ids = {
+        point["waypoint_task_id"]
+        for points in subtasks.values() for point in points
+        if point["waypoint_task_id"].startswith("e_guard_")
+    }
+    action_tree_stems = {Path(path).stem for path in action_trees}
+    assert task_action_ids == action_tree_stems
+    location_manifest = json.loads(next(
+        item.content for item in preview.artifacts if item.relative_path == "runtime/loc_yaml_path.json"
+    ))
+    floor_return = location_manifest["loc_yaml"][0]["yaml_index"][1]["init_return"]
+    first_return = subtasks["1509_r"][0]["pose"]
+    assert floor_return == {
+        "x": first_return["position"]["x"], "y": first_return["position"]["y"],
+        "z": 0.0, "yaw": pytest.approx(2 * atan2(
+            first_return["orientation"]["z"], first_return["orientation"]["w"],
+        )),
+    }
+    chain = preview.manifest["execution_chain"]["target"]
+    assert [node["action"] for node in chain["outbound"]] == ["open_go", "close_go"]
+    assert [node["action"] for node in chain["return"]] == ["open_back", "close_back"]
+    assert {node["controller_device_id"] for node in chain["outbound"]} == {"10044"}
+    assert {node["generated_by"] for node in chain["outbound"]} == {"component-target-gate"}
+    assert {node["behavior_tree"] for node in chain["outbound"]} == {
+        "e_guard_open_go.xml",
+        "e_guard_close_go.xml",
+    }
+
+
+@pytest.mark.parametrize("kind", ["gate", "auto_door"])
+def test_controlled_access_actions_stop_before_and_after_the_barrier(two_map_project, kind):
+    """Open before the barrier and close only after a configured clear distance."""
+    barrier = {
+        "id": f"component-{kind}-clearance", "map_asset_id": "target-map", "kind": kind,
+        "label": kind, "x": 3.0, "y": 0.0, "yaw": pi / 2,
+        "attributes": {
+            "width_m": 2.0, "height_m": 0.5, "controller_device_id": "10044",
+            "pre_open_distance_m": 1.25, "post_open_distance_m": 0.75,
+        },
+    }
+    two_map_project["components"].append(barrier)
+    _set_execution_nodes(two_map_project, target=[{"kind": "component", "id": barrier["id"]}])
+
+    subtasks = {item["subtask_name"]: item["waypoints"] for item in _compile(two_map_project).task_json["subtasks"]}
+    outbound_actions = subtasks["1509"][1:3]
+    return_actions = subtasks["1509_r"][:2]
+
+    assert [point["waypoint_id"].rsplit("_", 2)[-2:] for point in outbound_actions] == [["open", "go"], ["close", "go"]]
+    assert [point["pose"]["position"]["x"] for point in outbound_actions] == pytest.approx([1.5, 4.0])
+    assert [point["waypoint_id"].rsplit("_", 2)[-2:] for point in return_actions] == [["open", "back"], ["close", "back"]]
+    assert [point["pose"]["position"]["x"] for point in return_actions] == pytest.approx([4.0, 1.5])
+
+
+def test_compiler_uses_the_existing_auto_door_behavior_tree_filename_contract(two_map_project):
+    """Component UUIDs must never leak into the deployment behavior-tree contract."""
+    auto_door = {
+        "id": "component-target-auto-door", "map_asset_id": "target-map", "kind": "auto_door",
+        "label": "东侧自动门", "x": 3.0, "y": 0.0, "yaw": pi / 2,
+        "attributes": {
+            "width_m": 2.0, "height_m": 0.3, "speed_profile": "task_point",
+            "controller_device_id": "10045",
+        },
+    }
+    two_map_project["components"].append(auto_door)
+    _set_execution_nodes(two_map_project, target=[{"kind": "component", "id": auto_door["id"]}])
+
+    preview = _compile(two_map_project)
+    task_ids = {
+        point["waypoint_task_id"]
+        for subtask in preview.task_json["subtasks"] for point in subtask["waypoints"]
+        if point["waypoint_task_id"]
+    }
+    expected_tree_names = {
+        "1_1_open_door_go.xml", "1_1_close_door_go.xml",
+        "1_1_open_door_back.xml", "1_1_close_door_back.xml",
+    }
+    tree_names = {
+        Path(item.relative_path).name
+        for item in preview.artifacts
+        if Path(item.relative_path).name in expected_tree_names
+    }
+
+    assert {
+        "1_1_open_door_go", "1_1_close_door_go",
+        "1_1_open_door_back", "1_1_close_door_back",
+    } <= task_ids
+    assert tree_names == expected_tree_names
+
+
+@pytest.mark.parametrize(
+    ("kind", "stale_profile", "expected_profile"),
+    [("auto_door", "slow_point", "task_point"), ("gate", "single_point", "narrow_point")],
+)
+def test_compiler_enforces_the_template_speed_for_controlled_access_components(
+    two_map_project, kind: str, stale_profile: str, expected_profile: str,
+):
+    """Task JSON must obey the template even when a legacy project saved another mode."""
+    barrier = {
+        "id": f"component-{kind}-speed", "map_asset_id": "target-map", "kind": kind,
+        "label": kind, "x": 3.0, "y": 0.0, "yaw": pi / 2,
+        "attributes": {
+            "width_m": 2.0, "height_m": 1.0, "speed_profile": stale_profile,
+            "controller_device_id": "10044",
+        },
+    }
+    two_map_project["components"].append(barrier)
+    _set_execution_nodes(two_map_project, target=[{"kind": "component", "id": barrier["id"]}])
+
+    target_waypoints = next(
+        subtask["waypoints"]
+        for subtask in _compile(two_map_project).task_json["subtasks"]
+        if subtask["subtask_name"] == "1509"
+    )
+
+    assert [point["speed_mode"] for point in target_waypoints[1:3]] == [expected_profile, expected_profile]
+
+
+@pytest.mark.parametrize("kind", ["gate", "auto_door"])
+def test_compiler_crosses_a_horizontal_barrier_perpendicular_to_its_long_edge(two_map_project, kind: str):
+    """A horizontal door face must be crossed vertically, never along its leaves."""
+    barrier = {
+        "id": f"component-horizontal-{kind}", "map_asset_id": "target-map", "kind": kind,
+        "label": f"水平{kind}", "x": 3.0, "y": 0.0, "yaw": 0.0,
+        "attributes": {
+            "width_m": 2.0, "height_m": 1.0, "speed_profile": "single_point",
+            "controller_device_id": "10044",
+        },
+    }
+    two_map_project["components"].append(barrier)
+    _set_execution_nodes(two_map_project, target=[{"kind": "component", "id": barrier["id"]}])
+
+    outbound = _compile(two_map_project).task_json["subtasks"][1]["waypoints"]
+
+    assert [point["waypoint_id"] for point in outbound[1:3]] == [
+        f"1509_{barrier['id']}_open_go", f"1509_{barrier['id']}_close_go",
+    ]
+    assert [
+        (point["pose"]["position"]["x"], point["pose"]["position"]["y"])
+        for point in outbound[1:3]
+    ] == [(3.0, -2.0), (3.0, 2.0)]
+
+
+@pytest.mark.parametrize("kind", ["gate", "auto_door"])
+def test_compiler_crosses_a_rotated_barrier_perpendicular_to_its_long_edge(two_map_project, kind: str):
+    """Rotating a vertical door face rotates its normal, not an internal arrow."""
+    barrier = {
+        "id": f"component-rotated-{kind}", "map_asset_id": "target-map", "kind": kind,
+        "label": f"旋转{kind}", "x": 3.0, "y": 0.0, "yaw": pi / 2,
+        "attributes": {
+            "width_m": 2.0, "height_m": 1.0, "speed_profile": "single_point",
+            "controller_device_id": "10044",
+        },
+    }
+    two_map_project["components"].append(barrier)
+    _set_execution_nodes(two_map_project, target=[{"kind": "component", "id": barrier["id"]}])
+
+    outbound = _compile(two_map_project).task_json["subtasks"][1]["waypoints"]
+
+    coordinates = [
+        coordinate
+        for point in outbound[1:3]
+        for coordinate in (point["pose"]["position"]["x"], point["pose"]["position"]["y"])
+    ]
+    assert coordinates == pytest.approx([1.0, 0.0, 5.0, 0.0])
+    return_waypoints = next(
+        subtask["waypoints"]
+        for subtask in _compile(two_map_project).task_json["subtasks"]
+        if subtask["subtask_name"] == "1509_r"
+    )
+    assert [point["waypoint_id"] for point in return_waypoints[:2]] == [
+        f"1509_r_{barrier['id']}_open_back", f"1509_r_{barrier['id']}_close_back",
+    ]
+
+
+def test_compiler_rejects_a_route_that_does_not_cross_both_barrier_faces(two_map_project):
+    """A door must not fabricate a crossing when both route neighbours share one side."""
+    door = {
+        "id": "component-same-side-door", "map_asset_id": "target-map", "kind": "auto_door",
+        "label": "同侧自动门", "x": 3.0, "y": 0.0, "yaw": 0.0,
+        "attributes": {
+            "width_m": 2.0, "height_m": 1.0, "speed_profile": "single_point",
+            "controller_device_id": "10044",
+        },
+    }
+    target = next(item for item in two_map_project["components"] if item["id"] == "target")
+    route_target = next(item for item in two_map_project["waypoints"] if item["id"] == "route-target")
+    target["y"] = route_target["y"] = -3.0
+    two_map_project["components"].append(door)
+    _set_execution_nodes(two_map_project, target=[{"kind": "component", "id": door["id"]}])
+
+    with pytest.raises(CompilationError, match="门体没有被任务路径从两侧穿过"):
+        _compile(two_map_project)
+
+
+@pytest.mark.parametrize("kind", ["gate", "auto_door"])
+def test_compiler_blocks_an_unconfigured_access_component_until_its_device_number_is_filled(
+    two_map_project, kind: str,
+):
+    """A draft map marker must never turn into a behavior tree with a guessed device id."""
+    component = {
+        "id": f"component-draft-{kind}", "map_asset_id": "target-map", "kind": kind,
+        "label": "待配置设备", "x": 3.0, "y": 0.0, "yaw": pi / 2,
+        "attributes": {
+            "width_m": 2.0, "height_m": 1.0, "speed_profile": "single_point",
+            "controller_device_id": "",
+        },
+    }
+    two_map_project["components"].append(component)
+    _set_execution_nodes(two_map_project, target=[{"kind": "component", "id": component["id"]}])
+
+    with pytest.raises(CompilationError, match="必须填写纯数字控制设备号"):
+        _compile(two_map_project)
+
+
+def test_compiler_blocks_a_route_with_an_unapproved_intermediate_map(two_map_project):
+    """Catches silently dropping ferry/outdoor segments from the indoor task."""
+    two_map_project["localization_bindings"].insert(1, {
+        "id": "ferry-binding", "map_asset_id": "lobby-map", "building": "1",
+        "unit": "1", "type": "ferry",
+    })
+    two_map_project["localization_routes"][0]["binding_ids"] = [
+        "lobby-binding", "ferry-binding", "floor-binding",
+    ]
+
+    with pytest.raises(CompilationError, match="不支持户外或摆渡"):
+        _compile(two_map_project)
+
+
+def test_compiler_blocks_an_unapproved_custom_flow_stage(two_map_project):
+    """Catches presenting a profile as ready while its stage has no BT semantics."""
+    two_map_project["scene_model"] = "custom"
+    two_map_project["deployment_flow"] = [
+        {"id": "ferry", "type": "ferry"},
+        {"id": "lobby", "type": "lobby"},
+        {"id": "target", "type": "target_floor"},
+    ]
+
+    with pytest.raises(CompilationError, match="不支持户外或摆渡"):
+        _compile(two_map_project)
+
+
+def test_compiler_turns_a_slow_zone_into_physical_entry_and_exit_edges(two_map_project):
+    """A visible region changes speed only while traversing its physical span."""
+    slow_zone = {
+        "id": "component-slow-zone", "map_asset_id": "target-map", "kind": "slow_zone",
+        "label": "电梯口减速区", "x": 3.0, "y": 0.0, "yaw": pi,
+        "attributes": {"width_m": 2.0, "height_m": 2.0, "speed_profile": "slow_point"},
+    }
+    two_map_project["components"].append(slow_zone)
+    _set_execution_nodes(two_map_project, target=[{"kind": "component", "id": slow_zone["id"]}])
+
+    preview = _compile(two_map_project)
+    subtasks = {item["subtask_name"]: item["waypoints"] for item in preview.task_json["subtasks"]}
+
+    assert [point["waypoint_id"] for point in subtasks["1509"]] == [
+        "target_wait", "1509_component-slow-zone_entry", "1509_component-slow-zone_exit", "target",
+    ]
+    assert [point["speed_mode"] for point in subtasks["1509"]] == [
+        "backward", "single_point", "slow_point", "single_point",
+    ]
+    assert [point["waypoint_id"] for point in subtasks["1509_r"]] == [
+        "1509_r_component-slow-zone_exit", "1509_r_component-slow-zone_entry",
+        "target_return_wait", "target_return_elevator_center",
+    ]
+    assert [point["speed_mode"] for point in subtasks["1509_r"]] == [
+        "single_point", "slow_point", "task_point", "elevator_in",
+    ]
+    floor_return = json.loads(next(
+        item.content for item in preview.artifacts if item.relative_path == "runtime/loc_yaml_path.json"
+    ))["loc_yaml"][0]["yaml_index"][1]["init_return"]
+    assert floor_return["x"] == subtasks["1509_r"][0]["pose"]["position"]["x"]
+    assert floor_return["y"] == subtasks["1509_r"][0]["pose"]["position"]["y"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "speed_profile"),
+    [("narrow_passage", "narrow_point"), ("ramp", "slow_point")],
+)
+def test_compiler_treats_passive_regions_as_rotated_areas_not_directional_arrows(
+    two_map_project, kind: str, speed_profile: str,
+):
+    """A narrow passage or ramp must work in either travel direction across its footprint."""
+    region = {
+        "id": f"component-{kind}", "map_asset_id": "target-map", "kind": kind,
+        "label": kind, "x": 3.5, "y": 0.25, "yaw": pi,
+        "attributes": {"width_m": 2.0, "height_m": 2.0, "speed_profile": speed_profile},
+    }
+    two_map_project["components"].append(region)
+    _set_execution_nodes(two_map_project, target=[{"kind": "component", "id": region["id"]}])
+
+    preview = _compile(two_map_project)
+    outbound = preview.task_json["subtasks"][1]["waypoints"]
+    returned = preview.task_json["subtasks"][2]["waypoints"]
+
+    assert [point["waypoint_id"] for point in outbound] == [
+        "target_wait", f"1509_{region['id']}_entry", f"1509_{region['id']}_exit", "target",
+    ]
+    assert [point["speed_mode"] for point in outbound] == [
+        "backward", "single_point", speed_profile, "single_point",
+    ]
+    assert [point["waypoint_id"] for point in returned[:2]] == [
+        f"1509_r_{region['id']}_exit", f"1509_r_{region['id']}_entry",
+    ]
+
+
+def test_compiler_routes_through_an_off_line_passive_region(two_map_project):
+    """A required region creates a deliberate detour instead of rejecting its map mark."""
+    region = {
+        "id": "component-off-line-narrow", "map_asset_id": "target-map", "kind": "narrow_passage",
+        "label": "离线窄通道", "x": 3.0, "y": 5.0, "yaw": 0.0,
+        "attributes": {"width_m": 1.0, "height_m": 2.0, "speed_profile": "narrow_point"},
+    }
+    two_map_project["components"].append(region)
+    _set_execution_nodes(two_map_project, target=[{"kind": "component", "id": region["id"]}])
+
+    outbound = _compile(two_map_project).task_json["subtasks"][1]["waypoints"]
+
+    assert [point["waypoint_id"] for point in outbound] == [
+        "target_wait", "1509_component-off-line-narrow_entry",
+        "1509_component-off-line-narrow_exit", "target",
+    ]
+    assert [
+        (point["pose"]["position"]["x"], point["pose"]["position"]["y"])
+        for point in outbound[1:3]
+    ] == [(3.0, 4.0), (3.0, 6.0)]
+
+
 def test_compiler_emits_saved_target_transition_points_without_behavior_trees(two_map_project):
     """A marked task transition must survive preview generation in route order."""
     two_map_project["waypoints"].extend([
@@ -149,6 +1115,10 @@ def test_compiler_emits_saved_target_transition_points_without_behavior_trees(tw
             "label": "过渡点", "x": 4.0, "y": 2.0, "yaw": 0.75,
             "speed_mode": "narrow_point",
         },
+    ])
+    _set_execution_nodes(two_map_project, target=[
+        {"kind": "transition", "id": "transition-first"},
+        {"kind": "transition", "id": "transition-second"},
     ])
 
     outbound = _compile(two_map_project).task_json["subtasks"][1]["waypoints"]
@@ -176,6 +1146,13 @@ def test_compiler_mirrors_lobby_and_target_transitions_through_all_four_task_seg
         {"id": "target-first", "map_asset_id": "target-map", "kind": "transition", "label": "楼层过渡 1", "x": 3.0, "y": 1.0, "yaw": 0.5, "speed_mode": "slow_point"},
         {"id": "target-second", "map_asset_id": "target-map", "kind": "transition", "label": "楼层过渡 2", "x": 4.0, "y": 2.0, "yaw": 0.75, "speed_mode": "narrow_point"},
     ])
+    _set_execution_nodes(two_map_project, lobby=[
+        {"kind": "transition", "id": "lobby-first"},
+        {"kind": "transition", "id": "lobby-second"},
+    ], target=[
+        {"kind": "transition", "id": "target-first"},
+        {"kind": "transition", "id": "target-second"},
+    ])
 
     subtasks = _compile(two_map_project).task_json["subtasks"]
     by_name = {item["subtask_name"]: item["waypoints"] for item in subtasks}
@@ -192,7 +1169,10 @@ def test_compiler_mirrors_lobby_and_target_transitions_through_all_four_task_seg
     assert [point["waypoint_id"] for point in by_name["elevator_hall_r"]] == [
         "lobby_return_wait", "lobby_r_1", "lobby_r_2", "lobby_return_start",
     ]
-    assert [point["speed_mode"] for point in by_name["1509_r"][:2]] == ["narrow_point", "slow_point"]
+    # Speed belongs to the physical edge ending at a point.  On return, the
+    # first edge is target→last transition (the target's normal arrival edge),
+    # and only the next edge retraces the original narrow segment.
+    assert [point["speed_mode"] for point in by_name["1509_r"][:2]] == ["single_point", "narrow_point"]
     assert [point["pose"]["orientation"] for point in by_name["1509_r"][:2]] == [
         {"x": 0.0, "y": 0.0, "z": sin(-2.391592653589793 / 2), "w": cos(-2.391592653589793 / 2)},
         {"x": 0.0, "y": 0.0, "z": sin(-2.641592653589793 / 2), "w": cos(-2.641592653589793 / 2)},
@@ -210,6 +1190,10 @@ def test_target_return_transition_is_shared_by_task_json_and_location_manifest(t
     two_map_project["waypoints"].extend([
         {"id": "target-first", "map_asset_id": "target-map", "kind": "transition", "label": "楼层过渡 1", "x": 3.0, "y": 1.0, "yaw": 0.5, "speed_mode": "slow_point"},
         {"id": "target-last", "map_asset_id": "target-map", "kind": "transition", "label": "楼层过渡 2", "x": 4.0, "y": 2.0, "yaw": 0.75, "speed_mode": "narrow_point"},
+    ])
+    _set_execution_nodes(two_map_project, target=[
+        {"kind": "transition", "id": "target-first"},
+        {"kind": "transition", "id": "target-last"},
     ])
 
     preview = _compile(two_map_project)
@@ -244,6 +1228,9 @@ def test_compiler_rejects_transition_speed_modes_reserved_for_behavior_trees(two
         "label": "过渡点", "x": 3.0, "y": 1.0, "yaw": 0.0,
         "speed_mode": "elevator_in",
     })
+    _set_execution_nodes(two_map_project, target=[
+        {"kind": "transition", "id": "unsafe-transition"},
+    ])
 
     with pytest.raises(CompilationError, match="过渡点速度模式"):
         _compile(two_map_project)
@@ -465,7 +1452,7 @@ def test_compiler_rejects_two_landings_that_reference_different_physical_elevato
         {
             "id": "physical-elevator-b",
             "elevator_id": "10015",
-            "elevator_protocol": "bluetooth",
+            "elevator_protocol": "mqtt",
             "min_floor": 1,
             "max_floor": 15,
         }
@@ -511,6 +1498,21 @@ def test_compiler_fingerprint_includes_saved_map_edits(two_map_project):
     }]
     first = _compile(two_map_project).input_sha256
     two_map_project["map_edits"][0]["points"][0]["x"] = -8.0
+
+    second = _compile(two_map_project).input_sha256
+
+    assert second != first
+
+
+def test_compiler_fingerprint_includes_virtual_wall_segments(two_map_project):
+    two_map_project["virtual_walls"] = [{
+        "id": "virtual-wall-a",
+        "map_asset_id": two_map_project["map_assets"][0]["id"],
+        "start": {"x": -9.0, "y": -9.0},
+        "end": {"x": -8.0, "y": -9.0},
+    }]
+    first = _compile(two_map_project).input_sha256
+    two_map_project["virtual_walls"][0]["end"]["x"] = -7.0
 
     second = _compile(two_map_project).input_sha256
 
@@ -573,7 +1575,7 @@ def test_gk1_store_preview_and_download_have_the_approved_indoor_structure(
     store.add_map_instance(project["id"], {"map_id": lobby["id"], "role": "lobby", "building": "1", "unit": "1", "floor": 1})
     store.add_map_instance(project["id"], {"map_id": target["id"], "role": "typical_floor", "building": "1", "unit": "1", "floor": 15})
     store.add_component(project["id"], {"map_id": lobby["id"], "kind": "start", "x": -1.0, "y": -1.0})
-    elevator = store.add_physical_elevator(project["id"], {"elevator_id": "A", "elevator_protocol": "bluetooth", "min_floor": 1, "max_floor": 15})
+    elevator = store.add_physical_elevator(project["id"], {"elevator_id": "A", "elevator_protocol": "mqtt", "min_floor": 1, "max_floor": 15})
     lobby_elevator = store.add_component(project["id"], {"map_id": lobby["id"], "kind": "elevator", "x": 0.0, "y": 0.0, "attributes": {"physical_elevator_id": elevator["id"], "button_floor": 1}})
     store.add_component(project["id"], {"map_id": target["id"], "kind": "elevator", "x": 0.0, "y": 1.0, "yaw": pi, "attributes": {"physical_elevator_id": elevator["id"], "button_floor": 15}})
     target_component = store.add_component(project["id"], {"map_id": target["id"], "kind": "target", "x": 1.0, "y": 1.0})
@@ -669,7 +1671,7 @@ def test_store_compiles_browser_uploaded_map_snapshots_after_upload_staging_is_g
         source.with_name("0.pcd").unlink()
     store.add_map_instance(project["id"], {"map_id": lobby["id"], "role": "lobby", "building": "1", "unit": "1", "floor": 1})
     store.add_map_instance(project["id"], {"map_id": target["id"], "role": "typical_floor", "building": "1", "unit": "1", "floor": 15})
-    shared = store.add_physical_elevator(project["id"], {"elevator_id": "10014", "elevator_protocol": "bluetooth", "min_floor": 1, "max_floor": 15})
+    shared = store.add_physical_elevator(project["id"], {"elevator_id": "10014", "elevator_protocol": "mqtt", "min_floor": 1, "max_floor": 15})
     store.add_component(project["id"], {"map_id": lobby["id"], "kind": "start", "x": -1.0, "y": -1.0})
     lobby_elevator = store.add_component(project["id"], {"map_id": lobby["id"], "kind": "elevator", "x": 0.0, "y": 0.0, "attributes": {"physical_elevator_id": shared["id"], "button_floor": 1}})
     store.add_component(project["id"], {"map_id": target["id"], "kind": "elevator", "x": 0.0, "y": 1.0, "yaw": pi, "attributes": {"physical_elevator_id": shared["id"], "button_floor": 15}})

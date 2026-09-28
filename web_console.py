@@ -27,6 +27,7 @@ from autodrive_console.acceptance_plan import AcceptancePlanStore
 from autodrive_console.autostart import AutostartError, AutostartManager
 from autodrive_console.case_workspace import CasePackageError, CaseWorkspace
 from autodrive_console.deployment import DeploymentError, DeploymentStore
+from autodrive_console.component_defaults import ComponentDefaultsError, component_speed_defaults
 from autodrive_console.mapping import MappingError, MappingSessionController, MappingUnavailable
 from autodrive_console.observation import ObservationError, ObservationManager
 from autodrive_console.task_compiler import CompilationError
@@ -356,6 +357,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._json({"plan": plan}, HTTPStatus.OK if plan and plan["plan_id"] == plan_id else HTTPStatus.NOT_FOUND)
         elif path == "/api/mapping":
             self._json(MAPPING.status())
+        elif path == "/api/deployment-component-defaults":
+            try:
+                self._json({"component_speed_defaults": component_speed_defaults()})
+            except ComponentDefaultsError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE)
         elif path.startswith("/api/mapping/sessions/") and path.endswith("/preview.png"):
             session_id = unquote(path.removeprefix("/api/mapping/sessions/").removesuffix("/preview.png").strip("/"))
             self._mapping_preview(session_id)
@@ -595,7 +601,18 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if path == "/api/deployments":
             try:
                 data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-                self._json({"project": DEPLOYMENTS.create(data.get("name"))}, HTTPStatus.CREATED)
+                if (
+                    not isinstance(data, dict)
+                    or set(data) != {"name", "task_mode"}
+                    or not isinstance(data["name"], str)
+                    or not isinstance(data["task_mode"], str)
+                    or data["task_mode"] not in DeploymentStore.TASK_MODES
+                ):
+                    raise DeploymentError("创建项目仅接受项目名称和任务模式")
+                self._json(
+                    {"project": DEPLOYMENTS.create(data["name"], data["task_mode"])},
+                    HTTPStatus.CREATED,
+                )
             except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
@@ -621,31 +638,29 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
+        if path.startswith("/api/deployments/") and path.endswith("/localization-routes/derive"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                if not isinstance(data, dict) or data:
+                    raise DeploymentError("自动路线派生请求必须为空对象")
+                project_id = unquote(
+                    path.removeprefix("/api/deployments/").removesuffix("/localization-routes/derive").strip("/")
+                )
+                project = DEPLOYMENTS.derive_localization_routes(project_id)
+                self._json({"project": project, "localization_routes": project.get("localization_routes", [])})
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         if path.startswith("/api/deployments/") and path.endswith("/localization-routes"):
             try:
-                parts = path.split("/")
-                if len(parts) != 5 or parts[:3] != ["", "api", "deployments"] or not parts[3] or parts[4] != "localization-routes":
-                    raise DeploymentError("定位路线路径无效")
-                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-                project_id = unquote(parts[3])
-                route = DEPLOYMENTS.create_localization_route(project_id, data)
-                self._json(
-                    {"localization_route": route, "project": DEPLOYMENTS.get(project_id)},
-                    HTTPStatus.CREATED,
-                )
-            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                raise DeploymentError("定位路线由系统自动派生；请完成地图标记后使用 /localization-routes/derive")
+            except DeploymentError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
         if path.startswith("/api/deployments/") and "/localization-routes/" in path:
             try:
-                parts = path.split("/")
-                if len(parts) != 6 or parts[:3] != ["", "api", "deployments"] or not parts[3] or parts[4] != "localization-routes" or not parts[5]:
-                    raise DeploymentError("定位路线路径无效")
-                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-                project_id = unquote(parts[3])
-                route = DEPLOYMENTS.update_localization_route(project_id, unquote(parts[5]), data)
-                self._json({"localization_route": route, "project": DEPLOYMENTS.get(project_id)})
-            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                raise DeploymentError("定位路线由系统自动派生，不能人工修改")
+            except DeploymentError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
         if path.startswith("/api/deployments/") and path.endswith("/localization-bindings"):
@@ -826,6 +841,18 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                 project_id = unquote(parts[3]); component = DEPLOYMENTS.update_component(project_id, unquote(parts[5]), data)
                 self._json({"component": component, "project": DEPLOYMENTS.get(project_id)})
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/virtual-walls/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "virtual-walls":
+                    raise DeploymentError("虚拟墙路径无效")
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(parts[3])
+                wall = DEPLOYMENTS.update_virtual_wall(project_id, unquote(parts[5]), data)
+                self._json({"virtual_wall": wall, "project": DEPLOYMENTS.get(project_id)})
             except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
@@ -1565,6 +1592,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             except DeploymentError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
+        if path.startswith("/api/deployments/") and "/virtual-walls/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "virtual-walls":
+                    raise DeploymentError("虚拟墙路径无效")
+                project_id = unquote(parts[3])
+                DEPLOYMENTS.delete_virtual_wall(project_id, unquote(parts[5]))
+                self._json({"deleted": True, "project": DEPLOYMENTS.get(project_id)})
+            except DeploymentError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         if path.startswith("/api/deployments/") and "/physical-elevators/" in path:
             try:
                 parts = path.split("/")
@@ -1587,11 +1625,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/deployments/") and "/localization-routes/" in path:
             try:
-                parts = path.split("/")
-                if len(parts) != 6 or parts[:3] != ["", "api", "deployments"] or not parts[3] or parts[4] != "localization-routes" or not parts[5]:
-                    raise DeploymentError("定位路线路径无效")
-                DEPLOYMENTS.delete_localization_route(unquote(parts[3]), unquote(parts[5]))
-                self._json({"deleted": True})
+                raise DeploymentError("定位路线由系统自动派生，不能人工删除")
             except DeploymentError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return

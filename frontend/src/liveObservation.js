@@ -83,15 +83,15 @@ const MAP_PALETTE = {
   cloud: 0x8b5cf6,
   virtualWall: 0xd63142,
 };
-// PC 保持原有高对比观测配色与无格栅画面。点云用更深、饱和度更高的紫色，
+// PC 保持原有高对比观测配色。点云用更深、饱和度更高的紫色，
 // 并将半径从 0.35 调至 0.52 px：大屏与缩放地图中能看清稀疏导航点，仍明显
 // 小于手机端，不会遮蔽墙体细节；实际点数、几何边界和传输链路均不改变。
-// 手机专用主题和米制格栅只在
-// `html.mobile-console` 已由 setupMobileConsole 显式启用时参与渲染。
 const DESKTOP_MAP_PALETTE = {
   unknown: [174, 174, 174],
   free: [245, 245, 245],
   occupied: [36, 36, 36],
+  gridMinor: 0xaeb8c2,
+  gridMajor: 0x7d8a97,
   cloud: 0x6426d9,
   virtualWall: 0xd63142,
 };
@@ -1703,10 +1703,6 @@ function updateMapScale(layout, gridStep) {
   const root = $("mapScale");
   const bar = $("mapScaleBar");
   if (!root || !bar) return;
-  if (!mobileConsoleEnabled()) {
-    root.hidden = true;
-    return;
-  }
   const candidates = [0.5, 1, 2, 5, 10, 20, 50, 100];
   const scaleDistance = candidates.reduce(
     (best, value) => {
@@ -1726,14 +1722,9 @@ function updateMapScale(layout, gridStep) {
 }
 function renderMetricGrid(layout) {
   if (!pixiGridLayer || !mapInfo) return;
-  if (!mobileConsoleEnabled()) {
-    metricGridSignature = undefined;
-    pixiGridLayer.removeChildren().forEach((child) => child.destroy());
-    $("mapScale").hidden = true;
-    return;
-  }
   const step = metricGridStep(layout.pixelsPerMeter);
   const majorStep = step * 5;
+  const palette = mobileConsoleEnabled() ? MAP_PALETTE : DESKTOP_MAP_PALETTE;
   // 线宽按当前屏幕缩放反算到地图像素，缩放前后始终保持约 0.65/1.1 CSS px。
   const widthBucket = Math.max(1, Math.round(layout.pixelsPerMeter / 4));
   const signature = `${mapGeneration}:${step}:${widthBucket}`;
@@ -1770,14 +1761,14 @@ function renderMetricGrid(layout) {
   const minor = new Graphics();
   drawLines(step, minor);
   minor.stroke({
-    color: MAP_PALETTE.gridMinor,
+    color: palette.gridMinor,
     width: 0.65 / layout.ratio,
     alpha: 0.16,
   });
   const major = new Graphics();
   drawLines(majorStep, major);
   major.stroke({
-    color: MAP_PALETTE.gridMajor,
+    color: palette.gridMajor,
     width: 1.1 / layout.ratio,
     alpha: 0.28,
   });
@@ -1906,11 +1897,10 @@ function syncVehicleLayer(vehicle, layout) {
   const sine = Math.sin(layout.rotation);
   const x = centerX + cosine * (baseX - centerX) - sine * (baseY - centerY);
   const y = centerY + sine * (baseX - centerX) + cosine * (baseY - centerY);
-  const length =
-    Math.max(0.2, Number(vehicleModel.length_m) || 1.0) * layout.pixelsPerMeter;
-  const width =
-    Math.max(0.15, Number(vehicleModel.width_m) || 0.68) *
-    layout.pixelsPerMeter;
+  const { length, width } = projectVehicleFootprint(
+    vehicleModel,
+    layout.pixelsPerMeter,
+  );
   element.hidden = false;
   if (element.style.width !== `${width}px`) element.style.width = `${width}px`;
   if (element.style.height !== `${length}px`)
@@ -1923,6 +1913,13 @@ function syncVehicleLayer(vehicle, layout) {
   const transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%) rotate(${localYaw}rad)`;
   if (element.style.transform !== transform)
     element.style.transform = transform;
+}
+function projectVehicleFootprint(model, pixelsPerMeter) {
+  const scale = Math.max(0, Number(pixelsPerMeter) || 0);
+  return {
+    length: Math.max(0.2, Number(model?.length_m) || 1.0) * scale,
+    width: Math.max(0.15, Number(model?.width_m) || 0.68) * scale,
+  };
 }
 function vehiclePoseInMap() {
   // 小车端 C++ 已从 map -> base_* TF 得到位姿；浏览器只消费该最小实时结果。

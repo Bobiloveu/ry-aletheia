@@ -16,12 +16,7 @@ import re
 from typing import Any
 
 from .localization_assets import LocalizationMapError, read_localization_map
-from .task_path import (
-    TaskPathError,
-    return_task_transition_points,
-    task_segment_transitions,
-    task_transition_pose,
-)
+from .execution_chain import ExecutionChainError, build_map_execution_plan
 
 
 class LocationManifestError(ValueError):
@@ -354,8 +349,15 @@ def _binding(source: object, assets: dict[str, dict[str, Any]]) -> dict[str, Any
     binding_type = str(source.get("type") or "").strip()
     if binding_type not in _BINDING_TYPES:
         raise LocationManifestError("定位绑定类型无效")
-    building = validate_path_component(source.get("building"), "楼栋")
-    unit = validate_path_component(source.get("unit"), "单元")
+    raw_building = source.get("building")
+    raw_unit = source.get("unit")
+    if binding_type == "ferry" and raw_building in (None, "") and raw_unit in (None, ""):
+        # New topology uses one global ferry binding.  Historical projects
+        # stored it per identity, which remains readable for compatibility.
+        building, unit = "", ""
+    else:
+        building = validate_path_component(raw_building, "楼栋")
+        unit = validate_path_component(raw_unit, "单元")
     floor_template = ""
     if binding_type == "floor":
         floor_template = validate_path_component(source.get("floor_template"), "布局模板")
@@ -420,7 +422,10 @@ def _resolve_route(
         bindings = [bindings_by_id[identifier] for identifier in normalized_ids]
     except KeyError as exc:
         raise LocationManifestError("定位路线引用的绑定不存在") from exc
-    if any(item["building"] != building or item["unit"] != unit for item in bindings):
+    if any(
+        item["type"] != "ferry" and (item["building"] != building or item["unit"] != unit)
+        for item in bindings
+    ):
         raise LocationManifestError("定位路线绑定的楼栋或单元不一致")
     if bindings[-1]["type"] != "floor" or any(item["type"] == "floor" for item in bindings[:-1]):
         raise LocationManifestError("定位路线必须以 floor 绑定结束")
@@ -429,36 +434,40 @@ def _resolve_route(
     components = _indexed_items(project.get("components"), "组件")
     start = _route_waypoint(route.get("task_start_waypoint_id"), waypoints, bindings[0], "任务起点")
     target = _route_waypoint(route.get("task_target_waypoint_id"), waypoints, bindings[-1], "任务目标")
+    final_elevator_call = _final_elevator_call_pose(
+        project, bindings[-1], waypoints, components,
+        legacy_id=route.get("task_return_waypoint_id"),
+    )
     try:
-        target_transitions = task_segment_transitions(
-            project, bindings[-1]["map_asset_id"],
+        target_plan = build_map_execution_plan(
+            project, bindings[-1]["id"], start_anchor=final_elevator_call,
+            end_anchor=target, end_speed_mode="single_point",
         )
-        target_return_transitions = return_task_transition_points(target_transitions)
-    except TaskPathError as exc:
+    except ExecutionChainError as exc:
         raise LocationManifestError(str(exc)) from exc
-    for transition in target_transitions:
-        _validate_pose(
-            assets[bindings[-1]["map_asset_id"]],
-            task_transition_pose(transition),
-            "目标层任务过渡点",
-        )
     return_point = (
-        task_transition_pose(target_return_transitions[0])
-        if target_return_transitions
-        else _final_elevator_call_pose(
-            project, bindings[-1], waypoints, components,
-            legacy_id=route.get("task_return_waypoint_id"),
-        )
+        {
+            "x": target_plan.return_nodes[0].x,
+            "y": target_plan.return_nodes[0].y,
+            "z": 0.0,
+            "yaw": target_plan.return_nodes[0].yaw,
+        }
+        if target_plan.return_nodes else final_elevator_call
     )
     links = route.get("links")
     if not isinstance(links, list) or len(links) != len(bindings) - 1:
         raise LocationManifestError("定位路线链接无效")
 
+    entry_anchors = _entry_anchors(route, bindings, waypoints, components, assets)
     entries: list[dict[str, Any]] = []
     elevator_anchors: list[dict[str, Any]] = []
     for index, binding in enumerate(bindings):
         asset = assets[binding["map_asset_id"]]
-        init_go = start if index == 0 else _elevator_center_pose()
+        init_go = start if index == 0 else (
+            _elevator_center_pose()
+            if binding["type"] == "floor"
+            else entry_anchors.get(binding["id"], _elevator_center_pose())
+        )
         _validate_pose(asset, init_go, "定位初始化位")
         if index == len(bindings) - 1:
             init_return = return_point
@@ -481,6 +490,55 @@ def _resolve_route(
         "entries": entries,
         "elevator_anchors": elevator_anchors,
     }
+
+
+def _entry_anchors(
+    route: dict[str, Any],
+    bindings: list[dict[str, Any]],
+    waypoints: dict[str, dict[str, Any]],
+    components: dict[str, dict[str, Any]],
+    assets: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, float]]:
+    """Resolve backend-derived incoming hand-offs for non-elevator maps.
+
+    The browser cannot submit this field.  It is added only by automatic route
+    derivation, so it records a selected map fact rather than a manual order.
+    Legacy routes have no such field and retain the elevator-centre fallback.
+    """
+    source = route.get("entry_anchors")
+    if source is None:
+        return {}
+    if not isinstance(source, list):
+        raise LocationManifestError("定位路线入口锚点无效")
+    allowed = {item["id"] for item in bindings}
+    result: dict[str, dict[str, float]] = {}
+    binding_by_id = {item["id"]: item for item in bindings}
+    for item in source:
+        if not isinstance(item, dict) or set(item) != {"binding_id", "anchor"}:
+            raise LocationManifestError("定位路线入口锚点无效")
+        binding_id = str(item.get("binding_id") or "")
+        if binding_id not in allowed or binding_id in result:
+            raise LocationManifestError("定位路线入口锚点无效")
+        binding = binding_by_id[binding_id]
+        anchor = item.get("anchor")
+        if not isinstance(anchor, dict):
+            raise LocationManifestError("定位路线入口锚点无效")
+        if anchor.get("kind") == "waypoint" and set(anchor) == {"kind", "waypoint_id"}:
+            waypoint = waypoints.get(str(anchor.get("waypoint_id") or ""))
+            if waypoint is None or waypoint.get("map_asset_id") != binding["map_asset_id"]:
+                raise LocationManifestError("入口锚点 Waypoint 必须位于对应地图")
+            result[binding_id] = _controlled_pose(waypoint, "入口锚点")
+            continue
+        if anchor.get("kind") == "component_center" and set(anchor) == {"kind", "component_id"}:
+            component = components.get(str(anchor.get("component_id") or ""))
+            if component is None or component.get("map_asset_id") != binding["map_asset_id"]:
+                raise LocationManifestError("入口锚点组件必须位于对应地图")
+            pose = _controlled_pose(component, "入口锚点组件")
+            _validate_pose(assets[binding["map_asset_id"]], pose, "入口锚点组件")
+            result[binding_id] = pose
+            continue
+        raise LocationManifestError("定位路线入口锚点无效")
+    return result
 
 
 def _indexed_items(source: object, label: str) -> dict[str, dict[str, Any]]:
@@ -698,6 +756,12 @@ def _map_members(
         LocationArtifact((target / image.name).as_posix(), image_bytes),
         *[LocationArtifact((target / cloud.name).as_posix(), cloud.read_bytes()) for cloud in localization.clouds],
     ]
+    wall_path = source.with_name("map_walls.yaml")
+    if wall_path.exists() or wall_path.is_symlink():
+        wall = wall_path.resolve()
+        if wall_path.is_symlink() or not wall.is_file() or not wall.is_relative_to(root):
+            raise LocationManifestError("虚拟墙文件必须位于受控地图目录")
+        artifacts.append(LocationArtifact((target / "map_walls.yaml").as_posix(), wall.read_bytes()))
     if localization.index_bytes is not None:
         artifacts.insert(2, LocationArtifact((target / "index.txt").as_posix(), localization.index_bytes))
     return artifacts

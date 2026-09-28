@@ -16,14 +16,23 @@ import {
   zoomAt,
 } from "./deployment/canvas-geometry.js";
 import { drawDeploymentCanvas } from "./deployment/canvas-renderer.js";
+import { createCanvasDrawScheduler } from "./deployment/canvas-scheduler.js";
+import { createEraseFrameMask } from "./deployment/erase-frame-mask.js";
+import { eraseEditsForRender } from "./deployment/erase-preview.js";
 import {
-  orderedRouteBindingIds,
-  moveRouteBinding,
-  resetRouteDraft,
-  routeBindingChoices,
-  routeEndpointFields,
-  setRouteBindingIncluded,
-} from "./deployment/localization-route.js";
+  executionNodeLabel,
+  executionNodeRoleLabel,
+  executionNodeSpeedLabel,
+} from "./deployment/execution-chain-view.js";
+import { isDirectionalTaskAnchor, startDirectionGeometry } from "./deployment/start-direction.js";
+import { bindingOwnedByTopology } from "./deployment/localization-topology.js";
+import {
+  moveWallEndpoint,
+  moveWallVertex,
+  translateWall,
+  wallHitTest,
+  wallsForDisplay,
+} from "./deployment/virtual-walls.js";
 import {
   deriveDeploymentEditImpact,
   deriveDeploymentTask,
@@ -51,6 +60,7 @@ import {
   renderDeploymentFlow,
   validateFlow,
 } from "./deployment/flow-editor.js";
+import { deleteDeploymentAnnotation } from "./deployment/annotation-delete.js";
 import { requestJson } from "./platform/http.js";
 
 const $ = (id) => document.getElementById(id);
@@ -60,6 +70,7 @@ const esc = (value) => {
   return node.innerHTML;
 };
 let selectedProject = null;
+let componentSpeedDefaults = {};
 let deploymentFlow = [];
 let activeMap = null;
 let mapImage = null;
@@ -67,6 +78,10 @@ let mapNeedsFit = false;
 let activeTool = "pan";
 let selectedComponent = null;
 let selectedWaypoint = null;
+let selectedVirtualWall = null;
+let virtualWallDraft = null;
+let virtualWallDrag = null;
+let virtualWallPlacementPending = false;
 let mappingSession = null;
 let mappingRuntime = null;
 let mappingTemplate = null;
@@ -76,6 +91,8 @@ let mappingPollTimer = null;
 let eraserDiameterM = 0.8;
 let eraserShape = "circle";
 let eraserStroke = null;
+let pendingEraserStroke = null;
+let eraserCommitPending = false;
 let polygonEraseDraft = [];
 let eraserHoverPoint = null;
 let spacePanActive = false;
@@ -97,6 +114,7 @@ let viewedDeploymentStage = null;
 let editingDeploymentStage = null;
 let pendingEditStage = null;
 let deploymentEditReturnFocus = null;
+let annotationDeleteInFlight = false;
 const taskActionGate = createTaskActionGate();
 let elevatorLandingDraft = null;
 let localizationBindingDraft = null;
@@ -104,6 +122,23 @@ let localizationRouteDraft = null;
 const mapView = { scale: 40, x: 0, y: 0 };
 const canvas = $("mapCanvas");
 const context = canvas.getContext("2d");
+const eraseFrameMaskCanvas = $("mapEraseFrameMask");
+const eraseFrameMaskContext = eraseFrameMaskCanvas.getContext("2d");
+const eraseFrameMask = createEraseFrameMask({
+  capture: () => {
+    eraseFrameMaskCanvas.width = canvas.width;
+    eraseFrameMaskCanvas.height = canvas.height;
+    eraseFrameMaskContext.clearRect(
+      0,
+      0,
+      eraseFrameMaskCanvas.width,
+      eraseFrameMaskCanvas.height,
+    );
+    eraseFrameMaskContext.drawImage(canvas, 0, 0);
+  },
+  show: () => { eraseFrameMaskCanvas.hidden = false; },
+  hide: () => { eraseFrameMaskCanvas.hidden = true; },
+});
 const mapWorkspace = $("mapWorkspace");
 const taskPreviewOverlay = $("taskPreviewOverlay");
 const taskPreviewMapMount = $("taskPreviewMapMount");
@@ -112,6 +147,10 @@ let taskPreviewOriginMapId = null;
 let taskPreviewWorkspaceParent = null;
 let taskPreviewWorkspaceBefore = null;
 let canvasResizeFrame = null;
+let scheduleMapDraw = null;
+let pendingComponentSizeReadout = null;
+let pendingComponentYaw = null;
+let pendingWaypointYaw = null;
 document.body.classList.add("deployment-no-project", "deployment-no-map");
 const physicalElevators = () =>
   Array.isArray(selectedProject?.physical_elevators)
@@ -161,6 +200,35 @@ function taskCompilerMessage(text, error = false) {
 function compilerRecovery(error) {
   return `${error}。请检查小区名称、地图阶段、组件属性和机器人地图来源后重试。`;
 }
+function renderExecutionChainTrace(executionChain) {
+  if (!executionChain || typeof executionChain !== "object") return "";
+  const maps = [
+    ["lobby", "电梯大厅"],
+    ["target", "用户楼层"],
+  ];
+  const renderLeg = (title, nodes) => {
+    if (!Array.isArray(nodes) || !nodes.length) {
+      return `<div class="compiler-execution-empty">${esc(title)}：没有中间执行节点</div>`;
+    }
+    return `<section class="compiler-execution-leg"><b>${esc(title)}</b><ol>${nodes.map((node, index) => {
+      const source = executionNodeLabel(node, selectedProject || {});
+      const details = [
+        node?.role ? `节点：${executionNodeRoleLabel(node.role)}` : "",
+        node?.incoming_speed_mode ? `入站速度：${executionNodeSpeedLabel(node.incoming_speed_mode)}` : "",
+        node?.behavior_tree ? `行为树：${node.behavior_tree}` : "",
+        node?.controller_device_id ? `设备号：${node.controller_device_id}` : "",
+      ].filter(Boolean).join(" · ");
+      return `<li><span>${index + 1}</span><div><strong>${esc(source)}</strong><small>${esc(details || "纯导航节点")}</small></div></li>`;
+    }).join("")}</ol></section>`;
+  };
+  const sections = maps.map(([key, label]) => {
+    const map = executionChain[key];
+    if (!map || typeof map !== "object") return "";
+    return `<section class="compiler-execution-map"><header><b>${esc(label)}</b><small>系统自动关联</small></header>${renderLeg("去程", map.outbound)}${renderLeg("返程", map.return)}</section>`;
+  }).filter(Boolean);
+  if (!sections.length) return "";
+  return `<section class="compiler-execution-trace"><header><b>组件执行链核验</b><small>以下为服务端实际编译的去返程节点；速度作用于到达该节点前的一段路径。</small></header>${sections.join("")}</section>`;
+}
 function renderTaskCompilerPreview(preview) {
   const holder = $("taskCompilerPreview");
   const download = $("downloadTaskCompilerBundle");
@@ -189,6 +257,11 @@ function renderTaskCompilerPreview(preview) {
   const subtasks = Array.isArray(preview.task_json?.subtasks)
     ? preview.task_json.subtasks
     : [];
+  const routeFamilies = Array.isArray(preview.route_families)
+    ? preview.route_families
+    : Array.isArray(preview.task_json?.route_families)
+      ? preview.task_json.route_families
+    : [];
   const steps = subtasks.map((subtask, index) => {
     const waypoints = Array.isArray(subtask.waypoints) ? subtask.waypoints : [];
     return `<li class="compiler-step"><span>${index + 1}</span><div><b>${esc(subtask.subtask_name || `子任务 ${index + 1}`)}</b><small>${waypoints.length} 个路点 · ${esc(subtask.map_url || "地图来源由服务端确认")}</small></div></li>`;
@@ -199,11 +272,25 @@ function renderTaskCompilerPreview(preview) {
     `<p class="compiler-output-note">实验产物，尚未安装到机器人</p>`,
     steps.length
       ? `<ol class="compiler-timeline">${steps.join("")}</ol>`
+      : routeFamilies.length
+        ? `<ol class="compiler-timeline">${routeFamilies.map((family, index) => {
+            const targets = Array.isArray(family.targets) ? family.targets : [];
+            const destinations = targets.map((target) => {
+              const floor = target.button_floor ?? target.physical_floor ?? target.floor;
+              const door = target.door;
+              return floor !== undefined && door ? `${floor} 楼 ${door} 户` : "尚未标记";
+            }).join("、") || "尚未标记";
+            const sharedSegments = Array.isArray(family.required_outputs)
+              ? family.required_outputs.filter((item) => item !== "floor").length
+              : 1;
+            return `<li class="compiler-step"><span>${index + 1}</span><div><b>${esc(`${family.building} 栋 ${family.unit} 单元`)}</b><small>${sharedSegments} 段公共路线 + ${targets.length} 个用户楼层去返段（${esc(destinations)}）</small></div></li>`;
+          }).join("")}</ol>`
       : '<div class="compiler-empty">预览没有返回可展示的子任务。</div>',
+    renderExecutionChainTrace(preview.manifest?.execution_chain),
     warnings.length
       ? `<ul class="compiler-warning-list">${warnings.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`
       : "",
-    `<p class="compiler-artifact-meta">${Array.isArray(preview.artifacts) ? preview.artifacts.length : 0} 个实验文件 · 输入校验 ${esc(preview.input_sha256 || "—")}</p>`,
+    `<p class="compiler-artifact-meta">${Array.isArray(preview.artifacts) ? preview.artifacts.length : 0} 个实验文件</p>`,
   ].join("");
   download.disabled = false;
   taskCompilerMessage("服务端校验完成；可下载到当前浏览器所在电脑。");
@@ -221,11 +308,19 @@ function renderTaskPreviewOverlay(preview) {
     return `<button class="task-preview-map-tab${isActive ? " is-active" : ""}" data-task-preview-map="${esc(map.id)}" role="tab" aria-selected="${isActive}">${esc(map.label || map.id)}</button>`;
   }).join("");
   const subtasks = Array.isArray(preview.task_json?.subtasks) ? preview.task_json.subtasks : [];
-  $("taskPreviewStepCount").textContent = `${subtasks.length} 个子任务`;
-  $("taskPreviewTaskList").innerHTML = subtasks.map((subtask, index) => {
+  const routeFamilies = Array.isArray(preview.route_families)
+    ? preview.route_families
+    : Array.isArray(preview.task_json?.route_families) ? preview.task_json.route_families : [];
+  $("taskPreviewStepCount").textContent = subtasks.length
+    ? `${subtasks.length} 个子任务`
+    : `${routeFamilies.reduce((count, family) => count + (family.targets?.length || 0), 0)} 个用户楼层任务`;
+  $("taskPreviewTaskList").innerHTML = (subtasks.length ? subtasks.map((subtask, index) => {
     const points = Array.isArray(subtask.waypoints) ? subtask.waypoints : [];
     return `<li class="task-preview-task-item${index === 0 ? " is-active" : ""}"><span class="task-preview-task-index">${index + 1}</span><div><strong>${esc(subtask.subtask_name || `子任务 ${index + 1}`)}</strong><small>${points.length} 个路点</small></div></li>`;
-  }).join("") || '<li class="task-preview-task-empty">预览没有返回任务步骤。</li>';
+  }).join("") : routeFamilies.map((family, index) => {
+    const targets = Array.isArray(family.targets) ? family.targets : [];
+    return `<li class="task-preview-task-item${index === 0 ? " is-active" : ""}"><span class="task-preview-task-index">${index + 1}</span><div><strong>${esc(`${family.building} 栋 ${family.unit} 单元`)}</strong><small>已拆分 ${targets.length} 个楼层去返任务</small></div></li>`;
+  }).join("")) || '<li class="task-preview-task-empty">预览没有返回任务步骤。</li>';
   $("taskPreviewActiveMap").textContent = activeMap?.label || "当前地图";
   $("taskPreviewOverlayMeta").textContent = `${selectedProject?.name || "部署项目"} · 只读地图核验，尚未写入机器人`;
 }
@@ -422,7 +517,9 @@ function renderMapStages() {
     </div>${stages
     .map((stage, index) => {
       const bound = Boolean(stage.map_asset_id);
-      return `<span class="${bound ? "done" : stage.status === "editing" ? "active" : ""}"><b>${bound ? "✓" : index + 1}</b>${esc(stage.map_label || stage.label)}</span>`;
+      const count = Number(stage.map_count || 0);
+      const summary = count > 1 ? `${stage.label} · 已配置 ${count} 张地图` : (stage.map_label || stage.label);
+      return `<span class="${bound ? "done" : stage.status === "editing" ? "active" : ""}"><b>${bound ? "✓" : index + 1}</b>${esc(summary)}</span>`;
     })
     .join("")}`;
   $("mapFolderLabel").textContent = guidance.fileLabel;
@@ -475,7 +572,11 @@ function renderTopology() {
   const stages = topology.stages || [];
   if (holder) {
     holder.innerHTML = stages
-      .map((stage) => `<div class="topology-stage ${esc(stage.status)}"><span>${stage.status === "complete" ? "✓" : stage.status === "editing" ? "•" : "—"}</span><div><b>${esc(stage.label)}</b><small>${esc(stage.map_label || "尚未绑定地图")}</small></div></div>`)
+      .map((stage) => {
+        const count = Number(stage.map_count || 0);
+        const summary = count > 1 ? `已配置 ${count} 张地图` : (stage.map_label || "尚未绑定地图");
+        return `<div class="topology-stage ${esc(stage.status)}"><span>${stage.status === "complete" ? "✓" : stage.status === "editing" ? "•" : "—"}</span><div><b>${esc(stage.label)}</b><small>${esc(summary)}</small></div></div>`;
+      })
       .join("");
   }
   const mapStage = stages.find((stage) => stage.map_asset_id === activeMap?.id)?.stage;
@@ -561,7 +662,13 @@ function deploymentReviewFacts(stageId) {
 }
 
 function renderDeploymentTaskConsole() {
-  if (!deploymentWorkflow) return;
+  if (!deploymentWorkflow) {
+    // The first paint occurs while projects are still loading.  Apply the
+    // default project task gate here as well, otherwise every later workflow
+    // panel flashes at once and the field guide loses its one-step focus.
+    applyDeploymentTaskGating();
+    return;
+  }
   deploymentTask = deriveDeploymentTask({
     workflow: deploymentWorkflow,
     project: selectedProject,
@@ -617,7 +724,7 @@ function synchronizeTaskWorkspace() {
   }
   if (deploymentTask.id === "maps.instance") {
     $("instanceRole").value = deploymentTask.instanceRole || "typical_floor";
-    $("instanceMessage").textContent = `当前任务：为“${targetMap?.label || "当前地图"}”设置部署拓扑位置。请核对用途，并填写实际楼栋、单元和楼层。`;
+    $("instanceMessage").textContent = `当前任务：为“${targetMap?.label || "当前地图"}”设置部署拓扑位置。请核对用途并填写实际楼栋、单元；物理楼层由稍后标记的电梯组件自动推导。`;
     return false;
   }
   if (deploymentTask.targetStageId) {
@@ -777,9 +884,15 @@ function completeDeploymentEdit(message) {
   return true;
 }
 
-function keepMapAnnotationOpen(message) {
-  const isAnnotating = editingDeploymentStage === "annotations" ||
+function isMapAnnotationWorkspaceActive() {
+  return editingDeploymentStage === "annotations" ||
+    viewedDeploymentStage === "annotations" ||
+    deploymentTask?.stageId === "annotations" ||
     deploymentWorkflow?.current?.id === "annotations";
+}
+
+function keepMapAnnotationOpen(message, { force = false } = {}) {
+  const isAnnotating = force || isMapAnnotationWorkspaceActive();
   if (!isAnnotating) return false;
   editingDeploymentStage = "annotations";
   viewedDeploymentStage = "annotations";
@@ -882,12 +995,18 @@ function updateLivePreview() {
   liveMapImage.src = `/api/mapping/sessions/${encodeURIComponent(mappingSession.id)}/preview.png?revision=${preview.revision}`;
 }
 function renderProject(project) {
+  // A save can make the workflow facts sufficient for the next stage. Keep the
+  // operator in map marking until they explicitly confirm completion instead
+  // of letting that refresh turn a mouse-up into a workflow transition.
+  const retainAnnotationWorkspace = isMapAnnotationWorkspaceActive();
   const projectChanged = selectedProject?.id !== project?.id;
   selectedProject = project;
   if (projectChanged) {
     activeMap = null;
     mapImage = null;
     selectedWaypoint = null;
+    selectedVirtualWall = null;
+    virtualWallDraft = null;
     $("waypointPopover").classList.add("deployment-hidden");
     const session = readDeploymentSession();
     const canRestore = session?.projectId === project.id;
@@ -901,6 +1020,10 @@ function renderProject(project) {
     };
     editingDeploymentStage = null;
   }
+  if (retainAnnotationWorkspace && !projectChanged) {
+    editingDeploymentStage = "annotations";
+    viewedDeploymentStage = "annotations";
+  }
   document.body.classList.remove("deployment-no-project");
   document.body.classList.toggle(
     "deployment-no-map",
@@ -910,7 +1033,8 @@ function renderProject(project) {
   $("newProjectForm").classList.add("deployment-hidden");
   $("currentProjectCard").classList.remove("deployment-hidden");
   $("currentProjectName").textContent = project.name;
-  $("currentProjectMeta").textContent = `项目 ID：${project.id} · 已导入 ${maps.length} 张地图`;
+  const taskModeLabel = project.task_mode === "multi" ? "多任务点模式" : "单任务点模式";
+  $("currentProjectMeta").textContent = `已固定为${taskModeLabel} · 已导入 ${maps.length} 张地图`;
   $("selectedProjectTitle").textContent = project.name;
   $("deploymentFlowEditor").classList.remove("deployment-hidden");
   deploymentFlow = flowForProject(project);
@@ -968,264 +1092,8 @@ function localizationRoutes() {
     ? selectedProject.localization_routes
     : [];
 }
-function bindingsForIdentity(building, unit) {
-  return localizationBindings().filter(
-    (item) => item.building === building && item.unit === unit,
-  );
-}
 function mapForId(mapAssetId) {
   return (selectedProject?.map_assets || []).find((item) => item.id === mapAssetId);
-}
-function routeAnchorOptions(mapAssetId) {
-  const waypointOptions = (selectedProject?.waypoints || [])
-    .filter((item) => item.map_asset_id === mapAssetId)
-    .map((item) => ({
-      value: `waypoint:${item.id}`,
-      label: `航点 · ${item.label || item.kind || item.id}`,
-      anchor: { kind: "waypoint", waypoint_id: item.id },
-    }));
-  const componentOptions = (selectedProject?.components || [])
-    .filter((item) => item.map_asset_id === mapAssetId)
-    .map((item) => ({
-      value: `component:${item.id}`,
-      label: `${item.kind === "elevator" ? "电梯组件中心" : "组件中心"} · ${componentName(item) || item.id}`,
-      anchor: { kind: "component_center", component_id: item.id },
-    }));
-  return [...waypointOptions, ...componentOptions];
-}
-function routeAnchorValue(anchor) {
-  if (anchor?.kind === "waypoint") return `waypoint:${anchor.waypoint_id}`;
-  if (anchor?.kind === "component_center") return `component:${anchor.component_id}`;
-  return "";
-}
-function routeAnchorForValue(value) {
-  const [kind, id] = String(value || "").split(":");
-  if (!id) return null;
-  return kind === "component"
-    ? { kind: "component_center", component_id: id }
-    : kind === "waypoint"
-      ? { kind: "waypoint", waypoint_id: id }
-      : null;
-}
-function routeForIdentity(building, unit) {
-  return localizationRoutes().find(
-    (item) => item.building === building && item.unit === unit,
-  );
-}
-function routeBindings() {
-  const bindings = bindingsForIdentity(
-    localizationRouteDraft?.building,
-    localizationRouteDraft?.unit,
-  );
-  return (localizationRouteDraft?.binding_ids || [])
-    .map((id) => bindings.find((item) => item.id === id))
-    .filter(Boolean);
-}
-function ensureRouteLinks() {
-  const bindings = routeBindings();
-  const retained = new Map(
-    (localizationRouteDraft?.links || []).map((item) => [
-      `${item.from_binding_id}:${item.to_binding_id}`,
-      item.anchor,
-    ]),
-  );
-  localizationRouteDraft.links = bindings.slice(0, -1).map((item, index) => {
-    const next = bindings[index + 1];
-    const key = `${item.id}:${next.id}`;
-    const elevators = (selectedProject?.components || []).filter(
-      (component) => component.map_asset_id === item.map_asset_id && component.kind === "elevator",
-    );
-    return {
-      from_binding_id: item.id,
-      to_binding_id: next.id,
-      anchor: retained.get(key) || (elevators.length === 1
-        ? { kind: "component_center", component_id: elevators[0].id }
-        : null),
-    };
-  });
-}
-function localizationRoutePayload() {
-  if (!localizationRouteDraft) return null;
-  ensureRouteLinks();
-  return {
-    building: localizationRouteDraft.building,
-    unit: localizationRouteDraft.unit,
-    binding_ids: [...localizationRouteDraft.binding_ids],
-    task_start_waypoint_id: localizationRouteDraft.task_start_waypoint_id || "",
-    task_target_waypoint_id: localizationRouteDraft.task_target_waypoint_id || "",
-    links: localizationRouteDraft.links.map((item) => ({
-      from_binding_id: item.from_binding_id,
-      to_binding_id: item.to_binding_id,
-      anchor: item.anchor,
-    })),
-  };
-}
-function routeEndpointOptions(mapAssetId, kind) {
-  return (selectedProject?.waypoints || []).filter(
-    (item) => item.map_asset_id === mapAssetId && item.kind === kind,
-  );
-}
-function routeWaypointLabel(item, kind) {
-  const role = kind === "start" ? "任务起点" : kind === "transition" ? "过渡点" : "任务终点";
-  const name = item.label || item.id || `${kind} 航点`;
-  const x = Number(item.x);
-  const y = Number(item.y);
-  const coordinates = Number.isFinite(x) && Number.isFinite(y)
-    ? ` · (${x.toFixed(2)}, ${y.toFixed(2)})`
-    : "";
-  return `${role} · ${name}${coordinates}`;
-}
-function routeValidation(bindings) {
-  const lastIsFloor = bindings.at(-1)?.type === "floor" && bindings.slice(0, -1).every((binding) => binding.type !== "floor");
-  const missing = [];
-  if (!localizationRouteDraft?.task_start_waypoint_id) missing.push("首张地图任务起点");
-  if (!localizationRouteDraft?.task_target_waypoint_id) missing.push("末张地图任务终点");
-  if (localizationRouteDraft?.links?.some((item) => !item.anchor)) missing.push("地图切图依据");
-  return { lastIsFloor, missing, complete: lastIsFloor && missing.length === 0 };
-}
-function openLocalizationRoute(building, unit) {
-  const existing = routeForIdentity(building, unit);
-  const bindings = bindingsForIdentity(building, unit);
-  localizationRouteDraft = {
-    id: existing?.id || null,
-    building,
-    unit,
-    binding_ids: orderedRouteBindingIds(
-      existing?.binding_ids,
-      bindings,
-      building,
-      unit,
-    ),
-    task_start_waypoint_id: existing?.task_start_waypoint_id || "",
-    task_target_waypoint_id: existing?.task_target_waypoint_id || "",
-    links: existing?.links ? [...existing.links] : [],
-  };
-  ensureRouteLinks();
-  $("localizationRouteDialog").classList.remove("deployment-hidden");
-  renderLocalizationRouteDialog();
-  $("localizationRouteLinks").querySelector("select, button")?.focus();
-}
-function closeLocalizationRoute() {
-  localizationRouteDraft = null;
-  $("localizationRouteDialog").classList.add("deployment-hidden");
-}
-function derivedRouteSource(binding, index, bindings) {
-  const go = index === 0 ? "人工任务起点" : "电梯中心坐标 0,0";
-  if (index === bindings.length - 1) return { go, back: "电梯门前呼梯点自动派生" };
-  const anchor = localizationRouteDraft.links[index]?.anchor;
-  return { go, back: anchor?.kind === "component_center" ? "组件中心自动派生" : "受控锚点" };
-}
-function renderLocalizationRouteDialog() {
-  if (!localizationRouteDraft) return;
-  ensureRouteLinks();
-  const bindings = routeBindings();
-  const holder = $("localizationRouteLinks");
-  const choices = routeBindingChoices(localizationBindings(), localizationRouteDraft.building, localizationRouteDraft.unit, localizationRouteDraft.binding_ids);
-  $("localizationRouteMembership").innerHTML = choices.map((binding) => `<label><input type="checkbox" data-route-include="${esc(binding.id)}" ${binding.included ? "checked" : ""}><span>${esc(mapForId(binding.map_asset_id)?.label || binding.map_asset_id)} · ${esc(binding.type === "floor" ? `用户楼层模板 ${binding.floor_template}` : { outdoor: "户外", indoor: "室内大厅", ferry: "摆渡层" }[binding.type] || binding.type)}</span></label>`).join("");
-  $("deleteLocalizationRoute").classList.toggle("deployment-hidden", !localizationRouteDraft.id);
-  $("localizationRouteIdentity").textContent = `${localizationRouteDraft.building} 栋 ${localizationRouteDraft.unit} 单元 · 后续地图从电梯中心 0,0 起步；楼上返程目标自动取电梯门前呼梯点。`;
-  if (!bindings.length) {
-    holder.innerHTML = '<div class="page-empty">勾选本次路线需要的地图，然后配置起终点和自动切图依据。</div>';
-    $("localizationRouteMessage").textContent = "尚未选择路线地图。";
-    $("localizationRouteSummary").textContent = "尚不能生成派生定位文件。";
-    return;
-  }
-  holder.innerHTML = bindings.map((binding, index) => {
-    const map = mapForId(binding.map_asset_id) || {};
-    const first = index === 0;
-    const last = index === bindings.length - 1;
-    const sources = derivedRouteSource(binding, index, bindings);
-    const starts = routeEndpointOptions(binding.map_asset_id, "start");
-    const targets = routeEndpointOptions(binding.map_asset_id, "target");
-    const link = localizationRouteDraft.links[index];
-    const anchorOptions = !last ? routeAnchorOptions(binding.map_asset_id) : [];
-    const elevators = (selectedProject?.components || []).filter(
-      (item) => item.map_asset_id === binding.map_asset_id && item.kind === "elevator",
-    );
-    const endpointFields = routeEndpointFields(first, last);
-    const endpoint = [
-      endpointFields.includes("start")
-        ? `<label>人工任务起点<select data-route-start><option value="">未选择：首张地图任务起点</option>${starts.map((item) => `<option value="${esc(item.id)}" ${item.id === localizationRouteDraft.task_start_waypoint_id ? "selected" : ""}>${esc(routeWaypointLabel(item, "start"))}</option>`).join("")}</select></label>`
-        : "",
-      endpointFields.includes("target")
-        ? `<label>去程任务终点<select data-route-target><option value="">未选择：选择交付目标点</option>${targets.map((item) => `<option value="${esc(item.id)}" ${item.id === localizationRouteDraft.task_target_waypoint_id ? "selected" : ""}>${esc(routeWaypointLabel(item, "target"))}</option>`).join("")}</select></label><p class="route-auto-note">返程子任务目标自动使用目标层电梯门前呼梯点。</p>`
-        : "",
-    ].join("");
-    const anchor = !last
-      ? `<label>地图切图依据<select data-route-anchor="${index}"><option value="">选择电梯组件中心</option>${anchorOptions.map((item) => `<option value="${esc(item.value)}" ${routeAnchorValue(link?.anchor) === item.value ? "selected" : ""}>${esc(item.label)}</option>`).join("")}</select></label>${elevators.length > 1 ? `<p class="route-blocker">本图有 ${elevators.length} 个电梯组件：请明确关联实际使用的电梯；单电梯会自动选中。</p>` : elevators.length === 1 ? '<p class="route-auto-note">已按唯一电梯组件中心自动派生。</p>' : '<p class="route-blocker">本图没有可自动派生的电梯组件，请先标记电梯。</p>'}`
-      : "";
-    return `<article class="localization-route-card"><header><div><b>${index + 1}. ${esc(map.label || binding.map_asset_id)}</b><small>${esc(binding.type === "floor" ? `用户楼层 · 模板 ${binding.floor_template}` : binding.type)}</small></div><div class="route-order-actions"><button class="compact-action" data-route-move="up" data-route-index="${index}" type="button" ${first ? "disabled" : ""}>上移</button><button class="compact-action" data-route-move="down" data-route-index="${index}" type="button" ${last ? "disabled" : ""}>下移</button></div></header><div class="route-derived"><span>进入：${esc(sources.go)}</span><span>返回：${esc(sources.back)}</span></div>${endpoint}${anchor}${last ? '<p class="route-last-note">末项必须为“用户楼层”。</p>' : ""}</article>`;
-  }).join("");
-  const validation = routeValidation(bindings);
-  $("localizationRouteMessage").textContent = validation.complete
-    ? "路线完整：位姿将由受控地图事实派生。"
-    : validation.lastIsFloor
-      ? `待补齐：${validation.missing.join("、")}。`
-      : "用户楼层只能在末项；请排除其他模板并调整顺序。";
-  $("localizationRouteMessage").style.color = validation.complete ? "#35d69c" : "#ffc05a";
-  $("localizationRouteSummary").innerHTML = `<b>${validation.complete ? "派生状态已完整" : "派生状态待补齐"}</b><span>将生成 <code>loc_yaml_path.json</code> 与 <code>lift_id_list.json</code>；仅显示相对文件名。</span>`;
-}
-async function saveLocalizationRoute() {
-  if (!selectedProject || !localizationRouteDraft) return;
-  const payload = localizationRoutePayload();
-  const bindings = routeBindings();
-  const validation = routeValidation(bindings);
-  if (!validation.complete) {
-    const reason = validation.lastIsFloor
-      ? `待补齐：${validation.missing.join("、")}。`
-      : "用户楼层只能在末项；请排除其他模板并调整顺序。";
-    note("localizationRouteMessage", reason, true);
-    return;
-  }
-  try {
-    const id = localizationRouteDraft.id;
-    const data = await request(
-      `/api/deployments/${encodeURIComponent(selectedProject.id)}/localization-routes${id ? `/${encodeURIComponent(id)}` : ""}`,
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
-    );
-    renderProject(data.project);
-    closeLocalizationRoute();
-    completeDeploymentEdit("定位路线已保存，已返回当前任务。");
-  } catch (error) {
-    note("localizationRouteMessage", error.message, true);
-  }
-}
-function resetLocalizationRoute() {
-  if (!localizationRouteDraft || !window.confirm("清空当前定位路线草稿？已保存的路线保留，只有再次保存才会替换。")) return;
-  localizationRouteDraft = resetRouteDraft(localizationRouteDraft);
-  renderLocalizationRouteDialog();
-}
-async function deleteLocalizationRoute() {
-  const route = localizationRouteDraft;
-  if (!selectedProject || !route?.id || !window.confirm(`删除 ${route.building} 栋 ${route.unit} 单元的定位路线？地图和定位绑定会保留，删除后可重新编辑绑定。`)) return;
-  const button = $("deleteLocalizationRoute");
-  button.disabled = true;
-  try {
-    await request(`/api/deployments/${encodeURIComponent(selectedProject.id)}/localization-routes/${encodeURIComponent(route.id)}`, { method: "DELETE" });
-    const data = await request(`/api/deployments/${encodeURIComponent(selectedProject.id)}`);
-    renderProject(data.project);
-    closeLocalizationRoute();
-    completeDeploymentEdit("定位路线已删除，已返回当前任务。");
-  } catch (error) {
-    note("localizationRouteMessage", error.message, true);
-  } finally {
-    button.disabled = false;
-  }
-}
-function renderLocalizationRoutes(guidance = deriveLocalizationGuidance(selectedProject, activeMap?.id)) {
-  const holder = $("localizationRouteList");
-  const routes = localizationRoutes();
-  if (!guidance.route.available) {
-    holder.innerHTML = `<div class="page-empty">${esc(`还需完成 ${guidance.roles.total - guidance.roles.configured} 张地图的运行角色，随后才能确认经过顺序。`)}</div>`;
-    return;
-  }
-  holder.innerHTML = routes.length
-    ? routes.map((route) => {
-      const bindings = route.binding_ids.map((id) => localizationBindings().find((item) => item.id === id)).filter(Boolean);
-      const labels = bindings.map((binding, index) => `${mapForId(binding.map_asset_id)?.label || binding.map_asset_id}：${index === 0 ? "人工任务起点" : "电梯中心 0,0"}${index === bindings.length - 1 ? ` / 去程终点${route.task_target_waypoint_id ? " · 返程呼梯点自动派生" : ""}` : ` / ${route.links[index]?.anchor?.kind === "component_center" ? "组件中心自动派生" : "受控锚点"}`}`);
-      return `<div class="localization-route-row"><div><b>${esc(route.building)} 栋 ${esc(route.unit)} 单元 · ${bindings.length} 张地图</b><small>${labels.map(esc).join(" · ")}</small></div><button class="compact-action edit-localization-route" data-route-building="${esc(route.building)}" data-route-unit="${esc(route.unit)}" type="button">检查经过顺序</button></div>`;
-    }).join("")
-    : '<div class="page-empty">所有地图角色已完成。点击上方按钮，确认机器人去程实际经过的地图顺序。</div>';
 }
 function renderLocalizationBindings() {
   const holder = $("localizationBindingList");
@@ -1235,28 +1103,38 @@ function renderLocalizationBindings() {
   const currentLabel = guidance.currentMapLabel || "当前地图";
   open.disabled = !selectedProject || !activeMap;
   open.textContent = activeMap
-    ? (guidance.state === "needs_role" ? guidance.primaryAction.label : `修改 ${currentLabel} 的运行角色`)
+    ? (guidance.state === "needs_role" ? guidance.primaryAction.label : "修改 " + currentLabel + " 的定位配置")
     : "先选择一张地图";
   $("localizationPurpose").textContent = "完成后，部署包会自动生成定位清单、地图切换顺序和受控路径；无需手工维护切图文件。";
   $("localizationRoleMessage").textContent = guidance.detail;
-  $("localizationRoleProgress").textContent = `${guidance.roles.configured} / ${guidance.roles.total} 张已完成`;
+  $("localizationRoleProgress").textContent = guidance.roles.configured + " / " + guidance.roles.total + " 张已完成";
   $("localizationRoutePurpose").textContent = guidance.route.available
-    ? guidance.detail
-    : "先完成每张地图的运行角色。系统随后会让你确认机器人去程经过的地图顺序和切图依据；返程自动派生。";
+    ? "场景地图顺序、切图锚点与中间节点均由系统自动推导；打开后仅核验结果。"
+    : "先确认每张地图的定位配置。系统随后会根据场景模型和地图标记自动推导路线。";
   $("localizationRouteProgress").textContent = guidance.route.available
-    ? (guidance.route.configured ? "路线已保存" : "现在可配置")
-    : "等待地图角色完成";
-  const routeStep = $("openLocalizationRoute").closest(".localization-flow-step");
+    ? (guidance.route.configured ? "路线已自动派生" : "可生成系统路线")
+    : "等待地图定位配置完成";
+  const routeStep = routeOpen.closest(".localization-flow-step");
   routeStep?.classList.toggle("is-waiting", !guidance.route.available);
   routeStep?.setAttribute("aria-disabled", guidance.route.available ? "false" : "true");
-  routeOpen.disabled = !guidance.route.available || !guidance.route.identity?.building || !guidance.route.identity?.unit;
-  routeOpen.textContent = guidance.route.available ? guidance.primaryAction.label : "先完成地图角色";
-  const bindings = localizationBindings().filter(
-    (item) => item.map_asset_id === activeMap?.id,
-  );
+  routeOpen.disabled = !guidance.route.available;
+  routeOpen.textContent = guidance.route.available ? "查看系统推导结果" : "先确认地图定位配置";
+  const bindings = localizationBindings().filter((item) => item.map_asset_id === activeMap?.id);
   holder.innerHTML = bindings.length
-    ? bindings.map((item) => `<div class="localization-binding-row active"><div><b>${esc(localizationRoleLabel(item))}</b><small>${esc(item.building)} 栋 ${esc(item.unit)} 单元 · ${esc(currentLabel)}</small></div><div class="localization-binding-actions"><button class="compact-action edit-localization-binding" data-binding-id="${esc(item.id)}" type="button">修改角色</button></div></div>`).join("")
-    : `<div class="page-empty">${esc(`“${currentLabel}”尚未确定运行角色。设置后才能确认地图经过顺序。`)}</div>`;
+    ? bindings.map((item) => [
+      '<div class="localization-binding-row active"><div><b>',
+      esc(localizationRoleLabel(item)),
+      '</b><small>',
+      esc(item.building),
+      ' 栋 ',
+      esc(item.unit),
+      ' 单元 · ',
+      esc(currentLabel),
+      '</small></div><div class="localization-binding-actions"><button class="compact-action edit-localization-binding" data-binding-id="',
+      esc(item.id),
+      '" type="button">修改配置</button></div></div>',
+    ].join("")).join("")
+    : '<div class="page-empty">“' + esc(currentLabel) + '”尚未确认定位配置。确认后系统才会自动推导路线。</div>';
   renderLocalizationRoutes(guidance);
 }
 function localizationTypeChanged() {
@@ -1267,30 +1145,122 @@ function localizationTypeChanged() {
 function openLocalizationBinding(binding = null) {
   if (!selectedProject || !activeMap) return;
   const instance = mapInstanceFor(activeMap.id) || {};
-  const topologyOwnsIdentity = Boolean(instance.building && instance.unit);
-  localizationBindingDraft = binding || { map_asset_id: activeMap.id, building: instance.building || "", unit: instance.unit || "", type: "indoor" };
-  $("localizationBindingType").value = localizationBindingDraft.type;
-  $("localizationBuilding").value = instance.building || localizationBindingDraft.building || "";
-  $("localizationUnit").value = instance.unit || localizationBindingDraft.unit || "";
+  const topologyBinding = bindingOwnedByTopology(instance);
+  const topologyOwnsBinding = Boolean(topologyBinding);
+  localizationBindingDraft = binding || {
+    map_asset_id: activeMap.id,
+    ...topologyBinding,
+    building: topologyBinding?.building || "",
+    unit: topologyBinding?.unit || "",
+    type: topologyBinding?.type || "indoor",
+  };
+  $("localizationBindingType").value = topologyBinding?.type || localizationBindingDraft.type;
+  $("localizationBuilding").value = topologyBinding?.building || localizationBindingDraft.building || "";
+  $("localizationUnit").value = topologyBinding?.unit || localizationBindingDraft.unit || "";
   $("localizationFloorTemplate").value = localizationBindingDraft.floor_template || "";
-  $("localizationIdentityFields").classList.toggle("deployment-hidden", topologyOwnsIdentity);
-  $("localizationTopologySummary").textContent = topologyOwnsIdentity
-    ? `部署拓扑已确定：${instance.building} 栋 ${instance.unit} 单元 ${instance.floor}F。楼栋和单元由此复用，无需重复填写。`
+  $("localizationBindingTypeLabel").classList.toggle("deployment-hidden", topologyOwnsBinding);
+  $("localizationIdentityFields").classList.toggle("deployment-hidden", topologyOwnsBinding);
+  $("localizationTopologySummary").textContent = topologyOwnsBinding
+    ? topologyBinding.type === "ferry"
+      ? "部署拓扑已确定为全局摆渡层；运行角色和归属范围由系统复用，无需重复填写。"
+      : "部署拓扑已确定：" + topologyBinding.building + " 栋 " + topologyBinding.unit + " 单元。运行角色、楼栋和单元由此复用；物理楼层由电梯落点自动推导，无需重复填写。"
     : "该地图尚无可复用的楼栋、单元部署位置；请在这里补充定位归属。";
   $("localizationBindingDialogTitle").textContent = binding
-    ? `修改“${activeMap.label || activeMap.id}”的运行角色`
-    : `设置“${activeMap.label || activeMap.id}”的运行角色`;
-  $("localizationBindingDialogDescription").textContent = "选择机器人进入当前地图时使用的定位角色；保存后可继续确认地图经过顺序。";
+    ? "修改“" + (activeMap.label || activeMap.id) + "”的定位配置"
+    : "确认“" + (activeMap.label || activeMap.id) + "”的定位配置";
+  $("localizationBindingDialogDescription").textContent = topologyOwnsBinding
+    ? "运行角色和归属已由部署拓扑确定；保存后系统将自动推导路线。"
+    : "选择机器人进入当前地图时使用的定位角色；保存后系统将自动推导路线。";
   $("deleteLocalizationBinding").classList.toggle("deployment-hidden", !binding?.id);
   $("localizationBindingDialog").classList.remove("deployment-hidden");
   localizationTypeChanged();
-  $("localizationBindingType").focus();
+  (topologyBinding?.type === "floor" ? $("localizationFloorTemplate") : $("localizationBindingType")).focus();
 }
 function openSuggestedLocalizationRoute() {
   const guidance = deriveLocalizationGuidance(selectedProject, activeMap?.id);
-  const identity = guidance.route.identity;
-  if (!guidance.route.available || !identity?.building || !identity?.unit) return;
-  openLocalizationRoute(identity.building, identity.unit);
+  if (!guidance.route.available) return;
+  openLocalizationRoute();
+}
+// The route review is intentionally read-only: route membership, fixed
+// anchors and component order are all derived from the scene and map facts.
+function automaticRouteNodeLabel(ref) {
+  if (ref.kind === "transition") {
+    const point = (selectedProject?.waypoints || []).find((item) => item.id === ref.id);
+    return `过渡点 · ${point?.label || ref.id} · ${point?.speed_mode || "single_point"}`;
+  }
+  const component = (selectedProject?.components || []).find((item) => item.id === ref.id);
+  return component ? `${componentName(component)} · ${component.label || ref.id}` : `已失效组件 · ${ref.id}`;
+}
+function renderAutomaticRouteNodes(route, binding) {
+  const entry = (route.execution_nodes || []).find((item) => item.binding_id === binding.id);
+  const refs = entry?.node_refs || [];
+  if (!refs.length) return '<p class="route-execution-empty">该地图固定锚点之间没有中间标记。</p>';
+  return `<ol class="route-execution-list">${refs.map((ref, index) => `<li><span><b>${index + 1}. ${esc(automaticRouteNodeLabel(ref))}</b><small>${ref.kind === "transition" ? "路径位置、朝向和速度来自该过渡点；返程由系统反向投影。" : "组件会按路径方向生成导航区间或受控动作。"}</small></span></li>`).join("")}</ol>`;
+}
+async function refreshAutomaticLocalizationRoutes() {
+  if (!selectedProject) return;
+  const button = $("saveLocalizationRoute");
+  button.disabled = true;
+  note("localizationRouteMessage", "正在根据项目场景、地图标记和可通行区域（含虚拟墙约束）推导路线…");
+  try {
+    const data = await request(
+      `/api/deployments/${encodeURIComponent(selectedProject.id)}/localization-routes/derive`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+    );
+    renderProject(data.project);
+    renderLocalizationRouteDialog();
+    note("localizationRouteMessage", "自动路线已更新。若结果异常，请回到对应地图调整标记或组件朝向。", false);
+  } catch (error) {
+    note("localizationRouteMessage", `${error.message} 请回到地图标记修正后再试。`, true);
+    $("localizationRouteLinks").innerHTML = '<div class="route-blocker">系统未生成路线：请按上方提示回到地图补齐或修正标记。路线顺序不能手动编辑。</div>';
+  } finally {
+    button.disabled = false;
+  }
+}
+function openLocalizationRoute() {
+  localizationRouteDraft = null;
+  $("localizationRouteDialog").classList.remove("deployment-hidden");
+  $("localizationRouteLinks").focus?.();
+  refreshAutomaticLocalizationRoutes();
+}
+function closeLocalizationRoute() {
+  localizationRouteDraft = null;
+  $("localizationRouteDialog").classList.add("deployment-hidden");
+}
+function renderLocalizationRouteDialog() {
+  const route = localizationRoutes()[0];
+  const holder = $("localizationRouteLinks");
+  $("localizationRouteIdentity").textContent = "系统按创建项目时的场景地图顺序、核心地图标记和可通行路径生成；所有顺序均只读。";
+  if (!route) {
+    holder.innerHTML = '<div class="page-empty">尚未生成路线。系统会检查每个阶段的地图绑定、唯一的起点/目标/电梯和中间设施标记。</div>';
+    $("localizationRouteSummary").textContent = "请完成地图标记后重新派生；不需要手动选择地图、端点或顺序。";
+    return;
+  }
+  const bindings = (route.binding_ids || []).map((id) => localizationBindings().find((item) => item.id === id)).filter(Boolean);
+  holder.innerHTML = bindings.map((binding, index) => {
+    const map = mapForId(binding.map_asset_id) || {};
+    const first = index === 0;
+    const last = index === bindings.length - 1;
+    const link = route.links?.[index];
+    const enter = first ? "起点标记" : "电梯中心坐标 0,0";
+    const leave = last ? "目标标记；返程由本图末个节点反向开始" : `已标记电梯：${link?.anchor?.component_id || "待核验"}`;
+    return `<article class="localization-route-card"><header><div><b>${index + 1}. ${esc(map.label || binding.map_asset_id)}</b><small>${esc(binding.type === "floor" ? `用户楼层 · 模板 ${binding.floor_template}` : binding.type)}</small></div><span class="route-auto-note">系统排序</span></header><div class="route-derived"><span>进入：${esc(enter)}</span><span>离开/返回：${esc(leave)}</span></div><section class="route-execution-chain"><header><b>自动经过节点</b><small>按地图可通行路径的弧长排序；返程严格反向，并保留方向、速度和受控动作。</small></header>${renderAutomaticRouteNodes(route, binding)}</section></article>`;
+  }).join("");
+  $("localizationRouteSummary").innerHTML = `<b>自动派生完成</b><span>已按 ${bindings.length} 张场景地图生成可审计执行链；将用于 <code>loc_yaml_path.json</code>、任务 JSON 和行为树预览。</span>`;
+}
+async function saveLocalizationRoute() {
+  await refreshAutomaticLocalizationRoutes();
+}
+function renderLocalizationRoutes(guidance = deriveLocalizationGuidance(selectedProject, activeMap?.id)) {
+  const holder = $("localizationRouteList");
+  const routes = localizationRoutes();
+  if (!guidance.route.available) {
+    holder.innerHTML = `<div class="page-empty">${esc(`还需完成 ${guidance.roles.total - guidance.roles.configured} 张地图的运行角色，系统随后会自动推导路线。`)}</div>`;
+    return;
+  }
+  holder.innerHTML = routes.length
+    ? routes.map((route) => `<div class="localization-route-row"><div><b>${esc(route.building)} 栋 ${esc(route.unit)} 单元 · 系统已派生 ${route.binding_ids.length} 张地图</b><small>场景顺序、切图锚点和中间组件顺序均由地图标记与可通行路径自动计算。</small></div><button class="compact-action edit-localization-route" type="button">查看系统推导</button></div>`).join("")
+    : '<div class="page-empty">地图角色已完成。打开“查看系统推导结果”后，系统会自动计算路线。</div>';
 }
 function closeLocalizationBinding() {
   localizationBindingDraft = null;
@@ -1299,19 +1269,23 @@ function closeLocalizationBinding() {
 async function saveLocalizationBinding() {
   if (!selectedProject || !activeMap) return;
   const instance = mapInstanceFor(activeMap.id) || {};
-  const payload = {
-    map_asset_id: activeMap.id,
-    building: instance.building || $("localizationBuilding").value,
-    unit: instance.unit || $("localizationUnit").value,
-    type: $("localizationBindingType").value,
-  };
-  if (payload.type === "floor") payload.floor_template = $("localizationFloorTemplate").value;
+  const topologyBinding = bindingOwnedByTopology(instance);
+  const payload = topologyBinding
+    ? { map_asset_id: activeMap.id }
+    : {
+      map_asset_id: activeMap.id,
+      building: $("localizationBuilding").value,
+      unit: $("localizationUnit").value,
+      type: $("localizationBindingType").value,
+    };
+  const type = topologyBinding?.type || payload.type;
+  if (type === "floor") payload.floor_template = $("localizationFloorTemplate").value;
   const id = localizationBindingDraft?.id;
   try {
     const data = await request(`/api/deployments/${encodeURIComponent(selectedProject.id)}/localization-bindings${id ? `/${encodeURIComponent(id)}` : ""}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     renderProject(data.project);
     closeLocalizationBinding();
-    note("mapToolHint", "地图运行角色已保存；完成每张地图角色后，可确认机器人经过顺序。");
+    note("mapToolHint", "地图运行角色已保存；完成每张地图角色后，系统会自动推导机器人经过顺序。");
     completeDeploymentEdit("定位绑定已保存，已返回当前任务。");
   } catch (error) { note("localizationBindingMessage", error.message, true); }
 }
@@ -1328,10 +1302,12 @@ function renderInstances() {
   const items = selectedProject?.map_instances || [];
   $("instanceList").innerHTML = items.length
     ? items
-        .map(
-          (item) =>
-            `<div class="asset-row"><div><b>${esc(item.label)}</b><small>${esc(item.role)} · ${item.building ? `${esc(item.building)} 栋 ${esc(item.unit)} 单元 ${esc(item.floor)}F` : "园区室外"}</small></div></div>`,
-        )
+        .map((item) => {
+          const identity = item.building
+            ? `${esc(item.building)} 栋 ${esc(item.unit)} 单元${item.floor === null || item.floor === undefined ? " · 物理楼层待电梯组件推导" : ` · 旧项目楼层 ${esc(item.floor)}F`}`
+            : "园区室外";
+          return `<div class="asset-row"><div><b>${esc(item.label)}</b><small>${esc(item.role)} · ${identity}</small></div></div>`;
+        })
         .join("")
     : '<div class="page-empty">尚未建立部署拓扑位置。</div>';
 }
@@ -1508,12 +1484,14 @@ function drawEraseOperation(edit, draft = false) {
   context.restore();
 }
 function drawMapEdits() {
-  for (const edit of (selectedProject?.map_edits || []).filter(
-    (item) => item.map_asset_id === activeMap?.id,
-  )) {
+  for (const edit of eraseEditsForRender({
+    savedEdits: selectedProject?.map_edits || [],
+    activeMapId: activeMap?.id,
+    activeStroke: eraserStroke,
+    pendingStroke: pendingEraserStroke,
+  })) {
     drawEraseOperation(edit);
   }
-  if (eraserStroke) drawEraseOperation(eraserStroke, true);
   if (activeTool === "erase_brush" && eraserHoverPoint) {
     const center = worldCanvasPoint(eraserHoverPoint);
     const actualRadius = (eraserDiameterM / 2) * mapView.scale;
@@ -1725,10 +1703,43 @@ function drawElevatorDoorMarker(width, height) {
   context.save();
   context.shadowColor = "transparent";
   context.fillStyle = "#ffffff";
+  context.fillRect(-markerSize * 0.8, top - markerSize * 0.2, markerSize * 1.6, markerSize * 0.4);
+  context.restore();
+}
+function drawStartDirectionMarker(item, px, py, radius) {
+  const { lineStart, tip, leftWing, rightWing } = startDirectionGeometry({
+    x: px,
+    y: py,
+    yaw: Number(item.yaw || 0),
+    radius,
+  });
+  context.save();
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.strokeStyle = "rgba(255, 255, 255, .96)";
+  context.lineWidth = 6;
   context.beginPath();
-  context.moveTo(0, top - markerSize * 0.7);
-  context.lineTo(-markerSize * 0.7, top + markerSize * 0.45);
-  context.lineTo(markerSize * 0.7, top + markerSize * 0.45);
+  context.moveTo(lineStart.x, lineStart.y);
+  context.lineTo(tip.x, tip.y);
+  context.stroke();
+  context.fillStyle = "rgba(255, 255, 255, .96)";
+  context.beginPath();
+  context.moveTo(tip.x, tip.y);
+  context.lineTo(leftWing.x, leftWing.y);
+  context.lineTo(rightWing.x, rightWing.y);
+  context.closePath();
+  context.fill();
+  context.strokeStyle = "#1677ff";
+  context.lineWidth = 2;
+  context.beginPath();
+  context.moveTo(lineStart.x, lineStart.y);
+  context.lineTo(tip.x, tip.y);
+  context.stroke();
+  context.fillStyle = "#1677ff";
+  context.beginPath();
+  context.moveTo(tip.x, tip.y);
+  context.lineTo(leftWing.x, leftWing.y);
+  context.lineTo(rightWing.x, rightWing.y);
   context.closePath();
   context.fill();
   context.restore();
@@ -1739,6 +1750,7 @@ function drawComponentSymbol(item, px, py) {
   const palette = {
     start: "#39dcad",
     target: "#ffbd61",
+    building_entrance: "#b995ef",
     elevator: "#719eff",
     gate: "#5ed7d1",
     auto_door: "#75b8ff",
@@ -1769,7 +1781,7 @@ function drawComponentSymbol(item, px, py) {
     context.lineTo(x2, y2);
     context.stroke();
   };
-  if (item.kind === "start" || item.kind === "target") {
+  if (isDirectionalTaskAnchor(item.kind)) {
     context.beginPath();
     context.arc(0, 0, Math.min(width, height) * 0.36, 0, Math.PI * 2);
     context.fillStyle = `${color}77`;
@@ -1777,13 +1789,12 @@ function drawComponentSymbol(item, px, py) {
     context.shadowColor = "transparent";
     context.strokeStyle = color;
     context.stroke();
-    context.fillStyle = color;
-    context.beginPath();
-    context.moveTo(width * 0.2, 0);
-    context.lineTo(-width * 0.13, -height * 0.16);
-    context.lineTo(-width * 0.13, height * 0.16);
-    context.closePath();
-    context.fill();
+  } else if (item.kind === "building_entrance") {
+    sticker();
+    context.strokeStyle = "#f6eaff";
+    line(-width * 0.32, height * 0.34, -width * 0.32, -height * 0.28);
+    line(width * 0.32, height * 0.34, width * 0.32, -height * 0.28);
+    line(-width * 0.32, -height * 0.28, width * 0.32, -height * 0.28);
   } else if (item.kind === "elevator") {
     sticker();
     context.strokeStyle = "#e9f1ff";
@@ -1872,6 +1883,9 @@ function drawComponentSymbol(item, px, py) {
     context.stroke();
   }
   context.restore();
+  if (isDirectionalTaskAnchor(item.kind)) {
+    drawStartDirectionMarker(item, px, py, Math.min(width, height) * 0.36);
+  }
 }
 function drawMap() {
   const box = canvas.getBoundingClientRect();
@@ -1886,6 +1900,7 @@ function drawMap() {
     view: mapView,
     drawGrid,
     drawMapEdits,
+    drawVirtualWalls,
     drawMapRoutes,
     drawWaypointSymbol,
     drawComponentSymbol,
@@ -1893,6 +1908,163 @@ function drawMap() {
     drawLocalizationMarkers,
     mapPointToCanvas,
   });
+}
+function flushCanvasInteractionReadout() {
+  if (pendingComponentSizeReadout) {
+    $("componentSizeReadout").textContent = pendingComponentSizeReadout;
+    pendingComponentSizeReadout = null;
+  }
+  if (pendingComponentYaw !== null) {
+    $("componentYaw").value = pendingComponentYaw;
+    pendingComponentYaw = null;
+  }
+  if (pendingWaypointYaw) {
+    syncTransitionYawControl(pendingWaypointYaw);
+    pendingWaypointYaw = null;
+  }
+}
+scheduleMapDraw = createCanvasDrawScheduler(() => {
+  flushCanvasInteractionReadout();
+  drawMap();
+});
+function virtualWallsForActiveMap() {
+  if (!selectedProject || !activeMap) return [];
+  return (selectedProject.virtual_walls || []).filter((wall) => {
+    const points = Array.isArray(wall?.points)
+      ? wall.points
+      : [wall?.start, wall?.end];
+    return wall?.map_asset_id === activeMap.id && points.length >= 2 && points.every(
+      (point) => Number.isFinite(point?.x) && Number.isFinite(point?.y),
+    );
+  });
+}
+function drawVirtualWalls() {
+  if (!activeMap) return;
+  const walls = wallsForDisplay(
+    virtualWallsForActiveMap(),
+    virtualWallDrag ? selectedVirtualWall : null,
+  );
+  const draftPoints = virtualWallDraft?.hover
+    ? [...virtualWallDraft.points, virtualWallDraft.hover]
+    : virtualWallDraft?.points;
+  const draft = draftPoints?.length >= 2
+    ? [{ id: "virtual-wall-draft", points: draftPoints, draft: true }]
+    : [];
+  for (const wall of [...walls, ...draft]) {
+    const points = Array.isArray(wall.points) ? wall.points : [wall.start, wall.end];
+    context.save();
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.strokeStyle = wall.draft ? "rgba(220, 38, 38, .65)" : "#dc2626";
+    context.lineWidth = wall.draft ? 4 : 3;
+    if (wall.draft) context.setLineDash([7, 5]);
+    const first = worldCanvasPoint(points[0]);
+    context.beginPath();
+    context.moveTo(first.x, first.y);
+    for (const point of points.slice(1)) {
+      const canvasPoint = worldCanvasPoint(point);
+      context.lineTo(canvasPoint.x, canvasPoint.y);
+    }
+    context.stroke();
+    // Persistent virtual walls stay visually quiet. Vertices are a drawing
+    // affordance only, so they disappear once the polyline is saved.
+    if (wall.draft) {
+      for (const point of points.map(worldCanvasPoint)) {
+        context.fillStyle = "#fff";
+        context.strokeStyle = "#dc2626";
+        context.lineWidth = 2;
+        context.beginPath();
+        context.arc(point.x, point.y, 5.5, 0, Math.PI * 2);
+        context.fill();
+        context.stroke();
+      }
+    }
+    context.restore();
+  }
+}
+function virtualWallAt(event) {
+  if (!activeMap) return null;
+  const point = canvasPointFromEvent(event);
+  for (const wall of [...virtualWallsForActiveMap()].reverse()) {
+    const hit = wallHitTest(wall, activeMap, mapView, point);
+    if (hit) return { wall, hit };
+  }
+  return null;
+}
+function selectVirtualWall(wall) {
+  selectedVirtualWall = wall;
+  selectedComponent = null;
+  closeComponentPopover();
+  closeWaypointPopover();
+  drawMap();
+}
+async function createVirtualWall(points) {
+  if (!selectedProject || !activeMap) return;
+  virtualWallPlacementPending = true;
+  try {
+    const data = await request(
+      `/api/deployments/${encodeURIComponent(selectedProject.id)}/virtual-walls`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ map_id: activeMap.id, points }),
+      },
+    );
+    renderProject(data.project);
+    selectedVirtualWall = data.virtual_wall;
+    drawMap();
+    note("mapToolHint", "虚拟墙已保存为红色不可穿越折线；可继续绘制下一条。按 Esc 取消未完成折线。");
+    keepMapAnnotationOpen("虚拟墙已保存；请继续检查当前地图，完成后再确认进入定位路线。", { force: true });
+  } catch (error) {
+    note("mapToolHint", error.message, true);
+  } finally {
+    virtualWallPlacementPending = false;
+  }
+}
+async function persistVirtualWall(wall) {
+  if (!selectedProject) return;
+  const projectId = selectedProject.id;
+  try {
+    const data = await request(
+      `/api/deployments/${encodeURIComponent(projectId)}/virtual-walls/${encodeURIComponent(wall.id)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(Array.isArray(wall.points)
+          ? { points: wall.points }
+          : { start: wall.start, end: wall.end }),
+      },
+    );
+    renderProject(data.project);
+    selectedVirtualWall = data.virtual_wall;
+    drawMap();
+    note("mapToolHint", "虚拟墙位置已保存。");
+    keepMapAnnotationOpen("虚拟墙位置已保存；请继续检查当前地图，完成后再确认进入定位路线。", { force: true });
+  } catch (error) {
+    // Do not leave a locally dragged wall pretending it was saved. Reload the
+    // authoritative project document, including the generated wall file view.
+    await openProject(projectId).catch(() => undefined);
+    selectedVirtualWall = null;
+    note("mapToolHint", error.message, true);
+  }
+}
+async function deleteSelectedVirtualWall() {
+  if (!selectedProject || !selectedVirtualWall) return;
+  const wall = selectedVirtualWall;
+  if (!window.confirm("删除这段虚拟墙？系统会立即重新生成当前地图的 map_walls.yaml。")) return;
+  try {
+    const data = await request(
+      `/api/deployments/${encodeURIComponent(selectedProject.id)}/virtual-walls/${encodeURIComponent(wall.id)}`,
+      { method: "DELETE" },
+    );
+    selectedVirtualWall = null;
+    renderProject(data.project);
+    drawMap();
+    note("mapToolHint", "虚拟墙已删除，当前地图的不可穿越区域已自动重新计算。");
+    keepMapAnnotationOpen("虚拟墙已删除；请继续检查当前地图，完成后再确认进入定位路线。", { force: true });
+  } catch (error) {
+    note("mapToolHint", error.message, true);
+  }
 }
 function drawMapOrigin() {
   if (!activeMap) return;
@@ -1936,6 +2108,10 @@ function drawLocalizationMarkers() {
 function selectMap(map, { persist = true } = {}) {
   if (!selectedProject) return;
   if (routeDraft.length && activeMap?.id !== map.id) routeDraft = [];
+  if (activeMap?.id !== map.id) {
+    selectedVirtualWall = null;
+    virtualWallDraft = null;
+  }
   activeMap = map;
   if (persist) persistDeploymentSession();
   document.body.classList.remove("deployment-no-map");
@@ -1981,6 +2157,10 @@ async function loadProjects() {
     $("projectList").innerHTML =
       `<div class="page-empty">读取失败：${esc(error.message)}</div>`;
   }
+}
+async function loadComponentSpeedDefaults() {
+  const data = await request("/api/deployment-component-defaults");
+  componentSpeedDefaults = data.component_speed_defaults || {};
 }
 async function openProject(id) {
   const data = await request(`/api/deployments/${encodeURIComponent(id)}`);
@@ -2124,7 +2304,10 @@ async function createDeploymentProject() {
     const data = await request("/api/deployments", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: $("projectName").value }),
+      body: JSON.stringify({
+        name: $("projectName").value,
+        task_mode: $("projectTaskMode").value,
+      }),
     });
     $("projectName").value = "";
     topology = null;
@@ -2396,6 +2579,8 @@ function setTool(tool) {
   $("mapToolHint").textContent =
     tool === "pan"
       ? "选择模式：拖动画布平移；左键拖动组件移动，滚轮或双指缩放。"
+      : tool === "virtual_wall"
+        ? "虚拟墙：左键连续加点；双击或 Enter 完成。红线顶点可拖动，拖线段可整体移动，选中后按 Delete 删除。"
       : isBrush
         ? "橡皮擦：左键实时擦除；滚轮调节直径，Ctrl + 滚轮缩放；中键或空格可平移。"
         : isPolygon
@@ -2425,13 +2610,13 @@ function setEraserDiameter(value) {
   eraserDiameterM = Math.max(0.1, Math.min(8, Math.round(value * 10) / 10));
   $("eraserDiameterValue").textContent = `${eraserDiameterM.toFixed(1)} m`;
   $("eraserButtonSize").textContent = `${eraserDiameterM.toFixed(1)} m`;
-  drawMap();
+  scheduleMapDraw();
 }
 function setEraserShape(shape) {
   eraserShape = shape;
   $("eraserCircle").classList.toggle("active", shape === "circle");
   $("eraserSquare").classList.toggle("active", shape === "square");
-  drawMap();
+  scheduleMapDraw();
 }
 $("eraserCircle").addEventListener("click", () => setEraserShape("circle"));
 $("eraserSquare").addEventListener("click", () => setEraserShape("square"));
@@ -2477,6 +2662,8 @@ function selectComponent(component) {
 function renderComponentAttributes(component) {
   const spec = COMPONENT_SPECS[component.kind] || { fields: [] };
   const attributes = component.attributes || {};
+  const isAccessBarrier = ["gate", "auto_door"].includes(component.kind);
+  $("componentDirectionHint").classList.toggle("deployment-hidden", !isAccessBarrier);
   $("componentPopoverTitle").textContent =
     `${componentName(component)} · 快捷编辑`;
   const controls = spec.fields
@@ -2488,9 +2675,21 @@ function renderComponentAttributes(component) {
           : field.options;
         return `<label>${esc(field.label)}<select data-component-attribute="${esc(field.key)}">${options.map(([option, title]) => `<option value="${esc(option)}" ${String(value) === option ? "selected" : ""}>${esc(title)}</option>`).join("")}</select></label>`;
       }
-      return `<label>${esc(field.label)}<input data-component-attribute="${esc(field.key)}" type="${esc(field.type)}" value="${esc(value)}" ${field.placeholder ? `placeholder="${esc(field.placeholder)}"` : ""} ${field.min ? `min="${esc(field.min)}"` : ""} ${field.max ? `max="${esc(field.max)}"` : ""} ${field.step ? `step="${esc(field.step)}"` : ""} /></label>`;
+      return `<label>${esc(field.label)}<input data-component-attribute="${esc(field.key)}" type="${esc(field.type)}" value="${esc(value)}" ${field.placeholder ? `placeholder="${esc(field.placeholder)}"` : ""} ${field.inputMode ? `inputmode="${esc(field.inputMode)}"` : ""} ${field.pattern ? `pattern="${esc(field.pattern)}"` : ""} ${field.required ? "required" : ""} ${field.min ? `min="${esc(field.min)}"` : ""} ${field.max ? `max="${esc(field.max)}"` : ""} ${field.step ? `step="${esc(field.step)}"` : ""} /></label>`;
     })
     .join("");
+  const configuredSpeed = componentSpeedDefaults[component.kind]?.locked
+    ? componentSpeedDefaults[component.kind]?.speed_profile
+    : null;
+  const speedLabels = {
+    task_point: "任务点",
+    single_point: "常规",
+    slow_point: "减速",
+    narrow_point: "窄通道",
+  };
+  const fixedSpeedControl = configuredSpeed
+    ? `<label>速度模式<output class="component-fixed-value">${esc(speedLabels[configuredSpeed] || configuredSpeed)} · 只读</output></label>`
+    : "";
   const sharedElevator = physicalElevatorFor(component);
   const mapInstance = mapInstanceFor(component.map_asset_id);
   const sharedContext =
@@ -2500,7 +2699,7 @@ function renderComponentAttributes(component) {
         : '<p class="component-no-options">此电梯落点缺少共享电梯关联；请删除后重新关联。</p>'
       : "";
   $("componentAttributeFields").innerHTML =
-    `${sharedContext}${controls}` ||
+    `${sharedContext}${controls}${fixedSpeedControl}` ||
     '<p class="component-no-options">此组件暂没有附加部署属性。</p>';
 }
 function closeComponentPopover() {
@@ -2513,6 +2712,7 @@ function closeWaypointPopover() {
 function openWaypointPopover(waypoint, event) {
   selectedWaypoint = waypoint;
   const popover = $("waypointPopover");
+  note("waypointPopoverStatus", "");
   $("waypointPopoverTitle").textContent = waypoint.label || "地图标记";
   const waypointKindLabel = waypoint.kind === "transition" ? "过渡点" : waypoint.kind;
   $("waypointPopoverDetail").textContent = `${waypointKindLabel} · x ${Number(waypoint.x).toFixed(2)} · y ${Number(waypoint.y).toFixed(2)} · yaw ${Number(waypoint.yaw || 0).toFixed(2)}`;
@@ -2525,11 +2725,11 @@ function openWaypointPopover(waypoint, event) {
   $("saveWaypointTransitionSpeed").classList.toggle("deployment-hidden", !appearsInTask);
   $("waypointTransitionSpeed").value = waypoint.speed_mode || "single_point";
   syncTransitionYawControl(waypoint);
-  $("waypointPopoverPurpose").textContent = appearsInTask
-    ? `${transitionRole === "lobby" ? "电梯大厅" : "用户楼层"}任务过渡点会按创建顺序插入去程任务；返程按相反顺序经过。实线箭头表示去程，虚线箭头表示自动反向的返程。拖动蓝色圆形方向手柄即可调整去程朝向；它不生成行为树。`
+ $("waypointPopoverPurpose").textContent = appearsInTask
+    ? `${transitionRole === "lobby" ? "电梯大厅" : "用户楼层"}任务过渡点会自动纳入去程；系统会按当前地图标记自动派生它在去程中的位置，返程严格按该链反向经过。实线箭头表示去程，虚线箭头表示自动反向的返程。拖动蓝色圆形方向手柄即可调整去程朝向；它不生成行为树。`
     : isTaskTransition
       ? "这是定位路线的过渡锚点。当前实验任务只会编译用户楼层地图上的任务过渡点，因此它不会写入配送任务 JSON。"
-    : "删除后需重新在定位路线中选择起点、目标点或过渡点；已保存路线引用时会先阻止删除。";
+    : "删除后系统会根据剩余地图标记重新派生路线；缺少起点、目标或电梯等核心标记时会明确提示补齐。";
   closeComponentPopover();
   popover.classList.remove("deployment-hidden");
   const workspace = $("mapWorkspace");
@@ -2735,37 +2935,11 @@ $("deleteLocalizationBinding").addEventListener("click", deleteLocalizationBindi
 $("localizationBindingType").addEventListener("change", localizationTypeChanged);
 $("cancelLocalizationRoute").addEventListener("click", closeLocalizationRoute);
 $("saveLocalizationRoute").addEventListener("click", saveLocalizationRoute);
-$("resetLocalizationRoute").addEventListener("click", resetLocalizationRoute);
-$("deleteLocalizationRoute").addEventListener("click", deleteLocalizationRoute);
-$("localizationRouteMembership").addEventListener("change", (event) => {
-  if (!localizationRouteDraft || !event.target.matches("[data-route-include]")) return;
-  localizationRouteDraft = setRouteBindingIncluded(localizationRouteDraft, localizationBindings(), event.target.dataset.routeInclude, event.target.checked);
-  renderLocalizationRouteDialog();
-});
-$("localizationRouteLinks").addEventListener("change", (event) => {
-  if (!localizationRouteDraft) return;
-  if (event.target.matches("[data-route-start]")) {
-    localizationRouteDraft.task_start_waypoint_id = event.target.value;
-  } else if (event.target.matches("[data-route-target]")) {
-    localizationRouteDraft.task_target_waypoint_id = event.target.value;
-  } else if (event.target.matches("[data-route-anchor]")) {
-    localizationRouteDraft.links[Number(event.target.dataset.routeAnchor)].anchor = routeAnchorForValue(event.target.value);
-  } else return;
-  renderLocalizationRouteDialog();
-});
-$("localizationRouteLinks").addEventListener("click", (event) => {
-  const button = event.target.closest("[data-route-move]");
-  if (!button || !localizationRouteDraft) return;
-  const index = Number(button.dataset.routeIndex);
-  localizationRouteDraft = moveRouteBinding(localizationRouteDraft, index, button.dataset.routeMove === "up" ? -1 : 1);
-  ensureRouteLinks();
-  renderLocalizationRouteDialog();
-});
 document.addEventListener("click", (event) => {
   const button = event.target.closest(".edit-localization-binding");
   if (button) openLocalizationBinding(localizationBindings().find((item) => item.id === button.dataset.bindingId));
   const routeButton = event.target.closest(".edit-localization-route");
-  if (routeButton) openLocalizationRoute(routeButton.dataset.routeBuilding, routeButton.dataset.routeUnit);
+  if (routeButton) openLocalizationRoute();
 });
 $("componentAttributeFields").addEventListener("click", (event) => {
   const button = event.target.closest(".edit-shared-elevator");
@@ -2774,6 +2948,7 @@ $("componentAttributeFields").addEventListener("click", (event) => {
 function openComponentPopover(component, event) {
   selectComponent(component);
   const popover = $("componentPopover");
+  note("componentPopoverStatus", "");
   const workspace = $("mapWorkspace");
   popover.classList.remove("deployment-hidden");
   const width = popover.offsetWidth;
@@ -2886,38 +3061,68 @@ $("saveComponent").addEventListener("click", async () => {
     note("mapToolHint", error.message, true);
   }
 });
-$("deleteComponent").addEventListener("click", async () => {
-  if (!selectedComponent || !selectedProject) return;
+async function deleteSelectedMapAnnotation({
+  annotation,
+  collection,
+  button,
+  popoverStatusId,
+  close,
+}) {
+  if (annotationDeleteInFlight || !annotation || !selectedProject) return;
+  const projectId = selectedProject.id;
+  const stableAnnotation = { id: annotation.id, label: annotation.label };
+  const label = componentName(annotation) || annotation.label || "此标记";
+  if (!window.confirm(`删除“${label}”？系统将立即按剩余标记重新计算路线。`)) return;
+  annotationDeleteInFlight = true;
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "删除中…";
   try {
-    await request(
-      `/api/deployments/${encodeURIComponent(selectedProject.id)}/components/${encodeURIComponent(selectedComponent.id)}`,
-      { method: "DELETE" },
-    );
-    selectComponent(null);
-    closeComponentPopover();
-    await openProject(selectedProject.id);
-    keepMapAnnotationOpen("组件已删除；请继续检查当前地图，完成后再确认进入定位路线。") ||
-      completeDeploymentEdit("组件已删除，已返回当前任务。");
-  } catch (error) {
-    note("mapToolHint", error.message, true);
+    await deleteDeploymentAnnotation({
+      projectId,
+      annotation: stableAnnotation,
+      collection,
+      request,
+      refreshProject: openProject,
+      notify: (message, error = false) => {
+        note("mapToolHint", message, error);
+        note(popoverStatusId, message, error);
+      },
+    });
+    close();
+    keepMapAnnotationOpen("标记已删除；系统已根据剩余标记重新计算路线，请继续检查当前地图。") ||
+      completeDeploymentEdit("标记已删除，系统已重新计算路线并返回当前任务。");
+  } catch {
+    // The helper leaves a visible, retryable error in both the canvas hint
+    // and this open popover.  Keep the selected item so the operator can retry.
+  } finally {
+    annotationDeleteInFlight = false;
+    button.disabled = false;
+    button.textContent = originalText;
   }
+}
+$("deleteComponent").addEventListener("click", () => {
+  const component = selectedComponent;
+  deleteSelectedMapAnnotation({
+    annotation: component,
+    collection: "components",
+    button: $("deleteComponent"),
+    popoverStatusId: "componentPopoverStatus",
+    close: () => {
+      selectComponent(null);
+      closeComponentPopover();
+    },
+  });
 });
-$("deleteWaypoint").addEventListener("click", async () => {
-  if (!selectedProject || !selectedWaypoint) return;
-  if (!window.confirm(`删除“${selectedWaypoint.label || "此标记"}”？已保存定位路线引用它时会先阻止删除。`)) return;
-  try {
-    await request(
-      `/api/deployments/${encodeURIComponent(selectedProject.id)}/waypoints/${encodeURIComponent(selectedWaypoint.id)}`,
-      { method: "DELETE" },
-    );
-    closeWaypointPopover();
-    await openProject(selectedProject.id);
-    note("mapToolHint", "地图标记已删除；如该点用于定位路线，请重新选择中间过渡锚点。");
-    keepMapAnnotationOpen("地图标记已删除；请继续检查当前地图，完成后再确认进入定位路线。") ||
-      completeDeploymentEdit("地图标记已删除，已返回当前任务。");
-  } catch (error) {
-    note("mapToolHint", error.message, true);
-  }
+$("deleteWaypoint").addEventListener("click", () => {
+  const waypoint = selectedWaypoint;
+  deleteSelectedMapAnnotation({
+    annotation: waypoint,
+    collection: "waypoints",
+    button: $("deleteWaypoint"),
+    popoverStatusId: "waypointPopoverStatus",
+    close: closeWaypointPopover,
+  });
 });
 $("saveWaypointTransitionSpeed").addEventListener("click", async () => {
   if (!selectedProject || !selectedWaypoint || selectedWaypoint.kind !== "transition") return;
@@ -2959,7 +3164,6 @@ $("addInstance").addEventListener("click", async () => {
           role: $("instanceRole").value,
           building: $("instanceBuilding").value,
           unit: $("instanceUnit").value,
-          floor: $("instanceFloor").value,
           label: activeMap.label,
         }),
       },
@@ -3155,6 +3359,7 @@ canvas.addEventListener("pointerdown", async (event) => {
     closeComponentPopover();
     selectComponent(null);
     if (activeTool === "erase_brush") {
+      if (eraserCommitPending) return;
       eraserHoverPoint = point;
       eraserStroke = {
         kind: "brush_erase",
@@ -3212,6 +3417,50 @@ canvas.addEventListener("pointerdown", async (event) => {
     openWaypointPopover(waypoint, event);
     return;
   }
+  // Existing markers always win over virtual-wall hit testing.  A wall can
+  // safely cross a facility marker without making that marker uneditable.
+  const virtualWallHit = virtualWallAt(event);
+  if (virtualWallHit) {
+    if (activeTool !== "pan") setTool("pan");
+    virtualWallDraft = null;
+    selectVirtualWall(virtualWallHit.wall);
+    const point = worldPointFromEvent(event);
+    virtualWallDrag = {
+      wall: virtualWallHit.wall,
+      hit: virtualWallHit.hit,
+      pointer: point,
+      initial: {
+        ...virtualWallHit.wall,
+        start: { ...virtualWallHit.wall.start },
+        end: { ...virtualWallHit.wall.end },
+      },
+    };
+    canvas.setPointerCapture(event.pointerId);
+    canvas.style.cursor = virtualWallHit.hit.startsWith("segment") ? "move" : "crosshair";
+    return;
+  }
+  if (activeTool === "virtual_wall" && activeMap && selectedProject) {
+    const point = worldPointFromEvent(event);
+    if (!pointIsOnActiveMap(point) || virtualWallPlacementPending) return;
+    if (!virtualWallDraft) {
+      virtualWallDraft = { points: [point], hover: point };
+      closeComponentPopover();
+      selectComponent(null);
+      note("mapToolHint", "已确定虚拟墙起点；继续左键添加拐点，双击或按 Enter 完成。按 Esc 取消本条墙。");
+      drawMap();
+    } else if (event.detail >= 2 && virtualWallDraft.points.length >= 2) {
+      const points = virtualWallDraft.points;
+      virtualWallDraft = null;
+      drawMap();
+      await createVirtualWall(points);
+    } else {
+      virtualWallDraft.points.push(point);
+      virtualWallDraft.hover = point;
+      note("mapToolHint", `已添加第 ${virtualWallDraft.points.length} 个虚拟墙点；继续左键添加，双击或按 Enter 完成。`);
+      drawMap();
+    }
+    return;
+  }
   if (activeTool !== "pan" && activeMap && selectedProject) {
     if (componentPlacementPending) return;
     const placementKind = activeTool;
@@ -3239,7 +3488,7 @@ canvas.addEventListener("pointerdown", async (event) => {
         renderProject(data.project);
         const transitionRole = taskTransitionRole(activeMap.id);
         note("mapToolHint", transitionRole
-          ? `已标记${transitionRole === "lobby" ? "电梯大厅" : "用户楼层"}任务过渡点；点选它可配置速度和去程朝向。生成预览后会自动串入去程及返程。`
+          ? `已标记${transitionRole === "lobby" ? "电梯大厅" : "用户楼层"}任务过渡点；点选它可配置速度和去程朝向。系统会按当前地图标记自动派生它在去程中的位置，生成预览将写入去程和返程。`
           : "已标记定位过渡锚点。只有大厅或用户楼层地图上的任务过渡点会写入配送任务 JSON。");
         keepMapAnnotationOpen("过渡点已保存；请继续检查当前地图，完成后再确认进入定位路线。") ||
           completeDeploymentEdit("过渡点已保存，已返回当前任务。");
@@ -3298,7 +3547,14 @@ document.addEventListener("keyup", (event) => {
     canvas.style.cursor = activeTool === "erase_brush" ? "crosshair" : "grab";
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape" || activeTool === "pan") return;
+  if (event.key !== "Escape") return;
+  if (virtualWallDraft) {
+    virtualWallDraft = null;
+    drawMap();
+    note("mapToolHint", "已取消当前未完成的虚拟墙；已保存的红色折线保持不变。");
+    return;
+  }
+  if (activeTool === "pan") return;
   if (polygonEraseDraft.length || eraserStroke) {
     polygonEraseDraft = [];
     eraserStroke = null;
@@ -3309,6 +3565,25 @@ document.addEventListener("keydown", (event) => {
   setTool("pan");
   note("mapToolHint", "已取消当前工具。现在可选择或拖动已有组件。");
 });
+document.addEventListener("keydown", (event) => {
+  const textInput = event.target.matches?.("input, textarea, select");
+  if (textInput || !selectedVirtualWall || !["Delete", "Backspace"].includes(event.key)) return;
+  event.preventDefault();
+  deleteSelectedVirtualWall();
+});
+document.addEventListener("keydown", async (event) => {
+  const textInput = event.target.matches?.("input, textarea, select");
+  if (textInput || event.key !== "Enter" || !virtualWallDraft) return;
+  if (virtualWallDraft.points.length < 2 || virtualWallPlacementPending) {
+    note("mapToolHint", "虚拟墙至少需要两个点。", true);
+    return;
+  }
+  event.preventDefault();
+  const points = virtualWallDraft.points;
+  virtualWallDraft = null;
+  drawMap();
+  await createVirtualWall(points);
+});
 canvas.addEventListener("contextmenu", (event) => {
   event.preventDefault();
   if (taskPreviewOpen) return;
@@ -3318,8 +3593,16 @@ canvas.addEventListener("contextmenu", (event) => {
     const waypoint = waypointAt(event);
     if (waypoint) openWaypointPopover(waypoint, event);
     else {
-      closeComponentPopover();
-      closeWaypointPopover();
+      const virtualWallHit = virtualWallAt(event);
+      if (virtualWallHit) {
+        selectVirtualWall(virtualWallHit.wall);
+        note("mapToolHint", "已选中虚拟墙；拖动任意红色顶点或线段调整，按 Delete 删除。");
+      } else {
+        selectedVirtualWall = null;
+        closeComponentPopover();
+        closeWaypointPopover();
+        drawMap();
+      }
     }
   }
 });
@@ -3329,7 +3612,7 @@ canvas.addEventListener("pointermove", (event) => {
   if (drag) {
     mapView.x = drag.viewX + event.clientX - drag.x;
     mapView.y = drag.viewY + event.clientY - drag.y;
-    drawMap();
+    scheduleMapDraw();
     return;
   }
   if (activeMap) {
@@ -3342,19 +3625,36 @@ canvas.addEventListener("pointermove", (event) => {
       // Always repaint while the button is held. In particular, this redraws
       // the live brush halo between sampled erase points, so it visibly follows
       // the pointer instead of appearing to lag at the stroke origin.
-      drawMap();
+      scheduleMapDraw();
       return;
     }
     if (activeTool === "erase_brush") {
       eraserHoverPoint = pointIsOnActiveMap(pointerWorld) ? pointerWorld : null;
       canvas.style.cursor = "crosshair";
-      drawMap();
+      scheduleMapDraw();
+      return;
+    }
+    if (virtualWallDraft) {
+      virtualWallDraft.hover = pointIsOnActiveMap(pointerWorld) ? pointerWorld : null;
+      canvas.style.cursor = "crosshair";
+      scheduleMapDraw();
+      return;
+    }
+    if (virtualWallDrag) {
+      if (!pointIsOnActiveMap(pointerWorld)) return;
+      const { initial, hit, pointer } = virtualWallDrag;
+      selectedVirtualWall = hit.startsWith("segment")
+        ? translateWall(initial, { x: pointerWorld.x - pointer.x, y: pointerWorld.y - pointer.y })
+        : hit.startsWith("vertex:")
+          ? moveWallVertex(initial, Number(hit.split(":")[1]), pointerWorld)
+        : moveWallEndpoint(initial, hit, pointerWorld);
+      scheduleMapDraw();
       return;
     }
     if (componentDrag) {
       componentDrag.x = x;
       componentDrag.y = y;
-      drawMap();
+      scheduleMapDraw();
       return;
     }
     if (componentResize) {
@@ -3372,9 +3672,9 @@ canvas.addEventListener("pointermove", (event) => {
         width_m: Math.min(20, width),
         height_m: Math.min(20, height),
       };
-      $("componentSizeReadout").textContent =
+      pendingComponentSizeReadout =
         `${componentResize.attributes.width_m.toFixed(2)} m × ${componentResize.attributes.height_m.toFixed(2)} m`;
-      drawMap();
+      scheduleMapDraw();
       return;
     }
     if (componentRotate) {
@@ -3384,8 +3684,8 @@ canvas.addEventListener("pointermove", (event) => {
       const increment = Math.PI / 18;
       const snappedYaw = Math.round(rawYaw / increment) * increment;
       componentRotate.yaw = Math.max(-Math.PI, Math.min(Math.PI, snappedYaw));
-      $("componentYaw").value = componentRotate.yaw.toFixed(3);
-      drawMap();
+      pendingComponentYaw = componentRotate.yaw.toFixed(3);
+      scheduleMapDraw();
       return;
     }
     if (waypointRotate) {
@@ -3395,8 +3695,8 @@ canvas.addEventListener("pointermove", (event) => {
       const increment = Math.PI / 18;
       const snappedYaw = Math.round(rawYaw / increment) * increment;
       waypointRotate.yaw = Math.max(-Math.PI, Math.min(Math.PI, snappedYaw));
-      syncTransitionYawControl(waypointRotate);
-      drawMap();
+      pendingWaypointYaw = waypointRotate;
+      scheduleMapDraw();
       return;
     }
     if (!drag) {
@@ -3408,14 +3708,25 @@ canvas.addEventListener("pointermove", (event) => {
           ? "nwse-resize"
           : componentAt(event)
             ? "move"
-            : "grab";
+            : activeTool === "virtual_wall"
+              ? "crosshair"
+              : virtualWallAt(event)
+                ? "move"
+                : "grab";
     }
   }
 });
 canvas.addEventListener("pointerleave", () => {
-  if (!eraserHoverPoint) return;
-  eraserHoverPoint = null;
-  drawMap();
+  let changed = false;
+  if (eraserHoverPoint) {
+    eraserHoverPoint = null;
+    changed = true;
+  }
+  if (virtualWallDraft?.hover) {
+    virtualWallDraft.hover = null;
+    changed = true;
+  }
+  if (changed) scheduleMapDraw();
 });
 canvas.addEventListener("pointerup", async (event) => {
   drag = null;
@@ -3423,21 +3734,43 @@ canvas.addEventListener("pointerup", async (event) => {
   if (eraserStroke) {
     trackEraserStroke(event.getCoalescedEvents?.() || [event]);
     const stroke = eraserStroke;
-    eraserStroke = null;
+    // Render the exact final sample without leaving a brush halo frozen in
+    // the temporary frame.  The captured result remains visible during the
+    // asynchronous save and cannot flash back to the original map image.
+    eraserHoverPoint = null;
     drawMap();
-    await commitMapEdit(
-      {
-        action: "add",
-        kind: "brush_erase",
-        radius_m: stroke.radius_m,
-        shape: stroke.shape,
-        points: stroke.points,
-      },
-      "擦除笔刷已保存到项目地图编辑层；可继续擦除或撤销。",
-    );
+    eraseFrameMask.cover();
+    eraserStroke = null;
+    pendingEraserStroke = stroke;
+    eraserCommitPending = true;
+    scheduleMapDraw();
+    try {
+      await commitMapEdit(
+        {
+          action: "add",
+          kind: "brush_erase",
+          radius_m: stroke.radius_m,
+          shape: stroke.shape,
+          points: stroke.points,
+        },
+        "擦除笔刷已保存到项目地图编辑层；可继续擦除或撤销。",
+      );
+    } finally {
+      pendingEraserStroke = null;
+      eraserCommitPending = false;
+      drawMap();
+      eraseFrameMask.revealAfterPaint();
+    }
+    return;
+  }
+  if (virtualWallDrag && selectedProject) {
+    const wall = selectedVirtualWall;
+    virtualWallDrag = null;
+    if (wall) await persistVirtualWall(wall);
     return;
   }
   if (componentRotate && selectedProject) {
+    const retainAnnotationWorkspace = isMapAnnotationWorkspaceActive();
     try {
       const data = await request(
         `/api/deployments/${encodeURIComponent(selectedProject.id)}/components/${encodeURIComponent(componentRotate.id)}`,
@@ -3453,8 +3786,14 @@ canvas.addEventListener("pointerup", async (event) => {
       renderProject(data.project);
       selectComponent(updated);
       note("mapToolHint", "组件朝向已保存（每 10° 自动吸附）。");
-      keepMapAnnotationOpen("组件朝向已保存；请继续检查当前地图，完成后再确认进入定位路线。") ||
+      if (retainAnnotationWorkspace) {
+        keepMapAnnotationOpen(
+          "组件朝向已保存；请继续检查当前地图，完成后再确认进入定位路线。",
+          { force: retainAnnotationWorkspace },
+        );
+      } else {
         completeDeploymentEdit("组件朝向已保存，已返回当前任务。");
+      }
     } catch (error) {
       note("mapToolHint", error.message, true);
     }
@@ -3462,6 +3801,7 @@ canvas.addEventListener("pointerup", async (event) => {
     return;
   }
   if (waypointRotate && selectedProject) {
+    const retainAnnotationWorkspace = isMapAnnotationWorkspaceActive();
     try {
       const data = await request(
         `/api/deployments/${encodeURIComponent(selectedProject.id)}/waypoints/${encodeURIComponent(waypointRotate.id)}`,
@@ -3476,8 +3816,14 @@ canvas.addEventListener("pointerup", async (event) => {
       syncTransitionYawControl(selectedWaypoint);
       drawMap();
       note("mapToolHint", "过渡点去程朝向已保存（每 10° 自动吸附）；虚线箭头会自动表示返程方向。");
-      keepMapAnnotationOpen("过渡点去程朝向已保存；请继续检查当前地图，完成后再确认进入定位路线。") ||
+      if (retainAnnotationWorkspace) {
+        keepMapAnnotationOpen(
+          "过渡点去程朝向已保存；请继续检查当前地图，完成后再确认进入定位路线。",
+          { force: retainAnnotationWorkspace },
+        );
+      } else {
         completeDeploymentEdit("过渡点去程朝向已保存，已返回当前任务。");
+      }
     } catch (error) {
       note("mapToolHint", error.message, true);
     }
@@ -3542,7 +3888,7 @@ canvas.addEventListener(
     }
     const pointer = canvasPointFromEvent(event);
     Object.assign(mapView, zoomAt(mapView, pointer, event.deltaY));
-    drawMap();
+    scheduleMapDraw();
   },
   { passive: false },
 );
@@ -3590,7 +3936,10 @@ document.addEventListener("click", (event) => {
     `/api/deployments/${encodeURIComponent(selectedProject.id)}/waypoints/${encodeURIComponent(button.dataset.id)}`,
     { method: "DELETE" },
   )
-    .then(() => openProject(selectedProject.id))
+    .then(async () => {
+      await openProject(selectedProject.id);
+      note("mapToolHint", "地图标记已删除；系统已根据剩余标记重新计算路线。");
+    })
     .catch((error) => note("mapToolHint", error.message, true));
 });
 window.addEventListener("resize", scheduleCanvasResize);
@@ -3599,5 +3948,7 @@ if ("ResizeObserver" in window) {
 }
 resizeCanvas();
 renderDeploymentGuide();
-loadProjects();
+loadComponentSpeedDefaults()
+  .catch((error) => console.error("读取组件默认速度配置失败", error))
+  .finally(loadProjects);
 refreshMappingStatus();

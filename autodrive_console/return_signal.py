@@ -5,14 +5,13 @@ from __future__ import annotations
 import logging
 import threading
 
+from .task_status_codes import TaskStatusCodeError, task_status_code
 
 LOGGER = logging.getLogger("ry_aletheia.return_signal")
 
 
 class ReturnSignalGate:
     """Allow one return publication for each explicitly armed acceptance item."""
-
-    WAITING_RETURN_CODE = "103"
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -34,8 +33,13 @@ class ReturnSignalGate:
                 self._armed_item = None
 
     def accept(self, status_code: object) -> bool:
-        """Return true only for the first 103 belonging to the armed item."""
-        if str(status_code).strip() != self.WAITING_RETURN_CODE:
+        """Return true only for the first approved waiting-return event when armed."""
+        try:
+            waiting_return_code = task_status_code("task_return_waiting")
+        except TaskStatusCodeError:
+            LOGGER.exception("任务状态码配置无效，拒绝自动返程")
+            return False
+        if str(status_code).strip() != waiting_return_code:
             return False
         with self._lock:
             if self._armed_item is None or self._sent_item == self._armed_item:

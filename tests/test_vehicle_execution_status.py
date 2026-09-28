@@ -1,12 +1,32 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import autodrive_console.task_status_codes as task_status_codes_module
 from autodrive_console.vehicle_execution_status.classifier import classify_execution_state
 from autodrive_console.vehicle_execution_status.model import NavigationState, TaskEvent
 from autodrive_console.vehicle_execution_status.monitor import VehicleExecutionStatusMonitor
 from autodrive_console.run_manager import RunManager
 import pytest
+
+
+def _copy_registry(tmp_path: Path) -> Path:
+    config = tmp_path / "task-status-codes.json"
+    config.write_bytes(task_status_codes_module.STATUS_CODE_PATH.read_bytes())
+    return config
+
+
+def _replace_code(config: Path, name: str, value: int) -> None:
+    document = json.loads(config.read_text(encoding="utf-8"))
+    document["codes"][name] = value
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+
+def _invalidate_registry(config: Path) -> None:
+    document = json.loads(config.read_text(encoding="utf-8"))
+    del document["codes"]["task_start"]
+    config.write_text(json.dumps(document), encoding="utf-8")
 
 
 def test_classifier_uses_official_elevator_out_code_over_close_door_filename() -> None:
@@ -19,6 +39,38 @@ def test_classifier_uses_official_elevator_out_code_over_close_door_filename() -
 
     assert snapshot.phase == "exiting_elevator"
     assert snapshot.label == "出梯中"
+
+
+def test_classifier_uses_a_reloaded_registry_code(monkeypatch, tmp_path: Path) -> None:
+    """Changing the approved door code must change the live status mapping."""
+    config = _copy_registry(tmp_path)
+    monkeypatch.setattr(task_status_codes_module, "STATUS_CODE_PATH", config)
+    _replace_code(config, "auto_door_out", 812)
+
+    snapshot = classify_execution_state(
+        NavigationState(status="running"),
+        TaskEvent(status_code="812"),
+        restarting_nodes=False,
+    )
+
+    assert snapshot.phase == "closing_access_door"
+
+
+def test_classifier_degrades_to_generic_navigation_when_registry_is_invalid(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """An unreadable registry cannot manufacture a specific vehicle phase."""
+    config = _copy_registry(tmp_path)
+    monkeypatch.setattr(task_status_codes_module, "STATUS_CODE_PATH", config)
+    _invalidate_registry(config)
+
+    snapshot = classify_execution_state(
+        NavigationState(status="running"),
+        TaskEvent(status_code="301"),
+        restarting_nodes=False,
+    )
+
+    assert snapshot.phase == "task"
 
 
 def test_classifier_uses_official_elevator_out_code_without_filename_context() -> None:
@@ -256,6 +308,69 @@ class FakeTask:
 class FakeNavigationHeartbeat:
     def __init__(self, *, data: str) -> None:
         self.data = data
+
+
+def test_monitor_keeps_last_good_complete_code_when_registry_reload_fails(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """A broken reload must not discard a completion code already verified for this session."""
+    config = _copy_registry(tmp_path)
+    monkeypatch.setattr(task_status_codes_module, "STATUS_CODE_PATH", config)
+    monitor = VehicleExecutionStatusMonitor(clock=lambda: 10.0)
+    monitor.observe_task(FakeTask(status_code="100", task_uuid="task-a"), received_at=8.0)
+    _invalidate_registry(config)
+    monitor.observe_task(FakeTask(status_code="109", task_uuid="task-a"), received_at=9.0)
+
+    assert monitor.status() == {"phase": "completed", "label": "任务完成"}
+
+
+def test_monitor_refuses_completion_when_the_initial_registry_lookup_fails(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """No initial trusted code means a retained 109 cannot complete an observed UUID."""
+    config = _copy_registry(tmp_path)
+    monkeypatch.setattr(task_status_codes_module, "STATUS_CODE_PATH", config)
+    _invalidate_registry(config)
+    monitor = VehicleExecutionStatusMonitor(clock=lambda: 10.0)
+    monitor.observe_task(FakeTask(status_code="100", task_uuid="task-a"), received_at=8.0)
+    monitor.observe_task(FakeTask(status_code="109", task_uuid="task-a"), received_at=9.0)
+
+    assert monitor.status() == {"phase": "idle", "label": "空闲中"}
+
+
+def test_monitor_does_not_reinterpret_an_unverified_completion_after_registry_recovery(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """A completion received while no code was trusted stays non-terminal after recovery."""
+    config = _copy_registry(tmp_path)
+    original_registry = config.read_bytes()
+    monkeypatch.setattr(task_status_codes_module, "STATUS_CODE_PATH", config)
+    _invalidate_registry(config)
+    monitor = VehicleExecutionStatusMonitor(clock=lambda: 10.0)
+    monitor.observe_task(FakeTask(status_code="100", task_uuid="task-a"), received_at=8.0)
+    monitor.observe_task(FakeTask(status_code="109", task_uuid="task-a"), received_at=9.0)
+    config.write_bytes(original_registry)
+
+    assert monitor.status() == {"phase": "idle", "label": "空闲中"}
+
+
+def test_monitor_suppresses_recovered_completion_for_live_navigation_when_unverified_at_ingest(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """A recovered registry cannot turn an unverified retained event into live completion."""
+    config = _copy_registry(tmp_path)
+    original_registry = config.read_bytes()
+    monkeypatch.setattr(task_status_codes_module, "STATUS_CODE_PATH", config)
+    _invalidate_registry(config)
+    monitor = VehicleExecutionStatusMonitor(clock=lambda: 10.0)
+    monitor.observe_task(FakeTask(status_code="100", task_uuid="task-a"), received_at=8.0)
+    monitor.observe_task(FakeTask(status_code="109", task_uuid="task-a"), received_at=9.0)
+    config.write_bytes(original_registry)
+    monitor.observe_navigation(
+        FakeNavigation(status="running", current_task="unreviewed_action.xml"), received_at=9.0,
+    )
+
+    assert monitor.status() == {"phase": "task", "label": "任务中"}
 
 
 def test_monitor_uses_fresh_navigation_heartbeat_when_detailed_snapshot_is_old() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import PurePath
 
+from ..task_status_codes import TaskStatusCodeError, task_status_code, task_status_phase_by_code
 from .model import ExecutionSnapshot, NavigationState, TaskEvent, snapshot_for, unavailable_snapshot
 
 
@@ -12,36 +13,6 @@ ACTIVE_NAVIGATION_STATUSES = frozenset(
 COMPLETED_NAVIGATION_STATUSES = frozenset({"completed", "successful"})
 IDLE_NAVIGATION_STATUSES = frozenset({"", "idle"})
 UNAVAILABLE_NAVIGATION_STATUSES = frozenset({"failed", "error"})
-TERMINAL_EVENT_PHASES = {
-    "109": "completed",
-}
-TASK_EVENT_PHASES = {
-    "100": "task",
-    "101": "task",
-    "102": "task",
-    "103": "task",
-    "200": "calling_elevator",
-    "201": "entering_elevator",
-    "202": "riding_elevator",
-    "203": "exiting_elevator",
-    # 电梯到达后仍在跨层切图/出梯衔接，直到物理出梯路段覆盖该状态。
-    "209": "riding_elevator",
-    "301": "opening_gate",
-    "302": "closing_gate",
-    "303": "opening_access_door",
-    "304": "closing_access_door",
-    "500": "task",
-    "600": "task",
-    "601": "task",
-    "700": "task",
-    "701": "task",
-}
-UNAMBIGUOUS_EVENT_PHASES = {
-    "400": "draining_or_unloading",
-    "401": "draining_or_unloading",
-    "402": "draining_or_unloading",
-    "403": "draining_or_unloading",
-}
 APPROVED_ACTION_PREFIXES = (
     ("elevator_in_", "calling_elevator"),
     ("elevator_out_", "riding_elevator"),
@@ -100,22 +71,18 @@ def phase_for_route_motion(navigation: NavigationState, semantic_phase: str | No
 
 def phase_for_task_event(status_code: str, semantic_phase: str | None) -> str | None:
     """Use the source-defined TaskStatus protocol before filename inference."""
-    code = status_code.strip()
-    terminal_phase = TERMINAL_EVENT_PHASES.get(code)
-    if terminal_phase:
-        return terminal_phase
-
-    task_phase = TASK_EVENT_PHASES.get(code)
-    if task_phase:
-        return task_phase
-
-    event_phase = UNAMBIGUOUS_EVENT_PHASES.get(code)
-    if event_phase:
-        return event_phase
-
-    # Door_Waiting (300) has no direction; the approved behavior filename may
-    # refine it below, otherwise the classifier returns the active generic task.
-    return None
+    try:
+        code = status_code.strip()
+        # The registry deliberately gives this directionless wait event the
+        # generic `task` phase.  The approved action filename is the existing
+        # source for its open/close direction and must remain able to refine it.
+        if code == task_status_code("door_waiting"):
+            return None
+        return task_status_phase_by_code().get(code)
+    except TaskStatusCodeError:
+        # Filename semantics and a generic active-navigation state remain safe
+        # when a local profile registry cannot be read.
+        return None
 
 
 def phase_for_approved_behavior(current_task: str) -> str | None:

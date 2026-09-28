@@ -7,6 +7,7 @@ import threading
 from typing import Any
 
 from .models import MultiTaskRequest
+from .task_status_codes import TaskStatusCodeError, task_status_code
 
 
 @dataclass(frozen=True)
@@ -24,13 +25,12 @@ class DeliveryEvent:
 
 
 class MultiTaskStatusCollector:
-    """Match status ``701`` events to one frozen R6B request.
+    """Match approved delivery-arrival events to one frozen R6B request.
 
     The collector deliberately has no publisher and no cargo-control behavior;
     it only consumes the existing ``/task_status`` edge protocol.
     """
 
-    DELIVERY_STATUS_CODE = "701"
     TASK_STATUS_TOPIC = "/task_status"
 
     def __init__(self, request: MultiTaskRequest) -> None:
@@ -47,7 +47,11 @@ class MultiTaskStatusCollector:
         )
 
     def observe_fields(self, status_code: object, task_uuid: object, message: object) -> bool:
-        if str(status_code).strip() != self.DELIVERY_STATUS_CODE:
+        try:
+            delivery_status_code = task_status_code("multi_task_arrived")
+        except TaskStatusCodeError:
+            return False
+        if str(status_code).strip() != delivery_status_code:
             return False
         if str(task_uuid).strip() != self.request.task_uuid:
             return False
@@ -61,11 +65,15 @@ class MultiTaskStatusCollector:
         return True
 
     def evidence(self) -> list[dict[str, str]]:
+        try:
+            skipped_message = f"未收到匹配的 {task_status_code('multi_task_arrived')} 配送码事件"
+        except TaskStatusCodeError:
+            skipped_message = "未收到匹配的配送码事件（状态码配置不可用）"
         with self._lock:
             return [
                 self._events.get(
                     delivery_code,
-                    DeliveryEvent(delivery_code, "skipped", "未收到匹配的 701 配送码事件"),
+                    DeliveryEvent(delivery_code, "skipped", skipped_message),
                 ).to_dict()
                 for delivery_code in self._delivery_codes
             ]

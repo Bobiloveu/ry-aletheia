@@ -165,11 +165,17 @@ def test_map_uses_an_adaptive_metric_grid_and_restrained_industrial_palette():
     assert "const pointRadius = mobile ? 0.82 : 0.52;" in source
 
 
-def test_vehicle_marker_has_a_minimal_rotating_front_line_without_an_arrow():
+def test_vehicle_marker_uses_the_metric_svg_vehicle_without_an_arrow():
     stylesheet = (ROOT / "frontend" / "src" / "liveObservation.css").read_text(encoding="utf-8")
     html = (ROOT / "frontend" / "live-observation.html").read_text(encoding="utf-8")
-    assert "#vehicleLayer i" in stylesheet
-    _assert_source_contains(stylesheet, "top:9%; left:20%; right:20%; height:4px")
+    assert 'class="vehicle-illustration"' in html
+    assert 'viewBox="0 0 68 100"' in html
+    assert 'class="vehicle-led vehicle-led--front"' in html
+    assert 'class="vehicle-led vehicle-led--rear"' in html
+    assert 'class="vehicle-sensor vehicle-sensor--front"' in html
+    assert 'class="vehicle-sensor vehicle-sensor--rear"' in html
+    assert "#vehicleLayer .vehicle-led--front" in stylesheet
+    assert "#vehicleLayer .vehicle-lidar" in stylesheet
     assert "#vehicleLayer::before" not in stylesheet
     assert "clip-path:polygon" not in stylesheet
     assert "map-legend" not in html

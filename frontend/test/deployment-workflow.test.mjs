@@ -20,6 +20,8 @@ import {
 const deploymentPage = readFileSync(new URL("../../autodrive_console/web/deployment.html", import.meta.url), "utf8");
 const deploymentSource = readFileSync(new URL("../../autodrive_console/web/deployment.js", import.meta.url), "utf8");
 const deploymentStyles = readFileSync(new URL("../../autodrive_console/web/deployment.css", import.meta.url), "utf8");
+const compilerStyles = readFileSync(new URL("../../autodrive_console/web/deployment/compiler.css", import.meta.url), "utf8");
+const deploymentContract = readFileSync(new URL("../../shared/contracts/deployment.md", import.meta.url), "utf8");
 const deploymentSessionSource = readFileSync(new URL("../../autodrive_console/web/deployment/session-state.js", import.meta.url), "utf8");
 const appShellStyles = readFileSync(new URL("../../autodrive_console/web/app_shell.css", import.meta.url), "utf8");
 const mappingWorkbenchSource = readFileSync(new URL("../../autodrive_console/web/mapping_workbench.js", import.meta.url), "utf8");
@@ -97,6 +99,7 @@ test("bound indoor maps stay in map preparation until the lobby has its deployme
   assert.equal(task.targetMapId, "lobby-map");
   assert.equal(task.instanceRole, "lobby");
   assert.equal(task.primaryAction.target, "instanceControls");
+  assert.match(task.detail, /只需填写实际楼栋、单元；物理楼层由电梯组件自动推导/);
 });
 
 test("after the lobby instance is saved, map preparation requires the target-floor instance", () => {
@@ -127,6 +130,26 @@ test("after the lobby instance is saved, map preparation requires the target-flo
   assert.equal(task.id, "maps.instance");
   assert.equal(task.targetMapId, "floor-map");
   assert.equal(task.instanceRole, "typical_floor");
+});
+
+test("map preparation derives an uneditable ferry instance role from the flow", () => {
+  const project = {
+    ...baseProject,
+    deployment_flow: [
+      { id: "ferry-1", type: "ferry", label: "摆渡层" },
+      { id: "lobby", type: "lobby", label: "电梯大厅" },
+      { id: "target_floor", type: "target_floor", label: "用户楼层" },
+    ],
+    map_assets: [{ id: "ferry-map", label: "摆渡层" }],
+  };
+  const topology = { stages: [{ stage: "ferry-1", label: "摆渡层", map_asset_id: "ferry-map" }] };
+
+  const task = deriveDeploymentTask({
+    workflow: deriveDeploymentWorkflow(project, topology, null), project, topology, mappingSession: null,
+  });
+
+  assert.equal(task.id, "maps.instance");
+  assert.equal(task.instanceRole, "ferry");
 });
 
 test("valid selected files advance the local map task to naming and checking", () => {
@@ -248,7 +271,7 @@ test("a reset draft asks for the user-floor source after the lobby is bound", ()
   assert.equal(task.targetStageId, "target_floor");
 });
 
-test("localization guidance tells the operator to set the current map role before configuring a route", () => {
+test("localization guidance asks for confirmation rather than duplicate map-role entry", () => {
   const project = {
     ...baseProject,
     map_assets: [
@@ -264,9 +287,9 @@ test("localization guidance tells the operator to set the current map role befor
 
   assert.equal(guidance.state, "needs_role");
   assert.equal(guidance.currentMapLabel, "1509");
-  assert.equal(guidance.primaryAction.label, "设置 1509 的运行角色");
+  assert.equal(guidance.primaryAction.label, "确认 1509 的定位配置");
   assert.equal(guidance.route.available, false);
-  assert.match(guidance.detail, /先确定这张地图承担的运行角色/);
+  assert.match(guidance.detail, /运行角色和归属会由部署拓扑自动派生/);
 });
 
 test("an existing unbound map advances directly to stage binding", () => {
@@ -463,6 +486,19 @@ test("single-task console keeps a readable desktop measure and a quiet progress 
   assert.match(deploymentStyles, /@media \(max-width:\s*1040px\)[\s\S]*\.deployment-task-console/);
 });
 
+test("deployment workbench retains the global navigation shell", () => {
+  assert.doesNotMatch(
+    deploymentStyles,
+    /body:has\(#deploymentTaskConsole\)\s*>\s*aside\s*\{[^}]*display:\s*none\s*!important/s,
+    "deployment must not hide the global navigation rail",
+  );
+  assert.doesNotMatch(
+    deploymentStyles,
+    /body:has\(#deploymentTaskConsole\)\s+main\.page-main\s*\{[^}]*margin-left:\s*0\s*!important/s,
+    "deployment must retain the shell's normal main-content offset",
+  );
+});
+
 test("deployment guide and task console share the same outer alignment measure", () => {
   assert.match(
     deploymentStyles,
@@ -480,6 +516,11 @@ test("deployment controller renders one derived task and gates panels by task", 
   assert.match(deploymentSource, /deriveDeploymentTask/);
   assert.match(deploymentSource, /renderDeploymentTaskConsole/);
   assert.match(deploymentSource, /applyDeploymentTaskGating/);
+  assert.match(
+    deploymentSource,
+    /function renderDeploymentTaskConsole\(\)[\s\S]*?if \(!deploymentWorkflow\)\s*\{[\s\S]*?applyDeploymentTaskGating\(\);\s*return;/,
+    "the initial loading state must also gate later deployment panels",
+  );
   assert.match(deploymentSource, /data-deployment-task/);
   assert.doesNotMatch(deploymentSource, /focusGuideTarget\(guideTargetForStep\(stepId\)\)/);
 });
@@ -533,16 +574,40 @@ test("canvas mutations retain the annotation workspace until the operator confir
   assert.match(canvasMutationSource, /componentDrag[\s\S]*keepMapAnnotationOpen/);
 });
 
-test("task transitions expose a persisted speed choice, a visible heading, and localization reuses topology identity", () => {
+test("component rotation retains the annotation task captured before its save refreshes workflow state", () => {
+  const componentRotationSource = deploymentSource.slice(
+    deploymentSource.indexOf("if (componentRotate && selectedProject)"),
+    deploymentSource.indexOf("if (waypointRotate && selectedProject)"),
+  );
+
+  assert.match(deploymentSource, /function isMapAnnotationWorkspaceActive\(\)/);
+  assert.match(
+    componentRotationSource,
+    /const retainAnnotationWorkspace = isMapAnnotationWorkspaceActive\(\);[\s\S]*renderProject\(data\.project\);[\s\S]*keepMapAnnotationOpen\([\s\S]*\{ force: retainAnnotationWorkspace \},?\s*\)/,
+  );
+  assert.doesNotMatch(componentRotationSource, /keepMapAnnotationOpen\([^)]*\)\s*\|\|\s*completeDeploymentEdit/);
+});
+
+test("passive regions use their rotated area without component traversal arrows", () => {
+  assert.match(deploymentSource, /item\.kind === "slow_zone"[\s\S]*for \(let x = -width/);
+  assert.doesNotMatch(deploymentSource, /drawTraversalDirectionArrow/);
+});
+
+test("task transitions expose a persisted speed choice, explicit execution-chain guidance, and localization derives topology identity", () => {
   assert.match(deploymentPage, /id="waypointTransitionSpeed"/);
   assert.match(deploymentPage, /id="waypointTransitionYaw"/);
   assert.match(deploymentPage, /id="saveWaypointTransitionSpeed"/);
   assert.match(deploymentPage, /id="localizationTopologySummary"/);
+  assert.match(deploymentPage, /id="localizationBindingTypeLabel"/);
   assert.match(deploymentPage, /楼层布局模板（不是实际楼层）/);
   assert.match(deploymentSource, /speed_mode:\s*"single_point"/);
   assert.match(deploymentSource, /const isTargetFloorMap/);
   assert.match(deploymentSource, /const taskTransitionRole/);
-  assert.match(deploymentSource, /任务过渡点会按创建顺序插入去程任务；返程按相反顺序经过/);
+  assert.match(deploymentSource, /系统会按当前地图标记自动派生它在去程中的位置，返程严格按该链反向经过/);
+  assert.match(deploymentPage, /系统将按项目场景和地图标记自动计算经过顺序/);
+  assert.doesNotMatch(deploymentSource, /确认地图经过顺序.*安排它的位置/);
+  assert.doesNotMatch(deploymentPage, /明确每张图的任务经过顺序/);
+  assert.doesNotMatch(deploymentPage, /配置地图经过顺序/);
   assert.match(deploymentSource, /yaw:\s*yawDegrees\s*\*\s*Math\.PI\s*\/\s*180/);
   assert.match(deploymentSource, /function drawWaypointSymbol/);
   assert.match(deploymentSource, /drawWaypointSymbol,/);
@@ -551,7 +616,17 @@ test("task transitions expose a persisted speed choice, a visible heading, and l
   assert.match(deploymentSource, /拖动蓝色圆形方向手柄/);
   assert.match(deploymentSource, /body:\s*JSON\.stringify\(\{ yaw: waypointRotate\.yaw \}\)/);
   assert.match(deploymentSource, /当前实验任务只会编译用户楼层地图上的任务过渡点/);
-  assert.match(deploymentSource, /building:\s*instance\.building\s*\|\|/);
+  assert.match(deploymentSource, /bindingOwnedByTopology\(instance\)/);
+  assert.match(deploymentStyles, /\.localization-identity-fields\.deployment-hidden\s*\{\s*display:\s*none\s*!important/s);
+  assert.match(deploymentStyles, /\.localization-binding-fields > label\.deployment-hidden\s*\{\s*display:\s*none\s*!important/s);
+});
+
+test("deployment topology derives physical floor from the elevator landing instead of asking for it", () => {
+  assert.doesNotMatch(deploymentPage, /id="instanceFloor"/);
+  assert.doesNotMatch(deploymentSource, /\$\("instanceFloor"\)/);
+  assert.match(deploymentSource, /物理楼层由稍后标记的电梯组件自动推导/);
+  assert.match(deploymentSource, /target\.button_floor \?\? target\.physical_floor \?\? target\.floor/);
+  assert.match(deploymentContract, /地图实例不保存人工填写的楼层/);
 });
 
 test("session state persists view and drafts but never completed stages", () => {
@@ -597,6 +672,10 @@ test("entering edit mode does not send a rollback request", () => {
 test("single-task console has explicit responsive and light-theme rules", () => {
   assert.match(deploymentStyles, /\.deployment-task-console\s*\{[^}]*max-width:\s*1480px/s);
   assert.match(deploymentStyles, /@media\s*\(max-width:\s*1040px\)[^]*\.deployment-task-console/s);
+  assert.match(
+    deploymentStyles,
+    /@media\s*\(max-width:\s*1040px\)\s*\{[^]*?\.deployment-task-progress\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/,
+  );
   assert.match(deploymentStyles, /@media\s*\(max-width:\s*760px\)[^]*\.deployment-guide-steps/s);
   assert.match(deploymentStyles, /body\.theme-light[^]*\.deployment-task-card/s);
   assert.match(deploymentStyles, /\.deployment-edit-impact[^]*:focus-visible/s);
@@ -829,6 +908,41 @@ test("deployment flow cards reorder by drag semantics and keep the target floor 
   assert.match(deploymentSource, /reorderFlow/);
 });
 
+test("deployment flow cards keep a readable width instead of compressing task names", () => {
+  assert.match(
+    deploymentStyles,
+    /\.deployment-flow-node\s*\{[^}]*flex:\s*1\s+0\s+156px[^}]*min-width:\s*156px/s,
+  );
+  assert.match(
+    deploymentStyles,
+    /\.deployment-flow-node (?:strong|small)[^}]*overflow-wrap:\s*anywhere/s,
+  );
+  assert.match(
+    deploymentStyles,
+    /\.deployment-flow-editor-head\s*\{[^}]*flex-wrap:\s*wrap/s,
+  );
+});
+
+test("existing elevator association never exposes shared elevator creation fields", () => {
+  assert.match(
+    deploymentStyles,
+    /\.elevator-landing-fields\.deployment-hidden\s*\{[^}]*display:\s*none\s*!important/s,
+  );
+  assert.match(
+    deploymentSource,
+    /newElevatorLandingFields"\)\.classList\.toggle\("deployment-hidden", !isNew\)/,
+  );
+  assert.match(
+    deploymentSource,
+    /existingElevatorLandingFields"\)\.classList\.toggle\("deployment-hidden", isNew\)/,
+  );
+  assert.match(
+    deploymentStyles,
+    /\.component-popover label\.deployment-hidden\s*\{\s*display:\s*none\s*!important/,
+    "hidden transition-point labels must not be re-enabled by the popover grid rule",
+  );
+});
+
 test("deployment page marks later panels for progressive disclosure", () => {
   for (const stage of ["maps", "annotations", "localization", "export"]) {
     assert.match(deploymentPage, new RegExp(`data-deployment-stage=["']${stage}["']`));
@@ -920,6 +1034,19 @@ test("project setup shares the guide reading measure", () => {
   );
 });
 
+test("project creation keeps the guided UI and chooses an immutable task mode", () => {
+  assert.match(deploymentPage, /id="projectTaskMode"/);
+  assert.match(deploymentPage, /单任务点模式/);
+  assert.match(deploymentPage, /多任务点模式/);
+  assert.match(deploymentSource, /task_mode:\s*\$\("projectTaskMode"\)\.value/);
+});
+
+test("multi-task preview uses business destinations rather than internal component identifiers", () => {
+  assert.match(deploymentSource, /target\.physical_floor\s*\?\?\s*target\.floor/);
+  assert.match(deploymentSource, /\$\{floor\}\s*楼\s*\$\{door\}\s*户/);
+  assert.doesNotMatch(deploymentSource, /component_id.*compiler-step/);
+});
+
 test("first-run project setup keeps its workspace on the guide alignment line", () => {
   assert.match(
     deploymentStyles,
@@ -941,13 +1068,53 @@ test("global navigation selection avoids the decorative accent rail", () => {
   );
 });
 
-test("route endpoint controls distinguish an empty binding from a selected waypoint", () => {
-  assert.match(deploymentSource, /未选择：首张地图任务起点/);
-  assert.match(deploymentSource, /未选择：选择交付目标点/);
-  assert.match(deploymentSource, /返程子任务目标自动使用目标层电梯门前呼梯点/);
-  assert.match(deploymentSource, /待补齐：/);
+test("route review explains that system-derived anchors and return order are read-only", () => {
+  assert.match(deploymentSource, /系统按创建项目时的场景地图顺序/);
+  assert.match(deploymentSource, /返程严格反向/);
+  assert.match(deploymentSource, /不需要手动选择地图、端点或顺序/);
+  assert.doesNotMatch(deploymentSource, /未选择：首张地图任务起点/);
+  assert.doesNotMatch(deploymentSource, /未选择：选择交付目标点/);
   assert.doesNotMatch(deploymentSource, /选择首图 start 航点/);
   assert.doesNotMatch(deploymentSource, /选择末图 target 航点/);
+});
+
+test("annotation deletion promises immediate automatic route recalculation", () => {
+  assert.match(deploymentSource, /系统将立即按剩余标记重新计算路线/);
+  assert.match(deploymentSource, /系统已根据剩余标记重新计算路线/);
+  assert.doesNotMatch(deploymentSource, /已保存定位路线引用它时会先阻止删除/);
+});
+
+test("compiler preview exposes the audited outbound and return component execution chain", () => {
+  assert.match(deploymentSource, /function renderExecutionChainTrace/);
+  assert.match(deploymentSource, /compiler-execution-trace/);
+  assert.match(deploymentSource, /controller_device_id/);
+  assert.match(compilerStyles, /\.compiler-execution-trace/);
+});
+
+test("component symbols stay neutral while task transitions retain their pose marker", () => {
+  assert.doesNotMatch(deploymentPage, /组件箭头表示穿越方向/);
+  assert.doesNotMatch(deploymentSource, /drawTraversalDirectionArrow/);
+  assert.match(
+    deploymentSource,
+    /function drawWaypointSymbol[\s\S]*?context\.lineTo\(22, 0\)[\s\S]*?context\.lineTo\(15, -5\)/,
+  );
+  assert.doesNotMatch(deploymentSource, /context\.moveTo\(width \* 0\.2, 0\)/);
+  assert.match(deploymentSource, /if \(isDirectionalTaskAnchor\(item\.kind\)\) \{\s*drawStartDirectionMarker/s);
+});
+
+test("controlled access components show their backend template speed as read-only", () => {
+  assert.match(deploymentSource, /request\("\/api\/deployment-component-defaults"\)/);
+  assert.match(deploymentSource, /componentSpeedDefaults\[component\.kind\]\?\.locked/);
+  assert.match(deploymentSource, /速度模式.*只读/);
+  assert.doesNotMatch(deploymentSource, /data-component-attribute="speed_profile"/);
+});
+
+test("deployment contract separates neutral facility geometry from task-transition pose", () => {
+  assert.match(deploymentContract, /闸机和自动门.*门面法线/);
+  assert.match(deploymentContract, /任务过渡点.*yaw/);
+  assert.match(deploymentContract, /Backend 为每张绑定地图.*自动派生并持久化/);
+  assert.match(deploymentContract, /浏览器不得人工编辑/);
+  assert.doesNotMatch(deploymentContract, /组件箭头.*穿越方向/);
 });
 
 test("map editing stages align the header and guide with the workbench", () => {

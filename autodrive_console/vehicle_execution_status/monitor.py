@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Callable
 
+from ..task_status_codes import TaskStatusCodeError, task_status_code
 from .classifier import classify_execution_state
 from .model import ExecutionSnapshot, NavigationState, TaskEvent, snapshot_for, unavailable_snapshot
 
@@ -21,7 +22,6 @@ class VehicleExecutionStatusMonitor:
     TASK_STATUS_TOPIC = "/task_status"
     NAVIGATION_STATUS_TOPIC = "/navigate_todoor_detailed_status"
     NAVIGATION_HEARTBEAT_TOPIC = "/navigate_todoor_status"
-    TASK_COMPLETE_CODE = "109"
     SAFE_TASK_UUID = "safe"
 
     def __init__(
@@ -53,9 +53,12 @@ class VehicleExecutionStatusMonitor:
         self._navigation_heartbeat_received_at: float | None = None
         self._task_event: TaskEvent | None = None
         self._task_event_received_at: float | None = None
+        self._task_event_completion_verified = False
         # TaskStatus is an edge-triggered protocol. Completion is meaningful
         # only after this monitor has observed the same task session.
         self._active_task_uuid = ""
+        self._last_task_complete_code = ""
+        self._task_complete_code()
 
     def start(self) -> None:
         """Start the persistent monitor without making console startup fragile."""
@@ -99,6 +102,7 @@ class VehicleExecutionStatusMonitor:
                 # they are normal steps inside the same ROS task.
                 self._task_event = None
                 self._task_event_received_at = None
+                self._task_event_completion_verified = False
                 self._active_task_uuid = ""
 
     def observe_task(self, message, *, received_at: float | None = None) -> None:
@@ -108,12 +112,14 @@ class VehicleExecutionStatusMonitor:
             task_uuid=str(getattr(message, "task_uuid", "")).strip(),
             message=str(getattr(message, "message", "")).strip(),
         )
+        task_complete_code = self._task_complete_code()
         with self._lock:
             if snapshot.task_uuid == self.SAFE_TASK_UUID:
                 # Node-manager safety notifications share this message type,
                 # but are not vehicle task lifecycle events.
                 return
-            if snapshot.status_code == self.TASK_COMPLETE_CODE:
+            completion_verified = bool(task_complete_code) and snapshot.status_code == task_complete_code
+            if completion_verified:
                 if not snapshot.task_uuid or snapshot.task_uuid != self._active_task_uuid:
                     # An old retained 109 must not turn an idle vehicle into a
                     # false completion when the console starts.
@@ -125,6 +131,7 @@ class VehicleExecutionStatusMonitor:
                 self._active_task_uuid = snapshot.task_uuid
             self._task_event = snapshot
             self._task_event_received_at = self._clock() if received_at is None else float(received_at)
+            self._task_event_completion_verified = completion_verified
 
     def observe_navigation_heartbeat(self, message, *, received_at: float | None = None) -> None:
         """Retain the simple navigation topic solely as a liveness signal.
@@ -160,6 +167,7 @@ class VehicleExecutionStatusMonitor:
             heartbeat_received_at = self._navigation_heartbeat_received_at
             task_event = self._task_event
             task_event_received_at = self._task_event_received_at
+            task_event_completion_verified = self._task_event_completion_verified
 
         if runtime_state == "unavailable":
             return unavailable_snapshot().to_public_dict()
@@ -168,7 +176,7 @@ class VehicleExecutionStatusMonitor:
         heartbeat_is_fresh = heartbeat_received_at is not None and now - heartbeat_received_at <= self.freshness_s
         detailed_status_is_fresh = navigation is not None and navigation_received_at is not None and now - navigation_received_at <= self.freshness_s
         if not heartbeat_is_fresh and not detailed_status_is_fresh:
-            if task_is_fresh and task_event.status_code == "109":
+            if task_is_fresh and task_event_completion_verified:
                 return snapshot_for("completed").to_public_dict()
             if navigation is None or navigation.status.strip().casefold() in {"", "idle"}:
                 return snapshot_for("idle").to_public_dict()
@@ -181,15 +189,32 @@ class VehicleExecutionStatusMonitor:
             # detailed waypoint/action context but never retain a stale lifecycle.
             navigation = replace(navigation, status=heartbeat_status)
 
+        event_for_classification = task_event if task_event is not None else TaskEvent()
+        if task_event is not None and not task_event_completion_verified:
+            # A recovered registry must not retroactively turn an event that
+            # skipped completion-time UUID validation into a completed task.
+            if task_event.status_code == self._task_complete_code():
+                event_for_classification = TaskEvent(
+                    task_uuid=task_event.task_uuid,
+                    message=task_event.message,
+                )
         snapshot = classify_execution_state(
             navigation,
             # TaskStatus is an edge-triggered phase event, not a heartbeat.
             # While navigation itself is live, retain the latest event until a
             # later code or a terminal navigation lifecycle replaces it.
-            task_event if task_event is not None else TaskEvent(),
+            event_for_classification,
             restarting_nodes=False,
         )
         return snapshot.to_public_dict()
+
+    def _task_complete_code(self) -> str:
+        """Refresh completion recognition without treating an unreadable registry as success."""
+        try:
+            self._last_task_complete_code = task_status_code("task_complete")
+        except TaskStatusCodeError:
+            LOGGER.exception("任务状态码配置无效，继续使用上次完成码")
+        return self._last_task_complete_code
 
     def _control_override_snapshot(self) -> ExecutionSnapshot | None:
         """Map only confirmed safety/control facts into the minimal public phases."""

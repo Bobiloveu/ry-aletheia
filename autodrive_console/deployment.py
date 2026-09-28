@@ -26,7 +26,22 @@ from .location_manifest import (
 )
 from .localization_assets import LocalizationMapError, read_localization_map
 from .map_assets import MapAssetCache, MapAssetError
-from .task_compiler import CompilationPreview, bundle_zip, compile_indoor_elevator
+from .task_compiler import (
+    CompilationPreview,
+    bundle_zip,
+    compile_multi_task_points,
+    compile_single_task_points,
+)
+from .automatic_route import AutomaticRouteError, derive_localization_routes
+from .component_defaults import ComponentDefaultsError, component_speed_profile
+from .virtual_walls import (
+    VirtualWallError,
+    parse_virtual_wall_segments,
+    polyline_segments,
+    render_virtual_wall_file,
+    validate_polyline,
+    validate_segment,
+)
 
 
 class DeploymentError(ValueError):
@@ -63,15 +78,37 @@ class DeploymentStore:
     }
     PROJECT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
     MAP_ID = re.compile(r"map-[a-z0-9][a-z0-9-]{0,63}\Z")
+    TASK_MODES = frozenset({"single", "multi"})
+    # A ferry is one shared transfer segment.  Outdoor files, however, are
+    # explicitly named per building/unit (for example ``outdoor/5_1.json``),
+    # so an outdoor map must retain that unit identity rather than being
+    # flattened into one global map.
+    GLOBAL_INSTANCE_ROLES = frozenset({"ferry"})
+    UNIT_INSTANCE_ROLES = frozenset({"outdoor", "lobby", "typical_floor", "floor_override"})
+    STAGE_INSTANCE_ROLES = {
+        "outdoor": frozenset({"outdoor"}),
+        "ferry": frozenset({"ferry"}),
+        "lobby": frozenset({"lobby"}),
+        "target_floor": frozenset({"typical_floor", "floor_override"}),
+    }
+    LOCALIZATION_TYPE_BY_INSTANCE_ROLE = {
+        "outdoor": "outdoor",
+        "ferry": "ferry",
+        "lobby": "indoor",
+        "typical_floor": "floor",
+        "floor_override": "floor",
+    }
     TASK_COMPILER_COMMUNITY = re.compile(r"[^/\\\x00-\x1f]{1,80}\Z")
     TASK_TRANSITION_SPEED_MODES = frozenset({
         "task_point", "single_point", "slow_point", "narrow_point",
     })
+    EXECUTION_NODE_KINDS = frozenset({"transition", "component"})
+    FIXED_EXECUTION_COMPONENT_KINDS = frozenset({"start", "target", "elevator"})
     TASK_COMPILER_DOOR = re.compile(r"[A-Za-z0-9_-]{1,32}\Z")
     MAX_MAP_BYTES = 2 * 1024 * 1024 * 1024
     MAP_MEMBERS = ("map.yaml", "map.pgm", "map_walls.yaml")
     COMPONENT_LABELS = {"start": "起点", "target": "目标点", "building_entrance": "楼栋入口", "elevator": "电梯", "gate": "闸机", "auto_door": "自动门", "narrow_passage": "窄通道", "ramp": "坡道", "slow_zone": "减速区"}
-    COMPONENT_DIMENSIONS = {"elevator": (1.8, 2.0), "gate": (2.0, .7), "auto_door": (1.8, .6), "narrow_passage": (.9, 2.0), "ramp": (1.5, 2.0), "slow_zone": (2.0, 1.5)}
+    COMPONENT_DIMENSIONS = {"building_entrance": (1.2, .8), "elevator": (1.8, 2.0), "gate": (2.0, .7), "auto_door": (1.8, .6), "narrow_passage": (.9, 2.0), "ramp": (1.5, 2.0), "slow_zone": (2.0, 1.5)}
     PROTOCOL_CATEGORIES = ("access_protocols", "elevator_protocols")
     DEFAULT_COMPONENT_TEMPLATES = {
         "access_protocols": (
@@ -79,8 +116,8 @@ class DeploymentStore:
             {"id": "4g", "label": "4G"},
         ),
         "elevator_protocols": (
-            {"id": "bluetooth", "label": "蓝牙"},
-            {"id": "4g", "label": "4G"},
+            {"id": "mqtt", "label": "MQTT"},
+            {"id": "lora", "label": "LORA"},
         ),
     }
 
@@ -155,6 +192,20 @@ class DeploymentStore:
             "profile": "indoor_elevator_v1",
             "identity": {"community": community, "last_preview_input_sha256": input_hash},
         }
+
+    @classmethod
+    def _normalise_task_mode(cls, value: object) -> str:
+        if not isinstance(value, str) or value not in cls.TASK_MODES:
+            raise DeploymentError("项目模式只能是 single 或 multi")
+        return value
+
+    @classmethod
+    def _map_instance_scope(cls, role: object) -> str:
+        if role in cls.GLOBAL_INSTANCE_ROLES:
+            return "global"
+        if role in cls.UNIT_INSTANCE_ROLES:
+            return "unit"
+        raise DeploymentError("地图实例类型无效")
 
     @classmethod
     def _normalise_physical_elevator(
@@ -318,9 +369,12 @@ class DeploymentStore:
     @staticmethod
     def _preview_payload(preview: CompilationPreview) -> dict[str, Any]:
         """Expose only rendered data and relative artifact metadata to HTTP callers."""
+        task_mode = str(preview.manifest.get("task_mode") or preview.task_json.get("mode") or "single")
         return {
             "status": "ready",
             "experimental": True,
+            "task_mode": task_mode,
+            "route_families": preview.manifest.get("route_families", []),
             "input_sha256": preview.input_sha256,
             "task_json": preview.task_json,
             "manifest": preview.manifest,
@@ -336,19 +390,80 @@ class DeploymentStore:
 
     def _persist_task_compiler_preview(self, project_id: str, document: dict[str, Any], preview: CompilationPreview) -> None:
         export_dir = self._compiler_export_directory(project_id, preview.input_sha256)
-        for artifact in preview.artifacts:
-            target = (export_dir / artifact.relative_path).resolve()
-            if not target.is_relative_to(export_dir):
-                raise DeploymentError("实验导出文件路径无效")
-            self._write_bytes(target, artifact.content)
-        # A manifest is the completion marker.  It is written only after every
-        # artifact was durably replaced below this project-owned export root.
-        self._write_json(export_dir / "manifest.json", preview.manifest)
+        export_root = export_dir.parent
+        export_root.mkdir(parents=True, exist_ok=True)
+        # Build beneath a sibling first.  Per-file atomic replacements alone
+        # are insufficient: a disk failure halfway through must never expose
+        # an incomplete content-addressed preview at ``exports/<sha>``.
+        staging = Path(tempfile.mkdtemp(
+            prefix=f".{preview.input_sha256}.", dir=export_root,
+        )).resolve()
+        published = False
+        try:
+            for artifact in preview.artifacts:
+                target = (staging / artifact.relative_path).resolve()
+                if not target.is_relative_to(staging):
+                    raise DeploymentError("实验导出文件路径无效")
+                self._write_bytes(target, artifact.content)
+            # The manifest is the final member of the staged tree.  Once the
+            # directory is moved, readers see every artifact and its audit
+            # metadata together, or see no new preview at all.
+            self._write_json(staging / "manifest.json", preview.manifest)
+
+            if export_dir.exists():
+                if not export_dir.is_dir() or export_dir.is_symlink():
+                    raise DeploymentError("实验导出目录无效")
+                if self._published_preview_is_complete(export_dir, preview):
+                    # Identical input fingerprints are immutable preview
+                    # identities.  Reuse a complete prior publication rather
+                    # than briefly removing it while generating the same one.
+                    published = True
+                else:
+                    # This can only be an interrupted pre-directory-atomic
+                    # export from an older build, or a damaged old export. It
+                    # is project-owned and fails the current manifest/hash
+                    # audit, so replace it with the fully staged tree.
+                    shutil.rmtree(export_dir)
+            if not published:
+                os.replace(staging, export_dir)
+                published = True
+        finally:
+            # ``staging`` remains only on a failed write or when an already
+            # complete matching export was reused.  It was created beneath a
+            # validated project export root, never from caller input.
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+
+        if not published or not (export_dir / "manifest.json").is_file():
+            raise DeploymentError("实验预览发布不完整")
         compiler = self._normalise_task_compiler(document.get("task_compiler"))
         compiler["identity"]["last_preview_input_sha256"] = preview.input_sha256
         document["task_compiler"] = compiler
         document["updated_at"] = self._now()
         self._write_json(self._document_path(project_id), document)
+
+    @staticmethod
+    def _published_preview_is_complete(
+        export_dir: Path, preview: CompilationPreview,
+    ) -> bool:
+        """Verify a content-addressed export before reusing its directory."""
+        manifest_path = export_dir / "manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        if manifest != preview.manifest or manifest.get("input_sha256") != preview.input_sha256:
+            return False
+        for artifact in preview.artifacts:
+            target = (export_dir / artifact.relative_path).resolve()
+            if not target.is_relative_to(export_dir) or not target.is_file():
+                return False
+            try:
+                if DeploymentStore._sha256(target) != artifact.sha256:
+                    return False
+            except OSError:
+                return False
+        return True
 
     def list_projects(self) -> list[dict[str, Any]]:
         if not self.root.is_dir(): return []
@@ -362,16 +477,17 @@ class DeploymentStore:
                 continue
         return result
 
-    def create(self, name: object) -> dict[str, Any]:
+    def create(self, name: object, task_mode: object = "single") -> dict[str, Any]:
         cleaned = " ".join(str(name or "").split())
         if not 1 <= len(cleaned) <= 80: raise DeploymentError("项目名称应为 1 至 80 个字符")
+        mode = self._normalise_task_mode(task_mode)
         base = self._slug(cleaned)
         project_id = base
         index = 2
         while self._project_dir(project_id).exists():
             project_id = f"{base[:58]}-{index}"; index += 1
         now = self._now()
-        document = {"schema": self.SCHEMA, "type": "ry-aletheia.site-project", "id": project_id, "name": cleaned, "created_at": now, "updated_at": now, "scene_model": None, "deployment_flow": [], "map_assets": [], "map_stage_assignments": [], "buildings": [], "map_instances": [], "localization_bindings": [], "localization_routes": [], "physical_elevators": [], "components": [], "waypoints": [], "routes": [], "map_transitions": [], "virtual_walls": [], "map_edits": [], "behavior_templates": [], "component_templates": self._default_component_templates(), "localization_template": None, "task_compiler": self._normalise_task_compiler(None), "deployment_config": {"state": "draft", "robot_target": None}, "mapping": {"mode": "import_or_robot", "recording": "not_started"}}
+        document = {"schema": self.SCHEMA, "type": "ry-aletheia.site-project", "id": project_id, "name": cleaned, "created_at": now, "updated_at": now, "task_mode": mode, "scene_model": None, "deployment_flow": [], "map_assets": [], "map_stage_assignments": [], "buildings": [], "map_instances": [], "localization_bindings": [], "localization_routes": [], "physical_elevators": [], "components": [], "waypoints": [], "routes": [], "map_transitions": [], "virtual_walls": [], "map_edits": [], "behavior_templates": [], "component_templates": self._default_component_templates(), "localization_template": None, "task_compiler": self._normalise_task_compiler(None), "deployment_config": {"state": "draft", "robot_target": None}, "mapping": {"mode": "import_or_robot", "recording": "not_started"}}
         self._write_json(self._document_path(project_id), document)
         return document
 
@@ -384,7 +500,7 @@ class DeploymentStore:
         self.get(project_id)
         try:
             shutil.rmtree(project_dir)
-        except OSError as exc:
+        except (OSError, VirtualWallError) as exc:
             raise DeploymentError(f"删除部署项目失败：{exc}") from exc
 
     @classmethod
@@ -468,6 +584,11 @@ class DeploymentStore:
             document["localization_template"] = None
         if document.get("scene_model") not in {None, "indoor", "indoor_outdoor", "outdoor", "custom"}: document["scene_model"] = None
         migrated = False
+        if "task_mode" not in document:
+            document["task_mode"] = "single"
+            migrated = True
+        else:
+            document["task_mode"] = self._normalise_task_mode(document["task_mode"])
         raw_flow = document.get("deployment_flow")
         if not isinstance(raw_flow, list) or not raw_flow:
             deployment_flow = self._legacy_flow(document.get("scene_model"))
@@ -482,6 +603,22 @@ class DeploymentStore:
                 migrated = True
             if document.get("deployment_flow") != deployment_flow:
                 document["deployment_flow"] = deployment_flow
+                migrated = True
+        for instance in document["map_instances"]:
+            if not isinstance(instance, dict):
+                continue
+            try:
+                scope = self._map_instance_scope(instance.get("role"))
+            except DeploymentError:
+                continue
+            if instance.get("scope") != scope:
+                instance["scope"] = scope
+                migrated = True
+            if scope == "global" and any(
+                instance.get(key) != expected
+                for key, expected in (("building", ""), ("unit", ""), ("floor", None))
+            ):
+                instance.update({"building": "", "unit": "", "floor": None})
                 migrated = True
         for waypoint in document["waypoints"]:
             if isinstance(waypoint, dict) and waypoint.get("kind") == "return":
@@ -509,15 +646,36 @@ class DeploymentStore:
             migrated = True
         if self._normalise_physical_elevators(document):
             migrated = True
+        if self._normalise_virtual_walls(document):
+            migrated = True
         for component in document["components"]:
             if not isinstance(component, dict):
                 continue
+            kind = str(component.get("kind") or "")
             attributes = component.get("attributes")
             if not isinstance(attributes, dict):
-                continue
+                if kind not in self.COMPONENT_LABELS:
+                    continue
+                attributes = self._normalise_component_attributes(kind, {}, templates)
+                component["attributes"] = attributes
+                migrated = True
             if component.get("kind") == "target" and "door" not in attributes:
                 attributes["door"] = ""
                 migrated = True
+            try:
+                configured_speed = component_speed_profile(
+                    str(component.get("kind") or ""), attributes.get("speed_profile"),
+                )
+            except ComponentDefaultsError as exc:
+                raise DeploymentError(str(exc)) from exc
+            if configured_speed and attributes.get("speed_profile") != configured_speed:
+                attributes["speed_profile"] = configured_speed
+                migrated = True
+            if kind in {"gate", "auto_door"}:
+                for key in ("pre_open_distance_m", "post_open_distance_m"):
+                    if key not in attributes:
+                        attributes[key] = 1.5
+                        migrated = True
             if component.get("kind") != "elevator":
                 continue
             if "wait_distance_m" not in attributes:
@@ -525,6 +683,61 @@ class DeploymentStore:
                 migrated = True
         if migrated: self._write_json(target, document)
         return document
+
+    def _normalise_virtual_walls(self, document: dict[str, Any]) -> bool:
+        """Migrate the former closed-polygon draft format to wall segments.
+
+        Older deployment snapshots used ``kind=forbidden_zone`` with three or
+        more points.  The runtime consumes wall *segments*, so retain their
+        closed outline as adjacent line segments.  Invalid legacy records are
+        kept untouched: a later explicit edit should never silently erase an
+        operator's source record.
+        """
+        walls = document.get("virtual_walls")
+        if not isinstance(walls, list):
+            document["virtual_walls"] = []
+            return True
+        assets = {
+            str(item.get("id")): item
+            for item in document.get("map_assets", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        normalised: list[dict[str, Any]] = []
+        changed = False
+        for raw in walls:
+            if not isinstance(raw, dict):
+                normalised.append(raw)
+                continue
+            map_id = str(raw.get("map_asset_id") or "")
+            asset = assets.get(map_id)
+            if isinstance(raw.get("start"), dict) and isinstance(raw.get("end"), dict):
+                normalised.append(raw)
+                continue
+            points = raw.get("points")
+            if raw.get("kind") != "forbidden_zone" or asset is None or not isinstance(points, list) or len(points) < 3:
+                normalised.append(raw)
+                continue
+            try:
+                cleaned = []
+                for point in points:
+                    if not isinstance(point, dict):
+                        raise VirtualWallError("虚拟墙点位无效")
+                    x, y = float(point.get("x")), float(point.get("y"))
+                    self._validate_point(asset, x, y, 0)
+                    cleaned.append({"x": x, "y": y})
+                for start, end in zip(cleaned, [*cleaned[1:], cleaned[0]]):
+                    segment = validate_segment(start, end)
+                    normalised.append({
+                        "id": f"virtual-wall-{uuid.uuid4().hex[:12]}",
+                        "map_asset_id": map_id,
+                        **segment,
+                    })
+                changed = True
+            except (TypeError, ValueError, VirtualWallError, DeploymentError):
+                normalised.append(raw)
+        if changed:
+            document["virtual_walls"] = normalised
+        return changed
 
     def _site_id_for_source(self, project_id: str, source: Path) -> str:
         """Derive a safe behavior-tree site ID without trusting upload staging."""
@@ -727,8 +940,12 @@ class DeploymentStore:
             "task_target_waypoint_id", "task_return_waypoint_id", "links",
         }
         legacy_route_keys = allowed_route_keys - {"task_return_waypoint_id"}
-        if not isinstance(data, dict) or set(data) not in (legacy_route_keys, allowed_route_keys):
-            raise DeploymentError("定位路线仅接受楼栋、单元、绑定、任务起点、目标点和链接")
+        execution_route_keys = allowed_route_keys | {"execution_nodes"}
+        execution_legacy_route_keys = legacy_route_keys | {"execution_nodes"}
+        if not isinstance(data, dict) or set(data) not in (
+            legacy_route_keys, allowed_route_keys, execution_legacy_route_keys, execution_route_keys,
+        ):
+            raise DeploymentError("定位路线仅接受楼栋、单元、绑定、任务起点、目标点、执行链和链接")
         building = self._normalise_localization_identifier(data["building"], "楼栋")
         unit = self._normalise_localization_identifier(data["unit"], "单元")
         raw_binding_ids = data["binding_ids"]
@@ -765,6 +982,9 @@ class DeploymentStore:
         if target.get("map_asset_id") != bindings[-1].get("map_asset_id"):
             raise DeploymentError("任务目标必须位于末个定位绑定地图")
         links = self._normalise_localization_route_links(document, data["links"], bindings)
+        execution_nodes = self._normalise_execution_nodes(
+            document, bindings, data.get("execution_nodes"), supplied="execution_nodes" in data,
+        )
         result = {
             "id": identifier or f"localization-route-{uuid.uuid4().hex[:12]}",
             "building": building,
@@ -772,6 +992,7 @@ class DeploymentStore:
             "binding_ids": binding_ids,
             "task_start_waypoint_id": start_id,
             "task_target_waypoint_id": target_id,
+            "execution_nodes": execution_nodes,
             "links": links,
         }
         # Keep the legacy field readable for old project snapshots, but new
@@ -779,6 +1000,128 @@ class DeploymentStore:
         if "task_return_waypoint_id" in data and str(data.get("task_return_waypoint_id") or "").strip():
             result["task_return_waypoint_id"] = str(data["task_return_waypoint_id"]).strip()
         return result
+
+    def _normalise_execution_nodes(
+        self,
+        document: dict[str, Any],
+        bindings: list[dict[str, Any]],
+        source: object,
+        *,
+        supplied: bool,
+    ) -> list[dict[str, Any]]:
+        """Validate the operator-owned order for all non-fixed task nodes.
+
+        This is intentionally a storage-layer rule, not a compiler convenience:
+        no downstream consumer may infer a route from draw order or coordinates.
+        """
+        binding_ids = [str(item["id"]) for item in bindings]
+        assets = {
+            str(item.get("id")): item
+            for item in document.get("map_assets", []) if isinstance(item, dict)
+        }
+        transitions = {
+            str(item.get("id")): item
+            for item in document.get("waypoints", [])
+            if isinstance(item, dict)
+            and item.get("kind") == "transition"
+            and not item.get("generated_by")
+            and not item.get("exclude_task_export")
+        }
+        components = {
+            str(item.get("id")): item
+            for item in document.get("components", [])
+            if isinstance(item, dict)
+            and item.get("kind") in self.COMPONENT_LABELS
+            and item.get("kind") not in self.FIXED_EXECUTION_COMPONENT_KINDS
+        }
+        required_by_binding: dict[str, set[tuple[str, str]]] = {
+            binding_id: set() for binding_id in binding_ids
+        }
+        for binding in bindings:
+            binding_id = str(binding["id"])
+            map_id = binding.get("map_asset_id")
+            required_by_binding[binding_id].update(
+                ("transition", waypoint_id)
+                for waypoint_id, waypoint in transitions.items()
+                if waypoint.get("map_asset_id") == map_id
+            )
+            required_by_binding[binding_id].update(
+                ("component", component_id)
+                for component_id, component in components.items()
+                if component.get("map_asset_id") == map_id
+            )
+        if not supplied:
+            missing = [
+                (binding, required_by_binding[str(binding["id"])])
+                for binding in bindings if required_by_binding[str(binding["id"])]
+            ]
+            if missing:
+                binding, node_refs = missing[0]
+                asset = assets.get(str(binding.get("map_asset_id")), {})
+                map_label = str(asset.get("label") or binding.get("map_asset_id") or "当前地图")
+                raise DeploymentError(
+                    f"地图“{map_label}”存在未编排任务节点；请在本地图任务路径顺序中加入 {len(node_refs)} 个节点"
+                )
+            return [{"binding_id": binding_id, "node_refs": []} for binding_id in binding_ids]
+        if not isinstance(source, list) or len(source) != len(bindings):
+            raise DeploymentError("执行链必须为每个定位绑定提供一项路径顺序")
+        values: dict[str, list[dict[str, str]]] = {}
+        seen_refs: set[tuple[str, str]] = set()
+        for entry in source:
+            if not isinstance(entry, dict) or set(entry) != {"binding_id", "node_refs"}:
+                raise DeploymentError("执行链条目仅接受 binding_id 和 node_refs")
+            binding_id = str(entry.get("binding_id") or "").strip()
+            if binding_id not in binding_ids:
+                raise DeploymentError("执行链引用了不属于当前路线的定位绑定")
+            if binding_id in values:
+                raise DeploymentError("执行链不能为同一定位绑定重复保存路径顺序")
+            refs = entry.get("node_refs")
+            if not isinstance(refs, list):
+                raise DeploymentError("执行链 node_refs 必须是数组")
+            binding = next(item for item in bindings if item["id"] == binding_id)
+            normalized_refs: list[dict[str, str]] = []
+            for raw_ref in refs:
+                if not isinstance(raw_ref, dict) or set(raw_ref) != {"kind", "id"}:
+                    raise DeploymentError("执行链节点仅接受 kind 和 id")
+                kind = str(raw_ref.get("kind") or "").strip()
+                node_id = str(raw_ref.get("id") or "").strip()
+                if kind not in self.EXECUTION_NODE_KINDS or not node_id:
+                    raise DeploymentError("执行链节点类型无效")
+                identity = (kind, node_id)
+                if identity in seen_refs:
+                    raise DeploymentError("执行链节点不能重复")
+                node = transitions.get(node_id) if kind == "transition" else components.get(node_id)
+                if node is None:
+                    if kind == "component":
+                        fixed = next(
+                            (item for item in document.get("components", [])
+                             if isinstance(item, dict) and item.get("id") == node_id),
+                            None,
+                        )
+                        if fixed is not None:
+                            raise DeploymentError("起点、目标点和电梯是固定锚点，不能加入执行链")
+                    raise DeploymentError("执行链引用的节点不存在或不可参与任务")
+                if node.get("map_asset_id") != binding.get("map_asset_id"):
+                    raise DeploymentError("执行链节点必须位于该定位绑定地图")
+                seen_refs.add(identity)
+                normalized_refs.append({"kind": kind, "id": node_id})
+            values[binding_id] = normalized_refs
+        if set(values) != set(binding_ids):
+            raise DeploymentError("执行链必须为每个定位绑定提供一项路径顺序")
+        for binding in bindings:
+            binding_id = str(binding["id"])
+            actual = {(item["kind"], item["id"]) for item in values[binding_id]}
+            missing = required_by_binding[binding_id] - actual
+            if missing:
+                asset = assets.get(str(binding.get("map_asset_id")), {})
+                map_label = str(asset.get("label") or binding.get("map_asset_id") or "当前地图")
+                raise DeploymentError(
+                    f"地图“{map_label}”存在未编排任务节点；请将它加入本地图任务路径顺序"
+                )
+            unexpected = actual - required_by_binding[binding_id]
+            if unexpected:
+                raise DeploymentError("执行链节点不属于当前地图任务路径")
+        return [{"binding_id": binding_id, "node_refs": values[binding_id]} for binding_id in binding_ids]
 
     @staticmethod
     def _localization_route_waypoint(document: dict[str, Any], waypoint_id: str) -> dict[str, Any]:
@@ -861,25 +1204,6 @@ class DeploymentStore:
             raise DeploymentError("该楼栋和单元已有定位路线；请更新已有路线")
 
     @staticmethod
-    def _localization_route_references_waypoint(route: dict[str, Any], waypoint_id: str) -> bool:
-        return (
-            waypoint_id in {
-                route.get("task_start_waypoint_id"),
-                route.get("task_target_waypoint_id"),
-                # Legacy projects may still need this fallback until an
-                # elevator landing component is added; new routes never set it.
-                route.get("task_return_waypoint_id"),
-            }
-            or any(
-                isinstance(link, dict)
-                and isinstance(link.get("anchor"), dict)
-                and link["anchor"].get("kind") == "waypoint"
-                and link["anchor"].get("waypoint_id") == waypoint_id
-                for link in route.get("links", [])
-            )
-        )
-
-    @staticmethod
     def _normalise_localization_identifier(value: object, label: str) -> str:
         cleaned = " ".join(str(value or "").split())
         if not cleaned or cleaned in {".", ".."}:
@@ -902,7 +1226,11 @@ class DeploymentStore:
         )
         if asset is None:
             raise DeploymentError("定位绑定只能引用当前项目地图")
-        binding_type = str(data.get("type") or "").strip()
+        topology_binding = self._topology_owned_localization_binding(document, map_asset_id)
+        submitted_type = str(data.get("type") or "").strip()
+        binding_type = topology_binding["type"] if topology_binding else submitted_type
+        if topology_binding and submitted_type and submitted_type != binding_type:
+            raise DeploymentError("运行角色由部署拓扑自动确定，不能在定位配置中修改")
         if binding_type not in {"outdoor", "indoor", "ferry", "floor"}:
             raise DeploymentError("定位绑定类型无效")
         floor_template = " ".join(str(data.get("floor_template") or "").split())
@@ -910,8 +1238,16 @@ class DeploymentStore:
             raise DeploymentError("用户楼层定位绑定必须填写布局模板")
         if binding_type != "floor" and "floor_template" in data:
             raise DeploymentError("仅用户楼层定位绑定可填写布局模板")
-        building = self._normalise_localization_identifier(data.get("building"), "楼栋")
-        unit = self._normalise_localization_identifier(data.get("unit"), "单元")
+        if topology_binding:
+            building, unit = topology_binding["building"], topology_binding["unit"]
+        elif binding_type == "ferry":
+            # A ferry is shared by the whole project.  UI values from the
+            # currently selected map are deliberately ignored rather than
+            # becoming accidental per-unit route facts.
+            building, unit = "", ""
+        else:
+            building = self._normalise_localization_identifier(data.get("building"), "楼栋")
+            unit = self._normalise_localization_identifier(data.get("unit"), "单元")
         if floor_template:
             floor_template = self._normalise_localization_identifier(floor_template, "布局模板")
         return {
@@ -922,6 +1258,25 @@ class DeploymentStore:
             "type": binding_type,
             **({"floor_template": floor_template} if binding_type == "floor" else {}),
         }
+
+    def _topology_owned_localization_binding(
+        self, document: dict[str, Any], map_asset_id: str,
+    ) -> dict[str, str] | None:
+        instances = [
+            item for item in document.get("map_instances", [])
+            if isinstance(item, dict) and item.get("map_asset_id") == map_asset_id
+        ]
+        if len(instances) != 1:
+            return None
+        instance = instances[0]
+        binding_type = self.LOCALIZATION_TYPE_BY_INSTANCE_ROLE.get(instance.get("role"))
+        if not binding_type:
+            return None
+        if binding_type == "ferry":
+            return {"type": binding_type, "building": "", "unit": ""}
+        building = " ".join(str(instance.get("building") or "").split())
+        unit = " ".join(str(instance.get("unit") or "").split())
+        return {"type": binding_type, "building": building, "unit": unit} if building and unit else None
 
     @staticmethod
     def _assert_localization_binding_unique(
@@ -939,8 +1294,8 @@ class DeploymentStore:
 
     def update_task_compiler_config(self, project_id: str, data: dict[str, Any]) -> dict[str, Any]:
         document = self.get(project_id)
-        if not isinstance(data, dict):
-            raise DeploymentError("任务编译器配置无效")
+        if not isinstance(data, dict) or set(data) != {"community"}:
+            raise DeploymentError("任务编译器配置仅接受小区名称")
         community = " ".join(str(data.get("community") or "").split())
         if community in {".", ".."} or not self.TASK_COMPILER_COMMUNITY.fullmatch(community):
             raise DeploymentError("小区名称应为不含路径分隔符的 1 至 80 个字符")
@@ -981,24 +1336,66 @@ class DeploymentStore:
         return metadata
 
     def task_compiler_preview(self, project_id: str) -> dict[str, Any]:
-        document = self.get(project_id)
-        preview = compile_indoor_elevator(
-            document, map_root=self._project_dir(project_id) / "maps"
-        )
+        document = self._derive_and_persist_localization_routes(project_id)
+        preview = self._compile_task_preview(project_id, document)
         self._persist_task_compiler_preview(project_id, document, preview)
         return self._preview_payload(preview)
 
     def task_compiler_bundle(self, project_id: str) -> tuple[str, bytes]:
-        document = self.get(project_id)
-        preview = compile_indoor_elevator(
-            document, map_root=self._project_dir(project_id) / "maps"
-        )
+        document = self._derive_and_persist_localization_routes(project_id)
+        preview = self._compile_task_preview(project_id, document)
         self._persist_task_compiler_preview(project_id, document, preview)
-        task_artifact = next((item for item in preview.artifacts if item.relative_path.startswith("tasks/")), None)
+        task_prefix = "multi_tasks/" if document.get("task_mode") == "multi" else "tasks/"
+        task_artifact = next((item for item in preview.artifacts if item.relative_path.startswith(task_prefix)), None)
         if task_artifact is None:
             raise DeploymentError("实验任务文件缺失")
-        filename = f"{Path(task_artifact.relative_path).stem}_experimental.zip"
+        filename = (
+            f"{self._normalise_task_compiler(document.get('task_compiler'))['identity']['community']}_multi_experimental.zip"
+            if document.get("task_mode") == "multi"
+            else f"{Path(task_artifact.relative_path).stem}_experimental.zip"
+        )
         return filename, bundle_zip(preview)
+
+    def _compile_task_preview(self, project_id: str, document: dict[str, Any]) -> CompilationPreview:
+        """Select the immutable project compiler mode; callers never select it."""
+        map_root = self._project_dir(project_id) / "maps"
+        if document.get("task_mode") == "multi":
+            return compile_multi_task_points(document, map_root=map_root)
+        return compile_single_task_points(document, map_root=map_root)
+
+    def derive_localization_routes(self, project_id: str) -> dict[str, Any]:
+        """Refresh read-only route facts from the scene and map annotations.
+
+        No route, endpoint, anchor, or execution ordering is accepted from a
+        client.  The persisted result is an auditable cache of map facts.
+        """
+        return self._derive_and_persist_localization_routes(project_id)
+
+    def _derive_and_persist_localization_routes(self, project_id: str) -> dict[str, Any]:
+        document = self.get(project_id)
+        try:
+            routes = derive_localization_routes(document)
+        except AutomaticRouteError as exc:
+            raise DeploymentError(str(exc)) from exc
+        if document.get("localization_routes") != routes:
+            document["localization_routes"] = routes
+            self._invalidate_task_compiler_preview(document)
+            document["updated_at"] = self._now()
+            self._write_json(self._document_path(project_id), document)
+        return document
+
+    @staticmethod
+    def _refresh_routes_after_annotation_delete(document: dict[str, Any]) -> None:
+        """Replace route cache after removing a map annotation.
+
+        Derived routes must never block edits to the facts they were derived
+        from.  When a required mark is gone, leave no stale route behind; the
+        guided map stage will show the missing mark until it is added again.
+        """
+        try:
+            document["localization_routes"] = derive_localization_routes(document)
+        except AutomaticRouteError:
+            document["localization_routes"] = []
 
     def set_scene_model(self, project_id: str, scene_model: object) -> dict[str, Any]:
         document = self.get(project_id)
@@ -1096,6 +1493,18 @@ class DeploymentStore:
         snapshot_yaml = (target / source.name).resolve()
         asset = {"id": map_id, "label": cleaned_label, "kind": map_kind, "source_yaml": str(snapshot_yaml), "site_id": self._site_id_for_source(project_id, source), "files": {"yaml": f"maps/{map_id}/{source.name}", "image": f"maps/{map_id}/{image.name}", "walls": f"maps/{map_id}/{walls.name}" if walls in members else None, "index": f"maps/{map_id}/index.txt" if index.is_file() else None, "pcd_count": len(pcd)}, "resolution_m": resolution, "origin": origin, "width": width, "height": height, "sha256": {item.name: self._sha256(item) for item in members}}
         document["map_assets"].append(asset)
+        if walls in members:
+            try:
+                for segment in parse_virtual_wall_segments((target / walls.name).read_bytes(), origin):
+                    document["virtual_walls"].append({
+                        "id": f"virtual-wall-{uuid.uuid4().hex[:12]}",
+                        "map_asset_id": map_id,
+                        **segment,
+                    })
+            except (OSError, VirtualWallError):
+                # Imported wall files are external data.  Keep an unrecognised
+                # companion untouched instead of guessing its geometry.
+                pass
         self._assign_next_stage(document, map_id)
         self._invalidate_task_compiler_preview(document)
         document["updated_at"] = self._now(); self._write_json(self._document_path(project_id), document)
@@ -1104,21 +1513,42 @@ class DeploymentStore:
     def stage_plan(self, project_id: str) -> dict[str, Any]:
         """Return the ordered deployment map stages without changing the project."""
         document = self.get(project_id)
-        stage_order = self._flow_stage_ids(document)
+        flow = document.get("deployment_flow")
+        if not isinstance(flow, list) or not flow:
+            flow = self._legacy_flow(document.get("scene_model"))
+        stage_order = [str(item.get("id") or "") for item in flow if isinstance(item, dict)]
         if not stage_order:
             return {"scene_model": None, "deployment_flow": [], "stages": [], "current_stage": None, "errors": ["请先配置部署流程"]}
         assignments = self._stage_assignment_map(document)
         assets = {item.get("id"): item for item in document["map_assets"] if isinstance(item, dict)}
         labels = self._flow_stage_labels(document)
         stages = []
-        for stage in stage_order:
-            map_id = assignments.get(stage)
+        for flow_item in flow:
+            if not isinstance(flow_item, dict):
+                continue
+            stage = str(flow_item.get("id") or "")
+            roles = self.STAGE_INSTANCE_ROLES.get(str(flow_item.get("type") or ""), frozenset())
+            instance_maps = sorted(
+                {
+                    str(item.get("map_asset_id"))
+                    for item in document["map_instances"]
+                    if isinstance(item, dict)
+                    and item.get("role") in roles
+                    and str(item.get("map_asset_id") or "") in assets
+                },
+                key=lambda map_id: (str(assets[map_id].get("label") or ""), map_id),
+            )
+            assigned_map = assignments.get(stage)
+            map_id = assigned_map if assigned_map in assets else (instance_maps[0] if instance_maps else None)
             asset = assets.get(map_id)
             stages.append({
                 "stage": stage,
                 "label": labels[stage],
                 "map_asset_id": map_id,
                 "map_label": asset.get("label") if asset else None,
+                "map_count": len(instance_maps) or (1 if asset else 0),
+                "map_labels": [str(assets[item].get("label") or item) for item in instance_maps]
+                    or ([str(asset.get("label") or map_id)] if asset else []),
                 "status": "editing" if asset else "missing",
             })
         current = next((item["stage"] for item in stages if item["status"] == "missing"), None)
@@ -1259,11 +1689,30 @@ class DeploymentStore:
         assignments = self._stage_assignment_map(document)
         assets = {item.get("id"): item for item in document["map_assets"] if isinstance(item, dict)}
         labels = self._flow_stage_labels(document)
+        flow_by_stage = {
+            str(item.get("id") or ""): str(item.get("type") or "")
+            for item in document.get("deployment_flow", []) if isinstance(item, dict)
+        }
         points = {item.get("id"): item for item in document["waypoints"] if isinstance(item, dict)}
         errors: list[str] = []
         map_by_stage: dict[str, str] = {}
+        instance_maps_by_stage: dict[str, list[str]] = {}
         for stage in stage_order:
-            map_id = assignments.get(stage)
+            roles = self.STAGE_INSTANCE_ROLES.get(flow_by_stage.get(stage, ""), frozenset())
+            instance_maps = sorted(
+                {
+                    str(item.get("map_asset_id"))
+                    for item in document["map_instances"]
+                    if isinstance(item, dict)
+                    and item.get("role") in roles
+                    and str(item.get("map_asset_id") or "") in assets
+                },
+                key=lambda map_id: (str(assets[map_id].get("label") or ""), map_id),
+            )
+            instance_maps_by_stage[stage] = instance_maps
+            map_id = assignments.get(stage) if assignments.get(stage) in assets else (
+                instance_maps[0] if instance_maps else None
+            )
             if not map_id or map_id not in assets:
                 errors.append(f"{labels[stage]}缺少地图")
             else:
@@ -1317,6 +1766,9 @@ class DeploymentStore:
                 "label": labels[stage],
                 "map_asset_id": map_by_stage.get(stage),
                 "map_label": assets[map_by_stage[stage]]["label"] if stage in map_by_stage else None,
+                "map_count": len(instance_maps_by_stage[stage]) or (1 if stage in map_by_stage else 0),
+                "map_labels": [str(assets[item].get("label") or item) for item in instance_maps_by_stage[stage]]
+                    or ([str(assets[map_by_stage[stage]].get("label") or map_by_stage[stage])] if stage in map_by_stage else []),
                 "status": stage_status[stage],
             }
             for stage in stage_order
@@ -1385,14 +1837,18 @@ class DeploymentStore:
         asset = next((item for item in document["map_assets"] if item.get("id") == map_id), None)
         if not asset: raise DeploymentError("要复用的地图资产不存在")
         role = str(data.get("role", ""))
-        if role not in {"outdoor", "lobby", "typical_floor", "floor_override"}: raise DeploymentError("地图实例类型无效")
+        scope = self._map_instance_scope(role)
         building = " ".join(str(data.get("building", "")).split())[:32]
         unit = " ".join(str(data.get("unit", "")).split())[:32]
-        try: floor = int(data.get("floor")) if data.get("floor") not in (None, "") else None
-        except (TypeError, ValueError) as exc: raise DeploymentError("楼层必须是整数") from exc
-        if role == "outdoor": building, unit, floor = "", "", None
-        elif not building or not unit or floor is None: raise DeploymentError("大厅、标准层和覆盖层必须填写楼栋、单元和楼层")
-        instance = {"id": f"instance-{uuid.uuid4().hex[:12]}", "map_asset_id": map_id, "role": role, "building": building, "unit": unit, "floor": floor, "label": " ".join(str(data.get("label") or asset["label"]).split())[:80] or asset["label"]}
+        # Map instances are created before the operator marks the elevator
+        # landing.  A submitted floor at this boundary is consequently an
+        # unverified client value, not a physical-floor fact.  Keep the
+        # legacy field empty; compilers derive the real value from the
+        # landing's panel button and shared-elevator configuration.
+        floor = None
+        if scope == "global": building, unit = "", ""
+        elif not building or not unit: raise DeploymentError("户外、大厅、标准层和覆盖层必须填写楼栋和单元")
+        instance = {"id": f"instance-{uuid.uuid4().hex[:12]}", "map_asset_id": map_id, "role": role, "scope": scope, "building": building, "unit": unit, "floor": floor, "label": " ".join(str(data.get("label") or asset["label"]).split())[:80] or asset["label"]}
         if any(all(item.get(key) == instance[key] for key in ("role", "building", "unit", "floor")) for item in document["map_instances"]):
             raise DeploymentError("该物理位置已有地图实例；请使用 Floor Override 或先检查已有部署")
         document["map_instances"].append(instance)
@@ -1472,16 +1928,11 @@ class DeploymentStore:
 
     def delete_waypoint(self, project_id: str, waypoint_id: str) -> None:
         document = self.get(project_id)
-        if any(
-            isinstance(route, dict)
-            and self._localization_route_references_waypoint(route, waypoint_id)
-            for route in document["localization_routes"]
-        ):
-            raise DeploymentError("Waypoint 仍被定位路线引用；请先删除或更新该路线")
         previous = len(document["waypoints"])
         document["waypoints"] = [item for item in document["waypoints"] if item.get("id") != waypoint_id]
         if len(document["waypoints"]) == previous: raise DeploymentError("Waypoint 不存在")
         self._invalidate_task_compiler_preview(document)
+        self._refresh_routes_after_annotation_delete(document)
         document["updated_at"] = self._now(); self._write_json(self._document_path(project_id), document)
 
     def add_component(self, project_id: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -1690,35 +2141,10 @@ class DeploymentStore:
     def delete_component(self, project_id: str, component_id: str) -> None:
         document = self.get(project_id)
         if not any(item.get("id") == component_id for item in document["components"]): raise DeploymentError("组件不存在")
-        if any(
-            isinstance(route, dict)
-            and any(
-                isinstance(link, dict)
-                and isinstance(link.get("anchor"), dict)
-                and link["anchor"].get("kind") == "component_center"
-                and link["anchor"].get("component_id") == component_id
-                for link in route.get("links", [])
-            )
-            for route in document["localization_routes"]
-        ):
-            raise DeploymentError("组件仍被定位路线引用；请先删除或更新该路线")
-        generated_waypoint_ids = {
-            item.get("id") for item in document["waypoints"]
-            if isinstance(item, dict) and item.get("generated_by") == component_id
-        }
-        if any(
-            isinstance(route, dict)
-            and any(
-                isinstance(waypoint_id, str)
-                and self._localization_route_references_waypoint(route, waypoint_id)
-                for waypoint_id in generated_waypoint_ids
-            )
-            for route in document["localization_routes"]
-        ):
-            raise DeploymentError("组件生成的 Waypoint 仍被定位路线引用；请先删除或更新该路线")
         document["components"] = [item for item in document["components"] if item.get("id") != component_id]
         document["waypoints"] = [item for item in document["waypoints"] if item.get("generated_by") != component_id]
         self._invalidate_task_compiler_preview(document)
+        self._refresh_routes_after_annotation_delete(document)
         document["updated_at"] = self._now(); self._write_json(self._document_path(project_id), document)
 
     @staticmethod
@@ -1739,15 +2165,27 @@ class DeploymentStore:
         defaults: dict[str, Any] = {"width_m": cls.COMPONENT_DIMENSIONS.get(kind, (.8, .8))[0], "height_m": cls.COMPONENT_DIMENSIONS.get(kind, (.8, .8))[1]}
         profiles: dict[str, dict[str, Any]] = {
             "elevator": {"wait_distance_m": 1.5},
-            "gate": {"gate_id": "", "access_protocol": "bluetooth", "speed_profile": "single_point"},
-            "auto_door": {"door_id": "", "access_protocol": "bluetooth", "speed_profile": "single_point"},
-            "narrow_passage": {"speed_profile": "narrow_point"},
-            "ramp": {"speed_profile": "slow_point"},
-            "slow_zone": {"speed_profile": "slow_point"},
+            "gate": {
+                "gate_id": "", "controller_device_id": "", "access_protocol": "bluetooth",
+                "pre_open_distance_m": 1.5, "post_open_distance_m": 1.5,
+            },
+            "auto_door": {
+                "door_id": "", "controller_device_id": "", "access_protocol": "bluetooth",
+                "pre_open_distance_m": 1.5, "post_open_distance_m": 1.5,
+            },
+            "narrow_passage": {},
+            "ramp": {},
+            "slow_zone": {},
             "target": {"arrival_action": "deliver", "door": ""},
             "start": {"start_action": "dispatch"},
         }
         attributes = {**defaults, **profiles.get(kind, {}), **source}
+        try:
+            configured_speed = component_speed_profile(kind, source.get("speed_profile"))
+        except ComponentDefaultsError as exc:
+            raise DeploymentError(str(exc)) from exc
+        if configured_speed:
+            attributes["speed_profile"] = configured_speed
         catalogue = cls._normalise_component_templates(templates)
         protocol_category = "access_protocols" if kind in {"gate", "auto_door"} else None
         protocol_key = "access_protocol" if protocol_category == "access_protocols" else "elevator_protocol" if protocol_category else None
@@ -1771,7 +2209,27 @@ class DeploymentStore:
             if door and not cls.TASK_COMPILER_DOOR.fullmatch(door):
                 raise DeploymentError("目标门牌号应为 1 至 32 个字母、数字、连字符或下划线")
             attributes["door"] = door
-        for key in ("gate_id", "door_id", "access_protocol", "elevator_protocol", "control_protocol", "speed_profile", "arrival_action", "start_action"):
+        if kind in {"gate", "auto_door"}:
+            for key, label in (
+                ("pre_open_distance_m", "开门前距离"),
+                ("post_open_distance_m", "开门后停靠距离"),
+            ):
+                try:
+                    distance = float(attributes[key])
+                except (TypeError, ValueError) as exc:
+                    raise DeploymentError(f"{label}无效") from exc
+                if not .5 <= distance <= 5.0:
+                    raise DeploymentError(f"{label}应在 0.5 至 5 米之间")
+                attributes[key] = distance
+            controller_device_id = "".join(str(attributes.get("controller_device_id") or "").split())
+            # A map marker is a draftable deployment fact: installers place
+            # its geometry first and then fill the device panel details in the
+            # existing component editor.  A non-empty value is still strict;
+            # task compilation remains the final guard that requires it.
+            if controller_device_id and not re.fullmatch(r"[1-9][0-9]*", controller_device_id):
+                raise DeploymentError("控制设备号必须为正整数纯数字")
+            attributes["controller_device_id"] = controller_device_id
+        for key in ("gate_id", "door_id", "controller_device_id", "access_protocol", "elevator_protocol", "control_protocol", "speed_profile", "arrival_action", "start_action"):
             if key in attributes:
                 value = " ".join(str(attributes[key] or "").split())
                 if len(value) > 64: raise DeploymentError("组件属性不能超过 64 个字符")
@@ -1849,17 +2307,127 @@ class DeploymentStore:
                 ) from exc
 
     def add_virtual_wall(self, project_id: str, data: dict[str, Any]) -> dict[str, Any]:
-        document = self.get(project_id); map_id = str(data.get("map_id", ""))
-        asset = next((item for item in document["map_assets"] if item.get("id") == map_id), None)
-        points = data.get("points")
-        if not asset or not isinstance(points, list) or len(points) < 3: raise DeploymentError("虚拟墙需在一张已导入地图内至少绘制三个点")
-        cleaned = []
-        for point in points:
-            if not isinstance(point, dict): raise DeploymentError("虚拟墙坐标无效")
-            x, y = float(point.get("x")), float(point.get("y")); self._validate_point(asset, x, y, 0); cleaned.append({"x": x, "y": y})
-        wall = {"id": f"wall-{uuid.uuid4().hex[:12]}", "map_asset_id": map_id, "kind": "forbidden_zone", "label": " ".join(str(data.get("label") or "禁行区").split())[:80], "points": cleaned}
-        document["virtual_walls"].append(wall); document["updated_at"] = self._now(); self._write_json(self._document_path(project_id), document)
+        document = self.get(project_id)
+        map_id = str(data.get("map_id") or "")
+        asset = self._virtual_wall_asset(document, map_id)
+        wall = {
+            "id": f"virtual-wall-{uuid.uuid4().hex[:12]}",
+            "map_asset_id": map_id,
+            **self._normalise_virtual_wall_segment(asset, data),
+        }
+        self._persist_virtual_walls(document, asset, [*document["virtual_walls"], wall])
         return wall
+
+    def update_virtual_wall(self, project_id: str, wall_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        document = self.get(project_id)
+        previous = next(
+            (item for item in document["virtual_walls"] if isinstance(item, dict) and item.get("id") == wall_id),
+            None,
+        )
+        if previous is None:
+            raise DeploymentError("虚拟墙不存在")
+        asset = self._virtual_wall_asset(document, str(previous.get("map_asset_id") or ""))
+        wall = {
+            "id": previous["id"],
+            "map_asset_id": asset["id"],
+            **self._normalise_virtual_wall_segment(asset, data),
+        }
+        self._persist_virtual_walls(
+            document,
+            asset,
+            [wall if item is previous else item for item in document["virtual_walls"]],
+        )
+        return wall
+
+    def delete_virtual_wall(self, project_id: str, wall_id: str) -> None:
+        document = self.get(project_id)
+        previous = next(
+            (item for item in document["virtual_walls"] if isinstance(item, dict) and item.get("id") == wall_id),
+            None,
+        )
+        if previous is None:
+            raise DeploymentError("虚拟墙不存在")
+        asset = self._virtual_wall_asset(document, str(previous.get("map_asset_id") or ""))
+        self._persist_virtual_walls(
+            document,
+            asset,
+            [item for item in document["virtual_walls"] if item is not previous],
+        )
+
+    def _virtual_wall_asset(self, document: dict[str, Any], map_id: str) -> dict[str, Any]:
+        asset = next(
+            (item for item in document["map_assets"] if isinstance(item, dict) and item.get("id") == map_id),
+            None,
+        )
+        if asset is None:
+            raise DeploymentError("虚拟墙必须属于已导入地图")
+        return asset
+
+    def _normalise_virtual_wall_segment(
+        self, asset: dict[str, Any], data: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            if "points" in data:
+                points = validate_polyline(data.get("points"))
+                for point in points:
+                    self._validate_point(asset, point["x"], point["y"], 0)
+                return {"points": points}
+            segment = validate_segment(data.get("start"), data.get("end"))
+        except VirtualWallError as exc:
+            raise DeploymentError(str(exc)) from exc
+        for point in segment.values():
+            self._validate_point(asset, point["x"], point["y"], 0)
+        return segment
+
+    def _virtual_wall_path(self, document: dict[str, Any], asset: dict[str, Any]) -> Path:
+        project_root = self._project_dir(str(document["id"])).resolve()
+        source = Path(str(asset.get("source_yaml") or "")).resolve()
+        if not source.is_file() or not source.is_relative_to(project_root):
+            raise DeploymentError("虚拟墙地图快照不存在")
+        return source.with_name("map_walls.yaml")
+
+    def _persist_virtual_walls(
+        self, document: dict[str, Any], asset: dict[str, Any], proposed: list[dict[str, Any]],
+    ) -> None:
+        wall_path = self._virtual_wall_path(document, asset)
+        previous_file = wall_path.read_bytes() if wall_path.is_file() else None
+        previous_walls = document["virtual_walls"]
+        previous_files = dict(asset.get("files") if isinstance(asset.get("files"), dict) else {})
+        previous_hashes = dict(asset.get("sha256") if isinstance(asset.get("sha256"), dict) else {})
+        document["virtual_walls"] = proposed
+        walls_for_map = [
+            segment
+            for item in proposed
+            if isinstance(item, dict) and item.get("map_asset_id") == asset["id"]
+            for segment in (
+                polyline_segments(item["points"])
+                if isinstance(item.get("points"), list)
+                else [validate_segment(item.get("start"), item.get("end"))]
+            )
+        ]
+        try:
+            self._write_bytes(wall_path, render_virtual_wall_file(asset["origin"], walls_for_map))
+            files = dict(previous_files)
+            files["walls"] = str(wall_path.relative_to(self._project_dir(str(document["id"]))))
+            asset["files"] = files
+            hashes = dict(previous_hashes)
+            hashes[wall_path.name] = self._sha256(wall_path)
+            asset["sha256"] = hashes
+            self._invalidate_task_compiler_preview(document)
+            document["updated_at"] = self._now()
+            self._write_json(self._document_path(str(document["id"])), document)
+        except OSError as exc:
+            document["virtual_walls"] = previous_walls
+            asset["files"] = previous_files
+            asset["sha256"] = previous_hashes
+            try:
+                if previous_file is None:
+                    wall_path.unlink(missing_ok=True)
+                else:
+                    self._write_bytes(wall_path, previous_file)
+            except OSError:
+                pass
+            raise DeploymentError("虚拟墙保存失败，已保留原地图标记") from exc
 
     @staticmethod
     def _validate_point(asset: dict[str, Any], x: float, y: float, yaw: float) -> None:

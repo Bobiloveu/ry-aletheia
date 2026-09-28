@@ -29,8 +29,8 @@ const ACTIONS = {
   assignStage: { label: "完善地图阶段", target: "mapStageAssignment" },
   configureMapInstance: { label: "设置部署拓扑位置", target: "instanceControls" },
   annotate: { label: "标记当前地图", target: "mapWorkspace" },
-  bindLocalization: { label: "设置地图运行角色", target: "openLocalizationBinding" },
-  editRoute: { label: "确认地图经过顺序", target: "openLocalizationRoute" },
+  bindLocalization: { label: "确认地图定位配置", target: "openLocalizationBinding" },
+  editRoute: { label: "查看系统派生路线", target: "openLocalizationRoute" },
   saveCompilerIdentity: { label: "保存小区信息", target: "taskCompilerCommunity" },
   preview: { label: "生成实验预览", target: "generateTaskCompilerPreview" },
   export: { label: "导出部署包", target: "downloadTaskCompilerBundle" },
@@ -135,7 +135,7 @@ export function deriveLocalizationGuidance(project, activeMapId = null) {
     return {
       state: "select_map",
       currentMapLabel: null,
-      detail: "先在地图列表中选择一张地图，再确定它承担的运行角色。",
+      detail: "先在地图列表中选择一张地图，再确认系统依据部署拓扑派生的定位配置。",
       primaryAction: { label: "选择一张地图", target: "mapList" },
       roles: { complete: rolesComplete, configured: configuredCount, total: maps.length },
       route: { available: false, configured: false, identity: null },
@@ -145,8 +145,8 @@ export function deriveLocalizationGuidance(project, activeMapId = null) {
     return {
       state: "needs_role",
       currentMapLabel: mapLabel(activeMap, "当前地图"),
-      detail: "先确定这张地图承担的运行角色；这会决定机器人进入此地图时采用的定位配置。",
-      primaryAction: { label: `设置 ${mapLabel(activeMap, "当前地图")} 的运行角色`, target: "openLocalizationBinding" },
+      detail: "确认这张地图的定位配置；运行角色和归属会由部署拓扑自动派生。",
+      primaryAction: { label: `确认 ${mapLabel(activeMap, "当前地图")} 的定位配置`, target: "openLocalizationBinding" },
       roles: { complete: false, configured: configuredCount, total: maps.length },
       route: { available: false, configured: false, identity: null },
     };
@@ -155,8 +155,8 @@ export function deriveLocalizationGuidance(project, activeMapId = null) {
     return {
       state: "needs_other_role",
       currentMapLabel: mapLabel(activeMap, "当前地图"),
-      detail: `“${mapLabel(missingMap, "另一张地图")}”还未确定运行角色。完成每张地图的角色后，才能确认机器人经过地图的顺序。`,
-      primaryAction: { label: `设置 ${mapLabel(missingMap, "待配置地图")} 的运行角色`, target: "mapList" },
+      detail: `“${mapLabel(missingMap, "另一张地图")}”还未确认定位配置。完成每张地图后，系统才能派生经过地图的顺序。`,
+      primaryAction: { label: `确认 ${mapLabel(missingMap, "待配置地图")} 的定位配置`, target: "mapList" },
       roles: { complete: false, configured: configuredCount, total: maps.length },
       route: { available: false, configured: false, identity: routeIdentity },
     };
@@ -165,10 +165,10 @@ export function deriveLocalizationGuidance(project, activeMapId = null) {
     state: configuredRoute ? "route_ready" : "configure_route",
     currentMapLabel: mapLabel(activeMap, "当前地图"),
     detail: configuredRoute
-      ? "地图角色和经过顺序已保存。可检查路线；返程会由系统按目标层电梯门前呼梯点自动派生。"
-      : "所有地图已确定运行角色。接下来确认机器人去程经过的地图顺序和切图依据；返程由系统自动派生。",
+      ? "地图定位配置和系统派生路线已保存。可检查路线；返程会由系统按目标层电梯门前呼梯点自动派生。"
+      : "所有地图定位配置已确认。接下来查看系统派生的去程地图顺序和切图依据；返程由系统自动派生。",
     primaryAction: {
-      label: configuredRoute ? "检查地图经过顺序" : "确认地图经过顺序",
+      label: configuredRoute ? "检查系统派生路线" : "查看系统派生路线",
       target: "openLocalizationRoute",
     },
     roles: { complete: true, configured: configuredCount, total: maps.length },
@@ -188,11 +188,20 @@ function stageReady(topology, maps) {
 function missingMapInstance(project, topology) {
   const instances = list(project?.map_instances);
   const requirements = {
+    outdoor: { roles: ["outdoor"], role: "outdoor" },
+    ferry: { roles: ["ferry"], role: "ferry" },
     lobby: { roles: ["lobby"], role: "lobby" },
     target_floor: { roles: ["typical_floor", "floor_override"], role: "typical_floor" },
   };
+  const flow = list(project?.deployment_flow);
+  const flowById = new Map(flow.map((item) => [item?.id, item?.type]));
   for (const stage of list(topology?.stages)) {
-    const requirement = requirements[stage.stage];
+    const stageType = flowById.get(stage.stage) || stage.stage;
+    // Old snapshots have only a scene model and may show a legacy outdoor
+    // stage.  Preserve their established workflow; newly saved flows are
+    // authoritative and therefore require their explicit instances.
+    if (!flow.length && ["outdoor", "ferry"].includes(stageType)) continue;
+    const requirement = requirements[stageType];
     if (!requirement || !stage.map_asset_id) continue;
     const matches = instances.filter(
       (instance) => instance?.map_asset_id === stage.map_asset_id && requirement.roles.includes(instance.role),
@@ -417,14 +426,15 @@ export function deriveDeploymentTask({
     });
   }
   if (instanceNeed) {
-    const roleLabel = instanceNeed.role === "lobby" ? "大厅 / 首层" : "标准层";
+    const roleLabels = { outdoor: "室外", ferry: "摆渡层", lobby: "大厅 / 首层", typical_floor: "标准层" };
+    const roleLabel = roleLabels[instanceNeed.role] || "地图位置";
     return deploymentTask({
       id: "maps.instance",
       stageId,
       title: `设置“${instanceNeed.stageLabel}”的部署拓扑位置`,
       detail: instanceNeed.duplicate
         ? `“${instanceNeed.stageLabel}”已有多个可用地图实例；编译要求仅保留一个。`
-        : `当前地图需要设为“${roleLabel}”，并填写实际楼栋、单元和楼层。`,
+        : `当前地图需要设为“${roleLabel}”，只需填写实际楼栋、单元；物理楼层由电梯组件自动推导。`,
       completionCriterion: instanceNeed.duplicate
         ? "仅保留一个符合当前地图阶段的实例"
         : "该地图已建立一个符合阶段用途的部署拓扑位置",
@@ -665,7 +675,7 @@ export function deriveDeploymentWorkflow(project, topology, preview) {
   } else if (instanceNeed) {
     current = steps[1];
     next = {
-      ...action("configureMapInstance", `先设置“${instanceNeed.stageLabel}”的部署拓扑位置，编译器才可确定实际楼栋、单元和楼层。`),
+      ...action("configureMapInstance", `先设置“${instanceNeed.stageLabel}”的部署拓扑位置并填写楼栋、单元；物理楼层会由电梯组件自动推导。`),
       targetMapId: instanceNeed.mapAssetId,
       instanceRole: instanceNeed.role,
     };

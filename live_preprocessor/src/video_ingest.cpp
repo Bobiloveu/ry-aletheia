@@ -185,7 +185,7 @@ class VideoIngest final : public rclcpp::Node {
                   options_.topic.c_str(), options_.encoding.c_str(), options_.width, options_.height, options_.fps, options_.bitrate_kbps,
                   ros_domain_id().c_str());
     } else {
-      RCLCPP_INFO(get_logger(), "视频输入已连接到 ShmSDK：channel=%s expected=%s %dx%d fps=%d；仅读取 GetLastCamImage 最新帧，不管理 mempool",
+      RCLCPP_INFO(get_logger(), "视频输入已连接到 ShmSDK：channel=%s expected=%s %dx%d fps=%d；仅读取 GetCamImage(GET_LAST) 最新实时帧，不管理 mempool",
                   options_.shm_channel.c_str(), options_.encoding.c_str(), options_.width, options_.height, options_.fps);
       shm_reader_ = std::thread([this] { read_shmsdk_frames(); });
     }

@@ -122,6 +122,7 @@ python3 -m PyInstaller \
   --name ry-aletheia \
   --add-data "autodrive_console/web:autodrive_console/web" \
   --add-data "autodrive_console/web-vue:autodrive_console/web-vue" \
+  --add-data "autodrive_console/task_templates/indoor_elevator_v1/task-status-codes.json:autodrive_console/task_templates/indoor_elevator_v1" \
   --add-data "$VIDEO_CONFIG_DEFAULT:config/video.json" \
   --add-data "$VIDEO_RUNTIME:runtime/video" \
   --add-binary "$LIVE_PREPROCESSOR:." \

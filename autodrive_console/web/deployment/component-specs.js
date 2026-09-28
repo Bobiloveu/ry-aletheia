@@ -4,8 +4,8 @@ export const DEFAULT_COMPONENT_TEMPLATES = {
     { id: "4g", label: "4G" },
   ],
   elevator_protocols: [
-    { id: "bluetooth", label: "蓝牙" },
-    { id: "4g", label: "4G" },
+    { id: "mqtt", label: "MQTT" },
+    { id: "lora", label: "LORA" },
   ],
 };
 
@@ -33,6 +33,10 @@ export const COMPONENT_SPECS = {
       },
     ],
   },
+  building_entrance: {
+    name: "楼栋入口",
+    fields: [],
+  },
   elevator: {
     name: "电梯",
     fields: [
@@ -44,21 +48,20 @@ export const COMPONENT_SPECS = {
     name: "闸机",
     fields: [
       { key: "gate_id", label: "闸机编号", type: "text", placeholder: "例如：G-01" },
+      { key: "controller_device_id", label: "控制设备号", type: "text", inputMode: "numeric", pattern: "[1-9][0-9]*", placeholder: "例如：10044", default: "" },
       { key: "access_protocol", label: "控制协议", type: "select", protocolCategory: "access_protocols", default: "bluetooth" },
-      {
-        key: "speed_profile",
-        label: "速度模式",
-        type: "select",
-        options: [["single_point", "常规"], ["slow_point", "减速"], ["narrow_point", "窄通道"]],
-      },
+      { key: "pre_open_distance_m", label: "开门前距离（m）", type: "number", min: "0.5", max: "5", step: "0.1", default: 1.5 },
+      { key: "post_open_distance_m", label: "开门后停靠距离（m）", type: "number", min: "0.5", max: "5", step: "0.1", default: 1.5 },
     ],
   },
   auto_door: {
     name: "自动门",
     fields: [
       { key: "door_id", label: "门编号", type: "text", placeholder: "例如：D-01" },
+      { key: "controller_device_id", label: "控制设备号", type: "text", inputMode: "numeric", pattern: "[1-9][0-9]*", placeholder: "例如：10044", default: "" },
       { key: "access_protocol", label: "控制协议", type: "select", protocolCategory: "access_protocols", default: "bluetooth" },
-      { key: "speed_profile", label: "速度模式", type: "select", options: [["single_point", "常规"], ["slow_point", "减速"]] },
+      { key: "pre_open_distance_m", label: "开门前距离（m）", type: "number", min: "0.5", max: "5", step: "0.1", default: 1.5 },
+      { key: "post_open_distance_m", label: "开门后停靠距离（m）", type: "number", min: "0.5", max: "5", step: "0.1", default: 1.5 },
     ],
   },
   narrow_passage: {

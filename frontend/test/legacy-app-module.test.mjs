@@ -87,6 +87,22 @@ test("runtime settings exposes an optional styled console autostart control", ()
   assert.match(styles, /#29d7d0|var\(--accent\)/);
 });
 
+test("upgrade safety remains attached to the offline upgrade operation", () => {
+  const app = readFileSync(runtimeSettingsAppPath, "utf8");
+  const styles = readFileSync(runtimeSettingsStylesPath, "utf8");
+
+  assert.match(
+    app,
+    /<article class="panel span-7 upgrade-panel">[\s\S]*?class="upgrade-safety-note"[\s\S]*?UPGRADE SAFETY/,
+  );
+  assert.doesNotMatch(
+    app,
+    /<article class="panel span-5"><p class="eyebrow">UPGRADE SAFETY<\/p>/,
+  );
+  assert.match(styles, /\.upgrade-safety-note/);
+  assert.doesNotMatch(styles, /\.page-grid > \.panel:last-child/);
+});
+
 test("trajectory hover resolves the nearest transformed sample, magnetic cursor state, and Beijing time", async () => {
   const page = readFileSync(dashboardPagePath, "utf8");
   const styles = readFileSync(dashboardStylesPath, "utf8");
@@ -134,37 +150,54 @@ test("deployment renderer draws a map-origin callback before localization marker
   assert.match(source, /drawMapOrigin\?\.\(\)[\s\S]*drawLocalizationMarkers\?\.\(\)/);
 });
 
-test("deployment route editor uses controlled route endpoints and no raw pose fields", () => {
+test("deployment route review requests backend derivation and keeps route facts read-only", () => {
   const deploymentPath = new URL("autodrive_console/web/deployment.js", repoRoot);
   const source = readFileSync(deploymentPath, "utf8");
-  assert.match(source, /\/localization-routes/);
-  assert.match(source, /component_center/);
-  assert.match(source, /task_start_waypoint_id/);
+  assert.match(source, /\/localization-routes\/derive/);
+  assert.match(source, /系统按创建项目时的场景地图顺序/);
+  assert.match(source, /可通行区域（含虚拟墙约束）/);
+  assert.match(source, /返程严格反向/);
+  assert.doesNotMatch(source, /data-route-node-move/);
+  assert.doesNotMatch(source, /data-route-include/);
   assert.doesNotMatch(source, /localizationGoX|localizationReturnX/);
 });
 
-test("route editor preserves saved membership and exposes new same-identity choices", async () => {
-  const { orderedRouteBindingIds } = await import(
+test("automatic route bindings preserve backend scene order", async () => {
+  const { automaticRouteBindings } = await import(
     new URL("autodrive_console/web/deployment/localization-route.js", repoRoot),
   );
   const bindings = [
-    { id: "A", building: "1", unit: "1" },
-    { id: "B", building: "1", unit: "1" },
-    { id: "C", building: "1", unit: "1" },
-    { id: "D", building: "2", unit: "1" },
+    { id: "lobby" },
+    { id: "floor" },
+    { id: "unrelated" },
   ];
 
-  assert.deepEqual(orderedRouteBindingIds(["A", "B"], bindings, "1", "1"), [
-    "A",
-    "B",
-  ]);
-  assert.deepEqual(orderedRouteBindingIds(undefined, bindings, "1", "1"), ["A", "B", "C"]);
+  assert.deepEqual(
+    automaticRouteBindings({ binding_ids: ["floor", "lobby"] }, bindings).map((item) => item.id),
+    ["floor", "lobby"],
+  );
+  assert.deepEqual(automaticRouteBindings({ binding_ids: ["missing"] }, bindings), []);
 });
 
-test("single-map route exposes both controlled task endpoints", async () => {
-  const { routeEndpointFields } = await import(
+test("automatic route nodes retain only executable transition and component references", async () => {
+  const { automaticExecutionNodes } = await import(
     new URL("autodrive_console/web/deployment/localization-route.js", repoRoot),
   );
 
-  assert.deepEqual(routeEndpointFields(true, true), ["start", "target"]);
+  assert.deepEqual(
+    automaticExecutionNodes({
+      execution_nodes: [{
+        binding_id: "floor",
+        node_refs: [
+          { kind: "transition", id: "waypoint-1" },
+          { kind: "component", id: "slow-zone-1" },
+          { kind: "unsupported", id: "ignore" },
+        ],
+      }],
+    }, "floor"),
+    [
+      { kind: "transition", id: "waypoint-1" },
+      { kind: "component", id: "slow-zone-1" },
+    ],
+  );
 });

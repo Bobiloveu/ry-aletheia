@@ -1,7 +1,7 @@
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
     <Sequence name="NavigateWithUnloadingWater">
-      <PublishTaskStatus status_code="109"/>
+      <PublishTaskStatus status_code="{{STATUS_TASK_COMPLETE}}"/>
     </Sequence>
   </BehaviorTree>
 </root>

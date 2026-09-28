@@ -91,6 +91,13 @@
                   maxlength="80"
                   placeholder="例如：XX花园"
               /></label>
+              <label
+                >车辆任务模式<select id="projectTaskMode">
+                  <option value="single">单任务点模式</option>
+                  <option value="multi">多任务点模式</option>
+                </select>
+                <span class="page-muted">创建后固定；地图标记和引导流程保持一致，仅实验任务包结构不同。</span>
+              </label>
             </div>
             <button id="createProject" class="page-top-action" type="button">
               创建项目
@@ -232,6 +239,15 @@
                   <circle cx="12" cy="12" r="2" /></svg
                 ><span>目标</span></button
               ><button
+                data-waypoint-kind="building_entrance"
+                class="compact-action waypoint-tool"
+                type="button"
+                title="户外进入电梯大厅时的自动定位入口"
+              >
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 20V5h14v15M9 20v-8h6v8M8 8h.01M16 8h.01" /></svg
+                ><span>楼栋入口</span></button
+              ><button
                 data-waypoint-kind="transition"
                 class="compact-action waypoint-tool"
                 type="button"
@@ -291,6 +307,16 @@
                 <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="m5 17 5-10m0 10 5-10m0 10 4-8" /></svg
                 ><span>减速区</span></button
+              ><button
+                data-waypoint-kind="virtual_wall"
+                class="compact-action waypoint-tool"
+                type="button"
+                title="左键依次确定虚拟墙的起点和终点；拖动红色端点或线段可调整"
+              >
+                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 7h16M4 12h16M4 17h16" />
+                </svg
+                ><span>虚拟墙</span></button
               ><span class="toolbar-divider" aria-hidden="true"></span
               ><span class="eraser-brush-group"
                 ><button
@@ -375,6 +401,7 @@
           </div>
           <div id="mapWorkspace" class="map-workspace" tabindex="-1" aria-label="地图标记工作区">
             <canvas id="mapCanvas" aria-label="部署地图画布"></canvas>
+            <canvas id="mapEraseFrameMask" class="map-erase-frame-mask" aria-hidden="true" hidden></canvas>
             <div id="mapCanvasEmpty" class="map-canvas-empty">
               <b>等待地图资产</b
               ><small
@@ -411,10 +438,12 @@
                     step="0.1"
                 /></label>
               </div>
+              <p id="componentDirectionHint" class="component-direction-hint deployment-hidden">组件长边表示设施门面；系统会按当前自动路径推导通行、开门和关门顺序。</p>
               <div
                 id="componentAttributeFields"
                 class="component-attribute-fields"
               ></div>
+              <p id="componentPopoverStatus" class="component-popover-status" aria-live="polite"></p>
               <div class="component-actions">
                 <button
                   id="saveComponent"
@@ -450,6 +479,7 @@
               </header>
               <p id="waypointPopoverDetail" class="page-muted"></p>
               <p id="waypointPopoverPurpose" class="page-muted">删除后需重新在定位路线中选择起点、目标点或过渡点；已保存路线引用时会先阻止删除。</p>
+              <p id="waypointPopoverStatus" class="component-popover-status" aria-live="polite"></p>
               <label id="transitionSpeedControl" class="deployment-hidden">过渡速度模式<select id="waypointTransitionSpeed"><option value="single_point">常规</option><option value="slow_point">减速</option><option value="narrow_point">窄通道</option><option value="task_point">任务点</option></select></label>
               <label id="transitionYawControl" class="deployment-hidden">去程朝向（°）<input id="waypointTransitionYaw" type="number" min="-180" max="180" step="1" inputmode="decimal" /><small>拖动地图上的蓝色圆形方向手柄调整；数字会同步更新。</small></label>
               <p id="transitionReturnDirectionHint" class="page-muted deployment-hidden">实线箭头是去程，虚线箭头是返程自动反向 180°；返程方向不可单独设置。</p>
@@ -506,13 +536,13 @@
             >
               <header>
                 <div>
-                  <strong id="localizationBindingDialogTitle">设置地图运行角色</strong>
-                  <small id="localizationBindingDialogDescription">选择机器人进入当前地图时使用的定位角色；路线和定位文件会在导出时自动生成。</small>
+                  <strong id="localizationBindingDialogTitle">确认地图定位配置</strong>
+                  <small id="localizationBindingDialogDescription">部署拓扑已确定时，运行角色和归属会自动复用；路线和定位文件会在导出时自动生成。</small>
                 </div>
                 <button id="cancelLocalizationBinding" class="popover-close" type="button" aria-label="关闭定位绑定">×</button>
               </header>
               <div class="localization-binding-fields">
-                <label>运行角色<select id="localizationBindingType"><option value="indoor">室内大厅（任务起点 / 进梯前）</option><option value="floor">用户楼层（交付终点）</option><option value="outdoor">户外（室外起点）</option><option value="ferry">摆渡层（中途经过）</option></select></label>
+                <label id="localizationBindingTypeLabel">运行角色<select id="localizationBindingType"><option value="indoor">室内大厅（任务起点 / 进梯前）</option><option value="floor">用户楼层（交付终点）</option><option value="outdoor">户外（室外起点）</option><option value="ferry">摆渡层（中途经过）</option></select></label>
                 <div id="localizationTopologySummary" class="localization-topology-summary"></div>
                 <div id="localizationIdentityFields" class="localization-identity-fields">
                   <label>归属楼栋<input id="localizationBuilding" type="text" maxlength="32" /></label>
@@ -520,12 +550,12 @@
                 </div>
                 <label id="localizationFloorTemplateLabel">楼层布局模板（不是实际楼层）<input id="localizationFloorTemplate" type="text" maxlength="32" placeholder="例如：2" /></label>
               </div>
-              <p id="localizationBindingMessage" class="inline-message">选择当前地图的运行角色；保存后才能配置地图经过顺序。</p>
-              <div class="component-actions"><button id="saveLocalizationBinding" class="page-top-action" type="button">保存运行角色</button><button id="deleteLocalizationBinding" class="compact-action danger-action deployment-hidden" type="button">删除</button></div>
+              <p id="localizationBindingMessage" class="inline-message">确认当前地图的定位配置；保存后系统将按项目场景和地图标记自动计算经过顺序。</p>
+              <div class="component-actions"><button id="saveLocalizationBinding" class="page-top-action" type="button">保存定位配置</button><button id="deleteLocalizationBinding" class="compact-action danger-action deployment-hidden" type="button">删除</button></div>
             </section>
           </div>
           <p id="mapToolHint" class="page-muted">
-                先标记地图上的真实组件并填写属性；跨图切换由行为树按定位路线自动执行，目标层返程呼梯点由电梯组件自动派生。
+                先标记地图上的真实组件并填写属性；系统会按项目场景和地图标记自动生成经过顺序。跨图切换由行为树按定位路线自动执行，返程首节点由该顺序自动派生。
           </p>
         </article>
         <article class="panel span-6 topology-panel" data-deployment-stage="maps" data-deployment-tasks="maps.assign maps.edit">
@@ -546,36 +576,29 @@
           <p id="localizationPurpose" class="page-muted">完成后，部署包会自动生成定位清单、地图切换顺序和受控路径。</p>
           <section class="localization-flow-step" aria-labelledby="localizationRoleTitle">
             <div class="localization-flow-heading">
-              <div><h3 id="localizationRoleTitle">确定每张地图的运行角色</h3><p id="localizationRoleMessage">先选择当前地图，再说明它是大厅、用户楼层、摆渡层还是户外地图。</p></div>
+              <div><h3 id="localizationRoleTitle">确认每张地图的定位配置</h3><p id="localizationRoleMessage">先选择当前地图；系统从部署拓扑自动复用运行角色和归属，用户楼层仅确认布局模板。</p></div>
               <span id="localizationRoleProgress" class="localization-step-progress">0 / 0 张已完成</span>
             </div>
-            <button id="openLocalizationBinding" class="page-top-action" type="button" disabled>设置当前地图的运行角色</button>
-            <div id="localizationBindingList" class="localization-binding-list"><div class="page-empty">选择地图后可设置运行角色。</div></div>
+            <button id="openLocalizationBinding" class="page-top-action" type="button" disabled>确认当前地图的定位配置</button>
+            <div id="localizationBindingList" class="localization-binding-list"><div class="page-empty">选择地图后可确认定位配置。</div></div>
           </section>
           <section class="localization-flow-step localization-route-step" aria-labelledby="localizationRouteTitle">
             <div class="localization-flow-heading">
-              <div><h3 id="localizationRouteTitle">确认机器人经过地图的顺序</h3><p id="localizationRoutePurpose">完成所有地图角色后，在这里确认去程经过的地图顺序和切图依据；返程由系统自动派生。</p></div>
+              <div><h3 id="localizationRouteTitle">系统自动派生路线</h3><p id="localizationRoutePurpose">地图标记完成后，系统按项目场景和可通行路径自动计算经过顺序、切图和返程。</p></div>
               <span id="localizationRouteProgress" class="localization-step-progress">等待地图角色完成</span>
             </div>
-            <button id="openLocalizationRoute" class="page-top-action" type="button" disabled>确认地图经过顺序</button>
+            <button id="openLocalizationRoute" class="page-top-action" type="button" disabled>查看系统推导结果</button>
             <div id="localizationRouteList" class="localization-route-list"><div class="page-empty">先完成每张地图的运行角色。</div></div>
-            <section id="localizationRouteDialog" class="localization-route-dialog deployment-hidden" aria-label="配置地图经过顺序">
+            <section id="localizationRouteDialog" class="localization-route-dialog deployment-hidden" aria-label="核验系统自动派生路线">
             <header>
-              <div><strong>确认地图经过顺序</strong><small id="localizationRouteIdentity">按机器人去程实际经过的顺序选择地图；后续地图从电梯中心 0,0 起步，目标层返程会自动取电梯门前呼梯点。</small></div>
+              <div><strong>系统自动派生路线核验</strong><small id="localizationRouteIdentity">路线顺序、固定锚点和设施经过顺序均来自项目场景与地图标记；此处只读。</small></div>
               <button id="cancelLocalizationRoute" class="popover-close" type="button" aria-label="关闭定位路线">×</button>
             </header>
-            <fieldset class="localization-route-membership">
-              <legend>选择路线地图</legend>
-              <p class="page-muted">只勾选本次去程实际经过的地图；多个楼层模板只选一个。保存后机器人会按此顺序自动切图。</p>
-              <div id="localizationRouteMembership"></div>
-            </fieldset>
-            <p id="localizationRouteMessage" class="inline-message" role="status">末项必须为“用户楼层”。</p>
+            <p id="localizationRouteMessage" class="inline-message" role="status">正在从项目场景和地图标记计算路线。</p>
             <div id="localizationRouteLinks" class="localization-route-links"></div>
             <div id="localizationRouteSummary" class="localization-route-summary"></div>
             <div class="component-actions">
-              <button id="deleteLocalizationRoute" class="compact-action deployment-hidden" type="button">删除路线</button>
-              <button id="resetLocalizationRoute" class="compact-action" type="button">清空草稿</button>
-              <button id="saveLocalizationRoute" class="page-top-action" type="button">保存定位路线</button>
+              <button id="saveLocalizationRoute" class="page-top-action" type="button">重新派生并检查</button>
             </div>
           </section>
           </section>
@@ -617,6 +640,7 @@
             <label
               >用途<select id="instanceRole">
                 <option value="outdoor">室外</option>
+                <option value="ferry">摆渡层</option>
                 <option value="lobby">大厅 / 首层</option>
                 <option value="typical_floor">标准层</option>
                 <option value="floor_override">特殊楼层覆盖</option>
@@ -626,17 +650,12 @@
                 id="instanceBuilding"
                 maxlength="32"
                 placeholder="例如：2" /></label
-            ><label
-              >单元<input
-                id="instanceUnit"
-                maxlength="32"
-                placeholder="例如：1" /></label
-            ><label
-              >楼层<input
-                id="instanceFloor"
-                type="number"
-                placeholder="例如：5" /></label
-            ><button id="addInstance" class="page-top-action" type="button">
+                ><label
+                  >单元<input
+                    id="instanceUnit"
+                    maxlength="32"
+                    placeholder="例如：1" /></label
+                ><button id="addInstance" class="page-top-action" type="button">
               加入部署拓扑
             </button>
           </div>

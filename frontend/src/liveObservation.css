@@ -59,33 +59,31 @@
   z-index: 3;
   pointer-events: none;
   box-sizing: border-box;
-  border: 2px solid #087e99;
-  border-radius: 16%;
-  background: rgb(33 199 215 / 50%);
-  box-shadow: 0 0 0 7px rgb(18 159 180 / 14%);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   transform-origin: center;
   will-change: transform;
   contain: layout paint;
   backface-visibility: hidden;
 }
-#vehicleLayer i {
-  position: absolute;
-  top: 0;
-  left: 18%;
-  right: 18%;
-  border-top: 2px solid #fff;
+#vehicleLayer .vehicle-illustration {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
 }
-/* 手机上的车体只保留一条克制的车头短线；桌面标记维持原有表现。 */
-html.mobile-console #vehicleLayer i {
-  top: 9%;
-  left: 20%;
-  right: 20%;
-  height: 4px;
-  border: 0;
-  border-radius: 4px;
-  background: #fff;
-  box-shadow: 0 1px 2px rgb(0 40 56 / 72%);
-}
+#vehicleLayer .vehicle-bumper { fill: #111a28; }
+#vehicleLayer .vehicle-body { fill: #fcfcfc; stroke: #ced3da; stroke-width: 1.2; }
+#vehicleLayer .vehicle-deck { fill: #f7f7f7; stroke: #d6dae0; stroke-width: 1; }
+#vehicleLayer .vehicle-led { fill: none; stroke: #f14349; stroke-linecap: round; }
+#vehicleLayer .vehicle-led--front,
+#vehicleLayer .vehicle-led--rear { stroke-width: 4.2; }
+#vehicleLayer .vehicle-sensor { fill: #37323a; }
+#vehicleLayer .vehicle-lidar-ring { fill: #ff4b4e; }
+#vehicleLayer .vehicle-lidar { fill: #121b28; stroke: #2b3544; stroke-width: 1.2; }
+#vehicleLayer .vehicle-lidar-highlight { fill: none; stroke: rgb(255 255 255 / 20%); stroke-linecap: round; stroke-width: 1.1; }
 .map-interaction-layer {
   position: absolute;
   inset: 0;
@@ -2546,6 +2544,16 @@ html.mobile-console
   > .webrtc-video-card[data-primary="true"] {
   grid-column: auto;
   grid-row: auto;
+}
+
+/* 车体本身是依照米制长宽投影的 SVG；桌面与移动端不得再叠加独立的 CSS 外框，
+ * 这样车身、雷达、传感器和灯带才能始终共享同一个缩放矩阵。 */
+#vehicleLayer,
+html.mobile-console #vehicleLayer {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 @media (orientation: portrait) {
   html.mobile-console.mobile-portrait .webrtc-video-grid[data-count="6"] {
