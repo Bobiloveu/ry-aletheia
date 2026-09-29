@@ -7,6 +7,7 @@ import {
   onMounted,
   ref,
 } from "vue/dist/vue.esm-bundler.js";
+import "./pageBoot.js";
 import legacyHtml from "../../autodrive_console/web/index.html?raw";
 import "../../autodrive_console/web/styles.css";
 import "../../autodrive_console/web/refinement.css";

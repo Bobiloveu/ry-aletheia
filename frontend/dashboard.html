@@ -5,9 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#08111f" />
     <title>任务指挥台 · RY Aletheia</title>
+    <style data-shell-boot>
+      html { min-height: 100%; background: #161617; color-scheme: dark; }
+      body { min-height: 100dvh; margin: 0; background: #161617; }
+      #app { min-height: 100dvh; opacity: 1; transition: opacity 140ms ease-out; }
+      #app[data-page-ready="false"] { visibility: hidden; opacity: 0; }
+      .mark, .mark svg { width: 34px; height: 34px; overflow: hidden; }
+      @media (prefers-reduced-motion: reduce) { #app { transition: none; } }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app" data-page-ready="false"></div>
     <script type="module" src="/src/dashboard.js"></script>
   </body>
 </html>

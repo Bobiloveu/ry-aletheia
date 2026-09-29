@@ -19,14 +19,33 @@
   --warning: #ff9f0a;
   --radius: 14px;
 }
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition {
+    navigation: auto;
+  }
+}
 html {
   min-height: 100%;
   background: var(--bg);
   color-scheme: dark;
 }
+html[data-navigation-state="leaving"] body {
+  opacity: 0;
+  transform: translateY(2px);
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-navigation-state="leaving"] body {
+    opacity: 1;
+    transform: none;
+  }
+  body {
+    transition: none;
+  }
+}
 body {
   min-height: 100dvh;
   background: var(--bg);
+  transition: opacity 120ms ease-out, transform 120ms ease-out;
   font-family:
     "SF Pro Display", "SF Pro Text", "Noto Sans SC", "Microsoft YaHei",
     system-ui, sans-serif;

@@ -61,6 +61,32 @@
       link.classList.toggle('active', href === parentRoute);
     });
   };
+  const isInternalPageNavigation = (event, link) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return false;
+    if (link.target || link.hasAttribute('download') || link.dataset.noNavigationTransition !== undefined) return false;
+    const target = new URL(link.href, window.location.href);
+    if (target.origin !== window.location.origin || target.protocol !== window.location.protocol) return false;
+    return target.pathname !== window.location.pathname || target.search !== window.location.search;
+  };
+  const installNavigationTransition = () => {
+    if (document.documentElement.dataset.navigationTransitionInstalled === 'true') return;
+    document.documentElement.dataset.navigationTransitionInstalled = 'true';
+    let navigationPending = false;
+    document.addEventListener('click', (event) => {
+      const link = event.target.closest('aside nav a[href]');
+      if (!link || !isInternalPageNavigation(event, link)) return;
+      // Let browsers with reduced-motion preference keep direct, predictable navigation.
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (navigationPending) return;
+      navigationPending = true;
+      document.documentElement.dataset.navigationState = 'leaving';
+      // A short, bounded exit makes full-document links feel intentional without
+      // delaying navigation enough to be perceived as input lag.
+      window.setTimeout(() => window.location.assign(link.href), 120);
+    }, true);
+  };
   const installNavigation = () => {
     const nav = document.querySelector('aside nav');
     if (!nav) return;
@@ -128,10 +154,10 @@
       }, true);
     });
   };
-  const install = () => { installNavigation(); installBrandThemeControl(); applyTheme(); };
+  const install = () => { installNavigation(); installBrandThemeControl(); installNavigationTransition(); applyTheme(); };
   // Vue compatibility pages mount their legacy markup after DOMContentLoaded.
   // Exposing this tiny, presentation-only hook lets them receive the same shell
   // without duplicating navigation or theme state in every page implementation.
-  window.RYAletheiaShell = { applyTheme, installNavigation, installBrandThemeControl, install };
+  window.RYAletheiaShell = { applyTheme, installNavigation, installBrandThemeControl, installNavigationTransition, install };
   document.addEventListener('DOMContentLoaded', install);
 })();
