@@ -114,6 +114,7 @@ fieldset label { display: inline-flex; align-items: center; gap: .4rem; font-wei
 .multi-floor-range-row small{color:var(--muted);font-size:.74rem}
 .multi-floor-range-row label{display:grid;gap:.3rem;font-size:.78rem;font-weight:650}
 .multi-floor-range-row input{width:100%}
+.multi-floor-range-row .multi-floor-missing-buttons{grid-column:1 / -1}
 body.theme-light .multi-task-options{border-color:var(--line);background:var(--surface-raised);color:var(--ink)}
 body.theme-light .multi-task-options .muted,
 body.theme-light .multi-task-options .multi-generated-note{color:var(--muted)}

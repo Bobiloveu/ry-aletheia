@@ -15,7 +15,11 @@ import uuid
 from typing import Any
 
 from .acceptance_catalog import AcceptanceTask, CatalogSnapshot
-from .location_manifest import LocationManifestError, button_sequence
+from .location_manifest import (
+    LocationManifestError,
+    button_sequence,
+    normalise_unavailable_button_floors,
+)
 from .models import MultiDestination, MultiTaskRequest, TaskParameters, now_iso
 
 
@@ -101,29 +105,46 @@ def normalize_multi_options(value: object, *, require_frozen_chains: bool = Fals
     }
 
 
-def _normalize_multi_floor_ranges(value: object) -> list[dict[str, int]]:
+def _normalize_multi_floor_ranges(value: object) -> list[dict[str, Any]]:
     if value is None:
         return []
     if not isinstance(value, list):
         raise ValueError("模板楼层范围必须是数组")
-    normalized: list[dict[str, int]] = []
+    normalized: list[dict[str, Any]] = []
     seen: set[tuple[int, int]] = set()
     for item in value:
-        if not isinstance(item, dict) or set(item) != {"building", "unit", "min_floor", "max_floor"}:
+        required_keys = {"building", "unit", "min_floor", "max_floor"}
+        allowed_keys = required_keys | {"unavailable_button_floors"}
+        if not isinstance(item, dict) or not required_keys.issubset(item) or set(item) - allowed_keys:
             raise ValueError("模板楼层范围字段无效")
-        values: dict[str, int] = {}
+        values: dict[str, Any] = {}
         for key in ("building", "unit", "min_floor", "max_floor"):
             raw = item[key]
             if isinstance(raw, bool) or not isinstance(raw, int):
                 raise ValueError("模板楼层范围必须使用整数")
             values[key] = raw
+        if not -20 <= values["min_floor"] <= 120 or not -20 <= values["max_floor"] <= 120:
+            raise ValueError("最低层和最高层必须在 -20 到 120 之间")
         key = (values["building"], values["unit"])
         if key in seen:
             raise ValueError(f"{key[0]}栋{key[1]}单元模板楼层范围重复")
         try:
-            button_sequence(values["min_floor"], values["max_floor"])
+            raw_unavailable = item.get("unavailable_button_floors", [])
+            if not isinstance(raw_unavailable, list) or any(
+                isinstance(button, bool) or not isinstance(button, int)
+                for button in raw_unavailable
+            ):
+                raise LocationManifestError("缺失按键必须为整数列表")
+            unavailable = normalise_unavailable_button_floors(
+                values["min_floor"],
+                values["max_floor"],
+                raw_unavailable,
+            )
+            button_sequence(values["min_floor"], values["max_floor"], unavailable)
         except LocationManifestError as exc:
             raise ValueError(str(exc).replace("电梯按钮范围无效", "最低层和最高层范围无效")) from exc
+        if unavailable:
+            values["unavailable_button_floors"] = list(unavailable)
         seen.add(key)
         normalized.append(values)
     return sorted(normalized, key=lambda item: (item["building"], item["unit"]))
@@ -747,10 +768,17 @@ def _generated_multi_requests(
     for status in statuses:
         if not status.available:
             raise ValueError(f"{status.building}栋{status.unit}单元多点任务目录不可用：{'；'.join(status.issues)}")
+        range_config = ranges.get((status.building, status.unit))
+        unavailable_buttons = set(
+            range_config.get("unavailable_button_floors", ())
+            if range_config else ()
+        )
         destinations: list[MultiDestination] = []
         special_destinations: set[tuple[int, int]] = set()
         for point in status.special_points:
             if not point.available:
+                continue
+            if point.physical_floor in unavailable_buttons:
                 continue
             special_destinations.add((point.physical_floor, point.door))
             destinations.append(_random_delivery_point(
@@ -764,10 +792,13 @@ def _generated_multi_requests(
         for template in status.templates:
             if not template.available:
                 continue
-            range_config = ranges.get((status.building, status.unit))
             if range_config is None:
                 raise ValueError(f"{status.building}栋{status.unit}单元缺少模板楼层范围配置")
-            for floor in button_sequence(range_config["min_floor"], range_config["max_floor"]):
+            for floor in button_sequence(
+                range_config["min_floor"],
+                range_config["max_floor"],
+                range_config.get("unavailable_button_floors", ()),
+            ):
                 door = int(f"{floor}{template.door_suffix}")
                 if (floor, door) in special_destinations:
                     continue

@@ -31,8 +31,14 @@ test("multi destination payload leaves destination generation to the backend", (
 test("R6B template ranges are operator-configured in the acceptance scope", () => {
   assert.match(html, /id="multiFloorRanges"/);
   assert.match(html, /id="multiFloorRangeRows"/);
-  assert.match(controller, /floorRanges: readFloorRanges\(\)/);
+  assert.match(controller, /floorRanges = readFloorRanges\(\{ strict: true \}\)/);
   assert.match(controller, /自动排除 0 层/);
+});
+
+test("R6B template ranges let operators omit unavailable elevator buttons", () => {
+  assert.match(controller, /unavailable_button_floors/);
+  assert.match(controller, /缺失按键（可选）/);
+  assert.match(controller, /缺失按键请填写整数；多个按键请用逗号分隔。/);
 });
 
 test("R6B random chain size is configured independently from the sampled task count", () => {

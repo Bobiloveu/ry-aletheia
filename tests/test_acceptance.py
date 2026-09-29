@@ -182,6 +182,133 @@ def test_template_floor_range_expands_into_one_single_chain_per_elevator_button(
     ]
 
 
+def test_template_floor_range_excludes_missing_elevator_buttons(tmp_path):
+    plan = AcceptancePlanFactory.create_multi(
+        make_multi_tasks(tmp_path / "multi_tasks").scan(),
+        scope_type="building",
+        community="数创大厦",
+        building=5,
+        unit=1,
+        mode="full",
+        sample_size=None,
+        random_seed=7,
+        criteria=AcceptanceCriteria.empty(),
+        multi_options={
+            "out_eguard": False,
+            "return_origin": False,
+            "chain_mode": "single",
+            "floor_ranges": [{
+                "building": 5,
+                "unit": 1,
+                "min_floor": 5,
+                "max_floor": 12,
+                "unavailable_button_floors": [7, 10],
+            }],
+        },
+    )
+
+    destinations = [item.multi_request.destinations[0] for item in plan.items if item.multi_request]
+    assert plan.task_pool_size == 6
+    assert sorted((item.floor for item in destinations), key=int) == ["5", "6", "8", "9", "11", "12"]
+    assert plan.multi_options["floor_ranges"] == [{
+        "building": 5,
+        "unit": 1,
+        "min_floor": 5,
+        "max_floor": 12,
+        "unavailable_button_floors": [7, 10],
+    }]
+
+
+def test_template_floor_range_requires_integer_missing_button_labels(tmp_path):
+    with pytest.raises(ValueError, match="缺失按键必须为整数"):
+        AcceptancePlanFactory.create_multi(
+            make_multi_tasks(tmp_path / "multi_tasks").scan(),
+            scope_type="building",
+            community="数创大厦",
+            building=5,
+            unit=1,
+            mode="full",
+            sample_size=None,
+            random_seed=7,
+            criteria=AcceptanceCriteria.empty(),
+            multi_options={
+                "out_eguard": False,
+                "return_origin": False,
+                "chain_mode": "single",
+                "floor_ranges": [{
+                    "building": 5,
+                    "unit": 1,
+                    "min_floor": 5,
+                    "max_floor": 12,
+                    "unavailable_button_floors": ["7"],
+                }],
+            },
+        )
+
+
+@pytest.mark.parametrize(("min_floor", "max_floor"), [(-21, 12), (5, 121)])
+def test_template_floor_range_stays_within_elevator_button_limits(tmp_path, min_floor, max_floor):
+    with pytest.raises(ValueError, match="最低层和最高层必须在 -20 到 120 之间"):
+        AcceptancePlanFactory.create_multi(
+            make_multi_tasks(tmp_path / "multi_tasks").scan(),
+            scope_type="building",
+            community="数创大厦",
+            building=5,
+            unit=1,
+            mode="full",
+            sample_size=None,
+            random_seed=7,
+            criteria=AcceptanceCriteria.empty(),
+            multi_options={
+                "out_eguard": False,
+                "return_origin": False,
+                "chain_mode": "single",
+                "floor_ranges": [{
+                    "building": 5,
+                    "unit": 1,
+                    "min_floor": min_floor,
+                    "max_floor": max_floor,
+                }],
+            },
+        )
+
+
+def test_missing_elevator_buttons_exclude_matching_concrete_floor_tasks(tmp_path):
+    multi_root = tmp_path / "multi_tasks"
+    catalog = make_multi_tasks(multi_root)
+    community = multi_root / "数创大厦"
+    for name in ("floor/5_1_7_701.json", "floor/5_1_7_701_r.json"):
+        write_task(community / name, {"subtasks": [{}]})
+
+    plan = AcceptancePlanFactory.create_multi(
+        catalog.scan(),
+        scope_type="building",
+        community="数创大厦",
+        building=5,
+        unit=1,
+        mode="full",
+        sample_size=None,
+        random_seed=7,
+        criteria=AcceptanceCriteria.empty(),
+        multi_options={
+            "out_eguard": False,
+            "return_origin": False,
+            "chain_mode": "single",
+            "floor_ranges": [{
+                "building": 5,
+                "unit": 1,
+                "min_floor": 5,
+                "max_floor": 12,
+                "unavailable_button_floors": [7, 10],
+            }],
+        },
+    )
+
+    destinations = [item.multi_request.destinations[0] for item in plan.items if item.multi_request]
+    assert plan.task_pool_size == 6
+    assert sorted((item.floor for item in destinations), key=int) == ["5", "6", "8", "9", "11", "12"]
+
+
 def test_template_sampling_uses_the_expanded_floor_pool(tmp_path):
     plan = AcceptancePlanFactory.create_multi(
         make_multi_tasks(tmp_path / "multi_tasks").scan(),

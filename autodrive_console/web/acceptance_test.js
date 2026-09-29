@@ -23,6 +23,16 @@ import { acceptancePlanModePayload, acceptancePlanPreflightPayload, acceptanceTa
     };
   }
   function floorRangeKey(building, unit) { return `${building}:${unit}`; }
+  function parseUnavailableFloorButtons(raw, { strict = false } = {}) {
+    const value = String(raw || '').trim();
+    if (!value) return [];
+    const buttons = value.split(/[，,、]/).map((item) => item.trim());
+    if (buttons.some((item) => !/^-?\d+$/.test(item))) {
+      if (strict) throw new Error('缺失按键请填写整数；多个按键请用逗号分隔。');
+      return null;
+    }
+    return buttons.map(Number);
+  }
   function selectedMultiBuildings() {
     const modeCatalog = state.catalog?.modes?.multi_r6b || {};
     const community = (modeCatalog.communities || []).find((item) => item.name === $('communitySelect').value);
@@ -31,14 +41,23 @@ import { acceptancePlanModePayload, acceptancePlanPreflightPayload, acceptanceTa
     const [building, unit] = ($('buildingSelect').value || '').split(':').map(Number);
     return buildings.filter((item) => item.building === building && item.unit === unit);
   }
-  function readFloorRanges() {
+  function readFloorRanges({ strict = false } = {}) {
     const rows = [...document.querySelectorAll('#multiFloorRangeRows .multi-floor-range-row')];
-    const ranges = rows.map((row) => ({
-      building: Number(row.dataset.building),
-      unit: Number(row.dataset.unit),
-      min_floor: Number(row.querySelector('[data-floor-min]').value),
-      max_floor: Number(row.querySelector('[data-floor-max]').value),
-    })).filter((item) => Number.isInteger(item.building) && Number.isInteger(item.unit) && Number.isInteger(item.min_floor) && Number.isInteger(item.max_floor));
+    const ranges = rows.map((row) => {
+      const unavailable = parseUnavailableFloorButtons(
+        row.querySelector('[data-floor-unavailable]').value,
+        { strict },
+      );
+      return {
+        building: Number(row.dataset.building),
+        unit: Number(row.dataset.unit),
+        min_floor: Number(row.querySelector('[data-floor-min]').value),
+        max_floor: Number(row.querySelector('[data-floor-max]').value),
+        ...(Array.isArray(unavailable) && unavailable.length
+          ? { unavailable_button_floors: unavailable }
+          : {}),
+      };
+    }).filter((item) => Number.isInteger(item.building) && Number.isInteger(item.unit) && Number.isInteger(item.min_floor) && Number.isInteger(item.max_floor));
     if (rows.length) state.floorRanges = Object.fromEntries(ranges.map((item) => [floorRangeKey(item.building, item.unit), item]));
     return taskMode() === 'multi_r6b' ? ranges : Object.values(state.floorRanges);
   }
@@ -65,7 +84,10 @@ import { acceptancePlanModePayload, acceptancePlanPreflightPayload, acceptanceTa
       const maxLabel = document.createElement('label'); maxLabel.textContent = '最高按键';
       const maxInput = document.createElement('input'); maxInput.type = 'number'; maxInput.min = '-20'; maxInput.max = '120'; maxInput.step = '1'; maxInput.required = true; maxInput.dataset.floorMax = ''; maxInput.value = saved.max_floor ?? '';
       maxLabel.append(maxInput);
-      row.append(title, hint, minLabel, maxLabel); rows.append(row);
+      const unavailableLabel = document.createElement('label'); unavailableLabel.className = 'multi-floor-missing-buttons'; unavailableLabel.textContent = '缺失按键（可选）';
+      const unavailableInput = document.createElement('input'); unavailableInput.type = 'text'; unavailableInput.inputMode = 'numeric'; unavailableInput.autocomplete = 'off'; unavailableInput.placeholder = '例如：7, 10'; unavailableInput.dataset.floorUnavailable = ''; unavailableInput.value = (saved.unavailable_button_floors || []).join(', ');
+      unavailableLabel.append(unavailableInput);
+      row.append(title, hint, minLabel, maxLabel, unavailableLabel); rows.append(row);
     }
   }
   function saveDraft() {
@@ -448,8 +470,16 @@ import { acceptancePlanModePayload, acceptancePlanPreflightPayload, acceptanceTa
         $('multiMaxPoints').focus();
         return;
       }
+      let floorRanges;
+      try {
+        floorRanges = readFloorRanges({ strict: true });
+      } catch (error) {
+        message(error.message, true);
+        document.querySelector('[data-floor-unavailable]')?.focus();
+        return;
+      }
       action('/api/acceptance/plans', {
-        ...acceptancePlanModePayload(taskMode(), { outEguard: $('multiOutEguard').checked, returnOrigin: $('multiReturnOrigin').checked, chainMode: $('multiChainMode').value, maxPointsPerTask, floorRanges: readFloorRanges() }),
+        ...acceptancePlanModePayload(taskMode(), { outEguard: $('multiOutEguard').checked, returnOrigin: $('multiReturnOrigin').checked, chainMode: $('multiChainMode').value, maxPointsPerTask, floorRanges }),
         scope_type: scope(), community: $('communitySelect').value, building, unit,
         mode: mode(), sample_size: mode() === 'sample' ? Number($('sampleSize').value) : null,
         ...acceptancePlanPreflightPayload({
