@@ -60,10 +60,10 @@ REPORT_TRAJECTORY_CSS = r'''
 .trajectory-report-stage > svg { position: relative; z-index: 1; }
 .trajectory-report-cursor { position: absolute; z-index: 3; width: 11px; height: 11px; margin: -5px 0 0 -5px; border: 2px solid #fff; border-radius: 50%; background: #168cff; box-shadow: 0 0 0 4px rgba(22,140,255,.2), 0 0 14px rgba(22,140,255,.7); pointer-events: none; }
 .trajectory-report-cursor::before { content: ""; position: absolute; left: 50%; top: -9999px; width: 1px; height: 19999px; transform: translateX(-50%); background: rgba(22,140,255,.28); }
-.trajectory-report-tooltip { position: absolute; z-index: 4; min-width: 190px; max-width: min(260px, calc(100% - 16px)); padding: 10px 12px; border: 1px solid rgba(0,113,227,.58); border-radius: 9px; background: rgba(23,35,55,.96); color: #e8f4ff; box-shadow: 0 10px 24px rgba(23,35,55,.22); font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; pointer-events: none; }
-.trajectory-report-tooltip::after { content: ""; position: absolute; left: 50%; bottom: -6px; width: 10px; height: 10px; transform: translateX(-50%) rotate(45deg); border-right: 1px solid rgba(0,113,227,.58); border-bottom: 1px solid rgba(0,113,227,.58); background: rgba(23,35,55,.96); }
+.trajectory-report-tooltip { position: absolute; z-index: 4; min-width: 190px; max-width: min(440px, calc(100% - 16px)); padding: 8px 10px; border: 1px solid rgba(91,186,255,.72); border-radius: 7px; background: rgba(8,18,31,.92); color: #e8f4ff; box-shadow: 0 8px 24px rgba(0,0,0,.28), 0 0 0 1px rgba(22,140,255,.12); font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; pointer-events: none; backdrop-filter: blur(8px); }
+.trajectory-report-tooltip::after { content: ""; position: absolute; left: 50%; bottom: -6px; width: 10px; height: 10px; transform: translateX(-50%) rotate(45deg); border-right: 1px solid rgba(91,186,255,.72); border-bottom: 1px solid rgba(91,186,255,.72); background: rgba(8,18,31,.92); }
 .trajectory-report-tooltip-kicker { color: #72c8ff; font-size: 10px; }
-.trajectory-report-tooltip-time { display: block; margin-top: 3px; color: #fff; font-size: 13px; }
+.trajectory-report-tooltip-time { display: block; margin-top: 3px; color: #f2f8ff; font-size: 13px; }
 .trajectory-report-tooltip-route { margin-top: 2px; color: #a6bfd4; font-size: 10px; }
 .trajectory-report-tooltip-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 7px; color: #89a7bf; font-size: 10px; }
 .trajectory-report-tooltip-grid b { display: block; margin-top: 2px; color: #e7f4ff; }
@@ -88,7 +88,7 @@ REPORT_TRAJECTORY_SCRIPT = r'''
       if (!nearest) return hide(figure);
       const screenX = (nearest.x - view.x) * scaleX; const screenY = (nearest.y - view.y) * scaleY; const stageRect = stage.getBoundingClientRect(); const figureRect = figure.getBoundingClientRect();
       cursor.hidden = false; cursor.style.left = `${screenX}px`; cursor.style.top = `${screenY}px`;
-      tooltip.innerHTML = `<div class="trajectory-report-tooltip-kicker">磁吸采样点 ${nearest.point.sample_index}</div><strong class="trajectory-report-tooltip-time"></strong><div class="trajectory-report-tooltip-route"></div><div class="trajectory-report-tooltip-grid"><span>x <b></b></span><span>y <b></b></span></div>`;
+      tooltip.innerHTML = `<div class="trajectory-report-tooltip-kicker">采样点 ${nearest.point.sample_index}</div><strong class="trajectory-report-tooltip-time"></strong><div class="trajectory-report-tooltip-route"></div><div class="trajectory-report-tooltip-grid"><span>x <b></b></span><span>y <b></b></span></div>`;
       tooltip.querySelector(".trajectory-report-tooltip-time").textContent = timeOf(nearest.point.timestamp_ns); tooltip.querySelector(".trajectory-report-tooltip-route").textContent = nearest.point.route_name || "轨迹采样"; const values = tooltip.querySelectorAll(".trajectory-report-tooltip-grid b"); values[0].textContent = Number(nearest.point.x).toFixed(3); values[1].textContent = Number(nearest.point.y).toFixed(3);
       tooltip.hidden = false;
       const tooltipWidth = tooltip.offsetWidth; const tooltipHeight = tooltip.offsetHeight; const left = Math.max(8, Math.min(stageRect.width - tooltipWidth - 8, screenX - tooltipWidth / 2)); const top = Math.max(8, screenY - tooltipHeight - 14); tooltip.style.left = `${left}px`; tooltip.style.top = `${top}px`;
