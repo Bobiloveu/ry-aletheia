@@ -67,7 +67,10 @@ def test_onefile_release_builder_embeds_the_runtime_status_registry() -> None:
         encoding="utf-8"
     )
 
-    assert '--add-data "autodrive_console/task_templates/indoor_elevator_v1/task-status-codes.json:autodrive_console/task_templates/indoor_elevator_v1"' in builder
+    assert (
+        '--add-data "autodrive_console/task_templates/indoor_elevator_v1:'
+        'autodrive_console/task_templates/indoor_elevator_v1"'
+    ) in builder
 
 
 def test_onefile_release_builder_uses_vehicle_runtime_for_localization_interface() -> None:

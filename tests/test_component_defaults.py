@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import autodrive_console.component_defaults as defaults_module
 from autodrive_console.component_defaults import component_speed_defaults, component_speed_profile
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_access_component_speed_defaults_are_loaded_from_the_task_template_json():
@@ -12,6 +16,16 @@ def test_access_component_speed_defaults_are_loaded_from_the_task_template_json(
 
     assert defaults["auto_door"] == {"speed_profile": "task_point", "locked": True}
     assert defaults["gate"] == {"speed_profile": "narrow_point", "locked": True}
+
+
+def test_onefile_release_embeds_the_complete_deployment_template_tree():
+    """Packaged consoles need every managed JSON, XML and YAML template at runtime."""
+    builder = (ROOT / "build_binary.sh").read_text(encoding="utf-8")
+
+    assert (
+        '--add-data "autodrive_console/task_templates/indoor_elevator_v1:'
+        'autodrive_console/task_templates/indoor_elevator_v1"'
+    ) in builder
 
 
 def test_locked_access_component_speeds_override_stale_project_values():
