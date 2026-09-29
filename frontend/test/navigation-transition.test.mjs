@@ -34,6 +34,26 @@ test("Vue entry pages keep their chosen theme and visible shell stable before mo
   }
 
   const livePage = read("frontend/live-observation.html");
+  const liveStyleLink = '<link rel="stylesheet" href="/src/liveObservationEntry.css" />';
+  assert.ok(
+    livePage.indexOf(liveStyleLink) >= 0
+      && livePage.indexOf(liveStyleLink) < livePage.indexOf("<body>"),
+    "the live viewer must load its complete CSS before the browser can paint its static body",
+  );
+  const liveStyleEntry = read("frontend/src/liveObservationEntry.css");
+  const liveStyleOrder = [
+    "styles.css",
+    "refinement.css",
+    "page_views.css",
+    "liveObservation.css",
+    "app_shell.css",
+  ];
+  let previousStyleOffset = -1;
+  for (const stylesheet of liveStyleOrder) {
+    const styleOffset = liveStyleEntry.indexOf(stylesheet);
+    assert.ok(styleOffset > previousStyleOffset, `${stylesheet} must retain the existing cascade order`);
+    previousStyleOffset = styleOffset;
+  }
   assert.match(livePage, /\.mark svg\s*\{[^}]*width:\s*34px[^}]*height:\s*34px/s);
   assert.match(
     livePage,

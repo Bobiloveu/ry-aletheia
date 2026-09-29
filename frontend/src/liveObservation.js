@@ -6,11 +6,6 @@ import {
   Sprite,
   Texture,
 } from "pixi.js";
-import "../../autodrive_console/web/styles.css";
-import "../../autodrive_console/web/refinement.css";
-import "../../autodrive_console/web/page_views.css";
-import "./liveObservation.css";
-import "../../autodrive_console/web/app_shell.css";
 import "../../autodrive_console/web/app_shell.js";
 
 // Aletheia 专用遥测帧。地图仍从既有 HTTP 缓存读取；点云已经由小车端 C++
