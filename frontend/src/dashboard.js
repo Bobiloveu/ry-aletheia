@@ -7,7 +7,6 @@ import {
   onMounted,
   ref,
 } from "vue/dist/vue.esm-bundler.js";
-import "./pageBoot.js";
 import legacyHtml from "../../autodrive_console/web/index.html?raw";
 import "../../autodrive_console/web/styles.css";
 import "../../autodrive_console/web/refinement.css";
@@ -51,29 +50,9 @@ createApp({
     const dashboardHost = ref(null);
     let controller = null;
 
-    function routeLegacyPage(event) {
-      const link = event.target.closest("aside nav a");
-      if (!link) return;
-      const target = link.getAttribute("href");
-      if (target === "/") {
-        event.preventDefault();
-        return;
-      }
-      event.preventDefault();
-      if (window.location.port === "5173") {
-        // 所有预览路由均保持在 Vite；兼容页面由 Vite 代理至本地后端。
-        if (target === "/runtime-settings.html")
-          window.location.assign("/runtime-settings.html");
-        else window.location.assign(target);
-      } else {
-        window.location.assign(target);
-      }
-    }
-
     onMounted(async () => {
       dashboardHost.value.innerHTML = dashboardMarkup();
       window.RYAletheiaShell?.install();
-      dashboardHost.value.addEventListener("click", routeLegacyPage);
       await nextTick();
       controller = document.createElement("script");
       controller.src = legacyControllerUrl();
@@ -84,7 +63,6 @@ createApp({
     });
 
     onBeforeUnmount(() => {
-      dashboardHost.value?.removeEventListener("click", routeLegacyPage);
       controller?.remove();
     });
 

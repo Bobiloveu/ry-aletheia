@@ -4,8 +4,21 @@ import test from "node:test";
 
 const repoRoot = new URL("../..", import.meta.url);
 const read = (path) => readFileSync(new URL(path, repoRoot), "utf8");
+const legacyMenuPages = [
+  "autodrive_console/web/index.html",
+  "autodrive_console/web/deployment.html",
+  "autodrive_console/web/acceptance-test.html",
+  "autodrive_console/web/manual-control.html",
+  "autodrive_console/web/case-library.html",
+  "autodrive_console/web/reports.html",
+  "autodrive_console/web/robot-logs.html",
+  "autodrive_console/web/runtime-settings.html",
+  "autodrive_console/web/scenario-setup.html",
+  "autodrive_console/web/tool-logs.html",
+  "autodrive_console/web/mapping-workbench.html",
+];
 
-test("Vue entry pages provide a stable, styled first paint before modules mount", () => {
+test("Vue entry pages keep their chosen theme and visible shell stable before modules mount", () => {
   for (const pagePath of [
     "frontend/dashboard.html",
     "frontend/index.html",
@@ -14,30 +27,41 @@ test("Vue entry pages provide a stable, styled first paint before modules mount"
   ]) {
     const page = read(pagePath);
     assert.match(page, /<style data-shell-boot>/, `${pagePath} needs critical boot styles`);
-    assert.match(page, /data-page-ready="false"/, `${pagePath} should start behind the boot guard`);
+    assert.match(page, /ry-aletheia-theme/, `${pagePath} must read the saved theme before first paint`);
+    assert.match(page, /html\[data-theme="light"\]/, `${pagePath} must not flash the dark canvas for light-theme operators`);
+    assert.doesNotMatch(page, /visibility:\s*hidden/, `${pagePath} must never hide the whole application during navigation`);
+    assert.doesNotMatch(page, /opacity:\s*0/, `${pagePath} must never fade to a blank frame`);
   }
-
-  assert.match(read("frontend/src/pageBoot.js"), /app\.dataset\.pageReady = "true"/);
 
   const livePage = read("frontend/live-observation.html");
   assert.match(livePage, /\.mark svg\s*\{[^}]*width:\s*34px[^}]*height:\s*34px/s);
-  assert.match(livePage, /#app\[data-page-ready="false"\]\s*\{[^}]*visibility:\s*hidden/s);
 });
 
-test("desktop shell applies one accessible transition to internal menu navigation", () => {
+test("legacy menu pages apply the saved theme before loading the shared shell", () => {
+  for (const pagePath of legacyMenuPages) {
+    const page = read(pagePath);
+    assert.match(page, /<script src="\/theme_bootstrap\.js"><\/script>/,
+      `${pagePath} must select the saved theme before styles paint`);
+  }
+  assert.match(read("frontend/vite.config.js"), /"\/theme_bootstrap\.js"/);
+  assert.match(read("autodrive_console/web/app_shell.css"), /html\[data-theme="light"\] body/);
+  assert.match(read("autodrive_console/web/scenario_setup.css"), /html\[data-theme="light"\]\s+\.scenario-help/);
+  assert.match(read("autodrive_console/web/tool_logs.css"), /html\[data-theme="light"\]\s+\.diagnostic-file-row/);
+  assert.doesNotMatch(read("autodrive_console/web/vehicle-execution-status.html"), /theme_bootstrap\.js/);
+});
+
+test("desktop shell leaves menu navigation native and never captures a reshaping page", () => {
   const shell = read("autodrive_console/web/app_shell.js");
   const stylesheet = read("autodrive_console/web/app_shell.css");
 
-  assert.match(shell, /const installNavigationTransition = \(\) =>/);
-  assert.match(shell, /document\.addEventListener\('click'/);
-  assert.match(shell, /event\.target\.closest\('aside nav a\[href\]'\)/,
-    "only sidebar menu links may enter the page-transition flow");
-  assert.doesNotMatch(shell, /event\.target\.closest\('a\[href\]'\)/,
-    "downloads and in-page action links must remain outside the transition flow");
-  assert.match(shell, /dataset\.navigationState/, "leaving state must be visible to CSS");
-  assert.match(shell, /prefers-reduced-motion/);
-  assert.match(shell, /window\.location\.assign/);
-  assert.match(stylesheet, /@media \(prefers-reduced-motion:\s*no-preference\)\s*\{\s*@view-transition\s*\{\s*navigation:\s*auto;/s);
-  assert.match(stylesheet, /html\[data-navigation-state="leaving"\]/);
-  assert.match(stylesheet, /@media \(prefers-reduced-motion:\s*reduce\)/);
+  assert.doesNotMatch(shell, /installNavigationTransition/);
+  assert.doesNotMatch(shell, /navigationState/);
+  assert.doesNotMatch(stylesheet, /@view-transition/);
+  assert.doesNotMatch(stylesheet, /data-navigation-state/);
+  assert.doesNotMatch(stylesheet, /transition:\s*opacity/);
+  assert.doesNotMatch(read("frontend/src/dashboard.js"), /routeLegacyPage/);
+  assert.doesNotMatch(read("frontend/src/dashboard.js"), /dashboardHost\.value(?:\?\.)?\.addEventListener\(\s*["']click["']/);
+  const runtimeSettings = read("frontend/src/main.js");
+  const nav = runtimeSettings.slice(runtimeSettings.indexOf("<nav>"), runtimeSettings.indexOf("</nav>") + 6);
+  assert.doesNotMatch(nav, /(?:@click|v-on:click)/);
 });

@@ -55,6 +55,7 @@ const legacyBackendPaths = [
   "/vehicle_execution_status.css",
   "/app_shell.css",
   "/app_shell.js",
+  "/theme_bootstrap.js",
   "/aletheia.svg",
   "/platform/",
   "/vendor/bloub/",

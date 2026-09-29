@@ -139,21 +139,30 @@
   border-left-color: #cf4966;
   background: #251522;
 }
+html[data-theme="light"] .diagnostic-file-row,
+html[data-theme="light"] .log-row,
 .theme-light .diagnostic-file-row,
 .theme-light .log-row {
   background: #f8fbff;
   border-color: #cbdced;
 }
+html[data-theme="light"] .diagnostic-file-main h3,
+html[data-theme="light"] .log-row p,
 .theme-light .diagnostic-file-main h3,
 .theme-light .log-row p {
   color: #213b56;
 }
+html[data-theme="light"] .diagnostic-file-main p,
+html[data-theme="light"] .diagnostic-file-meta,
+html[data-theme="light"] .log-row time,
+html[data-theme="light"] .log-source,
 .theme-light .diagnostic-file-main p,
 .theme-light .diagnostic-file-meta,
 .theme-light .log-row time,
 .theme-light .log-source {
   color: #66829e;
 }
+html[data-theme="light"] .log-exception pre,
 .theme-light .log-exception pre {
   background: #edf5fd;
   border-color: #cbdced;

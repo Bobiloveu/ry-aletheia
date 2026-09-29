@@ -45,11 +45,15 @@ if (dashboardIds.length < 40 || !vueDashboard.includes("documentNode.body.innerH
   failed = true;
   console.error('FAIL: Vue 任务指挥台未以原始完整 DOM 作为保真挂载基线。');
 }
-for (const value of ['index.html?raw', 'styles.css', 'refinement.css', 'app.js', 'dashboardMarkup', 'routeLegacyPage']) {
+for (const value of ['index.html?raw', 'styles.css', 'refinement.css', 'app.js', 'dashboardMarkup']) {
   if (!vueDashboard.includes(value)) {
     failed = true;
     console.error(`FAIL: Vue 任务指挥台缺少保真迁移基线：${value}`);
   }
+}
+if (vueDashboard.includes('routeLegacyPage') || /dashboardHost\.value(?:\?\.)?\.addEventListener\(\s*["']click["']/.test(vueDashboard)) {
+  failed = true;
+  console.error('FAIL: Vue 任务指挥台不得拦截导航点击；链接必须保留浏览器原生跳转行为。');
 }
 for (const route of ['/acceptance-test.html', '/acceptance_test.js', '/acceptance_test.css']) {
   if (!viteConfig.includes(`"${route}"`)) {

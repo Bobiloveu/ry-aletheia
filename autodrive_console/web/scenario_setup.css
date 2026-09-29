@@ -141,46 +141,57 @@
     margin-top: 14px;
   }
 }
+html[data-theme="light"] .scenario-help,
 body.theme-light .scenario-help {
   color: #587087;
 }
+html[data-theme="light"] .scenario-inspection dt,
 body.theme-light .scenario-inspection dt {
   color: #617b91;
 }
+html[data-theme="light"] .scenario-inspection dd,
 body.theme-light .scenario-inspection dd {
   color: #294860;
 }
+html[data-theme="light"] .scenario-state,
 body.theme-light .scenario-state {
   background: #edf8f8;
   border-color: #1b9c91;
   color: #405f73;
 }
+html[data-theme="light"] .scenario-state.pending,
 body.theme-light .scenario-state.pending {
   background: #fff7e8;
   border-color: #cf9643;
   color: #76551e;
 }
+html[data-theme="light"] .scenario-state.error,
 body.theme-light .scenario-state.error {
   background: #fff1f2;
   border-color: #c77983;
   color: #823440;
 }
+html[data-theme="light"] .scenario-profile,
 body.theme-light .scenario-profile {
   background: #f7fbfe;
   border-color: #bdcfdf;
 }
+html[data-theme="light"] .profile-actions .apply-profile,
 .theme-light .profile-actions .apply-profile {
   background: #188a7c;
   border-color: #248f83;
 }
+html[data-theme="light"] .profile-actions .remove-profile,
 .theme-light .profile-actions .remove-profile {
   background: #fff2f4;
   border-color: #d39ca7;
   color: #99374a;
 }
+html[data-theme="light"] .scenario-preview-meta,
 .theme-light .scenario-preview-meta {
   color: #55728b;
 }
+html[data-theme="light"] .file-preview,
 .theme-light .file-preview {
   border-color: #bdcfdf;
   background: #f7fbfe;
