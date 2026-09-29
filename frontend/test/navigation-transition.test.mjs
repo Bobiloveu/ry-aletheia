@@ -35,6 +35,16 @@ test("Vue entry pages keep their chosen theme and visible shell stable before mo
 
   const livePage = read("frontend/live-observation.html");
   assert.match(livePage, /\.mark svg\s*\{[^}]*width:\s*34px[^}]*height:\s*34px/s);
+  assert.match(
+    livePage,
+    /\.mark svg\s*\{[^}]*fill:\s*none[^}]*stroke:\s*#fff/s,
+    "the desktop brand mark must not render as a solid black triangle before module CSS loads",
+  );
+  assert.match(
+    livePage,
+    /\.mobile-console-bar,\s*\.mobile-bottom-nav\s*\{[^}]*display:\s*none/s,
+    "mobile-only SVG navigation must stay out of the desktop first paint",
+  );
 });
 
 test("legacy menu pages apply the saved theme before loading the shared shell", () => {
