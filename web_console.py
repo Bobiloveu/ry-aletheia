@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import tempfile
+import tarfile
 import zipfile
 import cgi
 from datetime import datetime
@@ -20,6 +21,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from autodrive_console.case_store import CaseStore
+from autodrive_console.bag_recording import BagRecordingError, BagRecordingManager
 from autodrive_console.acceptance_catalog import AcceptanceTaskCatalog
 from autodrive_console.multi_task_catalog import MultiTaskCatalog
 from autodrive_console.acceptance_orchestrator import AcceptanceConflict, AcceptanceOrchestrator, AcceptanceValidationError
@@ -118,7 +120,11 @@ AUTOSTART = AutostartManager(WORKSPACE, launcher=_autostart_launcher())
 ROBOT_LOGS = RobotLogStore(SETTINGS)
 ROBOT_LOG_DOWNLOADS = RobotLogDownloadTracker()
 SCENARIO_SETUP = ScenarioSetupStore(CONFIG_DIR)
-RUNS = RunManager(WORKSPACE / "reports", RosTaskExecutor(), SETTINGS, SCENARIO_SETUP, localization_monitor=LOCALIZATION_STATUS)
+BAG_RECORDINGS = BagRecordingManager(WORKSPACE / "bag_recordings")
+RUNS = RunManager(
+    WORKSPACE / "reports", RosTaskExecutor(), SETTINGS, SCENARIO_SETUP,
+    localization_monitor=LOCALIZATION_STATUS, bag_recordings=BAG_RECORDINGS,
+)
 ACCEPTANCE = AcceptanceOrchestrator(
     catalog=AcceptanceTaskCatalog(Path(SETTINGS.load().task_directory)),
     multi_catalog=MultiTaskCatalog(Path("/opt/ry/data/tasks/multi_tasks")),
@@ -438,6 +444,20 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         elif path == "/api/runs/latest":
             run = RUNS.latest()
             self._json({"run": run.to_dict() if run else None})
+        elif path == "/api/bag-recordings/topics":
+            try:
+                self._json({"topics": BAG_RECORDINGS.available_topics()})
+            except BagRecordingError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE)
+        elif path == "/api/bag-recordings":
+            self._json({"archives": BAG_RECORDINGS.list_archives()})
+        elif match := re.fullmatch(r"/api/bag-recordings/([0-9a-f]{32})/download", path):
+            self._download_bag_archive(match.group(1))
+        elif match := re.fullmatch(r"/api/bag-recordings/([0-9a-f]{32})", path):
+            try:
+                self._json(BAG_RECORDINGS.archive_detail(match.group(1)))
+            except BagRecordingError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
         elif path == "/api/reports":
             self._json({"reports": self._reports()})
         elif path == "/api/system/upgrade":
@@ -947,7 +967,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             case = STORE.get_case(str(data["caseId"]))
             if not case:
                 raise ValueError("未找到指定测试用例，请刷新列表后重试")
-            run = RUNS.start(case, int(data.get("count", 1)), float(data.get("intervalSeconds", 3)), True)
+            run = RUNS.start(
+                case, int(data.get("count", 1)), float(data.get("intervalSeconds", 3)), True,
+                bag_recording=data.get("bagRecording"),
+            )
             self._json({"run": run.to_dict()}, HTTPStatus.ACCEPTED)
         except (KeyError, TypeError, ValueError, RuntimeError) as exc:
             LOGGER.warning("创建测试计划失败：%s", exc)
@@ -1541,6 +1564,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
+        if match := re.fullmatch(r"/api/bag-recordings/([0-9a-f]{32})", path):
+            try:
+                BAG_RECORDINGS.delete_archive(match.group(1))
+                self._json({"deleted": True})
+            except BagRecordingError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         if path.startswith("/api/cases/"):
             case_id = unquote(path.removeprefix("/api/cases/").rstrip("/"))
             if not case_id or "/" in case_id or "\\" in case_id:
@@ -1714,6 +1744,33 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
+
+    def _download_bag_archive(self, archive_id: str) -> None:
+        """Stream one manifest-backed bag directory without accepting a path."""
+        try:
+            directory = BAG_RECORDINGS.archive_path(archive_id)
+        except BagRecordingError as exc:
+            self.send_error(HTTPStatus.NOT_FOUND, str(exc))
+            return
+        if directory.is_symlink() or not directory.is_dir():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/x-tar")
+        self.send_header("Content-Disposition", f"attachment; filename=diagnostic-bag-{archive_id}.tar")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        try:
+            with tarfile.open(fileobj=self.wfile, mode="w|") as bundle:
+                for target in sorted(directory.rglob("*")):
+                    if target.is_symlink() or not target.is_file():
+                        continue
+                    resolved = target.resolve()
+                    if not resolved.is_relative_to(directory):
+                        continue
+                    bundle.add(str(target), arcname=str(Path(directory.name) / target.relative_to(directory)), recursive=False)
+        except (OSError, tarfile.TarError, BrokenPipeError):
+            LOGGER.warning("诊断录包下载中断：archive=%s", archive_id)
 
     @staticmethod
     def _archive_report_target(requested: str) -> Path:

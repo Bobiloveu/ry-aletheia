@@ -28,6 +28,7 @@
       label: "记录与分析",
       items: [
         { href: "/reports.html", label: "报告中心", icon: "◫" },
+        { href: "/bag-recordings.html", label: "诊断录包", icon: "◌" },
         {
           href: "/robot-logs.html",
           label: "机器人日志",

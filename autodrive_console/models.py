@@ -145,6 +145,9 @@ class AttemptResult:
     case_filename: str | None = None
     delivery_evidence: list[dict[str, str]] | None = None
     relocalization_count: int = 0
+    # Optional, final audit summary for the one selected diagnostic bag round.
+    # It contains no local path, command line, or full environment.
+    bag_recording: dict[str, Any] | None = None
 
 
 @dataclass

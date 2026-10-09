@@ -28,6 +28,7 @@
         ><a href="/live-observation.html"><span>◉</span>实时运行观测</a
         ><a href="/case-library.html"><span>▤</span>用例资产库</a
         ><a href="/reports.html"><span>◫</span>报告中心</a
+        ><a href="/bag-recordings.html"><span>◌</span>诊断录包</a
         ><a href="/runtime-settings.html"><span>⚙</span>运行配置</a>
       </nav>
       <div class="side-status">
@@ -113,6 +114,23 @@
                 value="3"
             /></label>
           </div>
+          <section class="bag-recording-control" aria-labelledby="bagRecordingTitle">
+            <div class="bag-recording-head">
+              <div>
+                <p class="eyebrow">OPTIONAL / DIAGNOSTIC EVIDENCE</p>
+                <b id="bagRecordingTitle">诊断录包</b>
+              </div>
+              <label class="inline-check"><input id="bagRecordingEnabled" type="checkbox" />本次保留数据包</label>
+            </div>
+            <p>仅录制所选轮次。图像、点云和 LaserScan 已迁移至共享内存，不在 DDS 录包列表中。</p>
+            <div class="fields">
+              <label>录制轮次<input id="bagRecordingAttempt" type="number" min="1" value="1" disabled /></label>
+              <button id="refreshBagTopics" class="text-button" type="button" disabled>刷新可录 Topic</button>
+            </div>
+            <input id="bagTopicFilter" type="search" placeholder="筛选 Topic" disabled />
+            <div id="bagTopicList" class="bag-topic-list" aria-live="polite">启用后读取当前 ROS 图。</div>
+            <small id="bagTopicHint">审查依据：同窗口只读计数与 rosbag 写入数。估算丢失 ≤1% 通过，1–5% 警告，&gt;5% 失败。</small>
+          </section>
           <div class="gate-note">
             <span>✓</span>
             <div>

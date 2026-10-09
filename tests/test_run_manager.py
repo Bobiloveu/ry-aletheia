@@ -129,3 +129,117 @@ def test_run_manager_marks_multi_chain_failed_when_delivery_event_is_missing(mon
     finished = next(item for item in events if item["type"] == "item_finished")
     assert finished["attempt"]["status"] == "failed"
     assert finished["attempt"]["delivery_evidence"][1]["status"] == "skipped"
+
+class FakeBagRecorder:
+    def __init__(self, *, start_error: Exception | None = None, audit_status: str = "passed"):
+        self.start_error = start_error
+        self.audit_status = audit_status
+        self.validated = []
+        self.started_attempts = []
+        self.stopped_attempts = []
+
+    def validate_request(self, request, count):
+        self.validated.append((request, count))
+        return SimpleNamespace(attempt_index=request["attemptIndex"], topics=tuple(request["topics"])) if request else None
+
+    def start(self, run_id, case_name, attempt_index, request):
+        self.started_attempts.append(attempt_index)
+        if self.start_error:
+            raise self.start_error
+        return SimpleNamespace(attempt_index=attempt_index, request=request, run_id=run_id)
+
+    def stop(self, active):
+        self.stopped_attempts.append(active.attempt_index)
+        return {
+            "archive_id": "a" * 32,
+            "display_name": "bag_test",
+            "total_size_bytes": 42,
+            "audit": {"status": self.audit_status, "errors": [] if self.audit_status == "passed" else ["audit failed"]},
+        }
+
+
+def _normal_case():
+    return AcceptanceTestCase(
+        "normal", "normal.json", "普通测试",
+        TaskParameters("园区", 1, 1, 1, 101), "/tmp/normal.json",
+    )
+
+
+def _wait_for_terminal(manager, run_id):
+    deadline = time.monotonic() + 3
+    while manager.get(run_id).status in {"queued", "preparing", "running", "recovering", "cancelling"} and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return manager.get(run_id)
+
+
+def test_run_manager_records_only_selected_round_and_attaches_audit(monkeypatch, tmp_path):
+    monkeypatch.setattr("autodrive_console.run_manager.RobotGateway", FakeGateway)
+    recorder = FakeBagRecorder()
+    executor = FakeExecutor()
+    manager = RunManager(tmp_path / "reports", executor, FakeSettings(), bag_recordings=recorder)
+
+    run = manager.start(_normal_case(), 3, 0, False, bag_recording={"attemptIndex": 2, "topics": ["/odom"]})
+    finished = _wait_for_terminal(manager, run.id)
+
+    assert finished.status == "completed"
+    assert executor.single_calls == 3
+    assert recorder.validated == [({"attemptIndex": 2, "topics": ["/odom"]}, 3)]
+    assert recorder.started_attempts == [2]
+    assert recorder.stopped_attempts == [2]
+    assert finished.attempts[1].bag_recording["audit"]["status"] == "passed"
+    assert finished.attempts[0].bag_recording is None
+
+
+def test_run_manager_never_dispatches_selected_round_when_recording_cannot_start(monkeypatch, tmp_path):
+    from autodrive_console.bag_recording import BagRecordingError
+
+    monkeypatch.setattr("autodrive_console.run_manager.RobotGateway", FakeGateway)
+    executor = FakeExecutor()
+    manager = RunManager(
+        tmp_path / "reports", executor, FakeSettings(),
+        bag_recordings=FakeBagRecorder(start_error=BagRecordingError("ROS 环境无效")),
+    )
+
+    run = manager.start(_normal_case(), 3, 0, False, bag_recording={"attemptIndex": 2, "topics": ["/odom"]})
+    finished = _wait_for_terminal(manager, run.id)
+
+    assert finished.status == "failed"
+    assert executor.single_calls == 1
+    assert finished.attempts[-1].index == 2
+    assert "录包未开始" in finished.attempts[-1].message
+
+
+def test_recording_lifecycle_is_independent_of_browser_polling_or_page_navigation(monkeypatch, tmp_path):
+    """The run thread, not an HTTP request, owns an active diagnostic capture."""
+    import threading
+
+    monkeypatch.setattr("autodrive_console.run_manager.RobotGateway", FakeGateway)
+
+    class BlockingExecutor(FakeExecutor):
+        def __init__(self):
+            super().__init__()
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def execute(self, *_args, **_kwargs):
+            self.single_calls += 1
+            self.entered.set()
+            assert self.release.wait(2), "test must explicitly finish the backend-owned round"
+            return True, "single", 0.01
+
+    recorder = FakeBagRecorder()
+    executor = BlockingExecutor()
+    manager = RunManager(tmp_path / "reports", executor, FakeSettings(), bag_recordings=recorder)
+
+    run = manager.start(_normal_case(), 1, 0, False, bag_recording={"attemptIndex": 1, "topics": ["/odom"]})
+    assert executor.entered.wait(1)
+    # No API session or browser callback is retained by RunManager.  While the
+    # browser is elsewhere, the active capture remains owned by this thread.
+    assert manager.get(run.id).status == "running"
+    assert recorder.started_attempts == [1]
+    assert recorder.stopped_attempts == []
+
+    executor.release.set()
+    finished = _wait_for_terminal(manager, run.id)
+    assert finished.status == "completed"
+    assert recorder.stopped_attempts == [1]
