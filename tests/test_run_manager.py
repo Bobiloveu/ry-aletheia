@@ -207,3 +207,39 @@ def test_run_manager_never_dispatches_selected_round_when_recording_cannot_start
     assert executor.single_calls == 1
     assert finished.attempts[-1].index == 2
     assert "录包未开始" in finished.attempts[-1].message
+
+
+def test_recording_lifecycle_is_independent_of_browser_polling_or_page_navigation(monkeypatch, tmp_path):
+    """The run thread, not an HTTP request, owns an active diagnostic capture."""
+    import threading
+
+    monkeypatch.setattr("autodrive_console.run_manager.RobotGateway", FakeGateway)
+
+    class BlockingExecutor(FakeExecutor):
+        def __init__(self):
+            super().__init__()
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def execute(self, *_args, **_kwargs):
+            self.single_calls += 1
+            self.entered.set()
+            assert self.release.wait(2), "test must explicitly finish the backend-owned round"
+            return True, "single", 0.01
+
+    recorder = FakeBagRecorder()
+    executor = BlockingExecutor()
+    manager = RunManager(tmp_path / "reports", executor, FakeSettings(), bag_recordings=recorder)
+
+    run = manager.start(_normal_case(), 1, 0, False, bag_recording={"attemptIndex": 1, "topics": ["/odom"]})
+    assert executor.entered.wait(1)
+    # No API session or browser callback is retained by RunManager.  While the
+    # browser is elsewhere, the active capture remains owned by this thread.
+    assert manager.get(run.id).status == "running"
+    assert recorder.started_attempts == [1]
+    assert recorder.stopped_attempts == []
+
+    executor.release.set()
+    finished = _wait_for_terminal(manager, run.id)
+    assert finished.status == "completed"
+    assert recorder.stopped_attempts == [1]

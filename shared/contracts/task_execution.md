@@ -198,7 +198,7 @@ GET /api/reports/{report_id}/native/trajectories/{trajectory_id}/samples?cursor=
 
 **Status: Existing（Backend schema v1）**。运行时执行方为 `BagRecordingManager` 与普通 `RunManager`；Existing 消费者为 Desktop Web 的任务指挥台和 `/bag-recordings.html`；Mobile、验收序列、导航/底盘控制、视频及实时观测均为非消费者。
 
-普通测试 `POST /api/runs` 可增量携带 `bagRecording: null | {attemptIndex,topics}`。它只允许一个 `1..count` 的目标轮及 1–32 个不重复 Topic；浏览器不能提交命令、输出路径、压缩参数或 ROS 环境。未启用时原测试路径不变。目标轮下发任务前，Backend 必须再次验证 Topic 仍是单一类型、有 DDS 发布者的可审查 Topic，并确认已通过 ROS Humble 环境预检、受控 recorder 进程存活和只读计数器就绪；任一项失败时该轮不得下发任务并必须记录失败原因。
+普通测试 `POST /api/runs` 可增量携带 `bagRecording: null | {attemptIndex,topics}`。它只允许一个 `1..count` 的目标轮及 1–32 个不重复 Topic；浏览器不能提交命令、输出路径、压缩参数或 ROS 环境。未启用时原测试路径不变。录包生命周期由 Backend 测试线程持有，不绑定浏览器页面、HTTP 连接、轮询或页面可见性；操作者切换页面、刷新或关闭标签页不会停止录包、改变目标轮或改变审查状态。目标轮下发任务前，Backend 必须再次验证 Topic 仍是单一类型、有 DDS 发布者的可审查 Topic，并确认已通过 ROS Humble 环境预检、受控 recorder 进程存活和只读计数器就绪；任一项失败时该轮不得下发任务并必须记录失败原因。
 
 `GET /api/bag-recordings/topics` 只返回 `{name,type,publisher_count}`。它不列出隐藏、无发布者、多类型 Topic，也不列出已迁移到 ShmSDK 的 `sensor_msgs/msg/Image`、压缩/立体图像、`CameraInfo`、`PointCloud*` 或 `LaserScan` 类型；这些流不经过 DDS，不能录入 rosbag。`GET /api/bag-recordings` 返回受控归档摘要；`GET /api/bag-recordings/{id}` 返回已过滤清单详情；`DELETE /api/bag-recordings/{id}` 只能删除 Backend 发现的非活动受控目录。ID 固定为 32 位小写十六进制，接口绝不接受文件路径。
 
