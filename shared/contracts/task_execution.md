@@ -193,3 +193,15 @@ GET /api/reports/{report_id}/native/trajectories/{trajectory_id}/samples?cursor=
 - PC Web 不消费此字段或详情端点，不改变现有报告页面、下载与删除行为。
 - 既有 `DELETE /api/reports/{filename}` 的 filename 受控删除路径保持不变；`report_id` 不能替代、扩展或绕过它。
 - 将本节端点从 Planned 提升为 Existing 前，Backend 必须完成输入/输出校验、404/400 安全语义、旧索引兼容与迁移说明；Mobile 必须验证缺失/畸形/分页/错误状态；PC Web 必须确认忽略新增字段仍保持既有流程。然后在本文档记录三方验证证据与实际权威实现。
+
+## 诊断 ROS Bag 录制（Desktop Web）
+
+**Status: Existing（Backend schema v1）**。运行时执行方为 `BagRecordingManager` 与普通 `RunManager`；Existing 消费者为 Desktop Web 的任务指挥台和 `/bag-recordings.html`；Mobile、验收序列、导航/底盘控制、视频及实时观测均为非消费者。
+
+普通测试 `POST /api/runs` 可增量携带 `bagRecording: null | {attemptIndex,topics}`。它只允许一个 `1..count` 的目标轮及 1–32 个不重复 Topic；浏览器不能提交命令、输出路径、压缩参数或 ROS 环境。未启用时原测试路径不变。目标轮下发任务前，Backend 必须再次验证 Topic 仍是单一类型、有 DDS 发布者的可审查 Topic，并确认已通过 ROS Humble 环境预检、受控 recorder 进程存活和只读计数器就绪；任一项失败时该轮不得下发任务并必须记录失败原因。
+
+`GET /api/bag-recordings/topics` 只返回 `{name,type,publisher_count}`。它不列出隐藏、无发布者、多类型 Topic，也不列出已迁移到 ShmSDK 的 `sensor_msgs/msg/Image`、压缩/立体图像、`CameraInfo`、`PointCloud*` 或 `LaserScan` 类型；这些流不经过 DDS，不能录入 rosbag。`GET /api/bag-recordings` 返回受控归档摘要；`GET /api/bag-recordings/{id}` 返回已过滤清单详情；`DELETE /api/bag-recordings/{id}` 只能删除 Backend 发现的非活动受控目录。ID 固定为 32 位小写十六进制，接口绝不接受文件路径。
+
+录制固定使用 SQLite3、Zstd 文件级压缩、8 槽压缩队列、2 个压缩线程和 512 MiB cache。清单记录受限 ROS 环境指纹、固定 profile、选中 Topic 类型、metadata 计数、独立只读计数、文件大小、SHA-256 和审查结论。文件先写入 `bag_recordings/.staging`，再以 fsync 与原子 rename 发布；控制台重启发现的 staging 数据必须保留并标记未完成。审查把计数器接收数与 rosbag2 metadata 写入数比较：≤1% 通过、>1% 且 ≤5% 警告、>5% 失败；metadata/哈希/Topic/进程/计数器异常也为失败。该审查不声称能证明上游发布者自身绝对零丢帧。
+
+变更影响为 Backend 与 Desktop Web；当前 Mobile 非消费者，无需 Mobile 工具链。定向验证为 Backend 录包/RunManager/HTTP 测试与 Desktop Web 模块检查；不构建离线升级包、不部署或重启机器人。

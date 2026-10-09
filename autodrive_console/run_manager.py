@@ -71,6 +71,7 @@ class RunManager:
         scenario_setup: ScenarioSetupStore | None = None,
         return_signal_factory: Callable[[], object] | None = None,
         localization_monitor: object | None = None,
+        bag_recordings: object | None = None,
     ) -> None:
         self.report_dir = report_dir
         self.executor = executor
@@ -78,6 +79,7 @@ class RunManager:
         self.scenario_setup = scenario_setup
         self._return_signal_factory = return_signal_factory or RosReturnSignalBridge
         self._localization_monitor = localization_monitor
+        self._bag_recordings = bag_recordings
         self._scenario_apply_settle_seconds = SCENARIO_APPLY_SETTLE_SECONDS
         self._runs: dict[str, RunRecord] = {}
         self._cancel_events: dict[str, threading.Event] = {}
@@ -87,13 +89,31 @@ class RunManager:
         self._execution_lock = threading.Lock()
         self._dependency_restart_count = 0
 
-    def start(self, case: TestCase, count: int, interval_s: float, prepare_trajectory_maps: bool = True) -> RunRecord:
+    def start(
+        self,
+        case: TestCase,
+        count: int,
+        interval_s: float,
+        prepare_trajectory_maps: bool = True,
+        *,
+        bag_recording: object | None = None,
+    ) -> RunRecord:
         if not 1 <= count <= 1000:
             raise ValueError("执行次数必须介于 1 和 1000 之间")
         if not 0 <= interval_s <= 3600:
             raise ValueError("执行间隔必须介于 0 和 3600 秒之间")
+        if bag_recording is not None and self._bag_recordings is None:
+            raise ValueError("当前控制台未启用诊断录包")
+        normalized_bag_recording = (
+            self._bag_recordings.validate_request(bag_recording, count)
+            if self._bag_recordings is not None else None
+        )
         # 轨迹图是正式测试报告的必备证据，不允许创建无轨迹的执行计划。
         run = RunRecord(id=uuid.uuid4().hex[:12], case=case, requested_count=count, interval_s=interval_s, prepare_trajectory_maps=True)
+        # The manager-owned object intentionally stays out of the external
+        # RunRecord schema.  It contains no browser-supplied command/path and
+        # is consumed only by this normal-test execution thread.
+        run._bag_recording_request = normalized_bag_recording
         with self._lock:
             if any(item.status in {"queued", "preparing", "running", "cancelling", "awaiting_recovery", "recovering"} for item in self._runs.values()):
                 raise RuntimeError("已有任务正在执行，请等待其完成后再发起新任务")
@@ -692,6 +712,8 @@ class RunManager:
                         break
                     started = now_iso()
                     trajectory_session = None
+                    active_bag_recording = None
+                    bag_recording_summary = None
                     run.active_attempt = index
                     run.forced_attempt_failure = None
                     attempt_interrupt_event.clear()
@@ -699,6 +721,28 @@ class RunManager:
                     # 标记为不可用，避免多轮切换时网页把未知状态误画成卡住的 0%。
                     run.live_progress = {"visible": True, "attempt": index, "attempt_total": run.requested_count, "state": "正在等待 /map 与 /odom", "progress_available": False, "percent": 0, "points": 0}
                     trajectory_start_error = ""
+                    requested_bag_recording = getattr(run, "_bag_recording_request", None)
+                    if requested_bag_recording is not None and index == requested_bag_recording.attempt_index:
+                        try:
+                            # Capture is a strict prerequisite for its selected
+                            # round: never send an unrecorded task after the
+                            # operator explicitly requested diagnostic data.
+                            active_bag_recording = self._bag_recordings.start(
+                                run.id, run.case.name, index, requested_bag_recording,
+                            )
+                            run._active_bag_recording = active_bag_recording
+                        except Exception as exc:
+                            message = f"诊断录包未开始，本轮任务未下发：{exc}"
+                            run.attempts.append(AttemptResult(
+                                index, "failed", message, 0.0, started,
+                                None, run.case.id, run.case.filename,
+                                bag_recording={"audit": {"status": "failed", "errors": [str(exc)]}},
+                            ))
+                            run.active_attempt = None
+                            run.status = "failed"
+                            run.error = message
+                            LOGGER.error("诊断录包启动失败，拒绝下发目标轮：run=%s attempt=%s error=%s", run.id, index, exc)
+                            break
                     if run.prepare_trajectory_maps:
                         try:
                             trajectory_session = TrajectorySession(trajectory_assets, route_plan, lambda progress, attempt=index: self._update_live_progress(run, attempt, progress), elevator_wait_timeout_s=self.settings.load().elevator_wait_timeout_s, map_cache_dir=self.report_dir.parent / "maps_cache", localization_monitor=self._localization_monitor)
@@ -799,6 +843,21 @@ class RunManager:
                         except Exception as exc:
                             message = f"{message} · 轨迹保存失败：{exc}"
                             LOGGER.exception("轨迹证据保存失败：run=%s attempt=%s", run.id, index)
+                    if active_bag_recording is not None:
+                        try:
+                            bag_recording_summary = self._bag_recordings.stop(active_bag_recording)
+                            run._active_bag_recording = None
+                            audit = bag_recording_summary.get("audit", {})
+                            audit_status = audit.get("status") if isinstance(audit, dict) else "failed"
+                            if audit_status != "passed":
+                                ok = False
+                                message = f"{message} · 诊断录包审查{audit_status}"
+                        except Exception as exc:
+                            run._active_bag_recording = None
+                            bag_recording_summary = {"audit": {"status": "failed", "errors": [f"录包收尾失败：{exc}"]}}
+                            ok = False
+                            message = f"{message} · 诊断录包收尾失败：{exc}"
+                            LOGGER.exception("诊断录包收尾失败：run=%s attempt=%s", run.id, index)
                     forced_failure = run.forced_attempt_failure
                     if forced_failure and forced_failure.get("attempt") == index:
                         ok = False
@@ -806,17 +865,17 @@ class RunManager:
                     existing = next((item for item in run.attempts if item.index == index), None)
                     if cancel_event.is_set():
                         if existing:
-                            existing.status, existing.message, existing.duration_s, existing.trajectory, existing.delivery_evidence, existing.relocalization_count = "cancelled", message, duration, trajectory, delivery_evidence, relocalization_count
+                            existing.status, existing.message, existing.duration_s, existing.trajectory, existing.delivery_evidence, existing.relocalization_count, existing.bag_recording = "cancelled", message, duration, trajectory, delivery_evidence, relocalization_count, bag_recording_summary
                         else:
-                            run.attempts.append(AttemptResult(index, "cancelled", message, duration, started, trajectory, run.case.id, run.case.filename, delivery_evidence, relocalization_count))
+                            run.attempts.append(AttemptResult(index, "cancelled", message, duration, started, trajectory, run.case.id, run.case.filename, delivery_evidence, relocalization_count, bag_recording_summary))
                         run.active_attempt = None
                         run.forced_attempt_failure = None
                         run.status = "cancelled"
                         break
                     if existing:
-                        existing.status, existing.message, existing.duration_s, existing.trajectory, existing.delivery_evidence, existing.relocalization_count = "failed", message, duration, trajectory, delivery_evidence, relocalization_count
+                        existing.status, existing.message, existing.duration_s, existing.trajectory, existing.delivery_evidence, existing.relocalization_count, existing.bag_recording = "failed", message, duration, trajectory, delivery_evidence, relocalization_count, bag_recording_summary
                     else:
-                        run.attempts.append(AttemptResult(index, "passed" if ok else "failed", message, duration, started, trajectory, run.case.id, run.case.filename, delivery_evidence, relocalization_count))
+                        run.attempts.append(AttemptResult(index, "passed" if ok else "failed", message, duration, started, trajectory, run.case.id, run.case.filename, delivery_evidence, relocalization_count, bag_recording_summary))
                     run.active_attempt = None
                     run.forced_attempt_failure = None
                     if not ok:
@@ -858,12 +917,20 @@ class RunManager:
                         if cancel_event.wait(run.interval_s):
                             run.status = "cancelled"
                             break
-                if run.status != "cancelled":
+                if run.status not in {"cancelled", "failed"}:
                     run.status = "completed"
             except Exception as exc:
                 run.status, run.error = "failed", f"运行中断：{exc}"
                 LOGGER.exception("测试计划异常中断：run=%s", run.id)
             finally:
+                lingering_bag_recording = getattr(run, "_active_bag_recording", None)
+                if lingering_bag_recording is not None:
+                    try:
+                        self._bag_recordings.stop(lingering_bag_recording)
+                    except Exception:
+                        LOGGER.exception("异常路径回收诊断录包失败：run=%s", run.id)
+                    finally:
+                        run._active_bag_recording = None
                 run.live_progress = None
                 run.active_attempt = None
                 if scenario_applied:

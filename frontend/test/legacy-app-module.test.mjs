@@ -24,10 +24,12 @@ test("task dashboard controller parses as an ES module before it reaches the DOM
     const httpSource = await readFile(new URL("autodrive_console/web/platform/http.js", repoRoot), "utf8");
     const syncSource = await readFile(new URL("autodrive_console/web/task_dashboard_sync.js", repoRoot), "utf8");
     const trajectoryHoverSource = await readFile(new URL("autodrive_console/web/trajectory-hover.js", repoRoot), "utf8");
+    const bagRecordingSource = await readFile(new URL("autodrive_console/web/bag-recording-form.js", repoRoot), "utf8");
     await writeFile(join(directory, "app.mjs"), appSource.replace('"./platform/http.js"', '"./http.mjs"'));
     await writeFile(join(directory, "http.mjs"), httpSource);
     await writeFile(join(directory, "task_dashboard_sync.js"), syncSource);
     await writeFile(join(directory, "trajectory-hover.js"), trajectoryHoverSource);
+    await writeFile(join(directory, "bag-recording-form.js"), bagRecordingSource);
 
     await assert.rejects(
       import(`${pathToFileURL(join(directory, "app.mjs")).href}?${Date.now()}`),
@@ -200,4 +202,13 @@ test("automatic route nodes retain only executable transition and component refe
       { kind: "component", id: "slow-zone-1" },
     ],
   );
+});
+
+test("diagnostic bag payload is absent while disabled and preserves one selected round", async () => {
+  const { buildBagRecordingPayload } = await import(new URL("autodrive_console/web/bag-recording-form.js", repoRoot));
+  assert.equal(buildBagRecordingPayload({ enabled: false, attemptIndex: 2, topics: ["/odom"] }), null);
+  assert.deepEqual(buildBagRecordingPayload({ enabled: true, attemptIndex: 2, topics: ["/odom"] }), {
+    attemptIndex: 2, topics: ["/odom"],
+  });
+  assert.equal(buildBagRecordingPayload({ enabled: true, attemptIndex: 0, topics: [] }), null);
 });

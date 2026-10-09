@@ -1,9 +1,11 @@
 import { requestJson } from "./platform/http.js";
 import { taskDashboardRefreshDelay } from "./task_dashboard_sync.js";
 import { findMagneticTrajectoryPoint, formatBeijingTime, interpolateCounterValue } from "./trajectory-hover.js";
+import { bagAuditLabel, buildBagRecordingPayload } from "./bag-recording-form.js";
 
 const $ = (id) => document.getElementById(id);
 let cases = [], uiPreferences = { case_id: '', count: 20, interval_seconds: 3 }, dependencyPlan = { enabled: false, steps: [] }, monitorNodes = [], supervisorProcesses = [], timer = null, currentRun = null;
+let bagTopics = [], selectedBagTopicNames = new Set();
 const acknowledgedStallAlerts = new Set();
 const trajectoryView = { scale: 1, x: 0, y: 0, drag: null };
 const trajectoryHover = { attempt: null, mapId: null, counterFrame: null, counterValues: {} };
@@ -45,6 +47,31 @@ async function loadCases() {
 function showCase() {
   const testCase = cases.find(item => item.id === $('caseSelect').value);
   $('caseMeta').textContent = testCase ? `当前用例：${testCase.alias || testCase.filename}  |  community=${testCase.parameters.community}, building=${testCase.parameters.building}, unit=${testCase.parameters.unit}, floor=${testCase.parameters.floor}, door=${testCase.parameters.door}` : '请在 tasks/ 目录中放入有效的 JSON 用例文件';
+}
+function selectedBagTopics() { return [...selectedBagTopicNames]; }
+function renderBagTopics() {
+  const filter = $('bagTopicFilter').value.trim().toLowerCase();
+  const selected = selectedBagTopicNames;
+  const visible = bagTopics.filter(topic => !filter || topic.name.toLowerCase().includes(filter) || topic.type.toLowerCase().includes(filter));
+  $('bagTopicList').innerHTML = visible.length ? visible.map(topic => `<label class="bag-topic-row"><input data-bag-topic type="checkbox" value="${escapeHtml(topic.name)}" ${selected.has(topic.name) ? 'checked' : ''}/><span>${escapeHtml(topic.name)}</span><small>${escapeHtml(topic.type)} · ${topic.publisher_count} 发布者</small></label>`).join('') : '未发现可审查的 DDS Topic。';
+}
+async function refreshBagTopics() {
+  $('bagTopicHint').textContent = '正在读取当前 ROS 图…';
+  try {
+    const data = await requestJson('/api/bag-recordings/topics');
+    bagTopics = Array.isArray(data.topics) ? data.topics : [];
+    selectedBagTopicNames = new Set([...selectedBagTopicNames].filter(topic => bagTopics.some(item => item.name === topic)));
+    renderBagTopics();
+    $('bagTopicHint').textContent = bagTopics.length ? `已发现 ${bagTopics.length} 个可录 Topic；提交前和目标轮开始前都会再次验证。` : '没有可录 Topic；请确认当前 DDS 发布者已启动。';
+  } catch (error) { $('bagTopicHint').textContent = `无法读取 ROS 图：${error.message}`; }
+}
+function syncBagRecordingControls() {
+  const enabled = $('bagRecordingEnabled').checked;
+  ['bagRecordingAttempt', 'refreshBagTopics', 'bagTopicFilter'].forEach(id => { $(id).disabled = !enabled; });
+  $('bagRecordingAttempt').max = $('count').value || '1';
+  if (+$('bagRecordingAttempt').value > +$('count').value) $('bagRecordingAttempt').value = $('count').value;
+  if (enabled && !bagTopics.length) refreshBagTopics();
+  if (!enabled) $('bagTopicHint').textContent = '审查依据：同窗口只读计数与 rosbag 写入数。估算丢失 ≤1% 通过，1–5% 警告，>5% 失败。';
 }
 function applyUiPreferences() {
   if (uiPreferences.case_id && cases.some(item => item.id === uiPreferences.case_id)) $('caseSelect').value = uiPreferences.case_id;
@@ -117,7 +144,7 @@ function renderRun(run) {
   $('runStatus').textContent = hasRun ? statusText(run.status) : '待命'; $('runHint').textContent = hasRun ? `${summary.completed}/${run.requestedCount} 次已完成` : 'PRE-FLIGHT REQUIRED'; $('passRate').textContent = hasRun && summary.completed ? `${summary.passRate}%` : '—';
   $('statusBadge').textContent = hasRun ? run.status.toUpperCase() : 'IDLE'; $('statusBadge').className = `badge ${run?.status === 'running' || run?.status === 'preparing' ? '' : 'muted'}`;
   $('progressBar').style.width = `${hasRun ? summary.completed / run.requestedCount * 100 : 0}%`; $('progressText').textContent = hasRun ? `${statusText(run.status)} · ${summary.completed}/${run.requestedCount} 次 · ${summary.passed} 通过 / ${summary.failed} 失败${summary.cancelled ? ` / ${summary.cancelled} 已取消` : ''}` : '暂无执行任务'; $('durationText').textContent = run?.attempts?.length ? `最近 ${minutes(run.attempts.at(-1).duration_s)}` : '—';
-  $('resultBody').innerHTML = run?.attempts?.length ? run.attempts.slice().reverse().map(item => `<tr><td>T-${String(item.index).padStart(3, '0')}</td><td>${new Date(item.started_at).toLocaleTimeString('zh-CN', { hour12: false })}</td><td class="status ${item.status}">${item.status.toUpperCase()}</td><td>${escapeHtml(item.message)}</td><td>${minutes(item.duration_s)}</td><td>${item.trajectory?.visualizations?.length ? `<button class="trajectory-view" data-attempt="${item.index}" type="button">查看轨迹</button>` : '—'}</td></tr>`).join('') : `<tr><td colspan="6" class="empty">${escapeHtml(run?.error || '等待测试任务')}</td></tr>`;
+  $('resultBody').innerHTML = run?.attempts?.length ? run.attempts.slice().reverse().map(item => `<tr><td>T-${String(item.index).padStart(3, '0')}</td><td>${new Date(item.started_at).toLocaleTimeString('zh-CN', { hour12: false })}</td><td class="status ${item.status}">${item.status.toUpperCase()}</td><td>${escapeHtml(item.message)}${item.bag_recording ? `<span class="bag-audit ${escapeHtml(item.bag_recording.audit?.status || 'failed')}">诊断录包：${escapeHtml(item.bag_recording.display_name || '归档中')} · ${escapeHtml(bagAuditLabel(item.bag_recording.audit))}</span>` : ''}</td><td>${minutes(item.duration_s)}</td><td>${item.trajectory?.visualizations?.length ? `<button class="trajectory-view" data-attempt="${item.index}" type="button">查看轨迹</button>` : '—'}</td></tr>`).join('') : `<tr><td colspan="6" class="empty">${escapeHtml(run?.error || '等待测试任务')}</td></tr>`;
   const attempts = run?.attempts || [], chart = $('chart');
   chart.setAttribute('role', 'region');
   chart.tabIndex = 0;
@@ -299,10 +326,22 @@ $('trajectoryCanvas').addEventListener('pointermove', event => { if (trajectoryV
 $('trajectoryCanvas').addEventListener('pointerleave', hideTrajectoryTooltip);
 $('trajectoryCanvas').addEventListener('pointerup', event => { trajectoryView.drag = null; event.currentTarget.releasePointerCapture(event.pointerId); updateTrajectoryTooltip(event); });
 $('trajectoryCanvas').addEventListener('pointercancel', () => { trajectoryView.drag = null; });
+$('bagRecordingEnabled').addEventListener('change', syncBagRecordingControls);
+$('refreshBagTopics').addEventListener('click', refreshBagTopics);
+$('bagTopicFilter').addEventListener('input', renderBagTopics);
+$('bagTopicList').addEventListener('change', event => {
+  const input = event.target;
+  if (!(input instanceof HTMLInputElement) || !input.matches('[data-bag-topic]')) return;
+  if (input.checked) selectedBagTopicNames.add(input.value); else selectedBagTopicNames.delete(input.value);
+});
+$('count').addEventListener('input', syncBagRecordingControls);
 $('startButton').addEventListener('click', async () => {
   $('formMessage').textContent = '';
-  const testCase = cases.find(item => item.id === $('caseSelect').value); const accepted = await confirmAction({ eyebrow: 'CONFIRM TEST EXECUTION', title: '确认开始自动化测试？', body: `用例：${testCase?.alias || testCase?.filename || '未选择'}；执行 ${$('count').value} 轮，每轮间隔 ${$('interval').value} 秒。`, confirmText: '确认开始' }); if (!accepted) return;
-  try { const data = await requestJson('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ caseId: $('caseSelect').value, count: +$('count').value, intervalSeconds: +$('interval').value, prepareTrajectoryMaps: true }) }); renderRun(data.run); toast('测试计划已创建，正在执行前置条件校验。'); poll(); } catch (error) { $('formMessage').textContent = error.message; }
+  const bagRecording = buildBagRecordingPayload({ enabled: $('bagRecordingEnabled').checked, attemptIndex: $('bagRecordingAttempt').value, topics: selectedBagTopics() });
+  if ($('bagRecordingEnabled').checked && !bagRecording) { $('formMessage').textContent = '请为诊断录包选择有效轮次和至少一个 Topic。'; return; }
+  const testCase = cases.find(item => item.id === $('caseSelect').value); const captureText = bagRecording ? `；将在 T-${String(bagRecording.attemptIndex).padStart(3, '0')} 录制 ${bagRecording.topics.length} 个诊断 Topic` : '';
+  const accepted = await confirmAction({ eyebrow: 'CONFIRM TEST EXECUTION', title: '确认开始自动化测试？', body: `用例：${testCase?.alias || testCase?.filename || '未选择'}；执行 ${$('count').value} 轮，每轮间隔 ${$('interval').value} 秒${captureText}。`, confirmText: '确认开始' }); if (!accepted) return;
+  try { const data = await requestJson('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ caseId: $('caseSelect').value, count: +$('count').value, intervalSeconds: +$('interval').value, prepareTrajectoryMaps: true, bagRecording }) }); renderRun(data.run); toast('测试计划已创建，正在执行前置条件校验。'); poll(); } catch (error) { $('formMessage').textContent = error.message; }
 });
 $('cancelButton').addEventListener('click', async () => {
   if (!currentRun) return;
