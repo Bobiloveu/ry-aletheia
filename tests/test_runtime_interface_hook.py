@@ -19,21 +19,36 @@ def _hook_namespace() -> dict[str, object]:
     return runpy.run_path(str(HOOK_PATH))
 
 
-def test_runtime_interface_paths_accepts_only_declared_existing_master_packages(
+def test_runtime_interface_paths_accepts_declared_vehicle_service_interface_packages(
     tmp_path: Path,
 ) -> None:
-    """A frozen app may only source the vehicle interface from AMENT prefixes."""
-    good_prefix = tmp_path / "vehicle"
-    package = good_prefix / "local" / "lib" / "python3.10" / "dist-packages" / "master_interfaces"
-    package.mkdir(parents=True)
+    """A frozen app must restore every ROS interface it imports at runtime."""
+    master_prefix = tmp_path / "master"
+    master_package = master_prefix / "local" / "lib" / "python3.10" / "dist-packages" / "master_interfaces"
+    master_package.mkdir(parents=True)
+    lightning_prefix = tmp_path / "lightning"
+    lightning_package = lightning_prefix / "local" / "lib" / "python3.10" / "dist-packages" / "lightning"
+    lightning_package.mkdir(parents=True)
     missing_prefix = tmp_path / "missing"
     namespace = _hook_namespace()
     runtime_interface_paths = namespace["runtime_interface_paths"]
 
     assert runtime_interface_paths(
-        os.pathsep.join((str(good_prefix), str(missing_prefix))),
+        os.pathsep.join((str(master_prefix), str(lightning_prefix), str(missing_prefix))),
         python_version="python3.10",
-    ) == [str(package.parent)]
+    ) == [str(master_package.parent), str(lightning_package.parent)]
+
+
+def test_runtime_interface_paths_leaves_frozen_nav2_action_interfaces_in_the_bundle(
+    tmp_path: Path,
+) -> None:
+    prefix = tmp_path / "nav2"
+    package = prefix / "local" / "lib" / "python3.10" / "dist-packages" / "nav2_msgs"
+    package.mkdir(parents=True)
+
+    namespace = _hook_namespace()
+
+    assert namespace["runtime_interface_paths"](str(prefix), python_version="python3.10") == []
 
 
 def test_prepend_runtime_interface_paths_precedes_frozen_path(

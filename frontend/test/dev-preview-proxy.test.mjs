@@ -18,6 +18,7 @@ const close = (server) => new Promise((resolve, reject) => {
 
 test("Vite preview preserves legacy pages, split stylesheets, and the brand asset", async (t) => {
   const expectedAssets = new Map([
+    ["/platform/client-diagnostics.js", { type: "text/javascript", body: "window.RYAletheiaDiagnostics = {};" }],
     ["/vehicle-execution-status.html", { type: "text/html", body: "execution-status-page" }],
     ["/vehicle_execution_status.js", { type: "text/javascript", body: "export {};" }],
     ["/vehicle_execution_avatar.js", { type: "text/javascript", body: "export {};" }],
@@ -54,6 +55,8 @@ test("Vite preview preserves legacy pages, split stylesheets, and the brand asse
       // process instead of the `/vue/` production-build base.
       base: "/",
       logLevel: "error",
+      // This test checks HTML/proxy responses, without loading browser modules.
+      optimizeDeps: { noDiscovery: true, include: [] },
       server: {
         ...config.server,
         host: "127.0.0.1",
@@ -67,11 +70,14 @@ test("Vite preview preserves legacy pages, split stylesheets, and the brand asse
 
     const dashboard = await fetch(`http://127.0.0.1:${viteAddress.port}/`);
     assert.equal(dashboard.status, 200, "preview root should load successfully");
+    const dashboardHtml = await dashboard.text();
     assert.match(
-      await dashboard.text(),
+      dashboardHtml,
       /<title>任务指挥台 · RY Aletheia<\/title>/,
       "preview root should retain the production task-dashboard entry",
     );
+    assert.ok(dashboardHtml.indexOf('src="/platform/client-diagnostics.js"') >= 0, 'all Vite pages install early diagnostics');
+    assert.ok(dashboardHtml.indexOf('src="/platform/client-diagnostics.js"') < dashboardHtml.indexOf('src="/src/dashboard.js"'), 'diagnostics precede the entry module');
 
     for (const [path, expected] of expectedAssets) {
       const response = await fetch(`http://127.0.0.1:${viteAddress.port}${path}`);

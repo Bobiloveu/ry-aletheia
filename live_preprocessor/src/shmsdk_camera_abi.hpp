@@ -3,8 +3,10 @@
 // Minimal ShmSDK 2.8 camera ABI adapter.
 //
 // ShmSDK is installed and owned by the robot image stack.  The Aletheia
-// sidecar deliberately opens only the documented camera channels and never
-// starts or manages mempool.  Loading the shared library at runtime keeps the
+// sidecar deliberately opens only the documented camera channels and does not
+// actively manage mempool. The public OpenMem in inspected SDK 2.8/2.8.4 does
+// attempt to execute mempool once internally; it is not a no-autostart API.
+// Loading the shared library at runtime keeps the
 // desktop build independent of the robot-only SDK while producing a precise
 // diagnostic when the SDK is absent or incompatible on a vehicle.
 
@@ -70,8 +72,8 @@ class CameraApi final {
   }
 
   bool initialize() const {
-    // This only attaches the caller to the already-running shared-memory
-    // service.  It never configures or launches mempool.
+    // Initialize this SDK client's default configuration. Public OpenMem,
+    // called separately below, performs attachment and may auto-start mempool.
     return init_mem_({});
   }
 

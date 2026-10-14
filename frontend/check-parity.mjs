@@ -67,8 +67,11 @@ for (const value of [
   'type="module" src="/robot_logs.js"',
   'from "./platform/http.js"',
   'from "./platform/format.js"',
+  'from "./platform/log-format.js"',
   '/api/robot-logs/sources',
   '/api/robot-logs/downloads',
+  '/tail',
+  'liveLogWorkspace',
 ]) {
   if (!(robotLogsPage + robotLogsSource).includes(value)) {
     failed = true;

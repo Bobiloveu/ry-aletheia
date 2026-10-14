@@ -3,6 +3,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 import re
+import logging
 from dataclasses import dataclass
 
 
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 # use ``GROUP:PROGRAM``; a single program name is also valid.  Keep this shared
 # boundary strict even though subprocess is invoked without a shell.
 SUPERVISOR_PROCESS_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(?::[A-Za-z0-9][A-Za-z0-9_.-]{0,127})?\Z")
+LOGGER = logging.getLogger("ry_aletheia.supervisor")
 
 
 @dataclass(frozen=True)
@@ -47,13 +49,43 @@ class SupervisorClient:
     def start(self, process_name: str) -> None:
         self._control("start", process_name)
 
+    def tail_stdout(self, process_name: str) -> subprocess.Popen[bytes]:
+        """Follow one already-validated Supervisor program's stdout.
+
+        The caller owns the returned process and must terminate it when its
+        browser connection closes.  ``process_name`` is never shell input;
+        the console derives it from the active Supervisor status snapshot.
+        """
+
+        if not isinstance(process_name, str) or not SUPERVISOR_PROCESS_NAME.fullmatch(process_name):
+            raise RuntimeError("Supervisor 节点名称不合法")
+        try:
+            return subprocess.Popen(
+                [*self._base_args(), "tail", "-f", process_name, "stdout"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=False,
+                bufsize=0,
+            )
+        except OSError as exc:
+            raise RuntimeError(f"无法启动 Supervisor 日志跟随：{exc}") from exc
+
     def _control(self, action: str, process_name: str) -> None:
         if action not in {"start", "restart"} or not isinstance(process_name, str) or not SUPERVISOR_PROCESS_NAME.fullmatch(process_name):
             raise RuntimeError("Supervisor 节点名称不合法")
-        result = self._run([*self._base_args(), action, process_name])
+        LOGGER.info("Supervisor 控制请求：action=%s node=%s", action, process_name)
+        try:
+            result = self._run([*self._base_args(), action, process_name])
+        except RuntimeError as exc:
+            # Exception text may contain the configured supervisorctl credentials.
+            LOGGER.error("Supervisor 控制调用失败：action=%s node=%s error_type=%s", action, process_name, type(exc.__cause__ or exc).__name__)
+            raise
         if result.returncode != 0:
+            LOGGER.error("Supervisor 控制返回失败：action=%s node=%s exit_code=%s", action, process_name, result.returncode)
             detail = (result.stderr or result.stdout).strip().replace("\n", " ")
             raise RuntimeError(detail or f"退出码 {result.returncode}")
+        LOGGER.info("Supervisor 控制命令已完成：action=%s node=%s", action, process_name)
 
     def _status_args(self) -> list[str]:
         return [*self._base_args(), "status"]

@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
 import tempfile
 import uuid
+from threading import RLock
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,7 @@ from .location_manifest import (
 from .localization_assets import LocalizationMapError, read_localization_map
 from .map_assets import MapAssetCache, MapAssetError
 from .task_compiler import (
+    CompilationError,
     CompilationPreview,
     TARGET_ARRIVAL_ACTION_DEFAULT,
     TARGET_ARRIVAL_ACTIONS,
@@ -35,6 +38,9 @@ from .task_compiler import (
     compile_single_task_points,
 )
 from .automatic_route import AutomaticRouteError, derive_localization_routes
+from .fixed_task_compiler import compile_fixed_task_lines
+from .task_lines import TaskLineError, normalise_task_line, ensure_floor_target_line
+from .task_preview_cache import input_fingerprint, cache_record, load_preview
 from .component_defaults import ComponentDefaultsError, component_speed_profile
 from .virtual_walls import (
     VirtualWallError,
@@ -44,6 +50,9 @@ from .virtual_walls import (
     validate_polyline,
     validate_segment,
 )
+
+
+LOGGER = logging.getLogger("ry_aletheia.deployment")
 
 
 class DeploymentError(ValueError):
@@ -69,8 +78,8 @@ class DeploymentStore:
     }
     FLOW_NODE_TYPES = {
         "outdoor": {"label": "户外图", "description": "从园区或室外起点进入"},
-        "ferry": {"label": "摆渡层", "description": "中间摆渡或换乘地图"},
-        "lobby": {"label": "电梯大厅", "description": "电梯首层候梯地图"},
+        "ferry": {"label": "摆渡层", "description": "摆渡或换乘地图，可包含电梯大厅"},
+        "lobby": {"label": "电梯大厅", "description": "独立候梯地图，按需添加"},
         "target_floor": {"label": "用户楼层", "description": "最终配送目标地图"},
     }
     LEGACY_STAGE_ORDERS = {
@@ -102,7 +111,7 @@ class DeploymentStore:
     }
     TASK_COMPILER_COMMUNITY = re.compile(r"[^/\\\x00-\x1f]{1,80}\Z")
     TASK_TRANSITION_SPEED_MODES = frozenset({
-        "task_point", "single_point", "slow_point", "narrow_point",
+        "normal", "task_point", "single_point", "slow_point", "narrow_point",
     })
     LEGACY_TARGET_ARRIVAL_ACTIONS = frozenset({"", "deliver", "wait", "return"})
     EXECUTION_NODE_KINDS = frozenset({"transition", "component"})
@@ -126,6 +135,10 @@ class DeploymentStore:
 
     def __init__(self, root: Path) -> None:
         self.root = root
+        self._preview_lock = RLock()
+        self._diagnostic_lock = RLock()
+        self._project_read_states: dict[str, bool] = {}
+        self._project_read_overflow_reported = False
 
     @classmethod
     def _default_component_templates(cls) -> dict[str, list[dict[str, str]]]:
@@ -471,14 +484,49 @@ class DeploymentStore:
     def list_projects(self) -> list[dict[str, Any]]:
         if not self.root.is_dir(): return []
         result = []
-        for item in sorted(self.root.iterdir()):
-            if not item.is_dir() or not self.PROJECT_ID.fullmatch(item.name): continue
+        projects = [item for item in sorted(self.root.iterdir())
+                    if item.is_dir() and self.PROJECT_ID.fullmatch(item.name)]
+        present_ids = {item.name for item in projects}
+        with self._diagnostic_lock:
+            removed = set(self._project_read_states) - present_ids
+            for project_id in removed:
+                self._project_read_states.pop(project_id)
+            if removed:
+                self._project_read_overflow_reported = False
+        for item in projects:
             try:
                 document = self.get(item.name)
                 result.append({"id": document["id"], "name": document["name"], "updated_at": document["updated_at"], "map_count": len(document["map_assets"])})
-            except DeploymentError:
+            except DeploymentError as exc:
+                self._record_project_read_result(item.name, exc)
                 continue
+            self._record_project_read_result(item.name, None)
         return result
+
+    def _record_project_read_result(self, project_id: str, error: DeploymentError | None) -> None:
+        with self._diagnostic_lock:
+            previous = self._project_read_states.get(project_id)
+            if error is None:
+                if previous is False:
+                    self._project_read_states.pop(project_id)
+                    self._project_read_overflow_reported = False
+                    LOGGER.info("部署项目读取已恢复：project=%s", project_id)
+                return
+            if previous is False:
+                return
+            if previous is None and len(self._project_read_states) >= 128:
+                if not self._project_read_overflow_reported:
+                    self._project_read_overflow_reported = True
+                    LOGGER.warning("更多部署项目读取失败，已省略逐项目重复诊断：tracked_projects=128")
+                return
+            self._project_read_states[project_id] = False
+            LOGGER.warning("部署项目读取失败，已跳过：project=%s error_type=%s", project_id, type(error.__cause__ or error).__name__, exc_info=True)
+
+    @staticmethod
+    def _log_added_task_lines(document: dict[str, Any], before: int, operation: str) -> None:
+        total = len(document["task_lines"]) if isinstance(document.get("task_lines"), list) else 0
+        if total > before:
+            LOGGER.info("部署目标线路已自动创建：project=%s operation=%s count=%s total=%s", document["id"], operation, total - before, total)
 
     def create(self, name: object, task_mode: object = "single") -> dict[str, Any]:
         cleaned = " ".join(str(name or "").split())
@@ -490,9 +538,27 @@ class DeploymentStore:
         while self._project_dir(project_id).exists():
             project_id = f"{base[:58]}-{index}"; index += 1
         now = self._now()
-        document = {"schema": self.SCHEMA, "type": "ry-aletheia.site-project", "id": project_id, "name": cleaned, "created_at": now, "updated_at": now, "task_mode": mode, "scene_model": None, "deployment_flow": [], "map_assets": [], "map_stage_assignments": [], "buildings": [], "map_instances": [], "localization_bindings": [], "localization_routes": [], "physical_elevators": [], "components": [], "waypoints": [], "routes": [], "map_transitions": [], "virtual_walls": [], "map_edits": [], "behavior_templates": [], "component_templates": self._default_component_templates(), "localization_template": None, "task_compiler": self._normalise_task_compiler(None), "deployment_config": {"state": "draft", "robot_target": None}, "mapping": {"mode": "import_or_robot", "recording": "not_started"}}
+        document = {"schema": self.SCHEMA, "type": "ry-aletheia.site-project", "id": project_id, "name": cleaned, "created_at": now, "updated_at": now, "task_mode": mode, "scene_model": None, "deployment_flow": [], "map_assets": [], "map_stage_assignments": [], "buildings": [], "map_instances": [], "localization_bindings": [], "localization_routes": [], "task_lines": [], "active_task_line_id": None, "physical_elevators": [], "components": [], "waypoints": [], "routes": [], "map_transitions": [], "virtual_walls": [], "map_edits": [], "behavior_templates": [], "component_templates": self._default_component_templates(), "localization_template": None, "task_compiler": self._normalise_task_compiler(None), "deployment_config": {"state": "draft", "robot_target": None}, "mapping": {"mode": "import_or_robot", "recording": "not_started"}}
         self._write_json(self._document_path(project_id), document)
         return document
+
+    def update_project_settings(self, project_id: str, data: object) -> dict[str, Any]:
+        if not isinstance(data, dict) or set(data) != {"name", "task_mode"} or not isinstance(data["name"], str):
+            raise DeploymentError("项目设置仅接受项目名称和任务模式")
+        name = " ".join(data["name"].split())
+        if not 1 <= len(name) <= 80:
+            raise DeploymentError("项目名称应为 1 至 80 个字符")
+        mode = self._normalise_task_mode(data["task_mode"])
+        # Serialize against publication so a previous compile cannot restore
+        # its confirmation after these settings have been saved.
+        with self._preview_lock:
+            document = self.get(project_id)
+            if document["name"] == name and document["task_mode"] == mode:
+                return document
+            document.update(name=name, task_mode=mode, updated_at=self._now())
+            self._invalidate_task_compiler_preview(document)
+            self._write_json(self._document_path(project_id), document)
+            return self.get(project_id)
 
     def delete_project(self, project_id: str) -> None:
         """Remove one validated deployment project and all of its snapshots."""
@@ -543,8 +609,6 @@ class DeploymentStore:
             nodes.append({"id": node_id, "type": node_type, "label": label or cls.FLOW_NODE_TYPES[node_type]["label"]})
         if not nodes:
             raise DeploymentError("部署流程不能为空")
-        if counts.get("lobby", 0) != 1:
-            raise DeploymentError("部署流程必须包含一个电梯大厅")
         if counts.get("target_floor", 0) != 1:
             raise DeploymentError("部署流程必须包含一个用户楼层")
         if nodes[-1]["type"] != "target_floor":
@@ -579,6 +643,7 @@ class DeploymentStore:
         except (OSError, json.JSONDecodeError) as exc: raise DeploymentError("部署项目不存在或文件损坏") from exc
         if not isinstance(document, dict) or document.get("schema") != self.SCHEMA or document.get("id") != project_id or not isinstance(document.get("map_assets"), list):
             raise DeploymentError("部署项目格式不受支持")
+        original_line_count = len(document["task_lines"]) if isinstance(document.get("task_lines"), list) else 0
         for key in ("buildings", "map_instances", "localization_bindings", "localization_routes", "components", "waypoints", "routes", "map_transitions", "virtual_walls", "map_edits", "behavior_templates"):
             if not isinstance(document.get(key), list): document[key] = []
         if not isinstance(document.get("map_stage_assignments"), list): document["map_stage_assignments"] = []
@@ -705,8 +770,63 @@ class DeploymentStore:
             if "wait_distance_m" not in attributes:
                 attributes["wait_distance_m"] = 1.5
                 migrated = True
-        if migrated: self._write_json(target, document)
+        if self._ensure_topology_localization_bindings(document):
+            self._invalidate_task_compiler_preview(document)
+            migrated = True
+        if (document.get('task_mode')=='multi' and isinstance(document.get('task_lines'),list) and document['task_lines']
+            and document.get('target_line_policy_version')!=1):
+            before=len(document['task_lines'])
+            for component in document['components']:
+                if component.get('kind')=='target' and str(component.get('attributes',{}).get('door') or '').strip():
+                    ensure_floor_target_line(document,component)
+            if len(document['task_lines'])!=before:self._invalidate_task_compiler_preview(document)
+            # One-time repair of older placed targets. Explicit line deletion
+            # must not be undone by every subsequent project read.
+            document['target_line_policy_version']=1
+            migrated=True
+        if migrated:
+            try:
+                self._write_json(target, document)
+            except Exception:
+                LOGGER.exception("部署项目兼容迁移保存失败：project=%s", project_id)
+                raise
+            total_lines = len(document["task_lines"]) if isinstance(document.get("task_lines"), list) else 0
+            LOGGER.info("部署项目兼容迁移已保存：project=%s maps=%s components=%s task_lines=%s auto_lines_added=%s target_line_policy_version=%s", project_id, len(document["map_assets"]), len(document["components"]), total_lines, max(0, total_lines - original_line_count), document.get("target_line_policy_version"))
         return document
+
+    def _ensure_topology_localization_bindings(self, document: dict[str, Any]) -> bool:
+        """Reuse map-instance identity; allocate stable, internal layout keys once."""
+        changed = False
+        # Standard layouts receive the first available key before overrides,
+        # independently of import order. Persisted keys are never renumbered.
+        assets = sorted(document.get("map_assets", []), key=lambda asset: (
+            0 if any(instance.get("map_asset_id") == asset.get("id")
+                     and instance.get("role") == "typical_floor"
+                     for instance in document.get("map_instances", []) if isinstance(instance, dict)) else 1,
+            str(asset.get("id") or ""),
+        ))
+        for asset in assets:
+            map_id = str(asset.get("id") or "")
+            identity = self._topology_owned_localization_binding(document, map_id)
+            if not identity or any(binding.get("map_asset_id") == map_id
+                                   for binding in document["localization_bindings"]):
+                continue
+            payload = {"map_asset_id": map_id, **identity}
+            if identity["type"] == "floor":
+                used = {str(binding.get("floor_template") or "")
+                        for binding in document["localization_bindings"]
+                        if binding.get("type") == "floor"
+                        and binding.get("building") == identity["building"]
+                        and binding.get("unit") == identity["unit"]}
+                number = 1
+                while str(number) in used:
+                    number += 1
+                payload["floor_template"] = str(number)
+            binding = self._normalise_localization_binding(document, payload)
+            self._assert_localization_binding_unique(document, binding)
+            document["localization_bindings"].append(binding)
+            changed = True
+        return changed
 
     def _normalise_virtual_walls(self, document: dict[str, Any]) -> bool:
         """Migrate the former closed-polygon draft format to wall segments.
@@ -868,6 +988,14 @@ class DeploymentStore:
         """Persist one project-owned localization role without runtime paths."""
         document = self.get(project_id)
         binding = self._normalise_localization_binding(document, data)
+        current = next((item for item in document["localization_bindings"]
+                        if item.get("map_asset_id") == binding["map_asset_id"]), None)
+        if current and self._topology_owned_localization_binding(document, binding["map_asset_id"]):
+            if {key: value for key, value in current.items() if key != "id"} == {
+                key: value for key, value in binding.items() if key != "id"
+            }:
+                return current
+            return self.update_localization_binding(project_id, current["id"], data)
         self._assert_localization_binding_unique(document, binding)
         document["localization_bindings"].append(binding)
         self._invalidate_task_compiler_preview(document)
@@ -1360,32 +1488,67 @@ class DeploymentStore:
         return metadata
 
     def task_compiler_preview(self, project_id: str) -> dict[str, Any]:
-        document = self._derive_and_persist_localization_routes(project_id)
-        preview = self._compile_task_preview(project_id, document)
-        self._persist_task_compiler_preview(project_id, document, preview)
-        return self._preview_payload(preview)
+        return self._preview_payload(self._cached_task_preview(project_id))
+
+    def _cached_task_preview(self, project_id: str) -> CompilationPreview:
+        # GET restore, POST generate and ZIP download share one verified cache.
+        # Concurrent opens must not independently compile the same publication.
+        with self._preview_lock:
+            document = self.get(project_id)
+            map_root = self._project_dir(project_id) / "maps"
+            export_root = self._compiler_export_root(project_id)
+            fingerprint = input_fingerprint(document, map_root)
+            expected = self._normalise_task_compiler(document.get("task_compiler"))["identity"]["last_preview_input_sha256"]
+            cached = load_preview(export_root, fingerprint, expected)
+            if cached is not None:
+                return cached
+            if "task_lines" not in document:
+                document = self._derive_and_persist_localization_routes(project_id)
+                fingerprint = input_fingerprint(document, map_root)
+            preview = self._compile_task_preview(project_id, document)
+            if fingerprint and input_fingerprint(self.get(project_id), map_root) != fingerprint:
+                raise DeploymentError("生成预览期间项目或地图发生变化，请重新生成")
+            self._persist_task_compiler_preview(project_id, document, preview)
+            if fingerprint:
+                try:
+                    self._write_json(export_root / "preview-cache.json", cache_record(fingerprint, self._preview_payload(preview)))
+                except OSError:
+                    # Optional cache failure must not discard a valid export.
+                    pass
+            return preview
 
     def task_compiler_bundle(self, project_id: str) -> tuple[str, bytes]:
-        document = self._derive_and_persist_localization_routes(project_id)
-        preview = self._compile_task_preview(project_id, document)
-        self._persist_task_compiler_preview(project_id, document, preview)
-        task_prefix = "multi_tasks/" if document.get("task_mode") == "multi" else "tasks/"
+        document = self.get(project_id)
+        preview = self._cached_task_preview(project_id)
+        task_prefix = "multi_tasks/" if preview.manifest.get("task_mode") == "multi" else "tasks/"
         task_artifact = next((item for item in preview.artifacts if item.relative_path.startswith(task_prefix)), None)
         if task_artifact is None:
             raise DeploymentError("实验任务文件缺失")
         filename = (
-            f"{self._normalise_task_compiler(document.get('task_compiler'))['identity']['community']}_multi_experimental.zip"
-            if document.get("task_mode") == "multi"
+            f"{preview.task_json['task_group_name']}_multi_experimental.zip"
+            if preview.manifest.get("task_mode") == "multi" and preview.manifest.get('active_task_line')
+            else f"{self._normalise_task_compiler(document.get('task_compiler'))['identity']['community']}_multi_experimental.zip"
+            if preview.manifest.get("task_mode") == "multi"
             else f"{Path(task_artifact.relative_path).stem}_experimental.zip"
         )
         return filename, bundle_zip(preview)
 
     def _compile_task_preview(self, project_id: str, document: dict[str, Any]) -> CompilationPreview:
-        """Select the immutable project compiler mode; callers never select it."""
+        """Select the saved project compiler mode; preview callers never select it."""
         map_root = self._project_dir(project_id) / "maps"
-        if document.get("task_mode") == "multi":
-            return compile_multi_task_points(document, map_root=map_root)
-        return compile_single_task_points(document, map_root=map_root)
+        if "task_lines" in document:
+            preview = compile_fixed_task_lines(document, map_root=map_root)
+        elif document.get("task_mode") == "multi":
+            preview = compile_multi_task_points(document, map_root=map_root)
+        else:
+            preview = compile_single_task_points(document, map_root=map_root)
+        mode = document.get("task_mode", "single")
+        expected, forbidden = ("multi_tasks/", "tasks/") if mode == "multi" else ("tasks/", "multi_tasks/")
+        if (preview.manifest.get("task_mode") != mode or
+            not any(a.relative_path.startswith(expected) for a in preview.artifacts) or
+            any(a.relative_path.startswith(forbidden) for a in preview.artifacts)):
+            raise CompilationError("编译产物结构与项目任务模式不一致，请重新生成预览")
+        return preview
 
     def derive_localization_routes(self, project_id: str) -> dict[str, Any]:
         """Refresh read-only route facts from the scene and map annotations.
@@ -1394,6 +1557,67 @@ class DeploymentStore:
         client.  The persisted result is an auditable cache of map facts.
         """
         return self._derive_and_persist_localization_routes(project_id)
+
+    def save_task_line(self, project_id: str, data: object, line_id: str | None = None) -> dict[str, Any]:
+        document = self.get(project_id)
+        lines = document.setdefault("task_lines", [])
+        components={c['id']:c for c in document.get('components',[])}
+        recipe_maps={components.get(line['steps'][-1].get('id'),{}).get('map_asset_id')
+            for line in lines if line.get('steps') and line['steps'][-1].get('action',{}).get('purpose')=='delivery'}
+        current = next((line for line in lines if line.get("id") == line_id), None)
+        if line_id is not None and current is None:
+            raise DeploymentError("任务线路不存在")
+        try:
+            line = normalise_task_line(document, data, identifier=line_id)
+        except TaskLineError as exc:
+            raise DeploymentError(str(exc)) from exc
+        if current is None:
+            lines.append(line)
+        else:
+            current.clear()
+            current.update(line)
+        if not document.get("active_task_line_id"):
+            document["active_task_line_id"] = line["id"]
+        before_auto_lines = len(lines)
+        last=line['steps'][-1]
+        recipe_map=components.get(last['id'],{}).get('map_asset_id') if last.get('action',{}).get('purpose')=='delivery' else None
+        if recipe_map and recipe_map not in recipe_maps:
+            for target in document.get('components',[]):
+                if target.get('map_asset_id')==recipe_map:ensure_floor_target_line(document,target)
+        if document.get('task_mode')=='multi':document['target_line_policy_version']=1
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
+        self._log_added_task_lines(document, before_auto_lines, "save_task_line")
+        return line
+
+    def select_task_line(self, project_id: str, line_id: str) -> dict[str, Any]:
+        document = self.get(project_id)
+        line = next((line for line in document.get("task_lines", []) if line.get("id") == line_id), None)
+        if line is None:
+            raise DeploymentError("任务线路不存在")
+        try:
+            normalise_task_line(document, {key: value for key, value in line.items() if key != "id"}, identifier=line_id)
+        except TaskLineError as exc:
+            raise DeploymentError(str(exc)) from exc
+        document["active_task_line_id"] = line_id
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
+        return document
+
+    def delete_task_line(self, project_id: str, line_id: str) -> None:
+        document = self.get(project_id)
+        lines = document.get("task_lines", [])
+        remaining = [line for line in lines if line.get("id") != line_id]
+        if len(remaining) == len(lines):
+            raise DeploymentError("任务线路不存在")
+        document["task_lines"] = remaining
+        if document.get("active_task_line_id") == line_id:
+            document["active_task_line_id"] = None
+        self._invalidate_task_compiler_preview(document)
+        document["updated_at"] = self._now()
+        self._write_json(self._document_path(project_id), document)
 
     def _derive_and_persist_localization_routes(self, project_id: str) -> dict[str, Any]:
         document = self.get(project_id)
@@ -1876,6 +2100,7 @@ class DeploymentStore:
         if any(all(item.get(key) == instance[key] for key in ("role", "building", "unit", "floor")) for item in document["map_instances"]):
             raise DeploymentError("该物理位置已有地图实例；请使用 Floor Override 或先检查已有部署")
         document["map_instances"].append(instance)
+        self._ensure_topology_localization_bindings(document)
         self._invalidate_task_compiler_preview(document)
         document["updated_at"] = self._now()
         self._write_json(self._document_path(project_id), document)
@@ -1912,17 +2137,24 @@ class DeploymentStore:
         return item
 
     def update_waypoint(self, project_id: str, waypoint_id: str, data: object) -> dict[str, Any]:
-        """Update one manual task transition's speed and/or forward heading."""
+        """Update one manual task transition's name, speed or forward heading."""
         if (
             not isinstance(data, dict)
             or not data
-            or not set(data) <= {"speed_mode", "yaw"}
+            or not set(data) <= {"label", "speed_mode", "yaw"}
         ):
-            raise DeploymentError("过渡点更新仅支持速度模式或朝向")
+            raise DeploymentError("过渡点更新仅支持名称、速度模式或朝向")
         document = self.get(project_id)
         waypoint = self._waypoint(document, waypoint_id)
         if waypoint.get("kind") != "transition" or waypoint.get("generated_by"):
-            raise DeploymentError("仅手动过渡点可配置速度模式或朝向")
+            raise DeploymentError("仅手动过渡点可配置名称、速度模式或朝向")
+        if "label" in data:
+            if not isinstance(data["label"], str):
+                raise DeploymentError("过渡点名称必须是字符串")
+            label = " ".join(data["label"].split())
+            if not label or len(label) > 80:
+                raise DeploymentError("过渡点名称需为 1–80 个字符")
+            waypoint["label"] = label
         if "speed_mode" in data:
             waypoint["speed_mode"] = self._normalise_task_transition_speed(data.get("speed_mode"))
         if "yaw" in data:
@@ -1947,7 +2179,7 @@ class DeploymentStore:
     def _normalise_task_transition_speed(cls, value: object) -> str:
         speed_mode = str(value or "single_point").strip()
         if speed_mode not in cls.TASK_TRANSITION_SPEED_MODES:
-            raise DeploymentError("过渡点速度模式仅支持 task_point、single_point、slow_point 或 narrow_point")
+            raise DeploymentError("过渡点速度模式仅支持 normal、task_point、single_point、slow_point 或 narrow_point")
         return speed_mode
 
     def delete_waypoint(self, project_id: str, waypoint_id: str) -> None:
@@ -1988,9 +2220,12 @@ class DeploymentStore:
             self._validate_point(asset, point["x"], point["y"], yaw)
             document["waypoints"].append(point); component["generated_waypoint_ids"].append(point["id"])
         document["components"].append(component)
+        before_auto_lines = len(document["task_lines"]) if isinstance(document.get("task_lines"), list) else 0
+        ensure_floor_target_line(document,component)
         self._invalidate_task_compiler_preview(document)
         document["updated_at"] = self._now()
         self._write_json(self._document_path(project_id), document)
+        self._log_added_task_lines(document, before_auto_lines, "add_component")
         return component
 
     def update_component(self, project_id: str, component_id: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -2008,7 +2243,10 @@ class DeploymentStore:
             attributes = self._normalise_elevator_landing_attributes(document, attributes)
         label = " ".join(str(data.get("label", component["label"])).split())[:80]
         if not label: raise DeploymentError("组件名称不能为空")
+        previous_component = {**component,'attributes':dict(component.get('attributes',{}))}
         component.update({"x": x, "y": y, "yaw": yaw, "label": label, "attributes": attributes})
+        before_auto_lines = len(document["task_lines"]) if isinstance(document.get("task_lines"), list) else 0
+        ensure_floor_target_line(document,component,previous=previous_component)
         # Existing generated points keep stable IDs, but follow their component.
         points = [item for item in document["waypoints"] if item.get("generated_by") == component_id]
         for index, point in enumerate(points):
@@ -2016,6 +2254,7 @@ class DeploymentStore:
             point.update({"x": x + offset, "y": y, "yaw": yaw}); self._validate_point(asset, point["x"], point["y"], yaw)
         self._invalidate_task_compiler_preview(document)
         document["updated_at"] = self._now(); self._write_json(self._document_path(project_id), document)
+        self._log_added_task_lines(document, before_auto_lines, "update_component")
         return component
 
     @classmethod
@@ -2114,7 +2353,7 @@ class DeploymentStore:
                     document["updated_at"] = self._now()
                     self._write_json(self._document_path(project_id), document)
                     return document
-            raise DeploymentError("当前地图没有可撤销的擦除操作")
+            raise DeploymentError("当前地图没有可撤销的编辑操作")
         if action == "clear":
             document["map_edits"] = [item for item in edits if item.get("map_asset_id") != map_id]
             self._invalidate_task_compiler_preview(document)
@@ -2123,6 +2362,9 @@ class DeploymentStore:
             return document
         if action != "add":
             raise DeploymentError("地图编辑操作无效")
+        mode = data.get("mode", "erase")
+        if mode not in ("erase", "wall"):
+            raise DeploymentError("地图编辑模式无效，应为擦除或补墙")
         kind = str(data.get("kind") or "")
         raw_points = data.get("points")
         if kind not in {"brush_erase", "polygon_erase"} or not isinstance(raw_points, list):
@@ -2152,7 +2394,7 @@ class DeploymentStore:
             shape = str(data.get("shape") or "circle")
             if shape not in {"circle", "square"}:
                 raise DeploymentError("橡皮擦形状无效")
-        edit = {"id": f"map-edit-{uuid.uuid4().hex[:12]}", "map_asset_id": map_id, "kind": kind, "points": points}
+        edit = {"id": f"map-edit-{uuid.uuid4().hex[:12]}", "map_asset_id": map_id, "kind": kind, "mode": mode, "points": points}
         if radius_m is not None:
             edit["radius_m"] = radius_m
             edit["shape"] = shape

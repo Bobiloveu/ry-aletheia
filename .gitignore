@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.vite/
 .pixi/
 .worktrees/
 frontend/node_modules/
@@ -35,6 +36,8 @@ config/console.json
 config/case_workspace.json
 config/scenario_setup.json
 config/scenario_backups/
+/config/acceptance/current-plan.json
+/tmp/
 
 # OS/editor noise
 .DS_Store

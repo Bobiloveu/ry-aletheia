@@ -9,12 +9,16 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import os
 import re
 import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+
+
+LOGGER = logging.getLogger("ry_aletheia.scenario_setup")
 
 
 DEFAULT_DOCUMENT = {
@@ -49,6 +53,7 @@ class ScenarioSetupStore:
         self.path = config_dir / "scenario_setup.json"
         self.backup_dir = config_dir / "scenario_backups"
         self._lock = threading.RLock()
+        self._load_failed = False
         # 覆盖“脚本替换 → Supervisor 重启 → 状态确认”的较长事务；不能仅靠
         # 文件锁，因为 HTTP 的重复点击和测试 finally 可能在两次文件操作之间
         # 交错重启同一批节点。
@@ -56,15 +61,28 @@ class ScenarioSetupStore:
 
     def load(self) -> dict:
         with self._lock:
+            error = None
             try:
                 raw = json.loads(self.path.read_text(encoding="utf-8")) if self.path.is_file() else {}
-            except (OSError, json.JSONDecodeError):
+            except (OSError, json.JSONDecodeError) as exc:
+                error = exc
                 raw = {}
+            if not isinstance(raw, dict) or any(
+                key in raw and not isinstance(raw[key], expected)
+                for key, expected in (("profiles", list), ("case_bindings", dict), ("bindings", dict), ("search_directories", list))
+            ):
+                error = TypeError()
             document = {**DEFAULT_DOCUMENT, **(raw if isinstance(raw, dict) else {})}
             document["profiles"] = document["profiles"] if isinstance(document["profiles"], list) else []
             document["case_bindings"] = document["case_bindings"] if isinstance(document["case_bindings"], dict) else {}
             document["bindings"] = document["bindings"] if isinstance(document["bindings"], dict) else {}
             document["search_directories"] = document["search_directories"] if isinstance(document["search_directories"], list) else []
+            if error is not None and not self._load_failed:
+                self._load_failed = True
+                LOGGER.warning("场景前置配置读取降级，使用既有默认值：error_type=%s", type(error).__name__)
+            elif error is None and self._load_failed:
+                self._load_failed = False
+                LOGGER.info("场景前置配置读取已恢复")
             return document
 
     def save(self, document: dict) -> dict:
@@ -119,6 +137,31 @@ class ScenarioSetupStore:
             _active, transaction = self._transaction_status()
             return transaction["state"] != "normal"
 
+    def active_lightning_config(self) -> Path:
+        """Return the one active lightning config without exposing it to clients."""
+        with self._lock:
+            document = self.load()
+            script = Path(document["startup_script"])
+            try:
+                text = self._read_script(script).decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ScenarioSetupError("当前启动配置不可读取") from exc
+        matches = list(_LIGHTNING.finditer(text))
+        if len(matches) != 1:
+            raise ScenarioSetupError("当前启动配置未唯一指定 lightning 定位文件")
+        raw = matches[0].group("value")
+        target = Path(raw)
+        if not raw.startswith("/opt/ry/") or target.suffix not in {".yaml", ".yml"} or ".." in target.parts:
+            raise ScenarioSetupError("当前 lightning 定位文件不受支持")
+        try:
+            resolved = target.resolve(strict=True)
+        except OSError as exc:
+            raise ScenarioSetupError("当前 lightning 定位文件不可读取") from exc
+        root = Path("/opt/ry").resolve()
+        if not resolved.is_file() or root not in resolved.parents:
+            raise ScenarioSetupError("当前 lightning 定位文件不受支持")
+        return resolved
+
     def is_case_bound(self, case_id: str) -> bool:
         """供执行器在写脚本前确认是否必须具备可重启的依赖编排。"""
         with self._lock:
@@ -134,12 +177,17 @@ class ScenarioSetupStore:
         """列出受控目录的一层内容，供 FCRP/lightning 文件浏览器按需使用。"""
         document = self.load()
         root = self._allowed_root(Path(document["startup_script"]))
+        return self.browse_at_root(raw_path, kind, root)
+
+    @staticmethod
+    def browse_at_root(raw_path: str, kind: str, root: Path) -> dict:
+        """Reuse the bounded file browser with a caller-owned trusted root."""
         try:
             target = Path(raw_path or root).resolve(strict=True)
         except (OSError, RuntimeError) as exc:
             raise ScenarioSetupError("浏览目录不存在或无法解析") from exc
         if not target.is_dir() or (target != root and root not in target.parents):
-            raise ScenarioSetupError("只能浏览启动脚本所在受控目录内的路径")
+            raise ScenarioSetupError("只能浏览指定受控目录内的路径")
         if kind not in {"fcrp", "lightning"}:
             raise ScenarioSetupError("文件浏览类型无效")
         directories, files = [], []

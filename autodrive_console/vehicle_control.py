@@ -85,6 +85,12 @@ class VehicleControlConfig:
     input_timeout_s: float = 0.35
     heartbeat_timeout_s: float = 1.2
     emergency_release_timeout_s: float = 4.0
+    # A stale latched `false` is not a continuing authorization to move.  The
+    # controller re-confirms it while it owns any safety-critical operation.
+    emergency_confirmation_max_age_s: float = 2.0
+    emergency_query_interval_s: float = 0.5
+    emergency_query_timeout_s: float = 1.0
+    emergency_query_failure_limit: int = 2
     min_speed: float = 0.10
     max_speed: float = 1.00
     # 与现有 keyboard_manual_control 的 base_speed/base_angle 一致的保守默认值。
@@ -121,6 +127,7 @@ class VehicleControlController:
         self._twist_profile = twist_profile or MiniappTwistProfile()
         self._twist_factory = MiniappTwistFactory(self._twist_profile)
         self._active_run_guard = active_run_guard or (lambda: False)
+        self._map_marker_navigation_guard: Callable[[], bool] = lambda: False
         self._clock = clock
         self._lock = threading.RLock()
         self._publish_lock = threading.Lock()
@@ -154,6 +161,9 @@ class VehicleControlController:
         self._emergency_state_generation = 0
         self._emergency_query_future = None
         self._emergency_query_next_at = 0.0
+        self._emergency_query_started_at: float | None = None
+        self._emergency_last_confirmed_at: float | None = None
+        self._emergency_query_failures = 0
         self._emergency_release = "idle"
         self._emergency_release_deadline: float | None = None
         # 会话只标识某个 Web / App 客户端是否仍在参与控制；车端只有一个
@@ -171,6 +181,11 @@ class VehicleControlController:
         self._stop_pending = False
         self._stop_frames_remaining = 0
         self._manual_stop_latched = False
+        # 此状态只供手动重定位协调器使用，绝不授予浏览器可驾驶会话。
+        self._relocalization_hold = "idle"
+        # Fixed operation keys bound this diagnostic state independently of
+        # the number of ROS ticks, control clients, or incoming input values.
+        self._diagnostic_failures: set[str] = set()
 
     # ---- Public control contract -------------------------------------------------
 
@@ -193,8 +208,16 @@ class VehicleControlController:
         with self._lock:
             return bool(self._sessions) or self._pending_source == self.SOURCE_MINIAPP
 
+    def set_map_marker_navigation_guard(self, guard: Callable[[], bool] | None) -> None:
+        """Reject control takeover while Nav2 owns a map-marker goal."""
+        self._map_marker_navigation_guard = guard or (lambda: False)
+
     def begin_manual_session(self) -> dict[str, Any]:
         self._ensure_started()
+        if self._map_marker_navigation_guard():
+            raise VehicleControlConflict("前往地图标记正在进行，不能切换手动控制")
+        with self._lock:
+            self._raise_if_relocalization_hold_locked()
         if self._active_run_guard():
             raise VehicleControlConflict("自动化测试正在执行，禁止抢占车辆控制权")
         now = self._clock()
@@ -202,6 +225,7 @@ class VehicleControlController:
         adopted_existing_miniapp = False
         with self._lock:
             self._advance_safety_locked(now)
+            self._raise_if_relocalization_hold_locked()
             if self._pending_source == self.SOURCE_NAVIGATION:
                 raise VehicleControlConflict("正在等待切换至 navigation 的实际状态确认")
             if self._actual_source == self.SOURCE_MINIAPP:
@@ -251,6 +275,95 @@ class VehicleControlController:
             raise VehicleControlUnavailable(f"无法发布控制源切换命令：{exc}") from exc
         return snapshot
 
+    def begin_relocalization_hold(self) -> dict[str, Any]:
+        """独占 miniapp 停车控制权，允许在活动测试期间安全开始手动重定位。"""
+
+        self._ensure_started()
+        if self._map_marker_navigation_guard():
+            raise VehicleControlConflict("前往地图标记正在进行，不能开始手动重定位")
+        now = self._clock()
+        request_source: str | None = None
+        publish_stop = False
+        with self._lock:
+            self._advance_safety_locked(now)
+            if self._relocalization_hold not in {"idle", "failed"}:
+                raise VehicleControlConflict("手动重定位已在占用车辆控制权")
+            if self._sessions:
+                raise VehicleControlConflict("已有手动控制会话，不能开始手动重定位")
+            if self._pending_source is not None:
+                raise VehicleControlConflict(f"正在等待切换至 {self._pending_source} 的实际状态确认")
+            self._clear_motion_locked()
+            self._manual_stop_latched = True
+            self._last_error = ""
+            if self._actual_source == self.SOURCE_MINIAPP:
+                self._relocalization_hold = "active"
+                publish_stop = True
+            else:
+                self._relocalization_hold = "switching"
+                self._pending_source = self.SOURCE_MINIAPP
+                self._switch_deadline = now + self.config.switch_timeout_s
+                request_source = self.SOURCE_MINIAPP
+            snapshot = self._snapshot_locked()
+        if publish_stop:
+            self._publish_stop_now()
+        if request_source is not None:
+            try:
+                self._publish_source_command(request_source)
+            except Exception as exc:
+                with self._lock:
+                    self._relocalization_hold = "failed"
+                    self._pending_source = None
+                    self._switch_deadline = None
+                    self._last_error = f"无法请求切换到 miniapp：{exc}"
+                raise VehicleControlUnavailable("无法发布手动重定位停车控制源请求") from exc
+        return snapshot
+
+    def finish_relocalization_hold(self, *, success: bool) -> dict[str, Any]:
+        """记录重定位服务结果；失败时强制保留 miniapp 停车状态。"""
+
+        with self._lock:
+            if not success and self._relocalization_hold == "switching":
+                # A failed map/runtime check can precede the miniapp reply.
+                # Retire this attempt; a late reply must not silently activate it.
+                self._relocalization_hold = "failed"
+                self._pending_source = None
+                self._switch_deadline = None
+                return self._snapshot_locked()
+            if self._relocalization_hold != "active":
+                raise VehicleControlConflict("手动重定位未处于可完成状态")
+            if not success:
+                self._relocalization_hold = "failed"
+            return self._snapshot_locked()
+
+    def recover_navigation_after_relocalization(self) -> dict[str, Any]:
+        """重定位成功或人工失败恢复时，唯一允许切回 navigation 的入口。"""
+
+        self._ensure_started()
+        now = self._clock()
+        with self._lock:
+            if self._relocalization_hold not in {"active", "failed"}:
+                raise VehicleControlConflict("当前没有需要恢复的手动重定位停车状态")
+            if self._pending_source is not None:
+                raise VehicleControlConflict(f"正在等待切换至 {self._pending_source} 的实际状态确认")
+            self._clear_motion_locked()
+            self._manual_stop_latched = True
+            self._relocalization_hold = "recovering"
+            self._pending_source = self.SOURCE_NAVIGATION
+            self._switch_deadline = now + self.config.switch_timeout_s
+            self._last_error = ""
+            snapshot = self._snapshot_locked()
+        self._publish_stop_now()
+        try:
+            self._publish_source_command(self.SOURCE_NAVIGATION)
+        except Exception as exc:
+            with self._lock:
+                self._relocalization_hold = "failed"
+                self._pending_source = None
+                self._switch_deadline = None
+                self._last_error = f"无法请求切回 navigation：{exc}"
+                raise VehicleControlUnavailable("无法发布手动重定位后的自动驾驶恢复请求") from exc
+        return snapshot
+
     def heartbeat(self, session_id: str) -> dict[str, Any]:
         self._ensure_started()
         with self._lock:
@@ -272,6 +385,7 @@ class VehicleControlController:
                 raise VehicleControlConflict("尚未收到 /control_source_state=miniapp 的实际确认，禁止发送运动指令")
             if session["state"] != "active":
                 raise VehicleControlConflict("手动控制会话无效，禁止发送运动指令")
+            was_moving = bool(self._target_linear or self._target_angular)
             self._target_command = command
             self._target_vector = None
             self._motion_session_id = session_id
@@ -279,6 +393,8 @@ class VehicleControlController:
             self._manual_stop_latched = False
             session["last_input_at"] = now
             session["last_heartbeat_at"] = now
+            if not was_moving:
+                LOGGER.info("手动运动目标已开始：input=command command=%s", command)
             return self._snapshot_locked(session_id=session_id)
 
     def set_vector(
@@ -316,6 +432,7 @@ class VehicleControlController:
                 self._manual_stop_latched = True
                 publish_stop = was_moving
             else:
+                was_moving = bool(self._target_linear or self._target_angular)
                 self._target_command = None
                 self._target_vector = (linear, angular)
                 self._motion_session_id = session_id
@@ -323,6 +440,8 @@ class VehicleControlController:
                 self._stop_pending = False
                 self._stop_frames_remaining = 0
                 self._manual_stop_latched = False
+                if not was_moving:
+                    LOGGER.info("手动运动目标已开始：input=vector")
             session["last_input_at"] = now
             session["last_heartbeat_at"] = now
             snapshot = self._snapshot_locked(session_id=session_id)
@@ -459,6 +578,7 @@ class VehicleControlController:
         publish_stop = False
         with self._lock:
             self._advance_safety_locked(now)
+            self._raise_if_relocalization_hold_locked()
             if self._pending_source is not None:
                 raise VehicleControlConflict(f"正在等待切换至 {self._pending_source} 的实际状态确认")
             if self._actual_source == self.SOURCE_NAVIGATION:
@@ -623,12 +743,22 @@ class VehicleControlController:
             return
         publish_stop = False
         with self._lock:
+            self._advance_safety_locked(self._clock())
             previous = self._actual_source
             self._actual_source = source
             self._has_source_state = True
             self._last_source_update_at = self._clock()
             self._state_event.set()
-            if self._pending_source == self.SOURCE_MINIAPP and source == self.SOURCE_MINIAPP and self._sessions:
+            if self._pending_source == self.SOURCE_MINIAPP and source == self.SOURCE_MINIAPP and self._relocalization_hold == "switching":
+                self._pending_source = None
+                self._switch_deadline = None
+                self._relocalization_hold = "active"
+                self._clear_motion_locked()
+                self._manual_stop_latched = True
+                self._last_error = ""
+                publish_stop = True
+                LOGGER.info("已由 /control_source_state 确认手动重定位 miniapp 停车控制权")
+            elif self._pending_source == self.SOURCE_MINIAPP and source == self.SOURCE_MINIAPP and self._sessions:
                 self._pending_source = None
                 self._switch_deadline = None
                 now = self._clock()
@@ -644,8 +774,15 @@ class VehicleControlController:
                 self._sessions.clear()
                 self._motion_session_id = None
                 self._manual_stop_latched = False
+                if self._relocalization_hold == "recovering":
+                    self._relocalization_hold = "idle"
                 self._last_error = ""
                 LOGGER.info("已由 /control_source_state 确认 navigation 接管")
+            elif self._relocalization_hold in {"active", "failed", "recovering"} and source != self.SOURCE_MINIAPP:
+                self._relocalization_hold = "failed"
+                self._clear_motion_locked()
+                self._manual_stop_latched = True
+                self._last_error = "手动重定位期间控制源已离开 miniapp，需人工确认"
             elif source != self.SOURCE_MINIAPP and previous == self.SOURCE_MINIAPP:
                 # 外部切源也必须立即清空 Aletheia 的非零目标，不能等待下一帧。
                 was_moving = bool(self._target_linear or self._target_angular)
@@ -666,7 +803,7 @@ class VehicleControlController:
         self._record_emergency_state(state, source="topic")
 
     def _on_emergency_query_response(self, response, *, generation: int) -> None:
-        """只用底盘服务填补初始 unknown，不能覆盖已经收到的 Topic 状态。"""
+        """A service response may refresh state only for its current request generation."""
         raw = getattr(response, "is_emergency_stop", None)
         state = raw if isinstance(raw, bool) else None
         self._record_emergency_state(state, source="service", generation=generation)
@@ -674,25 +811,29 @@ class VehicleControlController:
     def _record_emergency_state(self, state: bool | None, *, source: str, generation: int | None = None) -> None:
         publish_stop = False
         with self._lock:
-            if source == "service" and (
-                self._closed
-                or self._emergency_stop is not None
-                or generation != self._emergency_state_generation
-            ):
+            if source == "service" and (self._closed or generation != self._emergency_state_generation):
                 return
+            previous_state = self._emergency_stop
             self._emergency_state_generation += 1
             self._emergency_stop = state
+            self._emergency_last_confirmed_at = self._clock() if isinstance(state, bool) else None
+            if isinstance(state, bool):
+                self._emergency_query_failures = 0
+                self._diagnostic_recovered("invalid_emergency_state")
+                if source == "service":
+                    self._diagnostic_recovered("emergency_query")
             if state is True:
                 self._clear_motion_locked()
                 self._manual_stop_latched = True
                 publish_stop = True
-                LOGGER.warning("急停状态已确认为 true：source=%s，已锁定手动运动输出", source)
+                if previous_state is not True:
+                    LOGGER.warning("急停状态已确认为 true：source=%s，已锁定手动运动输出", source)
             elif state is False:
                 if self._emergency_release == "waiting_confirmation":
                     self._emergency_release = "confirmed"
                     self._emergency_release_deadline = None
                     LOGGER.info("已由 /is_emergency_stop=false 确认软件解除急停")
-                elif source == "service":
+                elif source == "service" and previous_state is not False:
                     LOGGER.info("已由 %s 确认启动急停状态为 false", self.EMERGENCY_STATE_SERVICE)
             else:
                 self._clear_motion_locked()
@@ -701,7 +842,7 @@ class VehicleControlController:
                     self._emergency_release = "unconfirmable"
                     self._emergency_release_deadline = None
                 publish_stop = True
-                LOGGER.error("收到无效急停状态：source=%s，已按 unknown 锁定手动控制", source)
+                self._diagnostic_failure("invalid_emergency_state", "收到无效急停状态：source=%s，已按 unknown 锁定手动控制", source)
         if publish_stop:
             self._publish_stop_now()
 
@@ -711,7 +852,9 @@ class VehicleControlController:
         except Exception:
             # 状态探测失败只应保持 unknown；绝不能打断同一 executor 的
             # 看门狗与 STOP 路径，更不能把服务异常误判为未急停。
-            LOGGER.exception("急停启动状态查询调度异常")
+            self._diagnostic_failure("emergency_query_schedule", "急停启动状态查询调度异常", exc_info=True)
+        else:
+            self._diagnostic_recovered("emergency_query_schedule")
         try:
             with self._lock:
                 self._advance_safety_locked(self._clock())
@@ -727,34 +870,58 @@ class VehicleControlController:
         except Exception as exc:
             with self._lock:
                 self._fail_locked(f"ROS2 控制发布异常：{exc}")
-            LOGGER.exception("车辆控制 20 Hz 发布循环异常")
+            self._diagnostic_failure("publish_tick", "车辆控制 20 Hz 发布循环异常", exc_info=True)
+        else:
+            self._diagnostic_recovered("publish_tick")
 
     def _request_emergency_state_if_needed(self) -> None:
         """在 ROS executor 内发起单个、非阻塞且限频的底盘状态查询。"""
         now = self._clock()
+        timed_out_future = None
         with self._lock:
             client = self._emergency_state_client
             service_type = self._GetEmergencyStop
+            if self._emergency_query_future is not None:
+                started_at = self._emergency_query_started_at
+                if (
+                    started_at is None
+                    or now - started_at <= self.config.emergency_query_timeout_s
+                ):
+                    return
+                # A rclpy service future can remain incomplete permanently when
+                # the chassis service disappears.  Retire it before retrying;
+                # advancing the generation also makes a late reply inert.
+                timed_out_future = self._emergency_query_future
+                self._emergency_query_future = None
+                self._emergency_query_started_at = None
+                self._emergency_state_generation += 1
+        if timed_out_future is not None:
+            self._diagnostic_failure("emergency_query", "%s 急停状态查询超时，将在限频后重试", self.EMERGENCY_STATE_SERVICE, level=logging.WARNING)
+            self._record_emergency_query_failure()
+            return
+        with self._lock:
             if (
                 self._closed
-                or self._emergency_stop is not None
-                or self._emergency_query_future is not None
                 or now < self._emergency_query_next_at
+                or (self._emergency_stop is not None and not self._emergency_confirmation_required_locked())
             ):
                 return
-            self._emergency_query_next_at = now + 2.0
+            self._emergency_query_next_at = now + self.config.emergency_query_interval_s
             generation = self._emergency_state_generation
         if client is None or service_type is None or not client.service_is_ready():
+            self._record_emergency_query_failure()
             return
         try:
             future = client.call_async(service_type.Request())
         except Exception:
-            LOGGER.warning("无法发起 %s 急停状态查询", self.EMERGENCY_STATE_SERVICE, exc_info=True)
+            self._diagnostic_failure("emergency_query", "无法发起 %s 急停状态查询", self.EMERGENCY_STATE_SERVICE, level=logging.WARNING, exc_info=True)
+            self._record_emergency_query_failure()
             return
         with self._lock:
-            if self._closed or self._emergency_stop is not None:
+            if self._closed or generation != self._emergency_state_generation:
                 return
             self._emergency_query_future = future
+            self._emergency_query_started_at = now
         future.add_done_callback(
             lambda completed: self._on_emergency_query_future(completed, generation=generation)
         )
@@ -763,18 +930,62 @@ class VehicleControlController:
         with self._lock:
             if self._emergency_query_future is future:
                 self._emergency_query_future = None
+                started_at = self._emergency_query_started_at
+                self._emergency_query_started_at = None
+            else:
+                started_at = None
             if self._closed:
                 return
+            timed_out = started_at is None or self._clock() - started_at > self.config.emergency_query_timeout_s
+        if timed_out:
+            self._record_emergency_query_failure()
+            return
         try:
             response = future.result()
         except Exception:
-            LOGGER.warning("%s 急停状态查询失败", self.EMERGENCY_STATE_SERVICE, exc_info=True)
+            self._diagnostic_failure("emergency_query", "%s 急停状态查询失败", self.EMERGENCY_STATE_SERVICE, level=logging.WARNING, exc_info=True)
+            self._record_emergency_query_failure()
             return
         self._on_emergency_query_response(response, generation=generation)
 
+    def _record_emergency_query_failure(self) -> None:
+        publish_stop = False
+        with self._lock:
+            if self._closed or not self._emergency_confirmation_required_locked():
+                return
+            self._emergency_query_failures += 1
+            if self._emergency_query_failures < self.config.emergency_query_failure_limit:
+                return
+            publish_stop = self._invalidate_emergency_confirmation_locked("急停状态确认服务不可用")
+        if publish_stop:
+            self._publish_stop_now()
+
     # ---- State, watchdog and publish helpers ------------------------------------
 
+    def _diagnostic_failure(self, operation: str, message: str, *args: object, level: int = logging.ERROR, exc_info: bool = False) -> None:
+        with self._lock:
+            if operation in self._diagnostic_failures:
+                return
+            self._diagnostic_failures.add(operation)
+        LOGGER.log(level, message, *args, exc_info=exc_info)
+
+    def _diagnostic_recovered(self, operation: str) -> None:
+        with self._lock:
+            if operation not in self._diagnostic_failures:
+                return
+            self._diagnostic_failures.remove(operation)
+        LOGGER.info("车辆控制诊断已恢复：operation=%s", operation)
+
     def _advance_safety_locked(self, now: float) -> None:
+        if (
+            self._emergency_confirmation_required_locked()
+            and self._emergency_stop is False
+            and (
+                self._emergency_last_confirmed_at is None
+                or now - self._emergency_last_confirmed_at > self.config.emergency_confirmation_max_age_s
+            )
+        ):
+            self._invalidate_emergency_confirmation_locked("急停状态确认已过期")
         if self._emergency_release == "waiting_confirmation" and self._emergency_release_deadline is not None and now >= self._emergency_release_deadline:
             self._emergency_release = "failed" if self._emergency_stop is True else "unconfirmable"
             self._emergency_release_deadline = None
@@ -789,6 +1000,8 @@ class VehicleControlController:
             self._last_error = f"等待 /control_source_state={target} 超时；未确认控制源切换"
             self._sessions.clear()
             self._motion_session_id = None
+            if self._relocalization_hold in {"switching", "recovering"}:
+                self._relocalization_hold = "failed"
             LOGGER.warning("%s", self._last_error)
         expired = [
             session_id
@@ -815,11 +1028,47 @@ class VehicleControlController:
 
     def _manual_ready_locked(self) -> bool:
         return bool(
+            self._relocalization_hold == "idle"
+            and
             any(session.get("state") == "active" for session in self._sessions.values())
             and self._pending_source is None
             and self._actual_source == self.SOURCE_MINIAPP
             and self._emergency_stop is False
+            and self._emergency_confirmation_is_fresh_locked()
         )
+
+    def _emergency_confirmation_required_locked(self) -> bool:
+        return bool(
+            self._sessions
+            or self._relocalization_hold != "idle"
+            or self._pending_source == self.SOURCE_MINIAPP
+            or self._target_linear
+            or self._target_angular
+            or self._map_marker_navigation_guard()
+        )
+
+    def _emergency_confirmation_is_fresh_locked(self) -> bool:
+        return bool(
+            self._emergency_stop is False
+            and self._emergency_last_confirmed_at is not None
+            and self._clock() - self._emergency_last_confirmed_at <= self.config.emergency_confirmation_max_age_s
+        )
+
+    def _invalidate_emergency_confirmation_locked(self, detail: str) -> bool:
+        if self._emergency_stop is None:
+            return False
+        self._emergency_stop = None
+        self._emergency_last_confirmed_at = None
+        self._emergency_state_generation += 1
+        self._clear_motion_locked()
+        self._manual_stop_latched = True
+        self._last_error = detail
+        LOGGER.warning("%s，已锁定手动运动输出", detail)
+        return True
+
+    def _raise_if_relocalization_hold_locked(self) -> None:
+        if self._relocalization_hold != "idle":
+            raise VehicleControlConflict("手动重定位正在占用车辆控制权")
 
     def _emergency_motion_block_reason_locked(self) -> str:
         return "急停已触发，禁止发送手动运动指令" if self._emergency_stop is True else "急停状态未知，禁止发送手动运动指令"
@@ -844,6 +1093,7 @@ class VehicleControlController:
     def _clear_motion_locked(self) -> None:
         if self._target_linear or self._target_angular:
             self._stop_pending = True
+            LOGGER.info("手动运动目标已停止")
         self._target_linear = 0.0
         self._target_angular = 0.0
         self._target_command = None
@@ -968,7 +1218,9 @@ class VehicleControlController:
                     elif self._stop_frames_remaining:
                         self._stop_frames_remaining -= 1
             except Exception:
-                LOGGER.exception("无法立即发布 miniapp STOP")
+                self._diagnostic_failure("publish_stop", "无法立即发布 miniapp STOP", exc_info=True)
+            else:
+                self._diagnostic_recovered("publish_stop")
 
     def _publish_twist(self, linear: float, angular: float) -> None:
         with self._publish_lock:
@@ -998,10 +1250,20 @@ class VehicleControlController:
         display_mode = "手动控制" if actual == self.SOURCE_MINIAPP else "自动驾驶" if actual == self.SOURCE_NAVIGATION else "未知"
         if self._pending_source:
             display_mode = "正在切换"
-        emergency_state = "normal" if self._emergency_stop is False else "triggered" if self._emergency_stop is True else "unknown"
+        # `/is_emergency_stop=false` is retained state, not a perpetual motion
+        # permit.  Never render an expired confirmation as normal: callers that
+        # only inspect this snapshot must make the same fail-closed decision as
+        # the manual and Nav2 gates.
+        emergency_state = (
+            "triggered"
+            if self._emergency_stop is True
+            else "normal"
+            if self._emergency_confirmation_is_fresh_locked()
+            else "unknown"
+        )
         car_state_sync = {
             "control_source": "confirmed" if self._has_source_state else "pending",
-            "emergency_stop": "confirmed" if self._emergency_stop is not None else "pending",
+            "emergency_stop": "confirmed" if self._emergency_confirmation_is_fresh_locked() else "pending",
         }
         return {
             "runtime": self._runtime_state,
@@ -1010,12 +1272,13 @@ class VehicleControlController:
             "display_mode": display_mode,
             "transition": self._pending_source,
             "transition_error": self._last_error,
+            "relocalization_hold": self._relocalization_hold,
             "manual_ready": self._manual_ready_locked(),
             # 切换控制源与输出速度是两道独立闸门：当前 remote/未知或急停时仍可
             # 请求 miniapp，结果以 state Topic 确认；非零速度仍由 manual_ready
             # 和 _manual_ready_locked 的急停/会话条件严格控制。
-            "can_begin_manual": self._runtime_state == "ready" and self._pending_source in {None, self.SOURCE_MINIAPP} and not self._active_run_guard(),
-            "can_request_navigation": self._runtime_state == "ready" and self._pending_source is None,
+            "can_begin_manual": self._runtime_state == "ready" and self._relocalization_hold == "idle" and self._pending_source in {None, self.SOURCE_MINIAPP} and not self._active_run_guard(),
+            "can_request_navigation": self._runtime_state == "ready" and self._relocalization_hold == "idle" and self._pending_source is None,
             "session": session_data,
             "shared_sessions": {
                 "active_count": active_count,
@@ -1038,6 +1301,10 @@ class VehicleControlController:
             "emergency_stop": {
                 "state": emergency_state,
                 "release": self._emergency_release,
+                "confirmed_age_ms": (
+                    int((self._clock() - self._emergency_last_confirmed_at) * 1000)
+                    if self._emergency_last_confirmed_at is not None else None
+                ),
             },
             "chassis_parameters": {
                 "press": int(self._twist_profile.press),

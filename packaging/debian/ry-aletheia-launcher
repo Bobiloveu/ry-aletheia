@@ -16,6 +16,11 @@ if [[ -f /opt/ry/install/setup.bash ]]; then
   set +u
   source /opt/ry/install/setup.bash
   set -u
+  # A merged colcon install exports package prefixes, while legacy console
+  # releases checked the workspace root before deciding whether to source ROS
+  # a second time.  Keep the root as an explicit compatibility marker so an
+  # installed console never performs that expensive duplicate setup pass.
+  export AMENT_PREFIX_PATH="/opt/ry/install:${AMENT_PREFIX_PATH:-}"
 fi
 cd "$ROOT"
 # Keep older user-level systemd units compatible with the vehicle DDS domain.

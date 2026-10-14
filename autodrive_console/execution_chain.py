@@ -19,7 +19,7 @@ class ExecutionChainError(ValueError):
     """The explicit project intent cannot become a safe map traversal."""
 
 
-NAVIGATION_REGION_SPEEDS = frozenset({"task_point", "single_point", "slow_point", "narrow_point"})
+NAVIGATION_REGION_SPEEDS = frozenset({"normal", "task_point", "single_point", "slow_point", "narrow_point"})
 NAVIGATION_REGION_KINDS = frozenset({"slow_zone", "ramp", "narrow_passage"})
 # A building entrance is a map-to-map localization anchor, not an executable
 # task node.  It must not be expanded into a speed/action waypoint.
@@ -70,8 +70,34 @@ def build_map_execution_plan(
     if not isinstance(project, dict):
         raise ExecutionChainError("部署项目格式无效")
     binding = _binding(project, binding_id)
-    asset = _asset(project, str(binding["map_asset_id"]))
     refs = _execution_refs(project, binding)
+    return build_directed_map_execution_plan(
+        project, binding_id, node_refs=refs, start_anchor=start_anchor,
+        end_anchor=end_anchor, end_speed_mode=end_speed_mode,
+    )
+
+
+def build_directed_map_execution_plan(
+    project: dict[str, Any],
+    binding_id: str,
+    *,
+    node_refs: list[dict[str, str]],
+    start_anchor: dict[str, Any],
+    end_anchor: dict[str, Any],
+    end_speed_mode: str,
+) -> MapExecutionPlan:
+    """Expand an explicit map-local visit sequence, including subsets and repeats.
+
+    Each occurrence is a separate visit; refs are resolved only within this
+    project's bound map. Persisted route completeness is enforced by the legacy
+    entry point, so a fixed-line segment needs no localization execution route.
+    Return nodes reverse the same physical path and pair controlled actions.
+    """
+    if not isinstance(project, dict):
+        raise ExecutionChainError("部署项目格式无效")
+    binding = _binding(project, binding_id)
+    asset = _asset(project, str(binding["map_asset_id"]))
+    refs = _directed_execution_refs(node_refs)
     start = _pose(start_anchor, "路径起点")
     end = _pose(end_anchor, "路径终点")
     if end_speed_mode not in NAVIGATION_REGION_SPEEDS | {"task_point", "backward"}:
@@ -120,6 +146,23 @@ def build_map_execution_plan(
             continue
     returned = _reverse_nodes(outbound, end_speed_mode)
     return MapExecutionPlan(tuple(outbound), tuple(returned))
+
+
+def _directed_execution_refs(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise ExecutionChainError("执行链节点列表无效")
+    refs: list[dict[str, str]] = []
+    for raw in value:
+        if not isinstance(raw, dict) or set(raw) != {"kind", "id"}:
+            raise ExecutionChainError("执行链节点格式无效")
+        kind, source_id = raw["kind"], raw["id"]
+        if (
+            not isinstance(kind, str) or kind not in {"transition", "component"}
+            or not isinstance(source_id, str) or not source_id.strip()
+        ):
+            raise ExecutionChainError("执行链节点类型无效")
+        refs.append({"kind": kind, "id": source_id})
+    return refs
 
 
 def _binding(project: dict[str, Any], binding_id: str) -> dict[str, Any]:
@@ -477,6 +520,10 @@ def _reverse_nodes(outbound: list[ExecutionNode], end_speed_mode: str) -> list[E
     for index in range(len(outbound) - 1, -1, -1):
         node = outbound[index]
         incoming = outbound[index + 1].incoming_speed_mode if index + 1 < len(outbound) else end_speed_mode
+        # Manual normal transitions stay continuous in either direction. Region
+        # boundaries still inherit edge speeds to preserve slow interior spans.
+        if node.source_kind == "transition" and node.incoming_speed_mode == "normal":
+            incoming = "normal"
         returned.append(ExecutionNode(
             source_kind=node.source_kind, source_id=node.source_id, role=node.role,
             x=node.x, y=node.y, yaw=return_yaw(node.yaw), incoming_speed_mode=incoming,

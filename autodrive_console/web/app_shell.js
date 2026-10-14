@@ -40,6 +40,7 @@
       label: "系统",
       items: [
         { href: "/runtime-settings.html", label: "运行配置", icon: "⚙" },
+        { href: "/software-inventory.html", label: "软件资产", icon: "▦" },
       ],
     },
   ];
@@ -56,7 +57,7 @@
   };
   const markActive = () => {
     const current = location.pathname === '/' ? '/' : location.pathname;
-    const parentRoute = { '/scenario-setup.html': '/case-library.html' }[current] || current;
+    const parentRoute = { '/scenario-setup.html': '/case-library.html', '/bag-recording-config.html': '/bag-recordings.html' }[current] || current;
     document.querySelectorAll('aside nav a').forEach((link) => {
       const href = link.getAttribute('href');
       link.classList.toggle('active', href === parentRoute);

@@ -76,8 +76,21 @@
           <span>最近执行通过率</span><b id="passRate">—</b
           ><small>LAST COMPLETED RUN</small>
         </article>
-        <article>
-          <span>前置条件状态</span><b id="runStatus">待命</b
+        <article class="run-status-metric">
+          <span>前置条件状态</span>
+          <div class="run-status-readout">
+            <b id="runStatus">待命</b>
+            <span
+              id="runStatusMotion"
+              class="run-status-motion"
+              role="img"
+              aria-label="正在执行前置条件检查"
+              hidden
+              ><span class="run-status-motion-dot"></span
+              ><span class="run-status-motion-dot"></span
+              ><span class="run-status-motion-dot"></span
+            ></span>
+          </div>
           ><small id="runHint">PRE-FLIGHT REQUIRED</small>
         </article>
       </section>
@@ -114,22 +127,19 @@
                 value="3"
             /></label>
           </div>
-          <section class="bag-recording-control" aria-labelledby="bagRecordingTitle">
-            <div class="bag-recording-head">
+          <section class="bag-recording-summary" aria-labelledby="bagRecordingTitle">
+            <div class="bag-recording-summary-head">
               <div>
-                <p class="eyebrow">OPTIONAL / DIAGNOSTIC EVIDENCE</p>
-                <b id="bagRecordingTitle">诊断录包</b>
+                <h3 id="bagRecordingTitle">诊断录包</h3>
+                <p>只在选定轮次保留研发分析证据。图像、点云和 LaserScan 走共享内存，不会出现在录制列表中。</p>
               </div>
-              <label class="inline-check"><input id="bagRecordingEnabled" type="checkbox" />本次保留数据包</label>
+              <label class="bag-recording-toggle"><input id="bagRecordingEnabled" type="checkbox" />本次录制</label>
             </div>
-            <p>仅录制所选轮次。图像、点云和 LaserScan 已迁移至共享内存，不在 DDS 录包列表中。</p>
-            <div class="fields">
-              <label>录制轮次<input id="bagRecordingAttempt" type="number" min="1" value="1" disabled /></label>
-              <button id="refreshBagTopics" class="text-button" type="button" disabled>刷新可录 Topic</button>
+            <p id="bagRecordingSummary" class="bag-recording-summary-state" aria-live="polite">未启用。可先配置目标轮次和要录制的 Topic。</p>
+            <div class="bag-recording-actions">
+              <a id="configureBagRecording" class="outline-button" href="/bag-recording-config.html">配置录包</a>
+              <button id="clearBagRecording" class="text-button" type="button" disabled>清除配置</button>
             </div>
-            <input id="bagTopicFilter" type="search" placeholder="筛选 Topic" disabled />
-            <div id="bagTopicList" class="bag-topic-list" aria-live="polite">启用后读取当前 ROS 图。</div>
-            <small id="bagTopicHint">审查依据：同窗口只读计数与 rosbag 写入数。估算丢失 ≤1% 通过，1–5% 警告，&gt;5% 失败。</small>
           </section>
           <div class="gate-note">
             <span>✓</span>
@@ -394,7 +404,7 @@
             <span class="trajectory-cursor-dot"></span>
           </div>
           <div id="trajectoryTooltip" class="trajectory-tooltip" role="status" aria-live="polite" hidden>
-            <div class="trajectory-tooltip-kicker">磁吸采样点 <span data-trajectory-counter="index">—</span></div>
+                <div class="trajectory-tooltip-kicker">采样点 <span data-trajectory-counter="index">—</span></div>
             <strong data-trajectory-counter="timestamp">时间未知</strong>
             <div class="trajectory-tooltip-route" data-trajectory-counter="route">轨迹采样</div>
             <div class="trajectory-tooltip-grid">

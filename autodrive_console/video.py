@@ -8,11 +8,14 @@ enabled, and exposes only small status documents to the Python HTTP console.
 """
 
 import json
+import errno
+import hashlib
 import logging
 import os
 import re
 import signal
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -22,6 +25,28 @@ from typing import Any
 from urllib.error import URLError
 from urllib.parse import quote, urlparse, urlsplit
 from urllib.request import Request, urlopen
+
+from .video_encoder import EncoderProbeCancelled, EncoderSelection, EncoderUnavailable, HardwareEncoderSelector
+
+
+def _choose_private_rtsp_port(gateway: dict[str, Any]) -> int:
+    """Choose a loopback publisher port without taking over another service."""
+    reserved = {gateway['api_port'], gateway['whep_port'], 8189}
+    candidates = dict.fromkeys([gateway['rtsp_port'], *range(18554, 18558), 0])
+    for port in candidates:
+        if port in reserved:
+            continue
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind(('127.0.0.1', port))
+            except OSError as exc:
+                if exc.errno == errno.EADDRINUSE:
+                    continue
+                raise
+            chosen = probe.getsockname()[1]
+            if chosen not in reserved:
+                return chosen
+    raise OSError(errno.EADDRINUSE, '无法为私有视频网关选择空闲 RTSP 端口')
 
 
 VIDEO_SCHEMA = "ry-aletheia-video/v1"
@@ -44,6 +69,53 @@ _LEGACY_CAMERA_TOPICS = {
     "right_camera": "/right_camera/image_raw",
 }
 LOGGER = logging.getLogger("ry_aletheia.video")
+_PROC_ROOT = Path('/proc')
+
+
+def _process_identity(pid: int) -> tuple[int, int] | None:
+    try:
+        fields = (_PROC_ROOT / str(pid) / 'stat').read_text().rpartition(')')[2].split()
+        return int(fields[2]), int(fields[19])  # pgrp, kernel starttime
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _owned_subgroups(root_pid: int) -> list[tuple[int, int]]:
+    """Snapshot only child groups reached from this console's Popen handle.
+
+    PID plus kernel birth time guards PID reuse. Do not claim arbitrary SDK
+    descendants (notably mempool): only Aletheia native ingest / private GST
+    executables can enter the outer controller's emergency cleanup list.
+    """
+    pending, seen, groups = [root_pid], set(), []
+    while pending:
+        pid = pending.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        try:
+            children = (_PROC_ROOT / str(pid) / 'task' / str(pid) / 'children').read_text().split()
+            pending.extend(int(value) for value in children if value.isdigit())
+            identity = _process_identity(pid)
+            command = (_PROC_ROOT / str(pid) / 'cmdline').read_bytes().split(b'\0')
+            executable = Path(os.fsdecode(command[0])).name
+            private = executable == 'aletheia_video_ingest' or (
+                executable in {'gst-launch-1.0', 'gst-launch-1.0.real'} and
+                '/runtime/video/bin/' in os.fsdecode(command[0]))
+            if pid != root_pid and identity and identity[0] == pid and private:
+                groups.append((pid, identity[1]))
+        except (OSError, ValueError, IndexError):
+            continue
+    return sorted(groups)
+
+
+def _signal_owned_subgroups(groups: list[tuple[int, int]], signum: int) -> None:
+    for pid, birth in groups:
+        if pid > 0 and _process_identity(pid) == (pid, birth):
+            try:
+                os.killpg(pid, signum)
+            except ProcessLookupError:
+                pass
 
 
 class VideoConfigurationError(ValueError):
@@ -72,6 +144,7 @@ class VideoManager:
         # The HTTP console is threaded.  Serialise configuration updates so
         # two browser clicks cannot race a write or start two native runtimes.
         self._config_lock = threading.RLock()
+        self.runtime_status_path = config_path.parent.parent / 'runtime' / 'video-status.json'
 
     def status(self, public_host: str | None = None) -> dict[str, Any]:
         """Return the stable API model for ``GET /api/video/status``.
@@ -103,8 +176,20 @@ class VideoManager:
             health = self._probe_gateway(gateway["api_url"])
 
         streams = [self._stream_status(stream, gateway, health, public_host) for stream in config["streams"]]
+        diagnostics = self._read_runtime_status() if config['enabled'] else {}
+        stream_diagnostics = diagnostics.get('streams', {})
+        if isinstance(stream_diagnostics, dict):
+            for stream in streams:
+                detail = stream_diagnostics.get(stream['name'])
+                if isinstance(detail, dict):
+                    for key in ('error_code', 'detail', 'retry_count'):
+                        if key in detail:
+                            stream[key] = detail[key]
         return {
             "enabled": config["enabled"],
+            "runtime": diagnostics.get('runtime', {'state': 'starting' if config['enabled'] else 'disabled',
+                'encoder': None, 'device': None, 'error_code': None,
+                'detail': '等待视频运行时启动' if config['enabled'] else '视频已关闭'}),
             "gateway": {
                 "kind": gateway["kind"],
                 "online": health.online,
@@ -115,6 +200,25 @@ class VideoManager:
             },
             "streams": streams,
         }
+
+    def _read_runtime_status(self) -> dict[str, Any]:
+        try:
+            if self.runtime_status_path.stat().st_size > 65536:
+                return {}
+            raw = json.loads(self.runtime_status_path.read_text(encoding='utf-8'))
+            return raw if isinstance(raw, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def write_runtime_status(self, runtime: dict[str, Any], streams: dict[str, Any] | None = None) -> None:
+        target = self.runtime_status_path
+        temporary = target.with_suffix(f'.{os.getpid()}.tmp')
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps({'runtime': runtime, 'streams': streams or {}}, ensure_ascii=False), encoding='utf-8')
+            temporary.replace(target)
+        except OSError as exc:
+            LOGGER.warning('无法保存视频运行时诊断：%s', exc)
 
     def load_config(self) -> dict[str, Any]:
         """Load the validated configuration for the native runtime launcher."""
@@ -164,10 +268,11 @@ class VideoManager:
         runtime = raw.get("runtime")
         if not isinstance(runtime, dict):
             raise VideoConfigurationError("runtime 必须是对象")
-        if runtime.get("encoder") != "vaapih264enc":
-            raise VideoConfigurationError("runtime.encoder 当前必须为 vaapih264enc")
-        if runtime.get("vaapi_device") != "/dev/dri/renderD128":
-            raise VideoConfigurationError("runtime.vaapi_device 必须固定为 Intel renderD128")
+        if runtime.get("encoder") not in {'auto', 'vaapih264enc', 'nvh264enc'}:
+            raise VideoConfigurationError("runtime.encoder 必须为 auto、vaapih264enc 或 nvh264enc")
+        device = runtime.get('vaapi_device')
+        if device != 'auto' and (not isinstance(device, str) or not re.fullmatch(r'/dev/dri/renderD[0-9]{1,4}', device)):
+            raise VideoConfigurationError("runtime.vaapi_device 必须为 auto 或受控 DRM render 节点")
         if runtime.get("gst_launch") != "runtime/video/bin/gst-launch-1.0":
             raise VideoConfigurationError("runtime.gst_launch 不是受控私有运行时路径")
 
@@ -195,6 +300,9 @@ class VideoManager:
                 raise VideoConfigurationError(f"流名称或路径重复：{name}")
             if not isinstance(resolution, str) or not _RESOLUTION.fullmatch(resolution):
                 raise VideoConfigurationError(f"流 {name} 的 resolution 必须形如 1280x720")
+            width, height = (int(value) for value in resolution.split('x'))
+            if width > 8192 or height > 8192 or width % 2 or height % 2 or width * height > 16 * 1024 * 1024:
+                raise VideoConfigurationError(f'流 {name} 的 resolution 输出分辨率必须为偶数、边长不超过 8192、总像素不超过 16 Mi')
             if not isinstance(fps, int) or not 1 <= fps <= 120:
                 raise VideoConfigurationError(f"流 {name} 的 fps 必须介于 1 和 120")
             source = self._validate_stream_input(name, item)
@@ -384,6 +492,15 @@ class VideoManager:
             additions = [stream for stream in default_streams if isinstance(stream, dict) and stream.get("name") not in names]
             removed_legacy_metadata = False
             migrated_physical_camera_transport = False
+            migrated_encoder = False
+            runtime = current.get('runtime', {})
+            # This exact pair was shipped in all legacy templates. Keep other
+            # explicit hardware choices and every input/output budget intact.
+            if ('hardware_selection_version' not in runtime and runtime.get('encoder') == 'vaapih264enc' and
+                    runtime.get('vaapi_device') == '/dev/dri/renderD128'):
+                runtime.update(encoder='auto', vaapi_device='auto', hardware_selection_version=1)
+                migrated_encoder = True
+                LOGGER.info('视频配置迁移：旧默认 Intel 编码设置改为自动硬件选择，保留输入与输出预算')
             default_by_name = {
                 stream.get("name"): stream
                 for stream in default_streams
@@ -401,12 +518,13 @@ class VideoManager:
                 default_input = default.get("input") if isinstance(default, dict) else None
                 # Upgrade only the shipped, now-dead physical ROS topic.  A
                 # deliberately customised ROS input remains untouched.
-                if (name in _SHMSDK_CAMERA_CHANNELS and "input" not in stream and stream.get("source_topic") == expected_topic and
+                source = self._validate_stream_input(name, stream)
+                if (name in _SHMSDK_CAMERA_CHANNELS and source == {'kind': 'ros', 'topic': expected_topic} and
                         isinstance(default_input, dict) and default_input.get("kind") == "shmsdk"):
                     stream.pop("source_topic", None)
                     stream["input"] = json.loads(json.dumps(default_input))
                     migrated_physical_camera_transport = True
-            if not additions and not removed_legacy_metadata and not migrated_physical_camera_transport:
+            if not additions and not removed_legacy_metadata and not migrated_physical_camera_transport and not migrated_encoder:
                 return False
             # JSON round-trip is a compact deep copy and avoids sharing a
             # caller-owned configuration object with the persisted document.
@@ -528,6 +646,23 @@ class VideoRuntime:
         self.media_process: subprocess.Popen[bytes] | None = None
         self.ingest_processes: dict[str, subprocess.Popen[bytes]] = {}
         self.stopping = False
+        self.encoder_selection: EncoderSelection | None = None
+        self.encoder_selector = HardwareEncoderSelector()
+        self._retries: dict[str, dict[str, Any]] = {}
+        self._stream_diagnostics: dict[str, dict[str, Any]] = {}
+        self._runtime_diagnostic: dict[str, Any] = {'state': 'starting', 'encoder': None,
+            'device': None, 'error_code': None, 'detail': '正在检查私有视频运行时和硬件编码器'}
+        self._last_status: str | None = None
+        self._startup_pending: tuple[str, float] | None = None
+        self._next_startup_probe_at = 0.0
+        self._rtsp_port: int | None = None
+
+    def _publish_status(self, **changes: Any) -> None:
+        self._runtime_diagnostic.update(changes)
+        serialized = json.dumps([self._runtime_diagnostic, self._stream_diagnostics], sort_keys=True)
+        if serialized != self._last_status:
+            self.manager.write_runtime_status(self._runtime_diagnostic, self._stream_diagnostics)
+            self._last_status = serialized
 
     def run(self) -> int:
         try:
@@ -546,7 +681,12 @@ class VideoRuntime:
             LOGGER.error("视频运行时未启动：全局视频已启用但没有选择任何流")
             print("RY Aletheia 视频运行时未启动：已启用视频功能但没有启用任何相机流。", flush=True)
             return 2
+        # A close action during the bounded probe must reach this runner's
+        # handler, so it can reap the probe group before the outer five-second
+        # deadline rather than leave a detached driver/scanner process behind.
+        self._install_signal_handlers()
         try:
+            self._publish_status()
             runtime = self._runtime_root()
             media_binary = self._require_executable(runtime / "mediamtx" / "mediamtx", "MediaMTX")
             gst_launch = self._require_executable(
@@ -557,14 +697,43 @@ class VideoRuntime:
             # Declare every configured path once.  A per-stream switch then
             # only changes its native publisher; MediaMTX and other paths stay
             # live and existing WebRTC sessions are never needlessly reset.
-            self._write_media_config(media_config, config, config["streams"])
+            self.encoder_selection = self.encoder_selector.select(gst_launch, config['runtime']['encoder'], config['runtime']['vaapi_device'], lambda: self.stopping)
+            config = self.manager.load_config()
+            if self.stopping or not config['enabled']:
+                self._publish_status(state='disabled', error_code=None, detail='视频已关闭')
+                return 0
+            streams = [stream for stream in config['streams'] if stream['enabled']]
+            self._publish_status(state='ready', encoder=self.encoder_selection.encoder, device=self.encoder_selection.device,
+                                 error_code=None, detail='硬件 H.264 编码预检通过')
+        except EncoderProbeCancelled:
+            self._publish_status(state='disabled', error_code=None, detail='视频已关闭')
+            return 0
+        except EncoderUnavailable as exc:
+            self._publish_status(state='error', error_code='encoder_unavailable', detail=str(exc))
+            LOGGER.error('视频硬件编码不可用：%s', exc)
+            return 2
+        except VideoConfigurationError as exc:
+            self._publish_status(state='error', error_code='configuration_invalid', detail=str(exc))
+            LOGGER.error('视频预检期间配置失效：%s', exc)
+            return 2
         except (OSError, RuntimeError) as exc:
+            self._publish_status(state='error', error_code='runtime_unavailable', detail=str(exc))
             LOGGER.error("视频运行时未启动：%s", exc)
             print(f"RY Aletheia 视频运行时未启动：{exc}", flush=True)
             return 2
 
-        self._install_signal_handlers()
         try:
+            # Select after hardware preflight, immediately before launching
+            # our gateway. Persist only in this runner; reloaded user settings
+            # must not send a restarted publisher back to the occupied port.
+            requested_port = config['gateway']['rtsp_port']
+            self._rtsp_port = _choose_private_rtsp_port(config['gateway'])
+            if self._rtsp_port != requested_port:
+                LOGGER.warning('视频 RTSP 端口 %s 已占用或与网关端口重叠，本次使用回环端口 %s；外部服务及用户配置保持不变',
+                               requested_port, self._rtsp_port)
+                print(f'私有视频 RTSP 端口 {requested_port} 不可用，本次改用 {self._rtsp_port}', flush=True)
+            config = {**config, 'gateway': {**config['gateway'], 'rtsp_port': self._rtsp_port}}
+            self._write_media_config(media_config, config, config["streams"])
             LOGGER.info(
                 "启动视频运行时：ROS_DOMAIN_ID=%s streams=%s gateway_api=%s rtsp_port=%s whep_port=%s",
                 config["ros_domain_id"],
@@ -573,6 +742,7 @@ class VideoRuntime:
             )
             self.media_process = subprocess.Popen([str(media_binary), str(media_config)], cwd=self.workspace)
             if not self._wait_for_gateway(config["gateway"]["api_url"]):
+                self._publish_status(state='error', error_code='gateway_unavailable', detail='MediaMTX 未在 5 秒内就绪，请查看 logs/video-runtime.log')
                 status = self.media_process.returncode if self.media_process is not None and self.media_process.poll() is not None else "running"
                 LOGGER.error("MediaMTX 未在 5 秒内就绪：status=%s api=%s", status, config["gateway"]["api_url"])
                 print("MediaMTX 未在 5 秒内就绪。", flush=True)
@@ -585,6 +755,7 @@ class VideoRuntime:
             )
             return self._monitor_children(ingest_binary, gst_launch)
         except OSError as exc:
+            self._publish_status(state='error', error_code='process_start_failed', detail=str(exc))
             LOGGER.exception("视频子进程启动失败：%s", exc)
             print(f"RY Aletheia 视频子进程启动失败：{exc}", flush=True)
             return 1
@@ -616,9 +787,23 @@ class VideoRuntime:
         try:
             expected_marker = bundled_marker.read_bytes()
             current_marker = runtime / self.RUNTIME_MARKER
-            if current_marker.is_file() and current_marker.read_bytes() == expected_marker:
+            marker = json.loads(expected_marker)
+            required = marker.get('required_files', [])
+            files_present = all(isinstance(name, str) and (runtime / name).resolve().is_relative_to(runtime) and
+                                (runtime / name).is_file() for name in required)
+            hashes = marker.get('file_sha256', {})
+            if files_present and isinstance(hashes, dict):
+                files_present = all(isinstance(name, str) and (runtime / name).resolve().is_relative_to(runtime) and
+                                    (runtime / name).is_file() and hashlib.sha256((runtime / name).read_bytes()).hexdigest() == digest
+                                    for name, digest in hashes.items())
+            executables = marker.get('executable_files', [])
+            if files_present:
+                files_present = all(isinstance(name, str) and (runtime / name).resolve().is_relative_to(runtime) and
+                                    (runtime / name).is_file() and os.access(runtime / name, os.X_OK)
+                                    for name in executables)
+            if current_marker.is_file() and current_marker.read_bytes() == expected_marker and files_present:
                 return
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise RuntimeError(f"无法读取私有视频运行时标记：{exc}") from exc
 
         parent = runtime.parent
@@ -642,6 +827,7 @@ class VideoRuntime:
             self._remove_runtime_tree(staging)
             raise RuntimeError(f"无法更新私有视频运行时：{exc}") from exc
         print("RY Aletheia 已更新私有视频运行时。", flush=True)
+        LOGGER.info('私有视频运行时已按内容指纹刷新或修复：path=%s', runtime)
 
     @staticmethod
     def _remove_runtime_tree(path: Path) -> None:
@@ -706,10 +892,13 @@ class VideoRuntime:
             str(ingest_binary),
             "--node-name", f"ry_aletheia_video_{stream['name']}",
             "--input-kind", stream["input"]["kind"],
+            "--encoder", self.encoder_selection.encoder if self.encoder_selection else
+                ('vaapih264enc' if config['runtime']['encoder'] == 'auto' else config['runtime']['encoder']),
             "--encoding", stream["encoding"],
             "--gst-launch", str(gst_launch),
-            "--vaapi-device", config["runtime"]["vaapi_device"],
-            "--rtsp-url", f"rtsp://127.0.0.1:{config['gateway']['rtsp_port']}/{stream['path']}",
+            "--vaapi-device", (self.encoder_selection.device if self.encoder_selection else None) or
+                ('/dev/dri/renderD128' if config['runtime']['vaapi_device'] == 'auto' else config['runtime']['vaapi_device']),
+            "--rtsp-url", f"rtsp://127.0.0.1:{self._rtsp_port or config['gateway']['rtsp_port']}/{stream['path']}",
             "--width", width,
             "--height", height,
             "--fps", str(stream["fps"]),
@@ -725,7 +914,16 @@ class VideoRuntime:
         # MediaMTX is not a ROS participant.
         ingest_environment = os.environ.copy()
         ingest_environment["ROS_DOMAIN_ID"] = str(config["ros_domain_id"])
-        self.ingest_processes[stream["name"]] = subprocess.Popen(command, cwd=self.workspace, env=ingest_environment)
+        # Warnings/errors only; media pixels and per-frame debug stay out of
+        # Python. Preserve an explicitly configured GStreamer debug level.
+        ingest_environment.setdefault('GST_DEBUG', '2')
+        if self.encoder_selection and self.encoder_selection.encoder == 'vaapih264enc' and self.encoder_selection.device:
+            ingest_environment['GST_VAAPI_DRM_DEVICE'] = self.encoder_selection.device
+            ingest_environment['GST_VAAPI_DISPLAY'] = 'drm'
+        self.ingest_processes[stream["name"]] = subprocess.Popen(command, cwd=self.workspace, env=ingest_environment, start_new_session=True)
+        retry = self._retries.setdefault(stream['name'], {'count': 0, 'next_at': 0})
+        retry['started_at'] = time.monotonic()
+        self._stream_diagnostics[stream['name']] = {'error_code': None, 'detail': '原生输入进程已启动，等待媒体流', 'retry_count': retry['count']}
         LOGGER.info(
             "已启动视频输入：stream=%s pid=%s source=%s expected=%s/%s fps=%s bitrate_kbps=%s ros_domain_id=%s",
             stream["name"], self.ingest_processes[stream["name"]].pid, stream["source_label"],
@@ -734,34 +932,104 @@ class VideoRuntime:
         print(f"RY Aletheia 已启用视频流：{stream['name']}", flush=True)
 
     @staticmethod
-    def _stop_ingest(process: subprocess.Popen[bytes]) -> None:
+    def _stop_ingest(process: subprocess.Popen[bytes], process_group: bool = False) -> None:
+        group = process_group and isinstance(process.pid, int) and process.pid > 0
         if process.poll() is not None:
+            if group:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             return
-        process.terminate()
+        try:
+            if group:
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
+        except ProcessLookupError:
+            return
         try:
             process.wait(timeout=3)
         except subprocess.TimeoutExpired:
-            process.kill()
+            if not group:
+                process.kill()
+        finally:
+            if group:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             process.wait()
 
     def _reconcile_streams(self, config: dict[str, Any], ingest_binary: Path, gst_launch: Path) -> bool:
         """Apply per-stream choices without recreating MediaMTX or peers."""
 
         desired = {stream["name"]: stream for stream in config["streams"] if stream["enabled"]}
+        now = time.monotonic()
+        for name in list(self._retries):
+            if name not in desired:
+                self._retries.pop(name, None)
+                self._stream_diagnostics.pop(name, None)
         for name, process in list(self.ingest_processes.items()):
             if name not in desired:
-                self._stop_ingest(process)
+                self._stop_ingest(process, process_group=True)
                 self.ingest_processes.pop(name, None)
                 LOGGER.info("已停止视频输入：stream=%s（操作员关闭该路）", name)
                 print(f"RY Aletheia 已关闭视频流：{name}", flush=True)
             elif process.poll() is not None:
                 LOGGER.error("视频输入进程意外退出：stream=%s exit_code=%s；请查看 logs/video-runtime.log", name, process.returncode)
                 print(f"视频输入进程意外退出：{name} status={process.returncode}", flush=True)
-                return False
+                self.ingest_processes.pop(name, None)
+                self._stop_ingest(process, process_group=True)
+                self._schedule_retry(name, now, f'原生输入进程退出（exit={process.returncode}）')
+            else:
+                retry = self._retries.get(name)
+                if retry and now - retry.get('started_at', now) >= 60:
+                    retry['count'] = 0
+        serial_start = self.encoder_selection is not None and self.encoder_selection.encoder == 'nvh264enc'
+        if self._startup_pending:
+            starting, deadline = self._startup_pending
+            if not serial_start or starting not in desired or starting not in self.ingest_processes:
+                self._startup_pending = None
+            elif now >= deadline:
+                LOGGER.warning('NVENC 启动等待到期：stream=%s；继续启动下一路，当前输入与恢复保持独立', starting)
+                self._startup_pending = None
+            elif now >= self._next_startup_probe_at:
+                self._next_startup_probe_at = now + 1.0
+                health = self.manager._probe_gateway(config['gateway']['api_url'])
+                if desired[starting]['path'] in health.paths:
+                    LOGGER.info('NVENC 启动完成，媒体流已发布：stream=%s', starting)
+                    self._stream_diagnostics[starting]['detail'] = 'H.264 媒体流已发布'
+                    self._startup_pending = None
         for name, stream in desired.items():
+            if self.stopping:
+                break
             if name not in self.ingest_processes:
-                self._start_ingest(stream, config, ingest_binary, gst_launch)
+                if serial_start and self._startup_pending:
+                    continue
+                retry = self._retries.get(name)
+                if retry and (retry['count'] > 5 or now < retry['next_at']):
+                    continue
+                try:
+                    self._start_ingest(stream, config, ingest_binary, gst_launch)
+                    if serial_start:
+                        self._startup_pending = (name, now + 12.0)
+                        self._next_startup_probe_at = now
+                except OSError as exc:
+                    self._schedule_retry(name, now, f'无法启动原生输入进程：{exc}')
+        self._publish_status()
         return True
+
+    def _schedule_retry(self, name: str, now: float, reason: str) -> None:
+        retry = self._retries.setdefault(name, {'count': 0, 'next_at': 0})
+        retry['count'] += 1
+        exhausted = retry['count'] > 5
+        delay = min(30, 2 ** (retry['count'] - 1))
+        retry['next_at'] = now + delay
+        self._stream_diagnostics[name] = {'error_code': 'ingest_retry_exhausted' if exhausted else 'ingest_retrying',
+            'detail': reason + ('；重试已达上限，请关闭并重新启用该路' if exhausted else f'；{delay} 秒后仅重试该路'),
+            'retry_count': min(retry['count'], 5)}
+        LOGGER.warning('视频单路恢复：stream=%s %s', name, self._stream_diagnostics[name]['detail'])
 
     def _wait_for_gateway(self, api_url: str) -> bool:
         deadline = time.monotonic() + 5.0
@@ -778,6 +1046,7 @@ class VideoRuntime:
             if self.media_process is None or self.media_process.poll() is not None:
                 status = self.media_process.returncode if self.media_process is not None else "unknown"
                 LOGGER.error("MediaMTX 意外退出：exit_code=%s；请查看 logs/video-runtime.log", status)
+                self._publish_status(state='error', error_code='gateway_exited', detail=f'MediaMTX 意外退出（exit={status}）')
                 print(f"MediaMTX 意外退出：status={status}", flush=True)
                 return 1
             try:
@@ -787,6 +1056,7 @@ class VideoRuntime:
                 print(f"视频配置已失效：{exc}", flush=True)
                 return 1
             if not config["enabled"]:
+                self._publish_status(state='disabled', error_code=None, detail='视频已关闭')
                 LOGGER.info("视频运行时停止：全局视频开关已关闭")
                 return 0
             if not self._reconcile_streams(config, ingest_binary, gst_launch):
@@ -802,12 +1072,37 @@ class VideoRuntime:
         signal.signal(signal.SIGINT, stop)
 
     def _stop_children(self) -> None:
-        for process in reversed(list(self.ingest_processes.values())):
-            self._stop_ingest(process)
-        self.ingest_processes.clear()
+        # Ingest owns its own process group so a crashed SDK reader cannot leak
+        # its encoder, and restarting it cannot signal any peer. Signal all
+        # groups first; share one grace period across six streams so the outer
+        # console's five-second shutdown timeout still covers this cleanup.
+        children = [(process, True) for process in self.ingest_processes.values()]
         if self.media_process is not None:
-            self._stop_ingest(self.media_process)
-            self.media_process = None
+            children.append((self.media_process, False))
+        for process, group in children:
+            try:
+                if group and isinstance(process.pid, int) and process.pid > 0:
+                    os.killpg(process.pid, signal.SIGTERM)
+                elif process.poll() is None:
+                    process.terminate()
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + 3
+        for process, group in children:
+            try:
+                process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                if not group:
+                    process.kill()
+            finally:
+                if group and isinstance(process.pid, int) and process.pid > 0:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                process.wait()
+        self.ingest_processes.clear()
+        self.media_process = None
 
 
 class ConsoleVideoRuntime:
@@ -878,6 +1173,8 @@ class ConsoleVideoRuntime:
         log_file = logs_dir / "video-runtime.log"
         environment = os.environ.copy()
         environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        self.manager.write_runtime_status({'state': 'starting', 'encoder': None, 'device': None,
+            'error_code': None, 'detail': '正在启动视频运行时并检查硬件编码器'})
         with log_file.open("ab", buffering=0) as output:
             self.process = subprocess.Popen(
                 self.runner_command,
@@ -904,14 +1201,17 @@ class ConsoleVideoRuntime:
         self.process = None
         if process is None or process.poll() is not None:
             return
+        subgroups = _owned_subgroups(process.pid) if isinstance(process.pid, int) else []
         # Terminating only the onefile bootloader leaves its inner Python
         # process reparented to init, along with MediaMTX and GStreamer.  The
         # process was created in its own session above, so this exact process
         # group is the complete console-owned video tree.
         try:
+            _signal_owned_subgroups(subgroups, signal.SIGTERM)
             os.killpg(process.pid, signal.SIGTERM)
             LOGGER.info("请求停止受控视频运行时：pid=%s", process.pid)
         except ProcessLookupError:
+            _signal_owned_subgroups(subgroups, signal.SIGKILL)
             return
         try:
             process.wait(timeout=5)
@@ -924,3 +1224,8 @@ class ConsoleVideoRuntime:
             except ProcessLookupError:
                 return
             process.wait()
+        finally:
+            # Sessions survive the runner group. Clean only the already
+            # snapshotted, birth-time-validated native/encoder groups even if
+            # the onefile runner needed forced termination.
+            _signal_owned_subgroups(subgroups, signal.SIGKILL)

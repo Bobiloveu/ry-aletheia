@@ -1,11 +1,11 @@
 import { requestJson } from "./platform/http.js";
 import { taskDashboardRefreshDelay } from "./task_dashboard_sync.js";
-import { findMagneticTrajectoryPoint, formatBeijingTime, interpolateCounterValue } from "./trajectory-hover.js";
+import { findMagneticTrajectoryPoint, formatBeijingTime, interpolateCounterValue, trajectoryEvidenceHeight } from "./trajectory-hover.js";
 import { bagAuditLabel, buildBagRecordingPayload } from "./bag-recording-form.js";
+import { clearBagRecordingDraft, loadBagRecordingDraft } from "./bag-recording-selection.js";
 
 const $ = (id) => document.getElementById(id);
 let cases = [], uiPreferences = { case_id: '', count: 20, interval_seconds: 3 }, dependencyPlan = { enabled: false, steps: [] }, monitorNodes = [], supervisorProcesses = [], timer = null, currentRun = null;
-let bagTopics = [], selectedBagTopicNames = new Set();
 const acknowledgedStallAlerts = new Set();
 const trajectoryView = { scale: 1, x: 0, y: 0, drag: null };
 const trajectoryHover = { attempt: null, mapId: null, counterFrame: null, counterValues: {} };
@@ -29,7 +29,8 @@ function rememberRouteProgress(runId, attempt, percent) {
 
 function tickClock() { $('clock').textContent = new Date().toLocaleString('zh-CN', { hour12: false }); }
 function escapeHtml(value) { const el = document.createElement('span'); el.textContent = value ?? ''; return el.innerHTML; }
-function statusText(status) { return ({ queued: '排队中', preparing: '预检中', running: '执行中', awaiting_recovery: '等待人工恢复', recovering: '恢复预检中', cancelling: '正在终止', cancelled: '已取消', completed: '已完成', blocked: '已拦截', failed: '运行中断' })[status] || status || '待命'; }
+function statusText(status) { return ({ queued: '排队中', preparing: '预检中', running: '执行中', awaiting_recovery: '等待人工恢复', recovering: '恢复预检中', cancelling: '正在终止', cancelled: '已取消', completed: '已完成', blocked: '已拦截', failed: '运行中断', interrupted: '意外断电中断' })[status] || status || '待命'; }
+function attemptStatusText(status) { return ({ passed: '通过', failed: '失败', cancelled: '已取消', unknown_after_power_loss: '结果未知（断电）' })[status] || status || '—'; }
 function minutes(seconds) { return `${(Number(seconds || 0) / 60).toFixed(2)} 分钟`; }
 
 async function loadCases() {
@@ -48,34 +49,31 @@ function showCase() {
   const testCase = cases.find(item => item.id === $('caseSelect').value);
   $('caseMeta').textContent = testCase ? `当前用例：${testCase.alias || testCase.filename}  |  community=${testCase.parameters.community}, building=${testCase.parameters.building}, unit=${testCase.parameters.unit}, floor=${testCase.parameters.floor}, door=${testCase.parameters.door}` : '请在 tasks/ 目录中放入有效的 JSON 用例文件';
 }
-function selectedBagTopics() { return [...selectedBagTopicNames]; }
-function renderBagTopics() {
-  const filter = $('bagTopicFilter').value.trim().toLowerCase();
-  const selected = selectedBagTopicNames;
-  const visible = bagTopics.filter(topic => !filter || topic.name.toLowerCase().includes(filter) || topic.type.toLowerCase().includes(filter));
-  $('bagTopicList').innerHTML = visible.length ? visible.map(topic => `<label class="bag-topic-row"><input data-bag-topic type="checkbox" value="${escapeHtml(topic.name)}" ${selected.has(topic.name) ? 'checked' : ''}/><span>${escapeHtml(topic.name)}</span><small>${escapeHtml(topic.type)} · ${topic.publisher_count} 发布者</small></label>`).join('') : '未发现可审查的 DDS Topic。';
-}
-async function refreshBagTopics() {
-  $('bagTopicHint').textContent = '正在读取当前 ROS 图…';
-  try {
-    const data = await requestJson('/api/bag-recordings/topics');
-    bagTopics = Array.isArray(data.topics) ? data.topics : [];
-    selectedBagTopicNames = new Set([...selectedBagTopicNames].filter(topic => bagTopics.some(item => item.name === topic)));
-    renderBagTopics();
-    $('bagTopicHint').textContent = bagTopics.length ? `已发现 ${bagTopics.length} 个可录 Topic；提交前和目标轮开始前都会再次验证。` : '没有可录 Topic；请确认当前 DDS 发布者已启动。';
-  } catch (error) { $('bagTopicHint').textContent = `无法读取 ROS 图：${error.message}`; }
-}
 function syncBagRecordingControls() {
   const enabled = $('bagRecordingEnabled').checked;
-  ['bagRecordingAttempt', 'refreshBagTopics', 'bagTopicFilter'].forEach(id => { $(id).disabled = !enabled; });
-  $('bagRecordingAttempt').max = $('count').value || '1';
-  if (+$('bagRecordingAttempt').value > +$('count').value) $('bagRecordingAttempt').value = $('count').value;
-  if (enabled && !bagTopics.length) refreshBagTopics();
-  if (!enabled) $('bagTopicHint').textContent = '审查依据：同窗口只读计数与 rosbag 写入数。估算丢失 ≤1% 通过，1–5% 警告，>5% 失败。';
+  const draft = loadBagRecordingDraft();
+  const count = Number($('count').value) || 1;
+  const invalidRound = draft && draft.attemptIndex > count;
+  $('clearBagRecording').disabled = !draft;
+  if (!enabled) {
+    $('bagRecordingSummary').textContent = draft ? `已配置 T-${String(draft.attemptIndex).padStart(3, '0')} · ${draft.topics.length} 个 Topic；开启“本次录制”后才会使用。` : '未启用。可先配置目标轮次和要录制的 Topic。';
+  } else if (!draft) {
+    $('bagRecordingSummary').textContent = '尚未配置录制内容。请先打开配置页选择目标轮次和 Topic。';
+  } else if (invalidRound) {
+    $('bagRecordingSummary').textContent = `目标为 T-${String(draft.attemptIndex).padStart(3, '0')}，但本次只执行 ${count} 轮；请重新配置。`;
+  } else {
+    $('bagRecordingSummary').textContent = `本次将在 T-${String(draft.attemptIndex).padStart(3, '0')} 录制 ${draft.topics.length} 个 Topic，并在结束后自动审查完整性。`;
+  }
+}
+function restoreBagRecordingFromConfigurationRoute() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('diagnosticRecording') !== 'ready' || !loadBagRecordingDraft()) return;
+  $('bagRecordingEnabled').checked = true;
+  window.history.replaceState({}, '', window.location.pathname);
 }
 function applyUiPreferences() {
   if (uiPreferences.case_id && cases.some(item => item.id === uiPreferences.case_id)) $('caseSelect').value = uiPreferences.case_id;
-  $('count').value = uiPreferences.count ?? 20; $('interval').value = uiPreferences.interval_seconds ?? 3; showCase();
+  $('count').value = uiPreferences.count ?? 20; $('interval').value = uiPreferences.interval_seconds ?? 3; showCase(); syncBagRecordingControls();
 }
 function rememberUiPreferences() {
   uiPreferences = { case_id: $('caseSelect').value || '', count: Number($('count').value || 20), interval_seconds: Number($('interval').value || 0) };
@@ -140,11 +138,12 @@ function renderLiveProgress(run) {
 }
 function renderRun(run) {
   currentRun = run || null;
-  const hasRun = Boolean(run), summary = run?.summary || { completed: 0, passed: 0, failed: 0, passRate: 0 };
-  $('runStatus').textContent = hasRun ? statusText(run.status) : '待命'; $('runHint').textContent = hasRun ? `${summary.completed}/${run.requestedCount} 次已完成` : 'PRE-FLIGHT REQUIRED'; $('passRate').textContent = hasRun && summary.completed ? `${summary.passRate}%` : '—';
+  const hasRun = Boolean(run), summary = run?.summary || { completed: 0, passed: 0, failed: 0, cancelled: 0, unknown: 0, passRate: 0 };
+  const preflightPending = run?.status === 'preparing';
+  $('runStatus').textContent = hasRun ? statusText(run.status) : '待命'; $('runStatusMotion').hidden = !preflightPending; $('runHint').textContent = hasRun ? (run.status === 'interrupted' ? `意外断电后的历史记录，可直接开始新的测试；结果未知 ${summary.unknown || 0} 次` : `${summary.completed}/${run.requestedCount} 次已完成`) : 'PRE-FLIGHT REQUIRED'; $('passRate').textContent = hasRun && summary.completed ? `${summary.passRate}%` : '—';
   $('statusBadge').textContent = hasRun ? run.status.toUpperCase() : 'IDLE'; $('statusBadge').className = `badge ${run?.status === 'running' || run?.status === 'preparing' ? '' : 'muted'}`;
-  $('progressBar').style.width = `${hasRun ? summary.completed / run.requestedCount * 100 : 0}%`; $('progressText').textContent = hasRun ? `${statusText(run.status)} · ${summary.completed}/${run.requestedCount} 次 · ${summary.passed} 通过 / ${summary.failed} 失败${summary.cancelled ? ` / ${summary.cancelled} 已取消` : ''}` : '暂无执行任务'; $('durationText').textContent = run?.attempts?.length ? `最近 ${minutes(run.attempts.at(-1).duration_s)}` : '—';
-  $('resultBody').innerHTML = run?.attempts?.length ? run.attempts.slice().reverse().map(item => `<tr><td>T-${String(item.index).padStart(3, '0')}</td><td>${new Date(item.started_at).toLocaleTimeString('zh-CN', { hour12: false })}</td><td class="status ${item.status}">${item.status.toUpperCase()}</td><td>${escapeHtml(item.message)}${item.bag_recording ? `<span class="bag-audit ${escapeHtml(item.bag_recording.audit?.status || 'failed')}">诊断录包：${escapeHtml(item.bag_recording.display_name || '归档中')} · ${escapeHtml(bagAuditLabel(item.bag_recording.audit))}</span>` : ''}</td><td>${minutes(item.duration_s)}</td><td>${item.trajectory?.visualizations?.length ? `<button class="trajectory-view" data-attempt="${item.index}" type="button">查看轨迹</button>` : '—'}</td></tr>`).join('') : `<tr><td colspan="6" class="empty">${escapeHtml(run?.error || '等待测试任务')}</td></tr>`;
+  $('progressBar').style.width = `${hasRun ? summary.completed / run.requestedCount * 100 : 0}%`; $('progressText').textContent = hasRun ? `${statusText(run.status)} · ${summary.completed}/${run.requestedCount} 次 · ${summary.passed} 通过 / ${summary.failed} 失败${summary.unknown ? ` / ${summary.unknown} 结果未知` : ''}${summary.cancelled ? ` / ${summary.cancelled} 已取消` : ''}` : '暂无执行任务'; $('durationText').textContent = run?.attempts?.length ? `最近 ${minutes(run.attempts.at(-1).duration_s)}` : '—';
+  $('resultBody').innerHTML = run?.attempts?.length ? run.attempts.slice().reverse().map(item => `<tr><td>T-${String(item.index).padStart(3, '0')}</td><td>${new Date(item.started_at).toLocaleTimeString('zh-CN', { hour12: false })}</td><td class="status ${item.status}">${attemptStatusText(item.status)}</td><td>${escapeHtml(item.message)}${item.bag_recording ? `<span class="bag-audit ${escapeHtml(item.bag_recording.audit?.status || 'failed')}">诊断录包：${escapeHtml(item.bag_recording.display_name || '归档中')} · ${escapeHtml(bagAuditLabel(item.bag_recording.audit))}</span>` : ''}</td><td>${minutes(item.duration_s)}</td><td>${item.trajectory?.visualizations?.length ? `<button class="trajectory-view" data-attempt="${item.index}" type="button">查看轨迹</button>` : '—'}</td></tr>`).join('') : `<tr><td colspan="6" class="empty">${escapeHtml(run?.error || '等待测试任务')}</td></tr>`;
   const attempts = run?.attempts || [], chart = $('chart');
   chart.setAttribute('role', 'region');
   chart.tabIndex = 0;
@@ -239,6 +238,9 @@ function updateTrajectoryTooltip(event) {
   const segments = (trajectoryHover.attempt.trajectory?.segments || []).filter(segment => segment.map_id === trajectoryHover.mapId && segment.map);
   const map = segments[0]?.map;
   const paths = segments.filter(segment => Array.isArray(segment.points) && segment.points.length);
+  const hasRelocalizationEvidence = (trajectoryHover.attempt.trajectory?.relocalizations || []).some(
+    event => event?.position_available === true && event?.map_id === trajectoryHover.mapId,
+  );
   let sampleIndex = 0;
   const points = paths.flatMap(segment => segment.points.map(point => ({ ...point, route_name: segment.route_name, route_index: segment.route_index, sample_index: sampleIndex++ })));
   if (!map || !points.length) { hideTrajectoryTooltip(); return; }
@@ -248,7 +250,7 @@ function updateTrajectoryTooltip(event) {
     canvasHeight: rect.height,
     imageWidth: image.naturalWidth,
     imageHeight: image.naturalHeight,
-    evidenceHeight: 76 + paths.length * 17,
+    evidenceHeight: trajectoryEvidenceHeight(paths.length, hasRelocalizationEvidence),
     scale: trajectoryView.scale,
     offsetX: trajectoryView.x,
     offsetY: trajectoryView.y,
@@ -327,18 +329,13 @@ $('trajectoryCanvas').addEventListener('pointerleave', hideTrajectoryTooltip);
 $('trajectoryCanvas').addEventListener('pointerup', event => { trajectoryView.drag = null; event.currentTarget.releasePointerCapture(event.pointerId); updateTrajectoryTooltip(event); });
 $('trajectoryCanvas').addEventListener('pointercancel', () => { trajectoryView.drag = null; });
 $('bagRecordingEnabled').addEventListener('change', syncBagRecordingControls);
-$('refreshBagTopics').addEventListener('click', refreshBagTopics);
-$('bagTopicFilter').addEventListener('input', renderBagTopics);
-$('bagTopicList').addEventListener('change', event => {
-  const input = event.target;
-  if (!(input instanceof HTMLInputElement) || !input.matches('[data-bag-topic]')) return;
-  if (input.checked) selectedBagTopicNames.add(input.value); else selectedBagTopicNames.delete(input.value);
-});
+$('clearBagRecording').addEventListener('click', () => { clearBagRecordingDraft(); syncBagRecordingControls(); });
 $('count').addEventListener('input', syncBagRecordingControls);
 $('startButton').addEventListener('click', async () => {
   $('formMessage').textContent = '';
-  const bagRecording = buildBagRecordingPayload({ enabled: $('bagRecordingEnabled').checked, attemptIndex: $('bagRecordingAttempt').value, topics: selectedBagTopics() });
-  if ($('bagRecordingEnabled').checked && !bagRecording) { $('formMessage').textContent = '请为诊断录包选择有效轮次和至少一个 Topic。'; return; }
+  const draft = loadBagRecordingDraft();
+  const bagRecording = buildBagRecordingPayload({ enabled: $('bagRecordingEnabled').checked, attemptIndex: draft?.attemptIndex, topics: draft?.topics });
+  if ($('bagRecordingEnabled').checked && (!bagRecording || bagRecording.attemptIndex > Number($('count').value))) { $('formMessage').textContent = '请在诊断录包配置页选择本次范围内的有效轮次和至少一个 Topic。'; return; }
   const testCase = cases.find(item => item.id === $('caseSelect').value); const captureText = bagRecording ? `；将在 T-${String(bagRecording.attemptIndex).padStart(3, '0')} 录制 ${bagRecording.topics.length} 个诊断 Topic` : '';
   const accepted = await confirmAction({ eyebrow: 'CONFIRM TEST EXECUTION', title: '确认开始自动化测试？', body: `用例：${testCase?.alias || testCase?.filename || '未选择'}；执行 ${$('count').value} 轮，每轮间隔 ${$('interval').value} 秒${captureText}。`, confirmText: '确认开始' }); if (!accepted) return;
   try { const data = await requestJson('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ caseId: $('caseSelect').value, count: +$('count').value, intervalSeconds: +$('interval').value, prepareTrajectoryMaps: true, bagRecording }) }); renderRun(data.run); toast('测试计划已创建，正在执行前置条件校验。'); poll(); } catch (error) { $('formMessage').textContent = error.message; }
@@ -401,7 +398,8 @@ async function confirmShutdownAfterArm() {
   if (shutdownToggleHint) shutdownToggleHint.textContent = '请稍候';
   try {
     const response = await fetch('/api/system/shutdown', { method: 'POST' });
-    if (!response.ok) throw new Error('控制台未接受退出请求');
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || '控制台未接受退出请求');
     toast('正在确认控制台已停止…', 'warning');
     if (!await waitForConsoleShutdown()) {
       throw new Error('8087 仍在响应，控制台未停止。请确认没有其他 RY Aletheia 进程仍在运行。');
@@ -432,4 +430,6 @@ document.addEventListener('visibilitychange', () => {
     poll();
   }
 });
+restoreBagRecordingFromConfigurationRoute();
+syncBagRecordingControls();
 tickClock(); setInterval(tickClock, 1000); Promise.all([loadCases(), loadSettings()]).then(poll).catch(error => $('formMessage').textContent = `控制台连接失败：${error.message}`);

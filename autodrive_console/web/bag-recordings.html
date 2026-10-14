@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>诊断录包 · RY Aletheia</title>
+  <script src="/theme_bootstrap.js"></script>
   <link rel="stylesheet" href="/styles.css" />
   <link rel="stylesheet" href="/bag_recordings.css" />
   <link rel="stylesheet" href="/app_shell.css" />
@@ -12,6 +13,7 @@
   <aside><div class="brand"><div class="mark"></div><div><b>RY <span>Aletheia</span></b><small>AUTOMATED TEST SYSTEM</small></div></div><nav></nav></aside>
   <main>
     <header><div><p class="eyebrow">DIAGNOSTICS / MANAGED ROS BAG ARCHIVES</p><h1>诊断录包</h1><p class="sub">仅展示 Aletheia 受控创建的数据包。审查失败或未完成的数据会保留，便于研发分析。</p></div><button id="refresh" class="text-button" type="button">刷新归档</button></header>
+    <section class="panel manual-recording-panel" aria-labelledby="manualRecordingTitle"><div><p class="eyebrow">MANUAL SCENE CAPTURE</p><h2 id="manualRecordingTitle">手动场景录制</h2><p id="manualRecordingSummary">读取录制状态…</p></div><div class="manual-recording-actions"><a id="configureManualBagRecording" class="outline-button" href="/bag-recording-config.html?mode=manual">配置并开始录制</a><button id="stopManualRecording" class="delete" type="button" hidden>停止并归档</button></div></section>
     <section class="metrics"><article><span>归档数量</span><b id="archiveCount">—</b><small>MANAGED ARCHIVES</small></article><article><span>数据总量</span><b id="archiveBytes">—</b><small>ON-ROBOT STORAGE</small></article><article><span>审查失败 / 未完成</span><b id="archiveAttention">—</b><small>REQUIRES REVIEW</small></article></section>
     <section class="panel"><div class="panel-title"><div><p class="eyebrow">ARCHIVE INVENTORY</p><h2>归档清单</h2></div><span id="pageState" class="badge muted">读取中</span></div><div id="archiveList" class="archive-list" aria-live="polite"></div></section>
   </main>

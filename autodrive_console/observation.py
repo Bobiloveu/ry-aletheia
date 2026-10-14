@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .map_assets import CachedMapAsset, MapAssetCache
+from .map_assets import CachedMapAsset, MapAssetCache, MapAssetError
 from .map_snapshot import ObservationMapSnapshot
 from .settings import RobotSettings
 from .telemetry import TelemetryGateway
@@ -33,6 +33,10 @@ class ObservationManager:
     经回环 UDP 进入 ``TelemetryGateway`` 后用专用 Binary WebSocket 交给网页。
     """
 
+    MAP_SERVER_YAML_REFRESH_S = 10.0
+    MAP_SERVER_QUERY_TIMEOUT_S = 5.0
+    MAP_SERVER_YAML_FALLBACK_S = 30.0
+
     def __init__(self, maps_dir: Path, log_dir: Path, preprocessor_path: Path | None = None) -> None:
         self.maps_dir = maps_dir
         self.log_dir = log_dir
@@ -48,7 +52,13 @@ class ObservationManager:
         self._idle_timer: threading.Timer | None = None
         self._live_map_matches: dict[str, dict[str, Any]] = {}
         self._map_server_yaml_checked_at = 0.0
+        self._map_server_yaml_verified_at = 0.0
         self._map_server_yaml: Path | None = None
+        # Set only after ``live_layers`` has proven that map_server's YAML and
+        # the live OccupancyGrid describe the same map.  The first item is the
+        # content-hashed runtime snapshot; the second is the stable static-map
+        # identity used for operator markers.  They intentionally differ.
+        self._active_task_map: tuple[str, str, Path] | None = None
         self._client_metrics: dict[str, Any] = {}
         self._client_metrics_at = 0.0
         self._client_metric_alerts: set[str] = set()
@@ -123,7 +133,7 @@ class ObservationManager:
     def record_client_event(self, level: str, message: str) -> None:
         """将浏览器遥测事件写入统一工具日志，便于关联本机 UDP/WS 状态。"""
         level = level.upper()
-        getattr(LOGGER, "warning" if level == "WARNING" else "info")("实时观测浏览器：%s", message)
+        getattr(LOGGER, {"WARNING": "warning", "ERROR": "error"}.get(level, "info"))("实时观测浏览器：%s", message)
 
     def record_client_metrics(self, metrics: dict[str, Any]) -> None:
         """保存浏览器端的低频性能摘要，供现场远程区分数据与合成瓶颈。"""
@@ -270,6 +280,109 @@ class ObservationManager:
             pass
         return None
 
+    def active_task_map_path(self) -> Path | None:
+        """Return the already verified active YAML identity without ROS I/O.
+
+        This is a rendering-time optimization only.  Navigation still calls
+        :meth:`verify_active_task_map` immediately before it sends a goal.
+        """
+        active_id = self.active_map_id()
+        with self._lock:
+            verified = self._active_task_map
+        if active_id is None or verified is None or verified[0] != active_id:
+            return None
+        return verified[2]
+
+    def active_manual_map_id(self) -> str | None:
+        """Return the server-only identity of the strictly verified live map."""
+        active_id = self.active_map_id()
+        with self._lock:
+            verified = self._active_task_map
+        if active_id is None or verified is None or verified[0] != active_id:
+            return None
+        return verified[1]
+
+    def verify_active_manual_map_id(self, candidate_map_id: str) -> tuple[bool, str]:
+        """Recheck map_server and OccupancyGrid before a marker navigation goal."""
+        active_id = self.active_manual_map_id()
+        if active_id is None or candidate_map_id != active_id:
+            return False, "当前地图不匹配"
+        with self._lock:
+            verified_map = self._active_task_map
+        if verified_map is None or verified_map[1] != candidate_map_id:
+            return False, "当前地图尚未确认"
+        active_yaml = self._map_server_yaml_path()
+        if active_yaml is None:
+            return False, "当前地图尚未确认"
+        try:
+            if active_yaml.resolve() != verified_map[2].resolve():
+                return False, "当前地图不匹配"
+        except OSError:
+            return False, "当前地图不匹配"
+        if self.active_map_id() != verified_map[0]:
+            return False, "当前地图不匹配"
+        active = self._cached_asset(self.maps_dir / verified_map[0])
+        if (
+            active is None
+            or active.resolution is None
+            or active.width is None
+            or active.height is None
+            or active.origin is None
+            or len(active.origin) < 2
+        ):
+            return False, "当前地图尚未确认"
+        try:
+            strict_asset = self._map_server_asset(
+                MapAssetCache(self.maps_dir), active.resolution, active.width, active.height, active.origin,
+            )
+        except (MapAssetError, OSError, ValueError):
+            strict_asset = None
+        if strict_asset is None or strict_asset.id != candidate_map_id:
+            return False, "当前地图尚未确认"
+        return True, "当前地图匹配"
+
+    def verify_active_task_map(self, candidate_map: Path) -> tuple[bool, str]:
+        """Fail closed unless a task's map is the current live map_server map.
+
+        A task path alone is not sufficient: the currently displayed OccupancyGrid
+        cache must exist and retain matching geometry.  This keeps task-start
+        navigation from crossing a map/floor transition based on stale UI state.
+        """
+        try:
+            candidate = Path(candidate_map).expanduser().resolve()
+        except OSError:
+            return False, "当前地图不匹配"
+        active_yaml = self._map_server_yaml_path()
+        if active_yaml is None:
+            return False, "当前地图尚未确认"
+        try:
+            if candidate != active_yaml.resolve():
+                return False, "当前地图不匹配"
+        except OSError:
+            return False, "当前地图不匹配"
+        active_id = self.active_map_id()
+        if active_id is None:
+            return False, "当前地图尚未确认"
+        active = self._cached_asset(self.maps_dir / active_id)
+        if (
+            active is None
+            or active.resolution is None
+            or active.width is None
+            or active.height is None
+            or active.origin is None
+            or len(active.origin) < 2
+        ):
+            return False, "当前地图尚未确认"
+        try:
+            verified = self._map_server_asset(
+                MapAssetCache(self.maps_dir), active.resolution, active.width, active.height, active.origin,
+            )
+        except (MapAssetError, OSError, ValueError):
+            verified = None
+        if verified is None:
+            return False, "当前地图尚未确认"
+        return True, "当前地图匹配"
+
     def preview(self, asset_id: str) -> bytes:
         if not asset_id or len(asset_id) != 16 or any(char not in "0123456789abcdef" for char in asset_id):
             raise ObservationError("地图标识不合法")
@@ -341,6 +454,25 @@ class ObservationManager:
                 frame_id = marker["frame_id"].strip()
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             pass
+        wall_asset = asset
+        # OccupancyGrid 快照的内容哈希可能因运行时栅格的微小变化而产生新目录；
+        # 若快照落盘时因多个同几何地图而无法安全推断墙文件，不应因此丢失
+        # map_server 已明确选中的当前地图约束。仅对活动快照、且只在其自身没有
+        # 墙文件时，复用 _map_server_asset 的严格元数据校验结果，绝不扫描或猜测
+        # 历史快照的墙来源。
+        if (
+            asset.id == self.active_map_id()
+            and not asset.cache_walls
+            and asset.resolution is not None
+            and asset.width is not None
+            and asset.height is not None
+            and asset.origin is not None
+        ):
+            verified = self._map_server_asset(
+                MapAssetCache(self.maps_dir), asset.resolution, asset.width, asset.height, asset.origin,
+            )
+            if verified is not None:
+                wall_asset = verified
         return {
             "map_id": asset.id,
             "map": {
@@ -350,7 +482,7 @@ class ObservationManager:
                 "origin": asset.origin,
                 "frame_id": frame_id,
             },
-            "virtual_walls": MapAssetCache.virtual_walls(asset),
+            "virtual_walls": MapAssetCache.virtual_walls(wall_asset),
         }
 
     def live_layers(self, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -374,27 +506,51 @@ class ObservationManager:
         # OccupancyGrid.resolution 是 float32；0.05 会在浏览器端还原为
         # 0.050000000745...。用与地图匹配容差相容的稳定键，避免同一张地图
         # 因二进制浮点尾差分别得到“已匹配”和“未匹配”的缓存状态。
-        signature = f"{width}|{height}|{round(resolution, 8):.8f}|{origin[0]:.12g}|{origin[1]:.12g}|{frame_id}"
+        runtime_map_id = self.active_map_id()
+        signature = f"{runtime_map_id or '-'}|{width}|{height}|{round(resolution, 8):.8f}|{origin[0]:.12g}|{origin[1]:.12g}|{frame_id}"
         with self._lock:
             cached = self._live_map_matches.get(signature)
-        if cached is not None:
+            verified = self._active_task_map
+        if cached is not None and runtime_map_id is not None and verified is not None and verified[0] == runtime_map_id:
             return cached
         cache = MapAssetCache(self.maps_dir)
         try:
             # nav2 map_server 的 yaml_filename 是当前真实生效地图的权威来源。
             # 先验证其 YAML/PGM 元数据与浏览器收到的 /map 一致，再读取同目录的
             # map_walls.yaml；不能因参数短暂滞后把上一张地图的墙画到当前地图上。
-            asset = self._map_server_asset(cache, resolution, width, height, origin)
+            verified_asset = self._map_server_asset(cache, resolution, width, height, origin)
+            asset = verified_asset
             if asset is None:
                 asset = cache.find_matching_map(resolution=resolution, width=width, height=height, origin=origin)
         except MapAssetError as exc:
             raise ObservationError(str(exc)) from exc
         if asset is None:
+            with self._lock:
+                self._active_task_map = None
             result = {"matched": False, "virtual_walls": []}
         else:
-            # 同一个静态地图可直接作为观测页的活动标记；后续轨迹记录启动后会用
-            # 运行时栅格缓存覆盖该标记，不会影响轨迹的实际地图判定。
-            self._write_live_map_marker(asset, frame_id)
+            # 实时快照拥有 active_map.json。没有快照时仅为离线/直接调用保留
+            # 静态地图兜底；绝不能在正常观测期间把静态 ID 写回并覆盖运行时 ID。
+            if runtime_map_id is None:
+                self._write_live_map_marker(asset, frame_id)
+                runtime_map_id = asset.id
+            with self._lock:
+                if verified_asset is not None and runtime_map_id is not None:
+                    try:
+                        runtime_asset = self._cached_asset(self.maps_dir / runtime_map_id)
+                        if runtime_asset is None:
+                            raise OSError("active runtime map cache missing")
+                        self._active_task_map = (
+                            runtime_map_id,
+                            verified_asset.id,
+                            Path(verified_asset.source_yaml).resolve(),
+                        )
+                    except OSError:
+                        self._active_task_map = None
+                else:
+                    # A metadata-only fallback can draw walls, but it cannot
+                    # authorize task points from a similarly shaped map.
+                    self._active_task_map = None
             result = {
                 "matched": True,
                 "map_id": asset.id,
@@ -437,18 +593,21 @@ class ObservationManager:
         return asset
 
     def _map_server_yaml_path(self) -> Path | None:
-        """Read the active map path with a short cache; never scans arbitrary directories."""
+        """Read the active map path without letting a slow ROS CLI erase confirmation."""
         now = time.monotonic()
         with self._lock:
-            if now - self._map_server_yaml_checked_at < 2.0:
+            if now - self._map_server_yaml_checked_at < self.MAP_SERVER_YAML_REFRESH_S:
                 return self._map_server_yaml
+            previous = self._map_server_yaml
+            previous_verified_at = self._map_server_yaml_verified_at
         ros2 = shutil.which("ros2")
         candidate: Path | None = None
+        fresh_verification = False
         if ros2:
             try:
                 result = subprocess.run(
                     [ros2, "param", "get", "/map_server", "yaml_filename"],
-                    capture_output=True, text=True, timeout=2, check=False, env=self._ros_environment(),
+                    capture_output=True, text=True, timeout=self.MAP_SERVER_QUERY_TIMEOUT_S, check=False, env=self._ros_environment(),
                 )
                 match = re.search(r"^String value is:\s*(.+?)\s*$", result.stdout, re.MULTILINE)
                 if result.returncode == 0 and match:
@@ -456,11 +615,17 @@ class ObservationManager:
                     root = MapAssetCache.ALLOWED_ROOTS[0].resolve()
                     if path.is_file() and path.is_relative_to(root):
                         candidate = path
+                        fresh_verification = True
             except (OSError, subprocess.TimeoutExpired):
                 pass
+        if candidate is None and previous is not None and now - previous_verified_at <= self.MAP_SERVER_YAML_FALLBACK_S:
+            LOGGER.warning("map_server 地图参数查询暂时不可用，继续使用最近已核验地图")
+            candidate = previous
         with self._lock:
             self._map_server_yaml_checked_at = now
             self._map_server_yaml = candidate
+            if fresh_verification:
+                self._map_server_yaml_verified_at = now
         return candidate
 
     def _write_live_map_marker(self, asset: CachedMapAsset, frame_id: str) -> None:

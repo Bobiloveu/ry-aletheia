@@ -1,10 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import copy_metadata
 
-datas = [('autodrive_console/web', 'autodrive_console/web'), ('autodrive_console/web-vue', 'autodrive_console/web-vue'), ('autodrive_console/task_templates/indoor_elevator_v1/task-status-codes.json', 'autodrive_console/task_templates/indoor_elevator_v1'), ('/home/bob/Desktop/ry_aletheia_v2/ry-aletheia/config/video.shm.json', 'config/video.json'), ('/tmp/tmp.CJmdFIesTi/runtime', 'runtime/video')]
-binaries = [('/home/bob/Desktop/ry_aletheia_v2/ry-aletheia/build/live_preprocessor/aletheia_live_cloud', '.'), ('/home/bob/Desktop/ry_aletheia_v2/ry-aletheia/build/live_preprocessor/aletheia_video_ingest', '.'), ('/home/bob/Desktop/ry_aletheia_v2/ry-aletheia/install/master_interfaces/lib/libmaster_interfaces__rosidl_generator_c.so', '.'), ('/home/bob/Desktop/ry_aletheia_v2/ry-aletheia/install/master_interfaces/lib/libmaster_interfaces__rosidl_generator_py.so', '.'), ('/home/bob/Desktop/ry_aletheia_v2/ry-aletheia/install/master_interfaces/lib/libmaster_interfaces__rosidl_typesupport_c.so', '.'), ('/home/bob/Desktop/ry_aletheia_v2/ry-aletheia/install/master_interfaces/lib/libmaster_interfaces__rosidl_typesupport_cpp.so', '.'), ('/home/bob/Desktop/ry_aletheia_v2/ry-aletheia/install/master_interfaces/lib/libmaster_interfaces__rosidl_typesupport_fastrtps_c.so', '.'), ('/home/bob/Desktop/ry_aletheia_v2/ry-aletheia/install/master_interfaces/lib/libmaster_interfaces__rosidl_typesupport_fastrtps_cpp.so', '.'), ('/home/bob/Desktop/ry_aletheia_v2/ry-aletheia/install/master_interfaces/lib/libmaster_interfaces__rosidl_typesupport_introspection_c.so', '.'), ('/home/bob/Desktop/ry_aletheia_v2/ry-aletheia/install/master_interfaces/lib/libmaster_interfaces__rosidl_typesupport_introspection_cpp.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_generator_c.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_generator_py.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_typesupport_c.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_typesupport_cpp.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_typesupport_fastrtps_c.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_typesupport_fastrtps_cpp.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_typesupport_introspection_c.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_typesupport_introspection_cpp.so', '.')]
-hiddenimports = ['rclpy', 'master_interfaces.srv']
+datas = [('autodrive_console/web', 'autodrive_console/web'), ('autodrive_console/web-vue', 'autodrive_console/web-vue'), ('autodrive_console/task_templates/indoor_elevator_v1', 'autodrive_console/task_templates/indoor_elevator_v1'), ('/tmp/tmp.nvJdJZz8Tn/video.json', 'config'), ('/tmp/tmp.lycNYR3IG5/runtime', 'runtime/video')]
+binaries = [('/home/bob/Desktop/ry_aletheia_v2/ry-aletheia/build/live_preprocessor/aletheia_live_cloud', '.'), ('/home/bob/Desktop/ry_aletheia_v2/ry-aletheia/build/live_preprocessor/aletheia_video_ingest', '.'), ('/opt/ros/humble/lib/libnav2_msgs__rosidl_generator_c.so', '.'), ('/opt/ros/humble/lib/libnav2_msgs__rosidl_generator_py.so', '.'), ('/opt/ros/humble/lib/libnav2_msgs__rosidl_typesupport_c.so', '.'), ('/opt/ros/humble/lib/libnav2_msgs__rosidl_typesupport_cpp.so', '.'), ('/opt/ros/humble/lib/libnav2_msgs__rosidl_typesupport_fastrtps_c.so', '.'), ('/opt/ros/humble/lib/libnav2_msgs__rosidl_typesupport_fastrtps_cpp.so', '.'), ('/opt/ros/humble/lib/libnav2_msgs__rosidl_typesupport_introspection_c.so', '.'), ('/opt/ros/humble/lib/libnav2_msgs__rosidl_typesupport_introspection_cpp.so', '.'), ('/opt/ros/humble/lib/libsensor_msgs__rosidl_generator_c.so', '.'), ('/opt/ros/humble/lib/libsensor_msgs__rosidl_generator_py.so', '.'), ('/opt/ros/humble/lib/libsensor_msgs__rosidl_typesupport_c.so', '.'), ('/opt/ros/humble/lib/libsensor_msgs__rosidl_typesupport_cpp.so', '.'), ('/opt/ros/humble/lib/libsensor_msgs__rosidl_typesupport_fastrtps_c.so', '.'), ('/opt/ros/humble/lib/libsensor_msgs__rosidl_typesupport_fastrtps_cpp.so', '.'), ('/opt/ros/humble/lib/libsensor_msgs__rosidl_typesupport_introspection_c.so', '.'), ('/opt/ros/humble/lib/libsensor_msgs__rosidl_typesupport_introspection_cpp.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_generator_c.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_generator_py.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_typesupport_c.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_typesupport_cpp.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_typesupport_fastrtps_c.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_typesupport_fastrtps_cpp.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_typesupport_introspection_c.so', '.'), ('/opt/ros/humble/lib/libtf2_msgs__rosidl_typesupport_introspection_cpp.so', '.')]
+hiddenimports = ['rclpy', 'lzf']
+datas += copy_metadata('pypcd4')
 tmp_ret = collect_all('rclpy')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('pypcd4')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('tf2_ros')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
@@ -12,9 +16,11 @@ tmp_ret = collect_all('tf2_py')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('tf2_msgs')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('rpyutils')
+tmp_ret = collect_all('nav2_msgs')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('master_interfaces')
+tmp_ret = collect_all('sensor_msgs')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('rpyutils')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('rosidl_parser')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
@@ -44,8 +50,8 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
-    excludes=[],
+    runtime_hooks=['/home/bob/Desktop/ry_aletheia_v2/ry-aletheia/packaging/runtime_hooks/ros_runtime_interfaces.py'],
+    excludes=['master_interfaces', 'lightning'],
     noarchive=False,
     optimize=0,
 )

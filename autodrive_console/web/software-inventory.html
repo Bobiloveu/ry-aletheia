@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>软件资产 · RY Aletheia</title>
+    <script src="/theme_bootstrap.js"></script>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/refinement.css" />
+    <link rel="stylesheet" href="/page_views.css" />
+    <link rel="stylesheet" href="/app_shell.css" />
+    <link rel="stylesheet" href="/software_inventory.css" />
+  </head>
+  <body>
+    <aside>
+      <div class="brand"><div class="mark"></div><div><b>RY <span>Aletheia</span></b><small>AUTONOMOUS TEST SYSTEM</small></div></div>
+      <nav></nav>
+    </aside>
+    <main class="page-main software-inventory-page">
+      <header class="page-header">
+        <div>
+          <h1>软件资产</h1>
+          <p class="sub">版本清单来自当前小车已安装的 ry-* Debian 软件包。</p>
+        </div>
+        <button id="refreshInventory" class="outline-button page-top-action" type="button">刷新清单</button>
+      </header>
+      <section class="panel vehicle-profile-panel" aria-labelledby="vehicleProfileHeading">
+        <div class="inventory-panel-heading">
+          <div><h2 id="vehicleProfileHeading">车辆档案</h2><p>填写并保存车辆档案后，即可导出版本图片。</p></div>
+          <span id="profileStatus" class="inventory-status">请补全车辆档案</span>
+        </div>
+        <form id="vehicleProfileForm" class="vehicle-profile-form" novalidate>
+          <label>车号<input id="vehicleNumber" name="vehicle_number" maxlength="32" required autocomplete="off" /></label>
+          <label>车架号<input id="vehicleVin" name="vin" maxlength="64" required autocomplete="off" /></label>
+          <label>车型<input id="vehicleModel" name="model" maxlength="64" required autocomplete="off" /></label>
+          <label>项目/客户<input id="vehicleProject" name="project" maxlength="96" required autocomplete="off" /></label>
+          <label>部署地点<input id="vehicleLocation" name="location" maxlength="96" required autocomplete="off" /></label>
+          <div class="profile-actions"><button id="saveInventory" type="submit">保存车辆档案</button><p id="inventoryMessage" class="inventory-message" role="status" aria-live="polite"></p></div>
+        </form>
+      </section>
+      <section class="panel inventory-snapshot-panel" aria-labelledby="softwareSnapshotHeading">
+        <div class="inventory-panel-heading">
+          <div><h2 id="softwareSnapshotHeading">软件版本矩阵</h2><p id="snapshotDetail">正在读取本机软件清单…</p></div>
+          <div class="snapshot-actions"><span id="inventoryStatus" class="inventory-status">读取中</span><button id="exportInventory" class="outline-button" type="button" disabled>导出版本图片</button></div>
+        </div>
+        <p id="inventoryEmpty" class="inventory-empty" hidden></p>
+        <div class="inventory-table-wrap">
+          <table>
+            <thead><tr><th scope="col">软件包</th><th scope="col">标准安装包名</th><th scope="col">版本</th><th scope="col">架构</th></tr></thead>
+            <tbody id="packageRows"><tr><td colspan="4" class="inventory-table-empty">正在读取软件清单…</td></tr></tbody>
+          </table>
+        </div>
+        <p class="inventory-provenance">标准安装包名由包名、版本和架构组成；dpkg 不保留最初下载文件名。版本来自本机已安装 ry-* Debian 包。</p>
+      </section>
+    </main>
+    <script src="/app_shell.js"></script>
+    <script type="module" src="/software_inventory.js"></script>
+  </body>
+</html>

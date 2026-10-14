@@ -43,8 +43,8 @@ def test_seen_fault_id_remains_deduplicated_after_event_history_rollover():
     assert [event["fault_id"] for event in monitor.events_since(0)[1]] == [2, 3]
 
 
-def test_public_snapshot_uses_readable_status_without_internal_identifiers():
-    """The UI boundary must expose a readable cause, not ROS numeric internals."""
+def test_public_snapshot_uses_readable_status_with_approved_diagnostic_codes():
+    """The UI receives readable diagnoses and the documented state/error code pair only."""
     monitor = LocalizationStatusMonitor(clock=lambda: 12.5)
 
     monitor.observe(FakeLocalizationStatus(state=3, error_code=301, fault_id=99))
@@ -54,7 +54,28 @@ def test_public_snapshot_uses_readable_status_without_internal_identifiers():
         "label": "定位异常",
         "detail": "雷达数据断流",
         "updated_at": 12.5,
+        "state_code": 3,
+        "error_code": 301,
+        "error_detail": "雷达数据断流",
+        "error_retained": False,
+        "age_ms": 0,
     }
+
+
+def test_normal_state_keeps_a_retained_error_code_separate_from_live_health():
+    """A restored state must not hide the retained diagnostic code as a new failure."""
+    monitor = LocalizationStatusMonitor(clock=lambda: 14.0)
+    monitor.observe(FakeLocalizationStatus(state=1, error_code=100))
+
+    snapshot = monitor.status()
+
+    assert snapshot["phase"] == "normal"
+    assert snapshot["detail"] == "定位服务正常"
+    assert snapshot["state_code"] == 1
+    assert snapshot["error_code"] == 100
+    assert snapshot["error_detail"] == "NDT 匹配质量低"
+    assert snapshot["error_retained"] is True
+    assert snapshot["age_ms"] == 0
 
 
 def test_non_normal_zero_error_keeps_the_state_specific_explanation():
@@ -78,6 +99,11 @@ def test_stale_status_is_not_presented_as_normal():
         "label": "定位状态暂不可用",
         "detail": "等待新的定位状态",
         "updated_at": 0.0,
+        "state_code": None,
+        "error_code": None,
+        "error_detail": "错误码不可用",
+        "error_retained": False,
+        "age_ms": 4100,
     }
 
 

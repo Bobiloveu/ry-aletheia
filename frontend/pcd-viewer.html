@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>源点云查看 · RY Aletheia</title>
+  <script src="/theme_bootstrap.js"></script>
+  <script>if (new URLSearchParams(location.search).get('embed') === '1') document.documentElement.classList.add('viewer-embedded');</script>
+  <link rel="stylesheet" href="/src/pcdViewer.css" />
+</head>
+<body>
+  <main class="point-viewer">
+    <header class="viewer-header">
+      <div><p class="viewer-brand">RY Aletheia</p><h1>源点云查看</h1><p id="cloudSummary">正在读取导入的点云…</p></div>
+      <a class="viewer-back" href="/deployment.html">返回部署向导</a>
+    </header>
+    <section class="viewer-workspace" aria-label="三维源点云">
+      <div id="cloudStage" class="cloud-stage" tabindex="0" aria-label="拖动旋转点云，滚轮缩放，右键拖动平移；方向键旋转，Shift 加方向键平移，加减键缩放，F 适配全图"></div>
+      <div class="viewer-toolbar" aria-label="点云查看工具">
+        <button id="retryCloud" type="button" hidden>重新读取</button>
+        <button id="fitCloud" type="button" disabled>适配全图</button>
+        <button id="topCloud" type="button" disabled>俯视</button>
+        <button id="orbitCloud" type="button" disabled>三维视角</button>
+        <label class="band-toggle"><input id="showBand" type="checkbox" disabled />显示截面</label>
+        <div id="sliceLegend" class="slice-legend" aria-label="三维截取区域和高度边界" hidden><span class="slice-volume">截取区域</span><span id="sliceLower" class="slice-lower"></span><span id="sliceUpper" class="slice-upper"></span></div>
+      </div>
+      <details class="viewer-appearance"><summary>显示设置</summary><div class="viewer-appearance-controls" aria-label="点云显示设置">
+        <label>着色<select id="cloudColor" disabled><option value="rgb">原始颜色</option><option value="height">高度</option><option value="intensity">强度</option></select></label>
+        <label class="point-size">点大小<input id="cloudPointSize" type="range" min="0.6" max="2" step="0.05" value="0.85" disabled aria-label="点大小" /></label>
+      </div></details>
+      <p id="cloudMessage" class="cloud-message" role="status">正在准备三维视图…</p>
+      <div class="viewer-footer"><span id="cloudInteractionHint">拖动旋转 · 滚轮缩放 · 右键拖动平移</span><span id="cloudBand"></span></div>
+    </section>
+    <p class="viewer-note" id="sampleNote">只读查看原始点云的空间结构，不修改导入文件或投影参数。</p>
+  </main>
+  <script type="module" src="/src/pcdViewer.js"></script>
+</body>
+</html>

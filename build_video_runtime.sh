@@ -34,8 +34,8 @@ if [[ -e "$OUTPUT_DIR" ]]; then
   echo "视频运行时输出目录已存在，拒绝覆盖：$OUTPUT_DIR" >&2
   exit 1
 fi
-if ! command -v apt-get >/dev/null 2>&1 || ! command -v dpkg-deb >/dev/null 2>&1; then
-  echo "构建私有视频运行时需要 apt-get 与 dpkg-deb（仅下载/解包，不安装系统包）。" >&2
+if ! command -v apt-get >/dev/null 2>&1 || ! command -v dpkg-deb >/dev/null 2>&1 || ! command -v readelf >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+  echo "构建私有视频运行时需要 apt-get、dpkg-deb、readelf 与 python3（仅下载/解包，不安装系统包）。" >&2
   exit 1
 fi
 
@@ -61,6 +61,7 @@ download_deb() {
       exit 1
     fi
     install -m 0644 "$archive" "$cache_file"
+    rm -rf -- "$download_dir"
   fi
   printf '%s  %s\n' "$checksum" "$cache_file" | sha256sum -c - >&2
   dpkg-deb -x "$cache_file" "$EXTRACTED"
@@ -84,14 +85,11 @@ tar -xzf "$MEDIAMTX_FILE" -C "$RUNTIME/mediamtx" mediamtx LICENSE
 # therefore its transport plugins must remain alongside the visible encoder
 # chain. This avoids loading unrelated optional plugins on a minimal robot image.
 PLUGIN_DIR="$EXTRACTED/usr/lib/x86_64-linux-gnu/gstreamer-1.0"
-for plugin in libgstcoreelements.so libgstrawparse.so libgstvideoconvert.so libgstvideoparsersbad.so libgstrtspclientsink.so libgstvaapi.so libgstapp.so libgsttcp.so libgstudp.so libgstrtp.so libgstrtpmanager.so; do
+for plugin in libgstcoreelements.so libgstrawparse.so libgstvideoconvert.so libgstvideoscale.so libgstvideotestsrc.so libgstvideoparsersbad.so libgstrtspclientsink.so libgstvaapi.so libgstnvcodec.so libgstapp.so libgsttcp.so libgstudp.so libgstrtp.so libgstrtpmanager.so; do
   [[ -f "$PLUGIN_DIR/$plugin" ]] || { echo "私有 GStreamer 缺少受控插件：$plugin" >&2; exit 1; }
   install -m 0644 "$PLUGIN_DIR/$plugin" "$RUNTIME/plugins/$plugin"
 done
 
-cp -a "$EXTRACTED/usr/lib/x86_64-linux-gnu/"libgst*.so* "$RUNTIME/lib/"
-cp -a "$EXTRACTED/usr/lib/x86_64-linux-gnu/"libva*.so* "$RUNTIME/lib/"
-cp -a "$EXTRACTED/usr/lib/x86_64-linux-gnu/"libigdgmm*.so* "$RUNTIME/lib/"
 if [[ -d "$EXTRACTED/usr/lib/x86_64-linux-gnu/dri" ]]; then
   cp -a "$EXTRACTED/usr/lib/x86_64-linux-gnu/dri/." "$RUNTIME/drivers/"
 fi
@@ -99,6 +97,7 @@ SCANNER="$EXTRACTED/usr/lib/x86_64-linux-gnu/gstreamer1.0/gstreamer-1.0/gst-plug
 [[ -x "$SCANNER" ]] || { echo "私有 GStreamer 缺少 gst-plugin-scanner。" >&2; exit 1; }
 install -m 0755 "$SCANNER" "$RUNTIME/libexec/gst-plugin-scanner"
 install -m 0755 "$EXTRACTED/usr/bin/gst-launch-1.0" "$RUNTIME/bin/gst-launch-1.0.real"
+install -m 0755 "$EXTRACTED/usr/bin/gst-inspect-1.0" "$RUNTIME/bin/gst-inspect-1.0.real"
 cat > "$RUNTIME/bin/gst-launch-1.0" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -109,28 +108,28 @@ RUNTIME="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # append it: gst-launch needs only its private GStreamer/VA libraries and the
 # system ABI libraries resolved by the dynamic loader.
 export LD_LIBRARY_PATH="$RUNTIME/lib"
+unset GST_PLUGIN_PATH GST_PLUGIN_PATH_1_0
 export GST_PLUGIN_SYSTEM_PATH_1_0="$RUNTIME/plugins"
 export GST_PLUGIN_SCANNER="$RUNTIME/libexec/gst-plugin-scanner"
+export GST_PLUGIN_SCANNER_1_0="$RUNTIME/libexec/gst-plugin-scanner"
 export GST_REGISTRY_1_0="${RY_ALETHEIA_GST_REGISTRY:-$RUNTIME/gst-registry.bin}"
 export LIBVA_DRIVERS_PATH="$RUNTIME/drivers"
 export LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-iHD}"
-exec "$RUNTIME/bin/gst-launch-1.0.real" "$@"
+exec "$RUNTIME/bin/$(basename -- "$0").real" "$@"
 EOF
 chmod 0755 "$RUNTIME/bin/gst-launch-1.0"
+cp "$RUNTIME/bin/gst-launch-1.0" "$RUNTIME/bin/gst-inspect-1.0"
 
 cat > "$RUNTIME/README.txt" <<EOF
 RY Aletheia private video runtime
 MediaMTX: ${MEDIAMTX_VERSION}
 GStreamer: Ubuntu 22.04 locked archives listed in tools/video-runtime-packages.lock
-Only the controlled fdsrc -> RGB/BGR -> VAAPI H.264 -> RTSP plugins are exposed.
+Only the controlled fdsrc -> raw frames -> VAAPI/NVENC H.264 -> RTSP plugins are exposed.
+Synthetic hardware preflight uses three videotestsrc frames, never a camera.
+NVIDIA libcuda.so.1/libnvidia-encode.so.1 and kernel drivers remain vehicle-owned.
+Ubuntu 22.04 glibc/compiler ABI libraries remain system-owned; other ELF dependencies are locked and bundled.
 EOF
-cat > "$RUNTIME/ry-aletheia-runtime.json" <<EOF
-{
-  "schema": "ry-aletheia-video-runtime/v1",
-  "mediamtx_version": "${MEDIAMTX_VERSION}",
-  "plugins": ["coreelements", "rawparse", "videoconvert", "videoparsersbad", "rtspclientsink", "vaapi", "app", "tcp", "udp", "rtp", "rtpmanager"]
-}
-EOF
+python3 "$ROOT/scripts/video-runtime-manifest.py" "$EXTRACTED" "$RUNTIME" "$LOCKFILE" "$ROOT/build_video_runtime.sh"
 
 mkdir -p "$(dirname -- "$OUTPUT_DIR")"
 mv "$RUNTIME" "$OUTPUT_DIR"

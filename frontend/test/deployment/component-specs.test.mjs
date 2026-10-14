@@ -1,5 +1,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 
 import {
   COMPONENT_SPECS,
@@ -15,15 +17,40 @@ test("component definitions preserve deployment labels and fallback labels", () 
   assert.equal(componentName({ kind: "unknown" }), "unknown");
 });
 
-test("target points expose only the two runtime behavior-tree actions", () => {
-  const field = COMPONENT_SPECS.target.fields.find((item) => item.key === "arrival_action");
-  assert.deepEqual(field, {
-    key: "arrival_action",
-    label: "到达动作",
-    type: "select",
-    options: [["place_water", "泄水"], ["auto_cargo", "卸货"]],
-    default: "place_water",
-  });
+test("target quick editing keeps location properties and directs cargo configuration to task lines", () => {
+  const source = readFileSync(new URL("../../../autodrive_console/web/deployment.js", import.meta.url), "utf8");
+  const render = source.match(/function renderComponentAttributes\(component\) \{[\s\S]*?\n\}/)[0];
+  for (const project of [{id:"legacy"}, {id:"fixed",task_lines:[]}]) {
+    const elements = new Map();
+    const state = {
+      COMPONENT_SPECS,componentName,protocolOptions,protocolTitle,selectedProject:project,
+      componentSpeedDefaults:{},physicalElevatorFor:()=>null,mapInstanceFor:()=>null,esc:String,
+      $:id=>{if(!elements.has(id))elements.set(id,{classList:{toggle(){}},innerHTML:""});return elements.get(id);},
+    };
+    const component={kind:"target",attributes:{door:"1509",arrival_action:"auto_cargo"}};
+    runInNewContext(render,state);state.renderComponentAttributes(component);
+    const html=elements.get("componentAttributeFields").innerHTML;
+    assert.match(html,/data-component-attribute="door"/);
+    assert.match(html,/value="1509"/);
+    assert.doesNotMatch(html,/data-component-attribute="arrival_action"/);
+    assert.match(html,/任务线路/);
+    assert.equal(component.attributes.arrival_action,"auto_cargo");
+  }
+});
+
+test("saving target geometry preserves historical actions without creating a per-location cargo policy", async () => {
+  const source = readFileSync(new URL("../../../autodrive_console/web/deployment.js", import.meta.url), "utf8");
+  const handler=source.match(/\$\("saveComponent"\)\.addEventListener\("click", async \(\) => \{([\s\S]*?)\n\}\);/)[1];
+  let payload;
+  const selectedComponent={id:"target",kind:"target",map_asset_id:"m",x:2,y:3,attributes:{door:"1509",arrival_action:"auto_cargo",width_m:.8,height_m:.8}};
+  const state={selectedComponent,selectedWaypoint:null,selectedProject:{id:"p",components:[selectedComponent]},activeMap:{id:"m"},deploymentProjectGeneration:1,annotationSavePending:false,updateMapBeautyControls(){},$:()=>({value:"1.2"}),
+    document:{querySelectorAll:()=>[{dataset:{componentAttribute:"door"},type:"text",value:"1510"}]},
+    request:async(url,options)=>{payload=JSON.parse(options.body);return {project:{components:[selectedComponent]}};},
+    renderProject(){},selectComponent(){},keepMapAnnotationOpen:()=>true,completeDeploymentEdit(){},note(){},
+  };
+  const helper=source.match(/async function saveMapAnnotation\([\s\S]*?\n\}/)[0];
+  runInNewContext(`${helper}\nasync function save(){${handler}\n}`,state);await state.save();
+  assert.deepEqual(payload,{x:2,y:3,yaw:"1.2",attributes:{door:"1510",arrival_action:"auto_cargo",width_m:.8,height_m:.8}});
 });
 
 test("protocol options use project templates before the MQTT and LORA lift defaults", () => {

@@ -12,6 +12,7 @@ from autodrive_console.location_manifest import (
     button_sequence,
     compile_location_manifest,
     physical_floor_index,
+    _read_pgm_bytes,
 )
 from autodrive_console.virtual_walls import render_virtual_wall_file
 
@@ -293,16 +294,103 @@ def test_manifest_rasterizes_saved_map_edits_into_exported_pgm(tmp_path: Path):
         "kind": "brush_erase",
         "radius_m": 0.5,
         "shape": "square",
-        "points": [{"x": 0.0, "y": 0.0}],
+        "points": [{"x": 0.5, "y": 0.5}],
     }]
 
     rendered = compile_location_manifest(project, map_root=map_root)
     artifact = next(item for item in rendered.artifacts if item.relative_path.endswith("/map.pgm"))
     pixels = artifact.content.split(b"\n", 3)[3]
 
-    # The fixture is entirely occupied (0); world (0, 0) maps to image pixel
-    # (10, 89) for origin (-10, -10), and the erase must make it free (254).
+    # The fixture is entirely occupied (0); world (0.5, 0.5) is the centre
+    # of image cell (10, 89) for origin (-10, -10), and the erase makes it free.
     assert pixels[89 * 100 + 10] == 254
+
+
+@pytest.mark.parametrize("encoding", ["P2", "P5"])
+def test_navigation_export_makes_unknown_white_without_changing_source_or_calibration(
+    tmp_path: Path, encoding: str,
+):
+    """The deployment download uses the approved P2-style free background."""
+    project, map_root = _route_project(tmp_path, kinds=("floor",))
+    source = Path(project["map_assets"][0]["source_yaml"])
+    pixels = bytes([0, 205, 254, 255]) * 2500
+    header = f"{encoding}\n# original map\n100 100\n255\n".encode()
+    original = header + (pixels if encoding == "P5" else b" ".join(str(p).encode() for p in pixels))
+    source.with_name("map.pgm").write_bytes(original)
+    yaml_bytes = source.read_bytes()
+    walls = render_virtual_wall_file(project["map_assets"][0]["origin"], [
+        {"start": {"x": 1.0, "y": 2.0}, "end": {"x": 3.0, "y": 2.0}},
+    ])
+    source.with_name("map_walls.yaml").write_bytes(walls)
+
+    rendered = compile_location_manifest(project, map_root=map_root)
+    files = {Path(item.relative_path).name: item.content for item in rendered.artifacts}
+    width, height, exported = _read_pgm_bytes(files["map.pgm"])
+
+    assert (width, height) == (100, 100)
+    assert exported == pixels.replace(bytes([205]), bytes([254]))
+    assert files["map.yaml"] == yaml_bytes
+    assert files["map_walls.yaml"] == walls
+    assert source.with_name("map.pgm").read_bytes() == original
+
+
+def test_navigation_export_preserves_existing_black_white_pgm_bytes(tmp_path: Path):
+    project, map_root = _route_project(tmp_path, kinds=("floor",))
+    source = Path(project["map_assets"][0]["source_yaml"]).with_name("map.pgm")
+    original = b"P5\n# already edited externally\n100 100\n255\n" + bytes([0, 254]) * 5000
+    source.write_bytes(original)
+
+    rendered = compile_location_manifest(project, map_root=map_root)
+
+    assert next(item.content for item in rendered.artifacts if item.relative_path.endswith("/map.pgm")) == original
+
+
+def test_navigation_export_keeps_erase_and_obstacles_with_white_background(tmp_path: Path):
+    project, map_root = _route_project(tmp_path, kinds=("floor",))
+    source = Path(project["map_assets"][0]["source_yaml"]).with_name("map.pgm")
+    pixels = bytearray([205]) * 10000
+    pixels[89 * 100 + 10] = 0
+    pixels[0] = 0
+    source.write_bytes(b"P5\n100 100\n255\n" + pixels)
+    project["map_edits"] = [{
+        "id": "erase", "map_asset_id": "asset-0", "kind": "brush_erase",
+        "points": [{"x": 0.5, "y": 0.5}], "radius_m": 0.5, "shape": "circle",
+    }]
+
+    rendered = compile_location_manifest(project, map_root=map_root)
+    data = next(item.content for item in rendered.artifacts if item.relative_path.endswith("/map.pgm"))
+    _, _, exported = _read_pgm_bytes(data)
+
+    assert exported[89 * 100 + 10] == 254
+    assert exported[0] == 0
+    assert set(exported) == {0, 254}
+    assert _read_pgm_bytes(source.read_bytes())[2] == pixels
+
+
+def test_navigation_export_does_not_whiten_occupied_pixels_in_inverted_maps(tmp_path: Path):
+    project, map_root = _route_project(tmp_path, kinds=("floor",))
+    source = Path(project["map_assets"][0]["source_yaml"])
+    source.write_text(source.read_text() + "negate: 1\n")
+    original = b"P5\n100 100\n255\n" + bytes([205]) * 10000
+    source.with_name("map.pgm").write_bytes(original)
+
+    rendered = compile_location_manifest(project, map_root=map_root)
+
+    assert next(item.content for item in rendered.artifacts if item.relative_path.endswith("/map.pgm")) == original
+
+
+@pytest.mark.parametrize("separator", [b"\r\n", b"\r", b"\n"])
+def test_navigation_export_keeps_p5_pixels_aligned_after_header(tmp_path: Path, separator: bytes):
+    project, map_root = _route_project(tmp_path, kinds=("floor",))
+    source = Path(project["map_assets"][0]["source_yaml"]).with_name("map.pgm")
+    # A binary pixel may itself be whitespace or '#'; only consume the header separator.
+    pixels = bytes([10, 13, 32, 35]) + bytes([0]) * 9995 + bytes([205])
+    source.write_bytes(b"P5\n100 100\n255" + separator + pixels)
+
+    rendered = compile_location_manifest(project, map_root=map_root)
+    exported = next(item.content for item in rendered.artifacts if item.relative_path.endswith("/map.pgm"))
+
+    assert _read_pgm_bytes(exported)[2] == pixels[:-1] + bytes([254])
 
 
 def test_subsequent_localization_yaml_init_pose_uses_elevator_capture_origin(tmp_path: Path):

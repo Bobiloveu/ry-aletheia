@@ -5,11 +5,40 @@ set -euo pipefail
 # 产物为 dist/ry-aletheia 单文件核心程序。运行阶段不需要 PyInstaller、源码或网络。
 # 任务 JSON、.autodrive_console.json 和 reports/ 均是二进制外部的运行数据，不会被打包。
 # 必须加载包含 master_interfaces 服务定义的机器人工作空间；运行时消息接口由车辆提供。
-BUILD_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+BUILD_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+source "$BUILD_ROOT/scripts/build-environment.sh"
+aletheia_enter_build_environment "$BUILD_ROOT" "$BUILD_ROOT/build_binary.sh" "$@"
+# Keep the same ABI/dependencies after sourcing the robot workspace, whose
+# setup scripts may prepend other Python executables to PATH.
+BUILD_PYTHON="$(command -v python3)"
 FRONTEND_ROOT="$BUILD_ROOT/frontend"
 VIDEO_CONFIG_DEFAULT="${RY_ALETHEIA_VIDEO_CONFIG:-$BUILD_ROOT/config/video.ros.json}"
+PYINSTALLER_WORKPATH="$(mktemp -d)"
+BUILD_TEMP_DIRECTORIES=("$PYINSTALLER_WORKPATH")
+
+cleanup_build_temporary_directories() {
+  local directory
+  for directory in "${BUILD_TEMP_DIRECTORIES[@]}"; do
+    rm -rf -- "$directory"
+  done
+}
+
+trap cleanup_build_temporary_directories EXIT
+
 if [[ ! -f "$VIDEO_CONFIG_DEFAULT" ]]; then
   echo "未找到要嵌入的视频默认配置：$VIDEO_CONFIG_DEFAULT" >&2
+  exit 1
+fi
+# PyInstaller's --add-data destination is a directory. Stage the selected
+# profile under the canonical runtime filename before placing it in config/.
+VIDEO_CONFIG_STAGE="$(mktemp -d)"
+BUILD_TEMP_DIRECTORIES+=("$VIDEO_CONFIG_STAGE")
+STAGED_VIDEO_CONFIG="$VIDEO_CONFIG_STAGE/video.json"
+cp -- "$VIDEO_CONFIG_DEFAULT" "$STAGED_VIDEO_CONFIG"
+# PCD import is offline at runtime; every reader dependency must be available
+# before starting a release build, rather than discovered on the vehicle.
+if ! "$BUILD_PYTHON" -c 'import pypcd4, numpy, lzf' >/dev/null 2>&1; then
+  echo "缺少 PCD 地图导入依赖（构建解释器：$BUILD_PYTHON）。请先在工程目录执行 pixi install，再重试原构建或升级命令。" >&2
   exit 1
 fi
 if [[ ! -d "$FRONTEND_ROOT/node_modules" ]]; then
@@ -48,7 +77,7 @@ else
   echo "未找到 ROS2 环境：$ROBOT_SETUP" >&2
   exit 1
 fi
-if ! python3 -c 'import PyInstaller' >/dev/null 2>&1; then
+if ! "$BUILD_PYTHON" -c 'import PyInstaller' >/dev/null 2>&1; then
   OFFLINE_PYINSTALLER="$BUILD_ROOT/tools/pyinstaller"
   if [[ ! -d "$OFFLINE_PYINSTALLER/PyInstaller" ]]; then
     echo "未找到 PyInstaller。请保留工程内 tools/pyinstaller 离线构建工具。" >&2
@@ -56,8 +85,8 @@ if ! python3 -c 'import PyInstaller' >/dev/null 2>&1; then
   fi
   export PYTHONPATH="$OFFLINE_PYINSTALLER${PYTHONPATH:+:$PYTHONPATH}"
 fi
-python3 -c 'import rclpy; import master_interfaces.srv; import tf2_msgs.msg' || {
-  echo "当前 ROS2 构建环境缺少任务服务或 TF 基础接口。请加载完整的小车 ROS2 环境后再构建。" >&2
+"$BUILD_PYTHON" -c 'import rclpy; import master_interfaces.srv; import tf2_msgs.msg; import nav2_msgs.action' || {
+  echo "当前 ROS2 构建环境缺少任务服务、TF 或 Nav2 Action 基础接口。请加载完整的小车 ROS2 环境后再构建。" >&2
   exit 1
 }
 echo "正在构建实时点云预处理节点..."
@@ -73,7 +102,7 @@ VIDEO_RUNTIME="${RY_ALETHEIA_VIDEO_RUNTIME:-}"
 if [[ -z "$VIDEO_RUNTIME" ]]; then
   VIDEO_RUNTIME_PARENT="$(mktemp -d)"
   VIDEO_RUNTIME="$VIDEO_RUNTIME_PARENT/runtime"
-  trap 'rm -rf "$VIDEO_RUNTIME_PARENT"' EXIT
+  BUILD_TEMP_DIRECTORIES+=("$VIDEO_RUNTIME_PARENT")
   "$BUILD_ROOT/build_video_runtime.sh" --output-dir "$VIDEO_RUNTIME"
 fi
 [[ -f "$VIDEO_RUNTIME/ry-aletheia-runtime.json" ]] || {
@@ -82,14 +111,14 @@ fi
 }
 ROSIDL_LIBRARIES=()
 # Python 的 --collect-all 不会稳定收集 ROS2 运行时动态选择的类型支持库。
-# 只固化通用 TF 类型支持；master_interfaces 必须从目标车已 source 的运行时加载，
-# 否则一台车的接口版本会覆盖另一台车。
+# 固化控制台自身会动态订阅的通用消息类型支持；master_interfaces 必须从目标车
+# 已 source 的运行时加载，否则一台车的接口版本会覆盖另一台车。
 AMENT_PREFIXES=("$ROS_INSTALL_PREFIX")
 if [[ -n "${AMENT_PREFIX_PATH:-}" ]]; then
   IFS=: read -r -a SOURCED_PREFIXES <<< "$AMENT_PREFIX_PATH"
   AMENT_PREFIXES+=("${SOURCED_PREFIXES[@]}")
 fi
-for package in tf2_msgs; do
+for package in tf2_msgs nav2_msgs sensor_msgs; do
   found=false
   for prefix in "${AMENT_PREFIXES[@]}"; do
     # 工作空间的 isolated install 常用 <prefix>/<package>/lib；系统 ROS2
@@ -115,25 +144,32 @@ ROSIDL_LIBRARY_ARGS=()
 for library in "${ROSIDL_LIBRARIES[@]}"; do
   ROSIDL_LIBRARY_ARGS+=(--add-binary "$library:.")
 done
-python3 -m PyInstaller \
+"$BUILD_PYTHON" -m PyInstaller \
   --noconfirm \
   --clean \
+  --workpath "$PYINSTALLER_WORKPATH" \
   --onefile \
   --name ry-aletheia \
   --add-data "autodrive_console/web:autodrive_console/web" \
   --add-data "autodrive_console/web-vue:autodrive_console/web-vue" \
   --add-data "autodrive_console/task_templates/indoor_elevator_v1:autodrive_console/task_templates/indoor_elevator_v1" \
-  --add-data "$VIDEO_CONFIG_DEFAULT:config/video.json" \
+  --add-data "$STAGED_VIDEO_CONFIG:config" \
   --add-data "$VIDEO_RUNTIME:runtime/video" \
   --add-binary "$LIVE_PREPROCESSOR:." \
   --add-binary "$VIDEO_INGEST:." \
   --runtime-hook "$BUILD_ROOT/packaging/runtime_hooks/ros_runtime_interfaces.py" \
   --hidden-import rclpy \
   --exclude-module master_interfaces \
+  --exclude-module lightning \
   --collect-all rclpy \
+  --collect-all pypcd4 \
+  --hidden-import lzf \
+  --copy-metadata pypcd4 \
   --collect-all tf2_ros \
   --collect-all tf2_py \
   --collect-all tf2_msgs \
+  --collect-all nav2_msgs \
+  --collect-all sensor_msgs \
   --collect-all rpyutils \
   --collect-all rosidl_parser \
   --collect-all rosidl_runtime_py \

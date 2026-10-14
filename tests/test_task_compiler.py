@@ -362,6 +362,26 @@ def _compile(project: dict):
     return compile_indoor_elevator(project, map_root=Path(project["_test_map_root"]))
 
 
+def test_bundle_navigation_maps_match_raw_black_white_layer(two_map_project):
+    originals = {}
+    for asset in two_map_project["map_assets"]:
+        source = Path(asset["source_yaml"]).with_name("map.pgm")
+        source.write_bytes(b"P5\n2 2\n255\n\x00\xcd\xfe\xff")
+        originals[source] = source.read_bytes()
+
+    preview = _compile(two_map_project)
+    with zipfile.ZipFile(BytesIO(bundle_zip(preview))) as archive:
+        maps = [name for name in archive.namelist() if name.endswith("/map.pgm")]
+        assert len(maps) == 2
+        for name in maps:
+            assert archive.read(name) == b"P5\n2 2\n255\n\x00\xfe\xfe\xff"
+            source = next(a for a in two_map_project["map_assets"] if (
+                (a["id"] == "lobby-map") == ("/indoor/" in name)
+            ))
+            assert archive.read(name.removesuffix("map.pgm") + "map.yaml") == Path(source["source_yaml"]).read_bytes()
+    assert all(source.read_bytes() == data for source, data in originals.items())
+
+
 def test_target_arrival_action_selects_and_exports_the_matching_behavior_tree(two_map_project):
     """The stored target action must control the runtime task ID and exported XML."""
     target = next(item for item in two_map_project["components"] if item["id"] == "target")
@@ -721,7 +741,11 @@ def _set_execution_nodes(project: dict, *, lobby: list[dict] | None = None, targ
 def _add_store_localization_route(
     store: DeploymentStore, project: dict, lobby: dict, target: dict, lobby_elevator: dict
 ) -> None:
-    """Create the route facts required by the route-derived export boundary."""
+    """Create a legacy snapshot for the route-derived export compatibility test."""
+    legacy = store.get(project["id"])
+    legacy.pop("task_lines", None)
+    legacy.pop("active_task_line_id", None)
+    store._write_json(store._document_path(project["id"]), legacy)
     indoor = store.create_localization_binding(project["id"], {
         "map_asset_id": lobby["id"], "building": "1", "unit": "1", "type": "indoor",
     })
@@ -1730,3 +1754,37 @@ def test_store_compiles_browser_uploaded_map_snapshots_after_upload_staging_is_g
         "/opt/ry/data/maps/高科一号/1_1/indoor/map.yaml",
     ]
     assert any(item["path"].startswith("waypoint_tasks/gk1/") for item in preview["artifacts"])
+
+
+@pytest.mark.parametrize("speed_mode", [
+    "normal", "single_point", "task_point", "slow_point", "narrow_point",
+])
+def test_manual_transition_export_uses_continuous_navigation_only_for_normal(
+    two_map_project, speed_mode,
+):
+    """Normal must select speed_modes/normal.xml rather than the single-point directory."""
+    two_map_project["waypoints"].extend([
+        {"id": "transition-through", "map_asset_id": "target-map", "kind": "transition",
+         "x": 3.0, "y": 1.0, "yaw": 0.5, "speed_mode": speed_mode},
+        {"id": "transition-after", "map_asset_id": "target-map", "kind": "transition",
+         "x": 4.0, "y": 2.0, "yaw": 0.75, "speed_mode": "slow_point"},
+    ])
+    _set_execution_nodes(two_map_project, target=[
+        {"kind": "transition", "id": "transition-through"},
+        {"kind": "transition", "id": "transition-after"},
+    ])
+
+    subtasks = _compile(two_map_project).task_json["subtasks"]
+    outgoing = next(item for item in subtasks if item["subtask_name"] == "1509")["waypoints"]
+    transition = next(point for point in outgoing if point["waypoint_id"] == "1509_1")
+    assert transition["speed_mode"] == speed_mode
+    assert transition["is_single_point"] is (speed_mode != "normal")
+    assert transition["is_task_point"] is False
+    assert transition["waypoint_task_id"] == ""
+    assert transition["is_backward"] is False
+    for subtask in subtasks:
+        for point in subtask["waypoints"]:
+            assert point["is_single_point"] is (point["speed_mode"] != "normal")
+            if point["speed_mode"] == "normal":
+                assert point["is_task_point"] is False
+                assert point["waypoint_task_id"] == ""

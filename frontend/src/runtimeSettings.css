@@ -422,10 +422,76 @@ body.theme-light .page-main .eyebrow {
   font-size: 11px;
   line-height: 1.55;
 }
+.upgrade-panel .badge.warning {
+  color: #ffe0a0;
+  background: color-mix(in srgb, var(--amber) 13%, var(--surface));
+  border-color: color-mix(in srgb, var(--amber) 42%, var(--line));
+}
+.upgrade-blocker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--amber) 38%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--amber) 8%, var(--surface));
+}
+.upgrade-blocker strong {
+  display: block;
+  color: var(--ink);
+  font-size: 12px;
+}
+.upgrade-blocker p {
+  max-width: 55ch;
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.upgrade-blocker-action {
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--amber) 44%, var(--line));
+  border-radius: 7px;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--amber) 11%, transparent);
+  font-size: 11px;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background .16s ease, border-color .16s ease, transform .16s ease;
+}
+.upgrade-blocker-action:hover {
+  border-color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 18%, transparent);
+}
+.upgrade-blocker-action:active { transform: translateY(1px); }
+.upgrade-blocker-action:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+.upgrade-dropzone-locked {
+  cursor: not-allowed;
+  opacity: .62;
+}
+.upgrade-dropzone-locked:hover,
+.upgrade-dropzone-locked.dragover {
+  border-color: var(--line);
+  background: var(--surface-sunken);
+  box-shadow: none;
+}
 @media (max-width: 850px) {
   .upgrade-safety-note {
     grid-template-columns: 1fr;
     gap: 7px;
   }
   .upgrade-safety-note > p { max-width: none; }
+  .upgrade-blocker {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .upgrade-blocker-action { text-align: center; }
 }

@@ -292,17 +292,17 @@ import {
     const label = $("emergencyStopState");
     const detail = $("emergencyStopDetail");
     const releaseButton = $("releaseEmergencyStop");
-    panel.dataset.state = state;
+    panel.dataset.state = pending ? "unknown" : state;
 
-    if (state === "normal") {
+    if (pending) {
+      label.textContent = "正在读取";
+      detail.textContent = "正在从车端重新确认急停状态；确认前手动运动保持锁定。";
+    } else if (state === "normal") {
       label.textContent = "未触发急停";
       detail.textContent = release === "confirmed" ? "已收到车端状态确认，急停已解除。" : "车端已确认急停未触发。";
     } else if (state === "triggered") {
       label.textContent = "急停已触发";
       detail.textContent = release === "failed" ? "未在限定时间内收到解除确认，请检查物理急停与底盘状态。" : "手动运动已锁定。解除后仍需等待车端状态恢复。";
-    } else if (pending) {
-      label.textContent = "正在读取";
-      detail.textContent = "正在从车端读取急停状态；读取完成前手动运动保持锁定。";
     } else {
       label.textContent = "状态未知";
       detail.textContent = release === "unconfirmable" ? "解除结果无法确认，请检查 ROS2 与急停状态 Topic。" : "尚未收到 /is_emergency_stop 的真实状态，手动运动保持锁定。";

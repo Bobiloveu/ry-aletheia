@@ -180,6 +180,7 @@ class RunRecord:
         passed = sum(item.status == "passed" for item in self.attempts)
         failed = sum(item.status == "failed" for item in self.attempts)
         cancelled = sum(item.status == "cancelled" for item in self.attempts)
+        unknown = sum(item.status == "unknown_after_power_loss" for item in self.attempts)
         return {
             "id": self.id,
             "case": {
@@ -207,6 +208,7 @@ class RunRecord:
                 "passed": passed,
                 "failed": failed,
                 "cancelled": cancelled,
+                "unknown": unknown,
                 "passRate": round(passed / (passed + failed) * 100, 1) if passed + failed else 0,
             },
             "attempts": [asdict(item) for item in self.attempts],

@@ -147,7 +147,7 @@ def test_map_uses_an_adaptive_metric_grid_and_restrained_industrial_palette():
     assert 'id="mapScale"' in html
     assert 'id="mapGridLabel"' in html
     assert "let pixiGridLayer;" in source
-    _assert_source_contains(source, "pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiCostmapLayer, pixiWallLayer, pixiCloudLayer);")
+    _assert_source_contains(source, "pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiCostmapLayer, pixiWallLayer, pixiNavigationRouteLayer, pixiMapMarkerLayer, pixiCloudLayer);")
     assert "function metricGridStep(pixelsPerMeter)" in source
     assert "function renderMetricGrid(layout)" in source
     assert "renderMetricGrid(layout);" in source
@@ -320,7 +320,7 @@ def test_desktop_costmap_uses_a_separate_binary_lane_and_one_dynamic_pixi_textur
     assert "let pixiCostmapLayer;" in source
     assert "function updateTelemetryCostmap(data)" in source
     assert "function renderCostmap()" in source
-    assert "pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiCostmapLayer, pixiWallLayer, pixiCloudLayer);" in source
+    assert "pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiCostmapLayer, pixiWallLayer, pixiNavigationRouteLayer, pixiMapMarkerLayer, pixiCloudLayer);" in source
     _assert_source_contains(source, "openLane('costmap', '/costmap', scheduleLatestCostmapPacket, '局部代价地图');")
     assert "if (!mobileConsoleEnabled())" in source
     assert 'id="costmapVisible"' in html
@@ -365,7 +365,7 @@ def test_cloud_stream_uses_livox_per_point_time_for_rotation_deskew():
 
 def test_map_cache_refresh_is_independent_of_realtime_telemetry():
     source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
-    assert "async function refreshActiveMap(observation)" in source
+    assert "async function refreshActiveMap(observation," in source
     assert "function loadCachedMap(mapId, metadata)" in source
     assert "function connectTelemetry(payload)" in source
     assert "const ACTIVE_MAP_SYNC_MS = 1000;" in source
@@ -375,6 +375,12 @@ def test_virtual_wall_matching_stays_in_the_existing_map_cache_backend():
     backend = (ROOT / "autodrive_console" / "observation.py").read_text(encoding="utf-8")
     assert "if result[\"matched\"]:" in backend
     assert "self._live_map_matches.pop(signature, None)" in backend
+
+
+def test_pc_map_requests_live_wall_compensation_after_the_cached_map_is_loaded():
+    source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
+    assert "function requestLiveWallCompensation" in source
+    assert '"/api/observation/live-layers"' in source
 
 
 def test_map_transition_invalidates_async_cloud_frames():

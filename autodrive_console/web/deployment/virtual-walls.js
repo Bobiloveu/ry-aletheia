@@ -19,6 +19,20 @@ function wallPoints(wall) {
   return Array.isArray(wall.points) ? wall.points : [wall.start, wall.end];
 }
 
+export function snapWallPoint(walls,map,view,point,tolerancePx=8) {
+  const pointer=mapPointToCanvas(point,map,view);
+  let nearest=null,distance=tolerancePx*tolerancePx;
+  for(const wall of walls) {
+    if(wall.map_asset_id!==map.id)continue;
+    for(const vertex of wallPoints(wall)) {
+      if(!Number.isFinite(vertex?.x)||!Number.isFinite(vertex?.y))continue;
+      const candidate=squaredDistance(pointer,mapPointToCanvas(vertex,map,view));
+      if(candidate<=distance){nearest=vertex;distance=candidate;}
+    }
+  }
+  return nearest?{x:nearest.x,y:nearest.y}:{x:point.x,y:point.y};
+}
+
 export function polylineSegments(wall) {
   const points = wallPoints(wall);
   return points.slice(1).map((end, index) => ({

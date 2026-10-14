@@ -9,11 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from math import atan2, cos, isfinite, sin
+from math import atan2, ceil, cos, floor, isfinite, sin
 from pathlib import PurePosixPath
 from pathlib import Path
 import re
 from typing import Any
+
+import yaml
 
 from .localization_assets import LocalizationMapError, read_localization_map
 from .execution_chain import ExecutionChainError, build_map_execution_plan
@@ -208,14 +210,17 @@ def localization_template_text(project: dict[str, Any], *, map_root: Path) -> st
 
 
 def compile_location_manifest(
-    project: dict[str, Any], *, map_root: Path
+    project: dict[str, Any], *, map_root: Path,
+    execution_entries: list[dict[str, Any]] | None = None,
 ) -> RenderedLocationManifest:
     """Render controlled localization files without writing them anywhere.
 
     All source maps must already be project snapshots below ``map_root``.  The
     returned members are later included in an experimental ZIP; this function
     never invokes ROS and never touches the installer destinations in
-    :class:`RuntimePath`.
+    :class:`RuntimePath`. ``execution_entries`` is an internal fixed-line
+    compiler input, never a persisted browser field. Omitting it preserves the
+    existing persisted-route validation and pose derivation.
     """
     if not isinstance(project, dict):
         raise LocationManifestError("部署项目格式无效")
@@ -230,15 +235,16 @@ def compile_location_manifest(
     if not isinstance(bindings, list) or not bindings:
         raise LocationManifestError("缺少定位绑定")
     routes = project.get("localization_routes")
-    if not isinstance(routes, list):
-        raise LocationManifestError("定位路线无效")
-    if not routes:
-        if any(
-            isinstance(binding, dict) and {"init_go", "init_return"} & set(binding)
-            for binding in bindings
-        ):
-            raise LocationManifestError("定位绑定需要迁移为定位路线")
-        raise LocationManifestError("缺少定位路线")
+    if execution_entries is None:
+        if not isinstance(routes, list):
+            raise LocationManifestError("定位路线无效")
+        if not routes:
+            if any(
+                isinstance(binding, dict) and {"init_go", "init_return"} & set(binding)
+                for binding in bindings
+            ):
+                raise LocationManifestError("定位绑定需要迁移为定位路线")
+            raise LocationManifestError("缺少定位路线")
     localization_template = localization_template_text(project, map_root=root)
 
     normalized = [_binding(item, assets) for item in bindings]
@@ -251,7 +257,11 @@ def compile_location_manifest(
         if map_asset_id not in assets:
             raise LocationManifestError("地图擦除记录引用的地图不存在")
         edits_by_map.setdefault(map_asset_id, []).append(edit)
-    resolved_routes = [_resolve_route(project, route, assets) for route in routes]
+    resolved_routes = (
+        [_resolve_route(project, route, assets) for route in routes]
+        if execution_entries is None
+        else _resolve_execution_entries(project, normalized, assets, execution_entries)
+    )
     if len({(route["building"], route["unit"]) for route in resolved_routes}) != len(resolved_routes):
         raise LocationManifestError("同一楼栋和单元的定位路线重复")
     resolved_routes.sort(key=lambda route: (route["building"], route["unit"]))
@@ -305,6 +315,70 @@ def compile_location_manifest(
     lift_encoded = (json.dumps(_lift_id_document(project, resolved_routes), ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     artifacts.insert(1, LocationArtifact("runtime/lift_id_list.json", lift_encoded))
     return RenderedLocationManifest(encoded, tuple(artifacts), tuple(summaries))
+
+
+def _resolve_execution_entries(
+    project: dict[str, Any],
+    bindings: list[dict[str, Any]],
+    assets: dict[str, dict[str, Any]],
+    source: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Resolve compiler-owned poses without relaxing persisted route validation.
+
+    This parameter is internal to task compilation, not a browser document
+    field. Each selected binding is rendered once, even if the execution line
+    visits its map repeatedly or uses several floor layout templates.
+    """
+    if not isinstance(source, list) or not source:
+        raise LocationManifestError("执行定位记录不能为空")
+    bindings_by_id = _indexed_items(bindings, "定位绑定")
+    components = _indexed_items(project.get("components", []), "组件")
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    selected: set[str] = set()
+    for entry in source:
+        if not isinstance(entry, dict) or set(entry) != {
+            "binding_id", "init_go", "init_return", "elevator_anchors",
+        }:
+            raise LocationManifestError("执行定位记录字段无效")
+        identifier = entry["binding_id"]
+        if not isinstance(identifier, str) or identifier not in bindings_by_id or identifier in selected:
+            raise LocationManifestError("执行定位绑定不存在或重复")
+        selected.add(identifier)
+        binding = bindings_by_id[identifier]
+        building = validate_path_component(binding["building"], "楼栋")
+        unit = validate_path_component(binding["unit"], "单元")
+        asset = assets[binding["map_asset_id"]]
+        poses: dict[str, dict[str, float]] = {}
+        for field in ("init_go", "init_return"):
+            raw = entry[field]
+            if not isinstance(raw, dict) or set(raw) != {"x", "y", "z", "yaw"} or any(
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                for value in raw.values()
+            ):
+                raise LocationManifestError("执行定位位姿无效")
+            try:
+                poses[field] = {key: float(value) for key, value in raw.items()}
+            except (OverflowError, ValueError) as exc:
+                raise LocationManifestError("执行定位位姿无效") from exc
+            _validate_pose(asset, poses[field], "执行定位位姿")
+        anchor_ids = entry["elevator_anchors"]
+        if not isinstance(anchor_ids, list) or any(not isinstance(value, str) for value in anchor_ids):
+            raise LocationManifestError("执行电梯锚点无效")
+        if len(set(anchor_ids)) != len(anchor_ids):
+            raise LocationManifestError("执行电梯锚点重复")
+        elevators = []
+        for anchor_id in anchor_ids:
+            component = components.get(anchor_id)
+            if component is None or component.get("kind") != "elevator" or component.get("map_asset_id") != binding["map_asset_id"]:
+                raise LocationManifestError("执行电梯锚点必须位于对应地图")
+            _validate_pose(asset, _controlled_pose(component, "执行电梯锚点"), "执行电梯锚点")
+            elevators.append(component)
+        route = grouped.setdefault((building, unit), {
+            "building": building, "unit": unit, "entries": [], "elevator_anchors": [],
+        })
+        route["entries"].append({"binding": binding, "asset": asset, **poses})
+        route["elevator_anchors"].extend(elevators)
+    return list(grouped.values())
 
 
 def _community(project: dict[str, Any]) -> str:
@@ -751,8 +825,16 @@ def _map_members(
     image_bytes = image.read_bytes()
     if edits:
         image_bytes = _rasterize_map_edits(image_bytes, asset, edits)
+    image_bytes = _navigation_map_bytes(image_bytes, yaml_text)
+    # The controlled package flattens map images into the map directory. Keep
+    # its YAML reference consistent even when the source uses images/map.pgm
+    # or another root-owned relative path. Never rewrite source evidence.
+    export_yaml = yaml_text
+    if image_value != image.name:
+        export_yaml = (yaml_text[:match.start(1)] + json.dumps(image.name, ensure_ascii=False)
+                       + yaml_text[match.end(1):])
     artifacts = [
-        LocationArtifact((target / "map.yaml").as_posix(), yaml_text.encode("utf-8")),
+        LocationArtifact((target / "map.yaml").as_posix(), export_yaml.encode("utf-8")),
         LocationArtifact((target / image.name).as_posix(), image_bytes),
         *[LocationArtifact((target / cloud.name).as_posix(), cloud.read_bytes()) for cloud in localization.clouds],
     ]
@@ -798,7 +880,11 @@ def _read_pgm_bytes(data: bytes) -> tuple[int, int, bytearray]:
         raise LocationManifestError("仅支持 8 位 P2/P5 PGM 地图")
     expected = width * height
     if magic == b"P5":
-        if index < len(data) and data[index] in b" \t\r\n":
+        # A sole CR followed by a binary LF pixel is also legal. Use the
+        # complete raster size to avoid swallowing that first pixel.
+        if data[index:index + 2] == b"\r\n" and len(data) - index >= expected + 2:
+            index += 2
+        elif index < len(data) and data[index] in b" \t\r\n":
             index += 1
         pixels = bytearray(data[index:index + expected])
     else:
@@ -818,6 +904,27 @@ def _read_pgm_bytes(data: bytes) -> tuple[int, int, bytearray]:
     if len(pixels) != expected:
         raise LocationManifestError("地图 PGM 像素数据不完整")
     return width, height, pixels
+
+
+def _navigation_map_bytes(data: bytes, yaml_text: str) -> bytes:
+    """Apply the operator-approved white background only to exported copies.
+
+    Keep project evidence and display/topology inputs intact. Inverted external
+    maps use different occupancy semantics and must not inherit this policy.
+    """
+    try:
+        metadata = yaml.safe_load(yaml_text)
+    except yaml.YAMLError as exc:
+        raise LocationManifestError("无法解析受控地图 YAML") from exc
+    if not isinstance(metadata, dict):
+        raise LocationManifestError("地图 YAML 根节点无效")
+    if metadata.get("negate", 0) != 0:
+        return data
+    width, height, pixels = _read_pgm_bytes(data)
+    if 205 not in pixels:
+        return data
+    # bytes.replace runs in native code instead of iterating large maps in Python.
+    return b"P5\n%d %d\n255\n" % (width, height) + pixels.replace(b"\xcd", b"\xfe")
 
 
 def _rasterize_map_edits(data: bytes, asset: dict[str, Any], edits: list[dict[str, Any]]) -> bytes:
@@ -840,57 +947,194 @@ def _rasterize_map_edits(data: bytes, asset: dict[str, Any], edits: list[dict[st
             raise LocationManifestError("地图擦除坐标无效") from exc
         if not all(isfinite(value) for value in (x, y)):
             raise LocationManifestError("地图擦除坐标无效")
-        return (x - origin_x) / resolution, (height - 1) - (y - origin_y) / resolution
+        # Canvas uses continuous image edges. Test each raster cell at its
+        # centre, rather than shifting the erasure up by a row.
+        return (x - origin_x) / resolution - 0.5, height - (y - origin_y) / resolution - 0.5
 
-    def free_pixel(column: int, row: int) -> None:
+    # Keep the edit layer's coverage and color until the final threshold. A
+    # black/white mode change must not discard subpixel coverage from earlier
+    # strokes. Full coverage uses a compact mask instead of one dict per cell.
+    edge_alpha: dict[int, tuple[int, float]] = {}
+    full_coverage = bytearray(width * height)
+    paint_value = 254
+
+    def paint_pixel(column: int, row: int) -> None:
         if 0 <= column < width and 0 <= row < height:
-            pixels[row * width + column] = 254
+            index = row * width + column
+            pixels[index] = paint_value
+            full_coverage[index] = 1
+            edge_alpha.pop(index, None)
+
+    def cover_pixel(column: int, row: int, alpha: int) -> None:
+        if alpha <= 0 or not (0 <= column < width and 0 <= row < height):
+            return
+        index = row * width + column
+        if alpha >= 255:
+            paint_pixel(column, row)
+            return
+        previous, color = edge_alpha.get(index, (255, 255. if pixels[index] >= 128 else 0.)
+                                         if full_coverage[index] else (0, 0.))
+        target = 0. if paint_value == 0 else 255.
+        remainder = previous * (255 - alpha) / 255
+        coverage = alpha + remainder
+        color = (target * alpha + color * remainder) / coverage
+        combined = min(255, floor(coverage + .5))
+        edge_alpha[index] = (combined, color)
+        if combined >= 128:
+            pixels[index] = 0 if color < 128 else 254
 
     def stamp(center_x: float, center_y: float, radius_px: float, shape: str) -> None:
         if not isfinite(radius_px) or radius_px <= 0:
             raise LocationManifestError("橡皮擦半径无效")
-        left = max(0, int(center_x - radius_px - 1))
-        right = min(width - 1, int(center_x + radius_px + 1))
-        top = max(0, int(center_y - radius_px - 1))
-        bottom = min(height - 1, int(center_y + radius_px + 1))
+        left = max(0, ceil(center_x - radius_px - .5))
+        right = min(width - 1, floor(center_x + radius_px + .5))
+        top = max(0, ceil(center_y - radius_px - .5))
+        bottom = min(height - 1, floor(center_y + radius_px + .5))
         for row in range(top, bottom + 1):
             for column in range(left, right + 1):
-                if shape == "square" or (column - center_x) ** 2 + (row - center_y) ** 2 <= radius_px ** 2:
-                    free_pixel(column, row)
+                if shape == "square":
+                    dx = max(0., min(column + .5, center_x + radius_px) - max(column - .5, center_x - radius_px))
+                    dy = max(0., min(row + .5, center_y + radius_px) - max(row - .5, center_y - radius_px))
+                    cover_pixel(column, row, min(255, floor(dx * dy * 255 + .5)))
+                else:
+                    cover_pixel(column, row, round(circle_coverage(column, row, center_x, center_y, center_x, center_y, radius_px).bit_count() * 255 / 64))
+
+    def circle_coverage(column: int, row: int, x1: float, y1: float, x2: float, y2: float, radius: float) -> int:
+        dx, dy = x2 - x1, y2 - y1
+        length_squared = dx * dx + dy * dy
+        def distance_squared(x: float, y: float) -> float:
+            t = max(0., min(1., ((x - x1) * dx + (y - y1) * dy) / length_squared)) if length_squared else 0.
+            return (x - x1 - t * dx) ** 2 + (y - y1 - t * dy) ** 2
+        distance = distance_squared(column, row) ** .5
+        if distance > radius + .707107:
+            return 0
+        if distance < radius - .707107:
+            return (1 << 64) - 1
+        # Coverage is sampled only on the thin boundary band, never on a whole
+        # image. Keep partially covered wall cells instead of growing holes.
+        mask = 0
+        for sy in range(8):
+            for sx in range(8):
+                if distance_squared(column + (sx + .5) / 8 - .5, row + (sy + .5) / 8 - .5) <= radius * radius:
+                    mask |= 1 << (sy * 8 + sx)
+        return mask
 
     def brush(points: list[tuple[float, float]], radius_px: float, shape: str) -> None:
         if shape not in {"circle", "square"}:
             raise LocationManifestError("橡皮擦形状无效")
-        previous = None
-        for current in points:
-            if previous is None:
-                stamp(*current, radius_px, shape)
-            else:
-                distance = ((current[0] - previous[0]) ** 2 + (current[1] - previous[1]) ** 2) ** 0.5
-                steps = max(1, int(distance / max(0.5, radius_px * 0.5)) + 1)
-                for index in range(steps + 1):
-                    ratio = index / steps
-                    stamp(previous[0] + (current[0] - previous[0]) * ratio, previous[1] + (current[1] - previous[1]) * ratio, radius_px, shape)
-            previous = current
+        if not isfinite(radius_px) or radius_px <= 0:
+            raise LocationManifestError("橡皮擦半径无效")
+        if shape == "square" or len(points) == 1:
+            # Raw Canvas fillRect stamps do not sweep between sampled points.
+            for point in points:
+                stamp(*point, radius_px, shape)
+            return
+        # One stroke uses the union of segment capsules, not repeated alpha
+        # compositing at every sampled point. Restrict each scanline to its band.
+        stroke_edges: dict[tuple[int, int], int] = {}
+        for (x1, y1), (x2, y2) in zip(points, points[1:]):
+            dx, dy = x2 - x1, y2 - y1
+            if dx == dy == 0:
+                continue
+            band = radius_px + .5
+            for row in range(max(0, ceil(min(y1, y2) - band)), min(height - 1, floor(max(y1, y2) + band)) + 1):
+                lo, hi = (sorted(((row - y1 - band) / dy, (row - y1 + band) / dy)) if dy else (0., 1.))
+                lo, hi = max(0., lo), min(1., hi)
+                if lo > hi:
+                    continue
+                left = max(0, ceil(min(x1 + lo * dx, x1 + hi * dx) - band))
+                right = min(width - 1, floor(max(x1 + lo * dx, x1 + hi * dx) + band))
+                for column in range(left, right + 1):
+                    coverage = circle_coverage(column, row, x1, y1, x2, y2, radius_px)
+                    if coverage == (1 << 64) - 1:
+                        paint_pixel(column, row)
+                    elif coverage:
+                        key = (column, row)
+                        stroke_edges[key] = stroke_edges.get(key, 0) | coverage
+        for (column, row), coverage in stroke_edges.items():
+            cover_pixel(column, row, round(coverage.bit_count() * 255 / 64))
+        # Raw Canvas also fills the first-point disc after drawing the stroke.
+        stamp(*points[0], radius_px, "circle")
 
     def polygon(points: list[tuple[float, float]]) -> None:
         if len(points) < 3:
             raise LocationManifestError("框选擦除至少需要三个顶点")
-        left = max(0, int(min(point[0] for point in points) - 1))
-        right = min(width - 1, int(max(point[0] for point in points) + 1))
-        top = max(0, int(min(point[1] for point in points) - 1))
-        bottom = min(height - 1, int(max(point[1] for point in points) + 1))
+        # Integrate nonzero-winding scanline spans over each cell. Splitting
+        # at vertices and edge crossings keeps every span boundary linear;
+        # partial boundary coverage must not erase a whole thin wall.
+        edges = []
+        breaks = {y for _, y in points}
+        for (x1, y1), (x2, y2) in zip(points, points[1:] + points[:1]):
+            if y1 != y2:
+                slope = (x2 - x1) / (y2 - y1)
+                edges.append((min(y1, y2), max(y1, y2), slope, x1 - slope * y1, 1 if y2 > y1 else -1))
+        for i, (low, high, slope, intercept, _) in enumerate(edges):
+            for low2, high2, slope2, intercept2, _ in edges[i + 1:]:
+                if slope != slope2:
+                    y = (intercept2 - intercept) / (slope - slope2)
+                    if max(low, low2) < y < min(high, high2):
+                        breaks.add(y)
+        top = max(0, ceil(min(y for _, y in points) - .5))
+        bottom = min(height - 1, floor(max(y for _, y in points) + .5))
+        ordered_breaks = sorted(breaks)
         for row in range(top, bottom + 1):
-            for column in range(left, right + 1):
-                inside = False
-                for index, (x1, y1) in enumerate(points):
-                    x2, y2 = points[(index + 1) % len(points)]
-                    if (y1 > row) != (y2 > row) and column < (x2 - x1) * (row - y1) / (y2 - y1) + x1:
-                        inside = not inside
-                if inside:
-                    free_pixel(column, row)
+            cuts = [row - .5, *[y for y in ordered_breaks if row - .5 < y < row + .5], row + .5]
+            areas: dict[int, float] = {}
+            for low, high in zip(cuts, cuts[1:]):
+                middle = (low + high) / 2
+                crossings = sorted((slope * middle + intercept, slope, intercept, direction)
+                                   for y1, y2, slope, intercept, direction in edges if y1 <= middle < y2)
+                winding = 0
+                start = None
+                for _, slope, intercept, direction in crossings:
+                    previous = winding
+                    winding += direction
+                    if previous == 0 and winding:
+                        start = (slope, intercept)
+                    elif previous and winding == 0 and start is not None:
+                        ls, li = start
+                        rs, ri = slope, intercept
+                        left = max(0, ceil(min(ls * low + li, ls * high + li) - .5))
+                        right = min(width - 1, floor(max(rs * low + ri, rs * high + ri) + .5))
+                        full_left = max(left, ceil(max(ls * low + li, ls * high + li) + .5))
+                        full_right = min(right, floor(min(rs * low + ri, rs * high + ri) - .5))
+                        if high - low == 1 and full_left <= full_right:
+                            begin, end = row * width + full_left, row * width + full_right + 1
+                            pixels[begin:end] = bytes([paint_value]) * (end - begin)
+                            full_coverage[begin:end] = b'\x01' * (end - begin)
+                            for index in list(edge_alpha):
+                                if begin <= index < end:
+                                    edge_alpha.pop(index)
+                            columns = (*range(left, full_left), *range(full_right + 1, right + 1))
+                        else:
+                            columns = range(left, right + 1)
+                        for column in columns:
+                            if full_left <= column <= full_right:
+                                areas[column] = areas.get(column, 0.) + high - low
+                                continue
+                            # Clipping a linear span against a pixel introduces
+                            # bends only when either edge crosses a cell side.
+                            cell_cuts = [low, high]
+                            for m, c in ((ls, li), (rs, ri)):
+                                if m:
+                                    for side in (column - .5, column + .5):
+                                        y = (side - c) / m
+                                        if low < y < high:
+                                            cell_cuts.append(y)
+                            cell_cuts.sort()
+                            def span_width(y: float) -> float:
+                                return max(0., min(column + .5, rs * y + ri) - max(column - .5, ls * y + li))
+                            area = sum((span_width(y1) + span_width(y2)) * (y2 - y1) / 2
+                                       for y1, y2 in zip(cell_cuts, cell_cuts[1:]))
+                            areas[column] = areas.get(column, 0.) + area
+            for column, area in areas.items():
+                cover_pixel(column, row, min(255, floor(area * 255 + .5)))
 
     for edit in edits:
+        mode = edit.get("mode", "erase")
+        if mode not in ("erase", "wall"):
+            raise LocationManifestError("地图编辑模式无效，应为擦除或补墙")
+        paint_value = 0 if mode == "wall" else 254
         kind = edit.get("kind")
         raw_points = edit.get("points")
         if kind not in {"brush_erase", "polygon_erase"} or not isinstance(raw_points, list):

@@ -11,8 +11,9 @@
     "rtsp_port": 8554
   },
   "runtime": {
-    "encoder": "vaapih264enc",
-    "vaapi_device": "/dev/dri/renderD128",
+    "encoder": "auto",
+    "hardware_selection_version": 1,
+    "vaapi_device": "auto",
     "gst_launch": "runtime/video/bin/gst-launch-1.0"
   },
   "streams": [

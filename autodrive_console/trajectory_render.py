@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import html
+import os
+import secrets
 import struct
 import zlib
 from pathlib import Path
@@ -14,6 +16,48 @@ class TrajectoryRenderError(ValueError):
 
 
 ACTUAL_PATH_COLORS = ("#168cff", "#9b6dff", "#00a98f", "#ff8c42", "#e75aa8", "#5b95d6")
+
+
+def freeze_map_png(asset: CachedMapAsset, target: Path, *, maximum_bytes: int) -> dict[str, object]:
+    """Freeze one report-time PGM as a bounded PNG for native evidence."""
+    if (
+        asset.width is None
+        or asset.height is None
+        or asset.resolution is None
+        or asset.origin is None
+        or len(asset.origin) < 2
+        or asset.width <= 0
+        or asset.height <= 0
+        or asset.resolution <= 0
+        or asset.width * asset.height > 16_000_000
+    ):
+        raise TrajectoryRenderError(f"地图元数据不完整：{asset.label}")
+    width, height, pixels = _read_pgm(Path(asset.cache_image))
+    if (width, height) != (asset.width, asset.height):
+        raise TrajectoryRenderError(f"地图尺寸发生变化：{asset.label}")
+    body = _png_gray(width, height, pixels)
+    if len(body) > maximum_bytes:
+        raise TrajectoryRenderError(f"地图冻结图超过大小限制：{asset.label}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {
+        "map_id": asset.id,
+        "filename": target.name,
+        "label": asset.label,
+        "resolution_m": float(asset.resolution),
+        "width_cells": asset.width,
+        "height_cells": asset.height,
+        "origin_x_m": float(asset.origin[0]),
+        "origin_y_m": float(asset.origin[1]),
+    }
 
 
 def render_svg(asset: CachedMapAsset, segment: dict, target: Path, ideal_routes: list[dict] | None = None, virtual_walls: list[dict] | None = None) -> None:

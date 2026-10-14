@@ -142,6 +142,12 @@ class RobotGateway:
             statuses = {item.name: item.status for item in client.discover()}
         except RuntimeError as exc:
             return False, str(exc)
+        if progress_callback is not None:
+            progress_callback({"stages": [{
+                "index": 1,
+                "state": "restarting",
+                "nodes": [{"name": name, "status": statuses.get(name, "MISSING")} for name in consumers],
+            }]})
         with self._dependency_restart_activity():
             errors = []
             with ThreadPoolExecutor(max_workers=min(2, len(consumers))) as pool:
@@ -154,9 +160,23 @@ class RobotGateway:
                         future.result()
                     except RuntimeError as exc:
                         errors.append(f"{futures[future]}：{exc}")
-            ready, detail = self._wait_stage_running(client, consumers)
+            ready, detail = self._wait_stage_running(
+                client,
+                consumers,
+                progress_callback=lambda current: progress_callback({"stages": [{
+                    "index": 1,
+                    "state": "waiting_stable",
+                    "nodes": [{"name": name, "status": current.get(name, "MISSING")} for name in consumers],
+                }]}) if progress_callback is not None else None,
+            )
         if not ready:
             return False, f"最小场景依赖未稳定就绪：{detail}"
+        if progress_callback is not None:
+            progress_callback({"stages": [{
+                "index": 1,
+                "state": "ready",
+                "nodes": [{"name": name, "status": "RUNNING"} for name in consumers],
+            }]})
         if errors:
             return True, f"最小场景依赖已稳定 RUNNING（控制命令反馈：{'；'.join(errors)}）"
         return True, "定位与导航启动节点已重启并稳定 RUNNING"

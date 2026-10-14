@@ -79,11 +79,9 @@ fi
 
 if [[ -n "$SUPERVISORCTL" ]]; then
   TEMP_SUDOERS="$(mktemp)"
-  # Status remains read-only, but control permission must never be a wildcard:
-  # a network request may only start/restart the current vehicle's declared
-  # node set.  Keep existing customized plans usable by importing their
-  # validated names during this upgrade; later additions require a deliberate
-  # package/admin update instead of silently expanding root authority.
+  # Control permission stays limited to the existing approved node set and
+  # validated customized plans.  Read-only status discovery may add stdout
+  # tail rules, but must never add start/restart authority or wildcards.
   SUPERVISOR_NODES=(
     "DRIVERS:102-chassis_node"
     "DRIVERS:111-elevator_server"
@@ -97,6 +95,7 @@ if [[ -n "$SUPERVISORCTL" ]]; then
       [[ "$node" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(:[A-Za-z0-9][A-Za-z0-9_.-]{0,127})?$ ]] && SUPERVISOR_NODES+=("$node")
     done < <(python3 - "$ROOT/config/console.json" <<'PY'
 import json
+import re
 import sys
 
 try:
@@ -111,12 +110,23 @@ for step in raw.get("dependency_plan", {}).get("steps", []) if isinstance(raw.ge
     if isinstance(step, dict) and isinstance(step.get("nodes"), list):
         items.extend(step["nodes"])
 for item in items:
-    if isinstance(item, str):
+    # Validate the complete value before printing: embedded newlines must not
+    # turn one invalid configured name into multiple approved shell lines.
+    if isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(?::[A-Za-z0-9][A-Za-z0-9_.-]{0,127})?", item):
         print(item)
 PY
 )
   fi
+  SUPERVISOR_LOG_NODES=("${SUPERVISOR_NODES[@]}")
+  # Supervisor stdout files are named after programs that may not participate
+  # in a test dependency plan (for example DRIVERS:104-livox_lidar).  Import
+  # the current, root-readable status snapshot during package installation so
+  # their read-only `tail -f ... stdout` rule remains exact rather than broad.
+  while IFS=' ' read -r node _; do
+    [[ "$node" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(:[A-Za-z0-9][A-Za-z0-9_.-]{0,127})?$ ]] && SUPERVISOR_LOG_NODES+=("$node")
+  done < <("$SUPERVISORCTL" status 2>/dev/null || true)
   mapfile -t SUPERVISOR_NODES < <(printf '%s\n' "${SUPERVISOR_NODES[@]}" | sort -u)
+  mapfile -t SUPERVISOR_LOG_NODES < <(printf '%s\n' "${SUPERVISOR_LOG_NODES[@]}" | sort -u)
   {
     printf '%s ALL=(root) NOPASSWD: %s status' "$RUN_USER" "$SUPERVISORCTL"
     for node in "${SUPERVISOR_NODES[@]}"; do
@@ -124,6 +134,10 @@ PY
       # 转义后才能作为精确的命令参数白名单写入（例如 DRIVERS\:102）。
       sudoers_node="${node//:/\\:}"
       printf ', %s start %s, %s restart %s' "$SUPERVISORCTL" "$sudoers_node" "$SUPERVISORCTL" "$sudoers_node"
+    done
+    for node in "${SUPERVISOR_LOG_NODES[@]}"; do
+      sudoers_node="${node//:/\\:}"
+      printf ', %s tail -f %s stdout' "$SUPERVISORCTL" "$sudoers_node"
     done
     printf '\n'
   } > "$TEMP_SUDOERS"

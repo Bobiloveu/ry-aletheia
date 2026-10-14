@@ -20,4 +20,6 @@
 - [视频](video.md)
 - [任务执行与部署验收](task_execution.md)
 - [部署与地图配置](deployment.md)
-- [机器人日志下载](robot_logs.md)
+- [机器人日志下载与实时查看](robot_logs.md)
+- [车辆软件资产](software_inventory.md)
+- [工具诊断日志](tool_logging.md)

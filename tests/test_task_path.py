@@ -65,3 +65,19 @@ def test_task_segment_rejects_behavior_tree_only_speed_modes():
 
     with pytest.raises(TaskPathError, match="过渡点速度模式"):
         task_segment_transitions(project, "floor")
+
+
+def test_task_segment_accepts_normal_without_changing_missing_legacy_speed():
+    project = {"waypoints": [
+        {"id": "open-door", "map_asset_id": "floor", "kind": "transition",
+         "x": 1, "y": 2, "yaw": 0.2, "speed_mode": "normal"},
+        {"id": "legacy-stop", "map_asset_id": "floor", "kind": "transition",
+         "x": 3, "y": 4, "yaw": 0.4},
+    ]}
+
+    outbound = task_segment_transitions(project, "floor")
+
+    assert [point["speed_mode"] for point in outbound] == ["normal", "single_point"]
+    assert [point["speed_mode"] for point in return_task_transition_points(outbound)] == [
+        "single_point", "normal",
+    ]

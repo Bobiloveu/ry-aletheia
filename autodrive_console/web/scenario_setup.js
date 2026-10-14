@@ -2,7 +2,7 @@ import { requestJson } from "./platform/http.js";
 
 (() => {
   const $ = (id) => document.getElementById(id);
-  let documentState; let browserState; let commandCandidates = []; let lastInspection = {}; let lastActiveBackup = null; let lastTransaction = { state: 'normal', restore_available: false, message: '未检测到待恢复事务' };
+  let documentState; let browserState; let commandCandidates = []; let lastInspection = {}; let lastActiveBackup = null; let lastTransaction = { state: 'normal', restore_available: false, message: '未检测到待恢复事务' }; let activation = { state: 'idle' }; let activationTimer = null;
   const request = (url, options = {}) => requestJson(
     url,
     { cache: 'no-store', headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }, ...options },
@@ -19,6 +19,27 @@ import { requestJson } from "./platform/http.js";
     return { title: `${name}正在使用`, detail: '为避免参数混乱，编辑操作已暂时锁定。测试结束会自动恢复；如不再测试，请点击“恢复常规配置”。' };
   }
 
+  function renderActivation() {
+    const active = activation && activation.state !== 'idle';
+    $('activationState').hidden = !active;
+    if (!active) return;
+    const phase = { queued: '正在准备', writing: '正在写入启动参数', restarting: '正在重启依赖', waiting: '正在等待稳定', completed: '应用完成', failed: '需要处理' }[activation.phase] || '正在处理';
+    $('activationTitle').textContent = phase;
+    $('activationDetail').textContent = activation.message || '正在处理场景方案。';
+    const stages = Array.isArray(activation.stages) ? activation.stages : [];
+    $('activationStages').innerHTML = stages.map((stage) => {
+      const label = `第 ${escape(stage.index || '—')} 阶段`;
+      const nodes = Array.isArray(stage.nodes) ? stage.nodes.map((node) => `${escape(node.name)}：${escape(node.status)}`).join(' · ') : '';
+      return `<li><strong>${label}</strong><span>${escape(stage.state || '处理中')}${nodes ? ` · ${nodes}` : ''}</span></li>`;
+    }).join('');
+  }
+  function activationIsRunning() { return activation && activation.state === 'running'; }
+  function stopActivationPolling() { if (activationTimer !== null) { window.clearInterval(activationTimer); activationTimer = null; } }
+  function startActivationPolling() {
+    if (!activationIsRunning() || activationTimer !== null) return;
+    activationTimer = window.setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, 1000);
+  }
+
   function render(status, preserveInspection = false) {
     documentState = status.document;
     documentState.bindings = documentState.bindings || {};
@@ -28,7 +49,8 @@ import { requestJson } from "./platform/http.js";
     lastActiveBackup = preserveInspection ? lastActiveBackup : (status.active_backup || null);
     lastTransaction = preserveInspection ? lastTransaction : (status.transaction || { state: lastActiveBackup ? 'pending' : 'normal', restore_available: Boolean(lastActiveBackup), message: lastActiveBackup ? '存在待恢复事务' : '未检测到待恢复事务' });
     const transactionLocked = lastTransaction.state !== 'normal';
-    const mutationDisabled = transactionLocked ? 'disabled' : '';
+    const activationLocked = activationIsRunning();
+    const mutationDisabled = transactionLocked || activationLocked ? 'disabled' : '';
     commandCandidates = info.candidates || [];
     const commandSelect = (slot, kind, label) => {
       const all = commandCandidates.filter((item) => item.kind === kind);
@@ -50,10 +72,11 @@ import { requestJson } from "./platform/http.js";
     $('transactionTitle').textContent = state.title;
     $('transactionDetail').textContent = state.detail;
     $('restoreDefault').hidden = !lastTransaction.restore_available;
-    $('restoreDefault').disabled = !lastTransaction.restore_available;
-    $('saveProfiles').disabled = transactionLocked;
-    $('addProfile').disabled = transactionLocked;
+    $('restoreDefault').disabled = !lastTransaction.restore_available || activationLocked;
+    $('saveProfiles').disabled = transactionLocked || activationLocked;
+    $('addProfile').disabled = transactionLocked || activationLocked;
     $('profileList').innerHTML = documentState.profiles.length ? documentState.profiles.map((profile) => `<div class="scenario-profile" data-id="${escape(profile.id)}"><label>方案名称<input data-field="name" value="${escape(profile.name)}" ${mutationDisabled} ${transactionLocked ? 'readonly' : ''}></label><label>导航启动文件（FCRP）<div class="scenario-file-field"><input data-field="fcrp_launch" value="${escape(profile.fcrp_launch)}" readonly placeholder="浏览并选择 .launch.py"><button data-browse="fcrp" type="button" ${mutationDisabled}>选择文件</button></div></label><label>定位配置文件（lightning）<div class="scenario-file-field"><input data-field="lightning_config" value="${escape(profile.lightning_config)}" readonly placeholder="浏览并选择 YAML"><button data-browse="lightning" type="button" ${mutationDisabled}>选择文件</button></div></label><div class="profile-actions"><button class="preview-profile outline-button" type="button">预览</button><button class="apply-profile" type="button" ${mutationDisabled}>启用此方案</button><button class="remove-profile" type="button" ${mutationDisabled}>删除</button></div></div>`).join('') : '<div class="page-empty">还没有场景方案。点击“新建方案”后，选择导航和定位文件并保存。</div>';
+    renderActivation();
   }
   function renderLocal() { render({ document: documentState, inspection: lastInspection, active_backup: lastActiveBackup }, true); }
   function collect() {
@@ -80,12 +103,19 @@ import { requestJson } from "./platform/http.js";
     try { await browse(current ? current.slice(0, current.lastIndexOf('/')) : ''); } catch (error) { $('browserList').innerHTML = `<div class="page-empty">${escape(error.message)}</div>`; }
   }
   function closeBrowser() { $('fileBrowser').hidden = true; browserState = undefined; }
-  async function refresh() { try { render(await request('/api/scenario-setup')); } catch (error) { $('message').textContent = error.message; } }
+  async function refresh() {
+    try {
+      const [status, operation] = await Promise.all([request('/api/scenario-setup'), request('/api/scenario-setup/activation')]);
+      activation = operation.operation || { state: 'idle' };
+      render(status);
+      if (activationIsRunning()) startActivationPolling(); else stopActivationPolling();
+    } catch (error) { $('message').textContent = error.message; }
+  }
   async function post(payload) { const result = await request('/api/scenario-setup', { method: 'POST', body: JSON.stringify(payload) }); render(result.status || await request('/api/scenario-setup')); $('message').textContent = result.message || ''; }
-  $('addProfile').addEventListener('click', () => { if (lastTransaction.state !== 'normal') return; documentState = { ...documentState, ...collect() }; documentState.profiles.push({ id: `profile-${Date.now()}`, name: '新场景方案', fcrp_launch: '', lightning_config: '' }); renderLocal(); });
-  $('saveProfiles').addEventListener('click', () => { if (lastTransaction.state === 'normal') post({ action: 'save', document: collect() }).catch((error) => { $('message').textContent = error.message; }); });
-  $('restoreDefault').addEventListener('click', () => { if (confirm('要让小车恢复为平时的常规设置吗？\n工具只会恢复已登记的启动参数，不会重启任何服务。')) post({ action: 'restore' }).catch((error) => { $('message').textContent = error.message; }); });
-  $('profileList').addEventListener('click', (event) => { const row = event.target.closest('.scenario-profile'); if (!row) return; if (event.target.dataset.browse) { if (lastTransaction.state === 'normal') openBrowser(event.target.dataset.browse, row); return; } if (event.target.classList.contains('preview-profile')) { previewApplication(row.dataset.id).catch((error) => { $('message').textContent = error.message; }); return; } if (event.target.classList.contains('remove-profile')) { if (lastTransaction.state !== 'normal') return; documentState = { ...documentState, ...collect() }; documentState.profiles = documentState.profiles.filter((item) => item.id !== row.dataset.id); renderLocal(); return; } if (event.target.classList.contains('apply-profile') && lastTransaction.state === 'normal' && confirm(`要启用“${row.querySelector('[data-field="name"]').value.trim() || '这个方案'}”吗？\n工具会更新启动参数并重启相关服务。`)) post({ action: 'apply', profile_id: row.dataset.id, document: collect() }).catch((error) => { $('message').textContent = error.message; }); });
+  $('addProfile').addEventListener('click', () => { if (lastTransaction.state !== 'normal' || activationIsRunning()) return; documentState = { ...documentState, ...collect() }; documentState.profiles.push({ id: `profile-${Date.now()}`, name: '新场景方案', fcrp_launch: '', lightning_config: '' }); renderLocal(); });
+  $('saveProfiles').addEventListener('click', () => { if (lastTransaction.state === 'normal' && !activationIsRunning()) post({ action: 'save', document: collect() }).catch((error) => { $('message').textContent = error.message; }); });
+  $('restoreDefault').addEventListener('click', () => { if (!activationIsRunning() && confirm('要让小车恢复为平时的常规设置吗？\n工具只会恢复已登记的启动参数，不会重启任何服务。')) post({ action: 'restore' }).catch((error) => { $('message').textContent = error.message; }); });
+  $('profileList').addEventListener('click', (event) => { const row = event.target.closest('.scenario-profile'); if (!row) return; if (event.target.dataset.browse) { if (lastTransaction.state === 'normal' && !activationIsRunning()) openBrowser(event.target.dataset.browse, row); return; } if (event.target.classList.contains('preview-profile')) { previewApplication(row.dataset.id).catch((error) => { $('message').textContent = error.message; }); return; } if (event.target.classList.contains('remove-profile')) { if (lastTransaction.state !== 'normal' || activationIsRunning()) return; documentState = { ...documentState, ...collect() }; documentState.profiles = documentState.profiles.filter((item) => item.id !== row.dataset.id); renderLocal(); return; } if (event.target.classList.contains('apply-profile') && lastTransaction.state === 'normal' && !activationIsRunning() && confirm(`要启用“${row.querySelector('[data-field="name"]').value.trim() || '这个方案'}”吗？\n工具会更新启动参数并重启相关服务。`)) request('/api/scenario-setup', { method: 'POST', body: JSON.stringify({ action: 'apply', profile_id: row.dataset.id, document: collect() }) }).then((result) => { activation = result.operation || { state: 'running', phase: 'queued' }; renderLocal(); startActivationPolling(); }).catch((error) => { $('message').textContent = error.message; }); });
   $('browserList').addEventListener('click', (event) => { const button = event.target.closest('button'); if (!button || !browserState) return; if (button.dataset.directory) browse(button.dataset.directory).catch((error) => { $('browserList').innerHTML = `<div class="page-empty">${escape(error.message)}</div>`; }); if (button.dataset.file) { const field = browserState.row.querySelector(`[data-field="${browserState.kind === 'fcrp' ? 'fcrp_launch' : 'lightning_config'}"]`); field.value = button.dataset.file; preview(button.dataset.file); closeBrowser(); } });
   $('browserUp').addEventListener('click', () => { if (browserState && $('browserUp').dataset.path) browse($('browserUp').dataset.path).catch(() => {}); });
   $('closeBrowser').addEventListener('click', closeBrowser); $('fileBrowser').addEventListener('click', (event) => { if (event.target === $('fileBrowser')) closeBrowser(); });
@@ -96,5 +126,7 @@ import { requestJson } from "./platform/http.js";
     if (candidate) documentState.bindings[slot] = { kind: candidate.kind, prefix: candidate.prefix, occurrence: candidate.occurrence };
     else delete documentState.bindings[slot];
   });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh(); });
+  window.addEventListener('pagehide', stopActivationPolling);
   refresh();
 })();

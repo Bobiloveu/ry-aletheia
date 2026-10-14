@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,9 +18,11 @@ from .acceptance_plan import (
     public_execution_preflight,
 )
 from .report_trajectory import REPORT_TRAJECTORY_CSS, REPORT_TRAJECTORY_SCRIPT, trajectory_figure
+from .native_report_archive import NativeReportArchive, NativeReportArchiveError
 
 
 _TRAJECTORY_DIR = re.compile(r"run_[0-9a-f]{12}_trajectory")
+LOGGER = logging.getLogger("ry_aletheia.acceptance_report")
 
 
 @dataclass(frozen=True)
@@ -233,4 +236,13 @@ class AcceptanceReportWriter:
 <section class="section-card"><div class="section-title"><h2>地图运行轨迹证据</h2><p>实际轨迹、理想路线与虚拟墙以采集结果为准</p></div>{evidence_html}</section>
 <footer class="report-footer">由 RY Aletheia 自动生成。该文件与 CSV 可独立离线归档。</footer></main><script>{REPORT_TRAJECTORY_SCRIPT}</script></body></html>'''
         (self.report_dir / html_filename).write_text(html, encoding="utf-8")
+        try:
+            NativeReportArchive(self.report_dir).archive_acceptance_report(
+                html_filename=html_filename,
+                plan=plan,
+            )
+        except (NativeReportArchiveError, OSError) as exc:
+            # Never invalidate an existing operator-facing acceptance archive
+            # because its optional Mobile representation could not be built.
+            LOGGER.warning("原生验收报告归档失败：plan=%s error=%s", plan.plan_id, exc)
         return ReportReference(html_filename, csv_filename, manifest_filename)

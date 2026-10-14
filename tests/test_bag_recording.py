@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from autodrive_console.bag_recording import BagRecordingError, BagRecordingManager, RecordingRequest
+from autodrive_console.models import AttemptResult, RunRecord, TaskParameters, TestCase
+from autodrive_console.run_checkpoint import RunCheckpointStore
 
 
 def _topics():
@@ -22,6 +26,29 @@ def test_available_topics_only_exposes_active_single_type_nonhidden_topics(tmp_p
 
     assert manager.available_topics() == [
         {"name": "/odom", "type": "nav_msgs/msg/Odometry", "publisher_count": 2},
+    ]
+
+
+def test_topic_probe_merges_multiple_dds_graph_snapshots_before_filtering(tmp_path):
+    snapshots = iter([
+        [{"name": "/odom", "type": "nav_msgs/msg/Odometry", "types": ["nav_msgs/msg/Odometry"], "publisher_count": 0, "hidden": False}],
+        [
+            {"name": "/odom", "type": "nav_msgs/msg/Odometry", "types": ["nav_msgs/msg/Odometry"], "publisher_count": 1, "hidden": False},
+            {"name": "/task_status", "type": "std_msgs/msg/Int32", "types": ["std_msgs/msg/Int32"], "publisher_count": 2, "hidden": False},
+        ],
+        [{"name": "/task_status", "type": "std_msgs/msg/Int32", "types": ["std_msgs/msg/Int32"], "publisher_count": 2, "hidden": False}],
+    ])
+    waits = []
+
+    records = BagRecordingManager._collect_topic_snapshots(
+        lambda: next(snapshots), samples=3, sleep=lambda seconds: waits.append(seconds), interval_s=0.2,
+    )
+    manager = BagRecordingManager(tmp_path, topic_probe=lambda: records)
+
+    assert waits == [0.2, 0.2]
+    assert manager.available_topics() == [
+        {"name": "/odom", "type": "nav_msgs/msg/Odometry", "publisher_count": 1},
+        {"name": "/task_status", "type": "std_msgs/msg/Int32", "publisher_count": 2},
     ]
 
 
@@ -109,6 +136,12 @@ def _metadata(bag_dir):
     }
 
 
+def _rosbag_output(active):
+    """Model rosbag2 creating its own output directory after process spawn."""
+    active.bag_dir.mkdir()
+    return active.bag_dir
+
+
 def test_start_uses_only_fixed_rosbag_argv_and_resets_ready_counter(tmp_path):
     process = _FakeProcess()
     calls = []
@@ -136,6 +169,73 @@ def test_start_uses_only_fixed_rosbag_argv_and_resets_ready_counter(tmp_path):
     assert active.attempt_index == 2
 
 
+def test_start_manual_uses_the_same_recorder_boundary_and_marks_manual_archive(tmp_path):
+    from autodrive_console.manual_bag_recording import ManualRecordingRequest
+
+    process = _FakeProcess()
+    counter = _FakeCounter()
+    manager = BagRecordingManager(
+        tmp_path,
+        topic_probe=lambda: [{"name": "/odom", "type": "nav_msgs/msg/Odometry", "publisher_count": 1}],
+        environment_verifier=_recording_environment,
+        popen=lambda *_args, **_kwargs: process,
+        counter_factory=lambda _topic_types: counter,
+        sleeper=lambda _seconds: None,
+    )
+
+    active = manager.start_manual(ManualRecordingRequest(("/odom",), 15, "窄通道避障"))
+
+    assert active.source == "manual"
+    assert active.label == "窄通道避障"
+    assert active.duration_limit_seconds == 900
+    assert active.attempt_index is None
+
+
+def test_manual_archive_keeps_its_scene_label_limit_and_actual_duration(tmp_path):
+    from autodrive_console.manual_bag_recording import ManualRecordingRequest
+
+    process = _FakeProcess()
+    counter = _FakeCounter()
+    manager = BagRecordingManager(
+        tmp_path,
+        topic_probe=lambda: [{"name": "/odom", "type": "nav_msgs/msg/Odometry", "publisher_count": 1}],
+        environment_verifier=_recording_environment,
+        popen=lambda *_args, **_kwargs: process,
+        counter_factory=lambda _topic_types: counter,
+        metadata_reader=_metadata,
+        sleeper=lambda _seconds: None,
+    )
+    active = manager.start_manual(ManualRecordingRequest(("/odom",), 15, "窄通道避障"))
+    (_rosbag_output(active) / "metadata.yaml").write_text("metadata", encoding="utf-8")
+    (active.bag_dir / "data_0.db3.zstd").write_bytes(b"bag-data")
+
+    summary = manager.stop(active)
+    manifest = manager.archive_detail(summary["archive_id"])["manifest"]
+
+    assert manifest["source"] == "manual"
+    assert manifest["label"] == "窄通道避障"
+    assert manifest["duration_limit_seconds"] == 900
+    assert isinstance(manifest["actual_duration_seconds"], int)
+    assert manifest["actual_duration_seconds"] >= 0
+
+
+def test_manual_and_test_attempt_recorders_cannot_overlap_at_the_process_boundary(tmp_path):
+    from autodrive_console.manual_bag_recording import ManualRecordingRequest
+
+    manager = BagRecordingManager(
+        tmp_path,
+        topic_probe=lambda: [{"name": "/odom", "type": "nav_msgs/msg/Odometry", "publisher_count": 1}],
+        environment_verifier=_recording_environment,
+        popen=lambda *_args, **_kwargs: _FakeProcess(),
+        counter_factory=lambda _topic_types: _FakeCounter(),
+        sleeper=lambda _seconds: None,
+    )
+    manager.start_manual(ManualRecordingRequest(("/odom",), 15, "遥控复现"))
+
+    with pytest.raises(BagRecordingError, match="录包"):
+        manager.start("run123", "case", 1, RecordingRequest(1, ("/odom",)))
+
+
 def test_stop_writes_manifest_with_hashes_metadata_and_audit(tmp_path):
     process = _FakeProcess()
     counter = _FakeCounter()
@@ -149,7 +249,7 @@ def test_stop_writes_manifest_with_hashes_metadata_and_audit(tmp_path):
         sleeper=lambda _seconds: None,
     )
     active = manager.start("run123", "夜间巡检", 2, RecordingRequest(2, ("/odom",)))
-    (active.bag_dir / "metadata.yaml").write_text("metadata", encoding="utf-8")
+    (_rosbag_output(active) / "metadata.yaml").write_text("metadata", encoding="utf-8")
     (active.bag_dir / "data_0.db3.zstd").write_bytes(b"bag-data")
 
     summary = manager.stop(active)
@@ -159,6 +259,28 @@ def test_stop_writes_manifest_with_hashes_metadata_and_audit(tmp_path):
     assert archive["manifest"]["files"]["bag/data_0.db3.zstd"]["sha256"]
     assert archive["manifest"]["topics"]["/odom"]["recorded_count"] == 100
     assert counter.stopped
+
+
+@pytest.mark.parametrize("compression_mode", ["FILE", "CompressionMode.FILE"])
+def test_audit_accepts_rosbag2_file_compression_mode_variants(tmp_path, compression_mode):
+    """ROS 2 Humble writes FILE in metadata.yaml for file-level Zstd bags."""
+    process = _FakeProcess()
+    manager = BagRecordingManager(
+        tmp_path,
+        topic_probe=lambda: [{"name": "/odom", "type": "nav_msgs/msg/Odometry", "publisher_count": 1}],
+        environment_verifier=_recording_environment,
+        popen=lambda *_args, **_kwargs: process,
+        counter_factory=lambda _topic_types: _FakeCounter(),
+        metadata_reader=lambda bag_dir: {**_metadata(bag_dir), "compression_mode": compression_mode},
+        sleeper=lambda _seconds: None,
+    )
+    active = manager.start("run123", "case", 1, RecordingRequest(1, ("/odom",)))
+    (_rosbag_output(active) / "metadata.yaml").write_text("metadata", encoding="utf-8")
+
+    audit = manager.stop(active)["audit"]
+
+    assert audit["status"] == "passed"
+    assert "rosbag 压缩 profile 不符合固定 Zstd file 策略" not in audit["errors"]
 
 
 @pytest.mark.parametrize(("observed", "recorded", "expected"), [(100, 99, "passed"), (100, 97, "warning"), (100, 94, "failed")])
@@ -174,7 +296,7 @@ def test_audit_applies_approved_loss_thresholds(tmp_path, observed, recorded, ex
         sleeper=lambda _seconds: None,
     )
     active = manager.start("run123", "case", 1, RecordingRequest(1, ("/odom",)))
-    (active.bag_dir / "metadata.yaml").write_text("metadata", encoding="utf-8")
+    (_rosbag_output(active) / "metadata.yaml").write_text("metadata", encoding="utf-8")
 
     assert manager.stop(active)["audit"]["status"] == expected
 
@@ -218,3 +340,46 @@ def test_constructor_preserves_crash_leftover_as_incomplete_archive(tmp_path):
     assert archive["archive"]["audit_status"] == "failed"
     assert "未完成" in archive["manifest"]["case_name"]
     assert not stage.exists()
+
+
+def test_checkpoint_recovers_a_completed_bag_recording_audit(tmp_path):
+    case = TestCase("case", "case.json", "诊断测试", TaskParameters("园区", 1, 1, 1, 101), "unused.json")
+    run = RunRecord(
+        "123456789abc",
+        case,
+        2,
+        0,
+        status="running",
+        attempts=[AttemptResult(
+            1,
+            "passed",
+            "已完成",
+            1.0,
+            "2026-10-09T18:00:01+08:00",
+            bag_recording={"archive_id": "a" * 32, "audit": {"status": "passed", "topics": {"/odom": {"loss_percent": 0.0}}}},
+        )],
+    )
+    store = RunCheckpointStore(tmp_path)
+
+    store.save(run, attempt_in_progress=False)
+
+    [recovered] = store.load_recoverable()
+    assert recovered.run.attempts[0].bag_recording == run.attempts[0].bag_recording
+
+
+def test_recorder_receives_a_new_output_path_that_rosbag_can_create(tmp_path):
+    """ros2 bag record owns creation of its --output directory."""
+    process = _FakeProcess()
+    output_existed_when_spawned = []
+    manager = BagRecordingManager(
+        tmp_path,
+        topic_probe=lambda: [{"name": "/odom", "type": "nav_msgs/msg/Odometry", "publisher_count": 1}],
+        environment_verifier=_recording_environment,
+        popen=lambda argv, **_kwargs: output_existed_when_spawned.append(Path(argv[4]).exists()) or process,
+        counter_factory=lambda _topic_types: _FakeCounter(),
+        sleeper=lambda _seconds: None,
+    )
+
+    manager.start("run123", "case", 1, RecordingRequest(1, ("/odom",)))
+
+    assert output_existed_when_spawned == [False]

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import stat
+import subprocess
 import tempfile
 import zipfile
 from datetime import datetime
@@ -12,6 +14,8 @@ from pathlib import Path
 from typing import BinaryIO
 
 from .upgrade_signature import UpgradeSignatureError, verify_manifest_signature
+
+LOGGER = logging.getLogger("ry_aletheia.upgrade_manager")
 
 
 class UpgradeError(ValueError):
@@ -65,6 +69,19 @@ class UpgradeManager:
             return ""
 
     def apply(self, upload: BinaryIO, content_length: int, original_name: str) -> dict:
+        LOGGER.info("Offline upgrade started bytes=%s current_version=%s", content_length, self._current_version)
+        try:
+            result = self._apply(upload, content_length, original_name)
+        except UpgradeError as exc:
+            LOGGER.warning("Offline upgrade rejected reason=%s", exc)
+            raise
+        except Exception:
+            LOGGER.exception("Offline upgrade failed current_version=%s", self._current_version)
+            raise
+        LOGGER.info("Offline upgrade succeeded version=%s", result['version'])
+        return result
+
+    def _apply(self, upload: BinaryIO, content_length: int, original_name: str) -> dict:
         if not self.frozen:
             raise UpgradeError("当前为开发源码运行，拒绝覆盖升级。请使用 dist/ry-aletheia 运行控制台。")
         if not self.executable.is_file() or not self.executable.is_relative_to(self.workspace):
@@ -88,6 +105,8 @@ class UpgradeManager:
                     output.write(chunk)
                     remaining -= len(chunk)
             manifest, binary = self._validate_package(archive, temp_root)
+            self._verify_candidate_bootable(binary)
+            LOGGER.info("Offline upgrade validated version=%s bytes=%s", manifest['version'], manifest['binary']['size'])
             backup_dir = self.updates_dir / "backups"
             backup_dir.mkdir(parents=True, exist_ok=True)
             backup = backup_dir / "ry-aletheia.bak"
@@ -113,11 +132,43 @@ class UpgradeManager:
                 self._installed = installed
                 self._current_version = manifest["version"]
             except OSError as exc:
+                LOGGER.exception("Offline upgrade replacement failed version=%s", manifest['version'])
                 backup_staging.unlink(missing_ok=True)
                 if backup.is_file() and not self.executable.is_file():
                     shutil.copy2(backup, self.executable)
                 raise UpgradeError(f"替换程序失败：{exc}") from exc
         return {"message": f"升级包校验通过，已备份旧程序到 {backup.relative_to(self.workspace)}，正在重启到 {manifest['version']}。", "version": manifest["version"]}
+
+    def _verify_candidate_bootable(self, candidate: Path) -> None:
+        """Verify the unpacked onefile bootloader before touching the live binary.
+
+        A valid signed archive can still contain a corrupted PyInstaller
+        payload.  The deliberately inert self-check catches that class of
+        error without starting ROS work or depending on runtime initialization.
+        """
+        candidate.chmod(candidate.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        environment = os.environ.copy()
+        environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        try:
+            result = subprocess.run(
+                [str(candidate), "--self-check"],
+                cwd=self.workspace,
+                env=environment,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=12,
+            )
+        except subprocess.TimeoutExpired as exc:
+            LOGGER.warning("Offline upgrade boot check timed out timeout_seconds=12")
+            raise UpgradeError("升级包启动检查超时，未替换当前程序。请稍后重试。") from exc
+        except (OSError, subprocess.SubprocessError) as exc:
+            LOGGER.warning("Offline upgrade boot check failed reason=%s", type(exc).__name__)
+            raise UpgradeError("升级包无法完成启动检查，未替换当前程序。") from exc
+        if result.returncode != 0:
+            LOGGER.warning("Offline upgrade boot check failed exit_code=%s", result.returncode)
+            raise UpgradeError("升级包内程序无法启动，未替换当前程序。")
 
     def _validate_package(self, archive: Path, temp_root: Path) -> tuple[dict, Path]:
         if not zipfile.is_zipfile(archive):

@@ -14,6 +14,11 @@ function mapOrigin(map) {
   return [Number(map?.origin_x) || 0, Number(map?.origin_y) || 0];
 }
 
+export function trajectoryEvidenceHeight(pathCount, hasRelocalizationEvidence = false) {
+  const paths = Math.max(0, Math.floor(Number(pathCount) || 0));
+  return 76 + (paths + (hasRelocalizationEvidence ? 1 : 0)) * 17;
+}
+
 export function mapPointToImage(point, map, evidenceHeight) {
   const resolution = Number(map?.resolution);
   const width = Number(map?.width);

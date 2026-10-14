@@ -3,6 +3,8 @@ export function drawDeploymentCanvas({
   canvasBox,
   activeMap,
   mapImage,
+  mapAppearance = "raw",
+  drawMapBase,
   liveMapImage,
   mappingPreview,
   project,
@@ -38,15 +40,19 @@ export function drawDeploymentCanvas({
   const pixels = view.scale * activeMap.resolution_m;
   context.save();
   context.imageSmoothingEnabled = false;
-  context.drawImage(mapImage, view.x, view.y, activeMap.width * pixels, activeMap.height * pixels);
-  context.strokeStyle = "#38d59a";
-  context.lineWidth = 1.5;
+  if (!drawMapBase?.({context,image:mapImage,activeMap,view,canvasBox,mapAppearance})) {
+    context.drawImage(mapImage, view.x, view.y, activeMap.width * pixels, activeMap.height * pixels);
+  }
+  context.strokeStyle = mapAppearance === "styled" ? "#c5ced8" : "#38d59a";
+  context.lineWidth = mapAppearance === "styled" ? 1 : 1.5;
   context.strokeRect(view.x, view.y, activeMap.width * pixels, activeMap.height * pixels);
   context.save();
   context.beginPath();
   context.rect(view.x, view.y, activeMap.width * pixels, activeMap.height * pixels);
   context.clip();
   drawMapEdits();
+  // Saved walls always win over erase overlays. The caller uses grey styled
+  // strokes for the viewing map and red editing strokes for the raw map.
   drawVirtualWalls?.();
   context.restore();
   // The world coordinate (0, 0) can sit just outside the raster bounds when

@@ -140,15 +140,10 @@ class MapAssetCache:
         tolerance = max(1e-6, resolution * 1e-3)
         return abs(float(origin[0]) - float(candidate_origin[0])) <= tolerance and abs(float(origin[1]) - float(candidate_origin[1])) <= tolerance
 
-    def cache_occupancy_grid(
-        self, *, resolution: float, width: int, height: int, origin: list[float], frame_id: str,
-        data: list[int] | tuple[int, ...], label: str | None = None, wall_source: CachedMapAsset | None = None,
-    ) -> CachedMapAsset:
-        """把 ROS2 ``nav_msgs/OccupancyGrid`` 缓存为可离线渲染的 PGM/YAML。
-
-        OccupancyGrid 的数据原点在左下，而 PGM 首行对应图像上方；写入时逐行翻转，
-        保证世界坐标、轨迹和底图严格一致。此方法不依赖 ROS2，方便独立验证。
-        """
+    @staticmethod
+    def occupancy_grid_identity(*, resolution: float, width: int, height: int,
+                                origin: list[float], frame_id: str, data):
+        """Return the existing runtime asset ID and pixels without writing a cache."""
         if not (resolution > 0 and width > 0 and height > 0):
             raise MapAssetError("ROS2 /map 元数据无效")
         if len(data) != width * height:
@@ -171,6 +166,19 @@ class MapAssetCache:
                     pixels[target_offset + column] = round(254 * (100 - value) / 100)
         metadata = f"{resolution:.12g}|{width}|{height}|{float(origin[0]):.12g}|{float(origin[1]):.12g}|{frame_id}".encode("utf-8")
         asset_id = hashlib.sha256(metadata + pixels).hexdigest()[:16]
+        return asset_id, pixels
+
+    def cache_occupancy_grid(
+        self, *, resolution: float, width: int, height: int, origin: list[float], frame_id: str,
+        data: list[int] | tuple[int, ...], label: str | None = None, wall_source: CachedMapAsset | None = None,
+    ) -> CachedMapAsset:
+        """把 ROS2 ``nav_msgs/OccupancyGrid`` 缓存为可离线渲染的 PGM/YAML。
+
+        OccupancyGrid 的数据原点在左下，而 PGM 首行对应图像上方；写入时逐行翻转，
+        保证世界坐标、轨迹和底图严格一致。此方法不依赖 ROS2，方便独立验证。
+        """
+        asset_id, pixels = self.occupancy_grid_identity(resolution=resolution, width=width,
+            height=height, origin=origin, frame_id=frame_id, data=data)
         target_dir = self.cache_dir / asset_id
         target_dir.mkdir(parents=True, exist_ok=True)
         image_target = target_dir / "map.pgm"

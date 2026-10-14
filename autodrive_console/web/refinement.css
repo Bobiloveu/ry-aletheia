@@ -1470,6 +1470,43 @@ main:has(#caseSelect) .chart .bar {
   flex: 1 0 15px;
 }
 
+/* 预检是短暂过程：仅在进行中显示一组轻量、可暂停的状态点。 */
+main:has(#caseSelect) .run-status-readout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+}
+main:has(#caseSelect) .run-status-motion {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  width: 48px;
+  height: 12px;
+  flex: 0 0 auto;
+  opacity: .9;
+}
+main:has(#caseSelect) .run-status-motion-dot {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: run-status-orbit .9s ease-in-out infinite;
+}
+main:has(#caseSelect) .run-status-motion-dot:nth-child(2) { animation-delay: .12s; }
+main:has(#caseSelect) .run-status-motion-dot:nth-child(3) { animation-delay: .24s; }
+main:has(#caseSelect) .run-status-motion[hidden] { display: none; }
+@keyframes run-status-orbit {
+  0%, 60%, 100% { transform: translateY(0); opacity: .42; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  main:has(#caseSelect) .run-status-motion-dot { animation: none; opacity: .72; }
+}
+
 /* Command desk: execution planning and the live run share the primary canvas;
    readouts, readiness and evidence become clearly separated operational lanes. */
 @media (min-width: 1100px) {

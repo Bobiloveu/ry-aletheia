@@ -1,8 +1,10 @@
+import { taskLineSelectionReady } from "./task-lines.js";
+
 const STEP_LABELS = {
   project: "创建项目",
   maps: "准备地图",
   annotations: "标记地图",
-  localization: "配置定位路线",
+  localization: "配置任务线路",
   export: "校验并导出",
 };
 
@@ -30,6 +32,7 @@ const ACTIONS = {
   configureMapInstance: { label: "设置部署拓扑位置", target: "instanceControls" },
   annotate: { label: "标记当前地图", target: "mapWorkspace" },
   bindLocalization: { label: "确认地图定位配置", target: "openLocalizationBinding" },
+  configureTaskLine: { label: "保存并选择任务线路", target: "taskLineName" },
   editRoute: { label: "查看系统派生路线", target: "openLocalizationRoute" },
   saveCompilerIdentity: { label: "保存小区信息", target: "taskCompilerCommunity" },
   preview: { label: "生成实验预览", target: "generateTaskCompilerPreview" },
@@ -228,8 +231,8 @@ function topologyReason(topology) {
 
 function missingAnnotationMap(project) {
   const maps = list(project?.map_assets);
-  const waypoints = list(project?.waypoints);
-  return maps.find((map) => !waypoints.some((item) => item.map_asset_id === map.id));
+  const marks = [...list(project?.waypoints), ...list(project?.components)];
+  return maps.find((map) => !marks.some((item) => item.map_asset_id === map.id));
 }
 
 function routeReady(project) {
@@ -250,7 +253,7 @@ function routeReady(project) {
 
 function annotationReady(project) {
   const maps = list(project?.map_assets);
-  const waypoints = list(project?.waypoints);
+  const waypoints = [...list(project?.waypoints), ...list(project?.components)];
   return Boolean(
     maps.length &&
       maps.every((map) => waypoints.some((item) => item.map_asset_id === map.id)),
@@ -326,14 +329,14 @@ export function deriveDeploymentTask({
         stageId: viewedStage,
         title: annotationsFinished ? "确认地图标记已完成" : `继续修改${reviewed.label}`,
         detail: annotationsFinished
-          ? "全部地图均已有标记。你仍可继续补充或调整当前地图；确认后才会进入定位路线。"
+          ? "全部地图均已有标记。你仍可继续补充或调整当前地图；确认后才会进入任务线路。"
           : "编辑仅在现有保存按钮提交后生效；未保存离开不会改变项目事实。",
         completionCriterion: annotationsFinished
           ? "确认当前地图标记已完成"
           : "保存必要修改，并返回当前任务重新确认后续阶段",
         primaryAction: {
           id: "return-current",
-          label: annotationsFinished ? "确认标记完成，进入定位路线" : "结束修改并返回",
+          label: annotationsFinished ? "确认标记完成，进入任务线路" : "结束修改并返回",
           target: "deploymentTaskTitle",
         },
         nextTaskLabel: workflow.next.label,
@@ -535,6 +538,44 @@ export function deriveDeploymentTask({
       targetStageId: nextStage?.stage || null,
     });
   }
+  if (draft.mapSource === "pcd") {
+    const projection = draft.projection;
+    const state = projection?.state;
+    const active = ["analyzing", "processing"].includes(state);
+    const ready = state === "ready" && !draft.projectionStale && !draft.projectionNeedsRestore;
+    const hasAnalysis = Boolean(projection?.analysis);
+    const problem = ["failed", "cancelled", "interrupted"].includes(state);
+    const primaryAction = draft.projectionNeedsRestore
+      ? { id: "restore-pcd", label: "重新读取转换状态", target: "pcdRestore" }
+      : active
+      ? { id: "wait-pcd", label: state === "analyzing" ? "正在分析点云…" : "正在生成预览…", target: "pcdStatus", disabled: true }
+      : draft.projectionHasFile
+        ? { id: "upload-pcd", label: "上传并分析点云", target: "pcdUpload" }
+      : ready
+        ? { id: "confirm-pcd", label: "确认导入并继续", target: "pcdConfirm" }
+        : hasAnalysis && !problem
+          ? { id: "preview-pcd", label: "生成二维预览", target: "pcdPreview" }
+          : hasAnalysis && ["failed", "interrupted"].includes(state)
+            ? { id: "preview-pcd", label: "调整参数并重新预览", target: "pcdParameters" }
+            : { id: draft.projectionHasFile ? "upload-pcd" : "select-pcd", label: draft.projectionHasFile ? "上传并分析点云" : "选择 PCD 文件", target: "pcdFile" };
+    return deploymentTask({
+      id: ready ? DEPLOYMENT_TASK_IDS.MAP_DESCRIBE : DEPLOYMENT_TASK_IDS.MAP_IMPORT,
+      stageId,
+      title: ready ? "检查预览并命名地图" : active ? (state === "analyzing" ? "正在分析点云高度" : "正在生成二维预览") : hasAnalysis && state !== "cancelled" ? "调整高度并生成预览" : "上传 PCD 点云",
+      detail: ready ? "检查门洞、通道与障碍轮廓，填写现场可识别名称后确认导入。黑色为障碍，白色合并显示其他区域；保存地图仍保留未知区域；预览不会自动判断可通行性。" : problem ? (projection.message || "本次转换未完成。可调整参数重试，或重新上传点云；原部署步骤仍保留。") : active ? "处理在项目后台进行，切页或刷新后可以继续查看进度。" : hasAnalysis ? "候选高度仅是人工选择的起点。可选择候选地面层，或直接填写绝对 Z 上下限；修改参数后需重新预览。" : "只需选择一个 PCD 文件。分析完成后选择高度范围，再预览并确认生成地图。",
+      completionCriterion: ready ? "预览与当前参数一致，且已人工检查地图" : "点云分析完成，并生成当前参数的二维地图预览",
+      primaryAction: { ...primaryAction, disabled: Boolean(primaryAction.disabled || draft.projectionPending) },
+      nextTaskLabel: ready ? "绑定地图阶段与部署拓扑位置" : "检查预览并确认导入",
+      progressItems: [
+        { id: "source", label: "选择地图来源", status: "complete" },
+        { id: "upload", label: "上传并分析点云", status: hasAnalysis ? "complete" : "current" },
+        { id: "parameters", label: "设置高度与生成预览", status: ready ? "complete" : hasAnalysis ? "current" : "pending" },
+        { id: "confirm", label: "检查并确认导入", status: ready ? "current" : "pending" },
+        { id: "assign", label: "继续地图阶段配置", status: "pending" },
+      ],
+      targetStageId: nextStage?.stage || null,
+    });
+  }
   if (!draft.fileSummary?.valid) {
     return deploymentTask({
       id: DEPLOYMENT_TASK_IDS.MAP_IMPORT,
@@ -611,7 +652,9 @@ export function deriveDeploymentWorkflow(project, topology, preview) {
   // Transition row is not part of the operator workflow; the route editor
   // only records ordered bindings and the elevator/component anchor needed
   // to derive init_return.
-  const localization = annotations && routeReady(project);
+  const fixedMode = Array.isArray(project?.task_lines);
+  const taskLineReady = taskLineSelectionReady(project);
+  const localization = annotations && taskLineReady && (fixedMode ? true : routeReady(project));
   const exportReady = localization && preview?.status === "ready";
   const steps = [
     step(
@@ -644,9 +687,9 @@ export function deriveDeploymentWorkflow(project, topology, preview) {
       "localization",
       !annotations ? "locked" : localization ? "complete" : "current",
       localization
-        ? "地图角色和定位路线已保存；切图由行为树自动执行"
-        : "定位绑定或路线尚未完成",
-      "先为地图配置运行角色，再按实际经过顺序保存定位路线。切图点无需手动绘制。",
+        ? fixedMode ? "本次任务线路已保存；返程与切图由系统派生" : "沿用已保存的系统路线"
+        : fixedMode ? "请选择一条有效的已保存线路" : "任务线路或兼容定位路线尚未完成",
+      "编排去程访问顺序并保存为本次线路；定位信息自动沿用地图配置。",
     ),
     step(
       "export",
@@ -690,7 +733,9 @@ export function deriveDeploymentWorkflow(project, topology, preview) {
   } else if (!localization) {
     current = steps[3];
     const bindingCount = list(project.localization_bindings).length;
-    next = action(bindingCount ? "editRoute" : "bindLocalization", bindingCount ? "地图角色已存在；下一步确认机器人去程经过地图的顺序和切图依据。" : "先为每张地图确定大厅、用户楼层、摆渡层或户外等运行角色。");
+    next = fixedMode || list(project.map_instances).length
+      ? action("configureTaskLine", "指定起点并添加去程访问位置；保存后选择为本次校验与导出线路。")
+      : action(bindingCount ? "editRoute" : "bindLocalization", "历史项目可沿用系统派生路线，或在下方创建固定任务线路。");
   } else if (!project.task_compiler?.identity?.community) {
     current = steps[4];
     next = action("saveCompilerIdentity", "导出文件需要一个明确的小区名称。");
@@ -714,7 +759,7 @@ export function deriveDeploymentWorkflow(project, topology, preview) {
       { label: "项目与场景模型", done: project && sceneReady },
       { label: "地图阶段已绑定", done: mapsReady },
       { label: "地图标记已补齐", done: annotations },
-      { label: "定位路线已保存", done: localization },
+      { label: "本次任务线路已保存", done: localization },
       { label: "实验预览已校验", done: exportReady },
     ],
   };

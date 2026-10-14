@@ -6,6 +6,8 @@ from collections.abc import Iterable
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from .tool_audit import CONTEXT_FIELDS, REQUEST_CONTEXT, safe_message
+
 
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -13,10 +15,17 @@ class _JsonFormatter(logging.Formatter):
             "time": self.formatTime(record, "%Y-%m-%d %H:%M:%S"),
             "level": record.levelname,
             "source": record.name.removeprefix("ry_aletheia."),
-            "message": record.getMessage(),
+            "message": safe_message(record.getMessage(), limit=4000),
         }
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = safe_message(self.formatException(record.exc_info), limit=16000)
+        context = REQUEST_CONTEXT.get()
+        for key in CONTEXT_FIELDS:
+            value = getattr(record, key, context.get(key))
+            if isinstance(value, str):
+                payload[key] = safe_message(value, limit=480)
+            elif not isinstance(value, bool) and isinstance(value, (int, float)):
+                payload[key] = value
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -67,7 +76,7 @@ class ToolLogStore:
         logger.addHandler(errors)
         return logger
 
-    def entries(self, errors_only: bool = False, limit: int = 200) -> list[dict[str, str]]:
+    def entries(self, errors_only: bool = False, limit: int = 200) -> list[dict]:
         limit = min(max(int(limit), 1), 500)
         target = self.directory / (self.ERROR_NAME if errors_only else self.NORMAL_NAME)
         if not target.is_file():
@@ -81,7 +90,7 @@ class ToolLogStore:
         lines = body.splitlines()
         if start and lines:
             lines = lines[1:]
-        items: list[dict[str, str]] = []
+        items: list[dict] = []
         for line in reversed(lines):
             try:
                 item = json.loads(line)
@@ -92,6 +101,10 @@ class ToolLogStore:
                 # 完整堆栈只在用户主动展开时展示；列表默认仍保持紧凑。
                 if isinstance(item.get("exception"), str) and item["exception"]:
                     entry["exception"] = item["exception"]
+                for key in CONTEXT_FIELDS:
+                    value = item.get(key)
+                    if isinstance(value, str) or not isinstance(value, bool) and isinstance(value, (int, float)):
+                        entry[key] = value
                 items.append(entry)
             if len(items) >= limit:
                 break

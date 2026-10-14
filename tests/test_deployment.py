@@ -106,6 +106,25 @@ def test_transition_waypoint_defaults_to_single_point_and_rejects_reserved_speed
         })
 
 
+def test_manual_transition_can_be_renamed_without_changing_identity_or_pose(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = tmp_path / "maps"
+    source = _map(root / "lobby")
+    monkeypatch.setattr(DeploymentStore, "MAP_ROOT", root.resolve())
+    store = DeploymentStore(tmp_path / "deployments")
+    project = store.create("过渡点命名")
+    asset = store.import_map(project["id"], source, "大厅", "lobby")
+    point = store.add_waypoint(project["id"], {
+        "map_id": asset["id"], "kind": "transition", "label": "过渡点", "x": -0.95, "y": -1.95,
+    })
+    updated = store.update_waypoint(project["id"], point["id"], {"label": "  2号门   出口  "})
+    assert updated == {**point, "label": "2号门 出口"}
+    assert store.get(project["id"])["waypoints"][0] == updated
+    for label in ("", " \n ", None, 12, "门" * 81):
+        with pytest.raises(DeploymentError, match="名称"):
+            store.update_waypoint(project["id"], point["id"], {"label": label, "yaw": 0.5})
+        assert store.get(project["id"])["waypoints"][0] == updated
+
+
 def test_target_arrival_action_defaults_migrates_legacy_values_and_rejects_unknown_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1670,15 +1689,27 @@ def test_deployment_flow_migrates_legacy_scene_and_accepts_ferry_before_outdoor(
     ]
 
 
-def test_deployment_flow_requires_lobby_and_terminal_target_floor(
+@pytest.mark.parametrize("source_type", ("ferry", "outdoor"))
+def test_deployment_flow_allows_source_map_with_integrated_lobby(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_type: str,
+):
+    store, project, _ = _project_with_distinct_maps(tmp_path, monkeypatch, 0)
+    flow = [{"id": source_type, "type": source_type},
+            {"id": "target_floor", "type": "target_floor"}]
+    saved = store.set_deployment_flow(project["id"], flow)
+    assert [item["type"] for item in saved["deployment_flow"]] == [source_type, "target_floor"]
+    assert store.get(project["id"])["deployment_flow"] == saved["deployment_flow"]
+    assert [item["stage"] for item in store.stage_plan(project["id"])["stages"]] == [source_type, "target_floor"]
+
+
+def test_deployment_flow_requires_terminal_target_floor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     store, project, _ = _project_with_distinct_maps(tmp_path, monkeypatch, 0)
 
-    with pytest.raises(DeploymentError, match="电梯大厅"):
+    with pytest.raises(DeploymentError, match="用户楼层"):
         store.set_deployment_flow(project["id"], [
             {"id": "outdoor", "type": "outdoor"},
-            {"id": "target_floor", "type": "target_floor"},
         ])
     with pytest.raises(DeploymentError, match="末节点"):
         store.set_deployment_flow(project["id"], [
@@ -2284,7 +2315,8 @@ def test_deployment_contract_documents_automatic_route_derivation_and_lift_list(
     assert "地图成员与顺序来自创建项目时的 `deployment_flow`" in contract
     assert "| 仅非首项 | `init_go` | 后续地图统一使用采图电梯中心坐标系原点" in contract
     assert "| 非最终项 | `init_return` | 该图出向链接的受控锚点 |" in contract
-    assert "| 最终项 | `init_return` | 该图返程子任务的首个实际节点；无非固定节点时使用目标层电梯门前呼梯点 |" in contract
+    assert "| 最终项 | `init_return` | 单线路为该图返程子任务的首个实际节点；多户共享末图时按上文稳定代表线路规则 |" in contract
+    assert "各户真实首返程节点完整保留在自己的 floor_r 文件与逐线路 trace 中" in contract
     assert "任务 JSON 和 `runtime/loc_yaml_path.json` 必须消费同一条地图段执行链" in contract
     assert "定位 YAML 的 `system.init_pose.x`、`system.init_pose.y`、" in contract
     assert "必须与该路线条目的 `init_go` 完全一致" in contract
@@ -2338,7 +2370,7 @@ def test_deployment_empty_states_use_compact_layout_and_svg_brand_mark():
     assert 'img[src="/aletheia.svg"]' in shell_js
 
     deployment_js = (root / "deployment.js").read_text(encoding="utf-8")
-    assert "mapImage.onerror" in deployment_js
+    assert "image.onerror = () =>" in deployment_js
     assert "地图预览加载失败" in deployment_js
 
 
@@ -2370,10 +2402,15 @@ def _task_compiler_source_map(root: Path, floor: str) -> Path:
 def _compiler_ready_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, task_mode: str = "single",
 ):
+    """A historical project without the fixed-line schema marker."""
     map_root = tmp_path / "robot-maps"
     monkeypatch.setattr(DeploymentStore, "MAP_ROOT", map_root.resolve())
     store = DeploymentStore(tmp_path / "deployments")
     project = store.create("任务编译器", task_mode)
+    document = store.get(project["id"])
+    document.pop("task_lines")
+    document.pop("active_task_line_id")
+    store._write_json(store._document_path(project["id"]), document)
     store.set_scene_model(project["id"], "indoor")
     lobby = store.import_map(project["id"], _task_compiler_source_map(map_root, "P1"), "大厅", "lobby")
     target = store.import_map(project["id"], _task_compiler_source_map(map_root, "P2"), "目标层", "typical_floor")
@@ -2523,10 +2560,17 @@ def test_multi_mode_store_preview_and_zip_publish_only_project_owned_task_tree(
 def test_multi_mode_preview_uses_the_multi_compiler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = DeploymentStore(tmp_path / "deployments")
     project = store.create("多点项目", "multi")
+    # Preserve coverage of the legacy compiler, rather than creating a new
+    # fixed-line project with no selected line.
+    document = store.get(project["id"])
+    document.pop("task_lines")
+    document.pop("active_task_line_id")
+    store._write_json(store._document_path(project["id"]), document)
+    fragment = json.dumps({"change_loc":False,"map_url":"/controlled/map.yaml","pcd_url":"", "subtask_name":"indoor","waypoints":[]}).encode()
     preview = CompilationPreview(
         "a" * 64,
         {"mode": "multi"},
-        (),
+        (Artifact("multi_tasks/高科一号/indoor/1_1.json", fragment, sha256(fragment).hexdigest()),),
         {"task_mode": "multi", "route_families": [{"building": "1", "unit": "1", "targets": [{"physical_floor": 15, "door": "01"}]}]},
         {},
     )

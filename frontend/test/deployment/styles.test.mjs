@@ -24,3 +24,17 @@ test("deployment CSS keeps hidden panels and desktop media rules structurally va
         && declaration.value.includes("minmax(264px, 300px)"))
   ))), "the main three-column editor must remain inside its own media block");
 });
+
+test("PCD controls use the shared theme ink and keep candidate selections distinct in light mode", () => {
+  const file = new URL("../../../autodrive_console/web/deployment/pcd-import.css", import.meta.url);
+  const source = readFileSync(file, "utf8");
+  assert.doesNotMatch(source, /var\(--text\b/, "the shared theme defines --ink; a dark-only fallback makes light inputs unreadable");
+  const root = postcss.parse(source, { from: file.pathname });
+  const lightSelections = [];
+  root.walkRules((rule) => {
+    if (rule.selector.includes('body.theme-light') && rule.selector.includes('[aria-pressed="true"]')) {
+      rule.walkDecls("background", (declaration) => lightSelections.push(declaration));
+    }
+  });
+  assert.ok(lightSelections.some((declaration) => declaration.important && declaration.value.includes("--accent-soft")), "the selected candidate must override global light compact-button backgrounds");
+});

@@ -30,6 +30,26 @@ test("map bounds include the edge and reject a point beyond the physical extent"
   assert.equal(isPointOnMap({ x: 15.001, y: 24 }, map), false);
 });
 
+test("vertex picking uses a fixed screen radius after zoom and pan", async () => {
+  const {nearestCanvasVertex}=await import("../../../autodrive_console/web/deployment/canvas-geometry.js");
+  const points=[{x:11,y:21},{x:13,y:22}];
+  for(const scale of [5,40,500]) {
+    const shifted={x:123,y:-87,scale};
+    const center=mapPointToCanvas(points[0],map,shifted);
+    assert.equal(nearestCanvasVertex(points,map,shifted,{x:center.x,y:center.y+9}),0);
+    assert.equal(nearestCanvasVertex(points,map,shifted,{x:center.x,y:center.y-11}),-1);
+  }
+});
+
+test("overlapping vertex handles pick the nearest point and empty space adds no hit", async () => {
+  const {nearestCanvasVertex}=await import("../../../autodrive_console/web/deployment/canvas-geometry.js");
+  const points=[{x:11,y:21},{x:11.15,y:21}];
+  const pointer=mapPointToCanvas(points[1],map,view);
+  assert.equal(nearestCanvasVertex(points,map,view,pointer),1);
+  assert.equal(nearestCanvasVertex([],map,view,pointer),-1);
+  assert.equal(nearestCanvasVertex(points,map,view,{x:900,y:900}),-1);
+});
+
 test("rotated components use their local axes for hit and handle detection", () => {
   const component = {
     x: 11,

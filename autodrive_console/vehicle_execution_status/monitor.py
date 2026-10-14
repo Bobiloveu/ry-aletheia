@@ -58,6 +58,7 @@ class VehicleExecutionStatusMonitor:
         # only after this monitor has observed the same task session.
         self._active_task_uuid = ""
         self._last_task_complete_code = ""
+        self._diagnostic_failures: set[str] = set()
         self._task_complete_code()
 
     def start(self) -> None:
@@ -154,8 +155,10 @@ class VehicleExecutionStatusMonitor:
         try:
             restarting_nodes = bool(self._restarting_nodes())
         except Exception:
-            LOGGER.exception("读取运行依赖重启状态失败")
+            self._diagnostic_failure("dependency_restart", "读取运行依赖重启状态失败")
             restarting_nodes = False
+        else:
+            self._diagnostic_recovered("dependency_restart")
         if restarting_nodes:
             return snapshot_for("restarting_nodes").to_public_dict()
 
@@ -213,7 +216,9 @@ class VehicleExecutionStatusMonitor:
         try:
             self._last_task_complete_code = task_status_code("task_complete")
         except TaskStatusCodeError:
-            LOGGER.exception("任务状态码配置无效，继续使用上次完成码")
+            self._diagnostic_failure("task_status_registry", "任务状态码配置无效，继续使用上次完成码")
+        else:
+            self._diagnostic_recovered("task_status_registry")
         return self._last_task_complete_code
 
     def _control_override_snapshot(self) -> ExecutionSnapshot | None:
@@ -221,8 +226,9 @@ class VehicleExecutionStatusMonitor:
         try:
             control_status = self._vehicle_control_status()
         except Exception:
-            LOGGER.exception("读取车辆控制安全状态失败")
+            self._diagnostic_failure("vehicle_control", "读取车辆控制安全状态失败")
             return None
+        self._diagnostic_recovered("vehicle_control")
         if not isinstance(control_status, Mapping):
             return None
 
@@ -238,6 +244,20 @@ class VehicleExecutionStatusMonitor:
         ):
             return snapshot_for("manual_control")
         return None
+
+    def _diagnostic_failure(self, operation: str, message: str) -> None:
+        with self._lock:
+            if operation in self._diagnostic_failures:
+                return
+            self._diagnostic_failures.add(operation)
+        LOGGER.error("%s", message, exc_info=True)
+
+    def _diagnostic_recovered(self, operation: str) -> None:
+        with self._lock:
+            if operation not in self._diagnostic_failures:
+                return
+            self._diagnostic_failures.remove(operation)
+        LOGGER.info("车辆执行状态诊断已恢复：operation=%s", operation)
 
     def _ensure_started(self) -> None:
         with self._lock:

@@ -23,7 +23,7 @@ function pointer(value) {
     mapId: validId(value.mapId) ? value.mapId : null,
     viewedDeploymentStage: validId(viewedDeploymentStage) ? viewedDeploymentStage : null,
     deploymentTaskDraft: {
-      mapSource: ["import", "mapping"].includes(storedDraft.mapSource)
+      mapSource: ["import", "mapping", "pcd"].includes(storedDraft.mapSource)
         ? storedDraft.mapSource
         : null,
       mapLabel: typeof storedDraft.mapLabel === "string"

@@ -13,10 +13,12 @@ from autodrive_console.robot_logs import (
     RobotLogDownloadTracker,
     RobotLogError,
     RobotLogStore,
+    RobotLogTailTracker,
     convert_ros_time_to_beijing,
     iter_ros_time_converted_bytes,
 )
 from autodrive_console.settings import SettingsStore
+from autodrive_console.supervisor import SupervisorProcess
 
 
 def test_old_console_settings_get_default_robot_log_sources(tmp_path: Path) -> None:
@@ -201,6 +203,17 @@ def test_robot_log_download_progress_expires_after_its_short_lifetime() -> None:
         tracker.status(created["id"])
 
 
+def test_robot_log_tail_tracker_allows_each_operator_selected_follower() -> None:
+    """实时页可持续向下添加日志卡；Tracker 仅负责释放对应的受控 Tail 资源。"""
+
+    tracker = RobotLogTailTracker()
+    reservations = {tracker.reserve() for _ in range(20)}
+
+    assert len(reservations) == 20
+    for reservation in reservations:
+        tracker.release(reservation)
+
+
 def test_robot_log_sources_report_readable_and_missing_directories_independently(tmp_path: Path) -> None:
     """一个目录缺失时不能让其它可读日志源也无法使用。"""
 
@@ -249,6 +262,134 @@ def test_console_streams_one_selected_robot_log_as_an_attachment(tmp_path: Path)
     assert response["headers"]["Content-Length"] == "11"
     assert response["headers"]["Content-Disposition"] == "attachment; filename=102-chassis_node.out.log"
     assert handler.wfile.getvalue() == b"driver log\n"
+
+
+def test_console_follows_only_the_selected_supervisor_stdout_log(tmp_path: Path) -> None:
+    """实时页只能 Tail 当前清单中的日志，且进程名必须由后端从文件名与 status 推导。"""
+
+    logs = tmp_path / "robot-logs"
+    logs.mkdir()
+    (logs / "102-chassis_node.out.log").write_text("stored snapshot\n", encoding="utf-8")
+    settings = SettingsStore(tmp_path / "console.json")
+    settings.save({"robot_logs": {"sources": [{"id": "custom", "name": "自定义", "path": str(logs)}]}})
+    store = RobotLogStore(settings)
+    file_id = store.list_files("custom")[0]["id"]
+
+    class TailProcess:
+        stdout = io.BytesIO(b"[INFO] chassis ready\n")
+
+        def poll(self):
+            return 0
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    supervisor = Mock()
+    supervisor.discover.return_value = [SupervisorProcess("DRIVERS:102-chassis_node", "RUNNING", "pid 1")]
+    supervisor.tail_stdout.return_value = TailProcess()
+    handler = object.__new__(web_console.ConsoleHandler)
+    response = {"status": None, "headers": {}}
+    handler.wfile = io.BytesIO()
+    handler.send_response = lambda status: response.update(status=status)
+    handler.send_header = lambda key, value: response["headers"].update({key: value})
+    handler.end_headers = lambda: None
+    handler.send_error = Mock()
+
+    with patch.object(web_console, "ROBOT_LOGS", store, create=True), patch.object(web_console, "SETTINGS", settings, create=True), patch.object(web_console, "SupervisorClient", return_value=supervisor):
+        handler._tail_robot_log_stdout("custom", file_id)
+
+    assert response["status"] == HTTPStatus.OK
+    assert response["headers"]["Content-Type"] == "text/plain; charset=utf-8"
+    assert response["headers"]["Cache-Control"] == "no-store"
+    assert handler.wfile.getvalue() == b"[INFO] chassis ready\n"
+    supervisor.tail_stdout.assert_called_once_with("DRIVERS:102-chassis_node")
+    handler.send_error.assert_not_called()
+
+
+def test_console_rejects_a_supervisor_tail_when_log_filename_has_no_matching_process(tmp_path: Path) -> None:
+    """文件名不能成为任意 Supervisor 进程名；无 status 匹配时不允许开启实时流。"""
+
+    logs = tmp_path / "robot-logs"
+    logs.mkdir()
+    (logs / "102-chassis_node.out.log").write_text("stored snapshot\n", encoding="utf-8")
+    settings = SettingsStore(tmp_path / "console.json")
+    settings.save({"robot_logs": {"sources": [{"id": "custom", "name": "自定义", "path": str(logs)}]}})
+    store = RobotLogStore(settings)
+    file_id = store.list_files("custom")[0]["id"]
+    supervisor = Mock()
+    supervisor.discover.return_value = [SupervisorProcess("DRIVERS:103-battery_node", "RUNNING", "pid 1")]
+    handler = object.__new__(web_console.ConsoleHandler)
+    handler.send_error = Mock()
+
+    with patch.object(web_console, "ROBOT_LOGS", store, create=True), patch.object(web_console, "SETTINGS", settings, create=True), patch.object(web_console, "SupervisorClient", return_value=supervisor):
+        handler._tail_robot_log_stdout("custom", file_id)
+
+    handler.send_error.assert_called_once_with(HTTPStatus.NOT_FOUND, "未找到对应的 Supervisor 进程")
+    supervisor.tail_stdout.assert_not_called()
+
+
+def test_console_multiplex_tail_tags_each_selected_supervisor_stdout(tmp_path: Path) -> None:
+    """多路实时响应必须在一条 NDJSON 连接内保留每段 stdout 的所属文件。"""
+
+    logs = tmp_path / "robot-logs"
+    logs.mkdir()
+    (logs / "102-chassis_node.out.log").write_text("stored\n", encoding="utf-8")
+    (logs / "103-battery_node.out.log").write_text("stored\n", encoding="utf-8")
+    settings = SettingsStore(tmp_path / "console.json")
+    settings.save({"robot_logs": {"sources": [{"id": "custom", "name": "自定义", "path": str(logs)}]}})
+    store = RobotLogStore(settings)
+    files = {record["name"]: record["id"] for record in store.list_files("custom")}
+
+    class TailProcess:
+        def __init__(self, body: bytes) -> None:
+            self.stdout = io.BytesIO(body)
+
+        def poll(self):
+            return 0
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    supervisor = Mock()
+    supervisor.discover.return_value = [
+        SupervisorProcess("DRIVERS:102-chassis_node", "RUNNING", "pid 1"),
+        SupervisorProcess("DRIVERS:103-battery_node", "RUNNING", "pid 2"),
+    ]
+    supervisor.tail_stdout.side_effect = [TailProcess(b"chassis ready\n"), TailProcess(b"battery ready\n")]
+    handler = object.__new__(web_console.ConsoleHandler)
+    response = {"status": None, "headers": {}}
+    handler.wfile = io.BytesIO()
+    handler.send_response = lambda status: response.update(status=status)
+    handler.send_header = lambda key, value: response["headers"].update({key: value})
+    handler.end_headers = lambda: None
+    handler.send_error = Mock()
+
+    with patch.object(web_console, "ROBOT_LOGS", store, create=True), patch.object(web_console, "SETTINGS", settings, create=True), patch.object(web_console, "SupervisorClient", return_value=supervisor):
+        handler._tail_robot_logs_stdout([
+            ("custom", files["102-chassis_node.out.log"]),
+            ("custom", files["103-battery_node.out.log"]),
+        ])
+
+    frames = [json.loads(line) for line in handler.wfile.getvalue().decode("utf-8").splitlines()]
+    assert response["status"] == HTTPStatus.OK
+    assert response["headers"]["Content-Type"] == "application/x-ndjson; charset=utf-8"
+    assert {(frame["stream"], frame["text"]) for frame in frames} == {
+        (f"custom:{files['102-chassis_node.out.log']}", "chassis ready\n"),
+        (f"custom:{files['103-battery_node.out.log']}", "battery ready\n"),
+    }
+    handler.send_error.assert_not_called()
 
 
 def test_console_download_uses_the_size_observed_when_an_active_log_keeps_growing() -> None:
@@ -429,6 +570,24 @@ def test_console_download_route_only_enables_time_conversion_for_explicit_beijin
     )
 
 
+def test_console_multiplex_tail_route_dispatches_only_opaque_source_and_file_ids() -> None:
+    """多窗口实时查看只能占用一个浏览器长连接，且仍只接收受控文件标识。"""
+
+    handler = object.__new__(web_console.ConsoleHandler)
+    handler.headers = {"User-Agent": "test"}
+    handler._tail_robot_logs_stdout = Mock()
+    handler._static_from = Mock()
+    handler.path = "/api/robot-logs/tail?stream=drivers:0123456789abcdef01234567&stream=modules:abcdef0123456789abcdef01"
+
+    handler.do_GET()
+
+    handler._tail_robot_logs_stdout.assert_called_once_with([
+        ("drivers", "0123456789abcdef01234567"),
+        ("modules", "abcdef0123456789abcdef01"),
+    ])
+    handler._static_from.assert_not_called()
+
+
 def test_console_saves_configured_robot_log_directories_through_the_controlled_api(tmp_path: Path) -> None:
     """目录管理若不能持久化，维护人员每次重启都要重新配置日志源。"""
 
@@ -547,6 +706,98 @@ def test_robot_logs_page_is_a_desktop_only_operator_surface() -> None:
     assert 'id="convertRosTime"' in page
     assert 'id="downloadLocationHelp"' in page
     assert 'id="downloadProgress"' in page
+    assert '<th scope="col">操作</th>' in page
+    assert 'id="openLiveLogs"' not in page
+    assert "实时查看选中日志" not in page
+    assert 'id="liveLogWorkspace"' in page
     assert "下载前询问每个文件的保存位置" in page
     assert 'src="/robot_logs.js"' in page
     assert "robot-logs.html" not in web_console.MOBILE_PAGE_NAMES
+
+
+def test_robot_log_file_rows_offer_individual_live_viewing() -> None:
+    """实时 stdout 应按日志行打开，不能要求操作者先以下载用途勾选文件。"""
+
+    script = (web_console.WEB_ROOT / "robot_logs.js").read_text(encoding="utf-8")
+
+    assert 'class="view-live-log${opened' in script
+    assert "openLiveLog(file)" in script
+    assert "view-live-log" in script
+
+
+def test_robot_log_live_view_uses_a_two_state_compact_button() -> None:
+    """行内查看需要明确的默认与悬停反馈，同时不能让已打开日志继续播放操作动效。"""
+
+    script = (web_console.WEB_ROOT / "robot_logs.js").read_text(encoding="utf-8")
+    styles = (web_console.WEB_ROOT / "robot_logs.css").read_text(encoding="utf-8")
+
+    assert 'class="view-live-log-track"' in script
+    assert "实时查看" in script
+    assert "打开日志" in script
+    assert ".view-live-log:hover:not(:disabled) .view-live-log-track" in styles
+    assert ".view-live-log.is-open .view-live-log-track" in styles
+
+
+def test_robot_log_window_controls_keep_semantic_colors_in_light_theme() -> None:
+    """浅色主题的通用按钮规则不能把 Mac 风格的三色窗口控制点覆盖成蓝色。"""
+
+    styles = (web_console.WEB_ROOT / "robot_logs.css").read_text(encoding="utf-8")
+
+    assert "body.theme-light .live-log-window-control--close { background: #ff5f57; }" in styles
+    assert "body.theme-light .live-log-window-control--minimize { background: #febc2e; }" in styles
+    assert "body.theme-light .live-log-window-control--maximize { background: #28c840; }" in styles
+
+
+def test_robot_log_window_hides_transient_follow_status_from_the_title_bar() -> None:
+    """标题栏只保留文件信息和操作，不能显示持续闪烁的 stdout 跟随状态。"""
+
+    script = (web_console.WEB_ROOT / "robot_logs.js").read_text(encoding="utf-8")
+    styles = (web_console.WEB_ROOT / "robot_logs.css").read_text(encoding="utf-8")
+
+    assert "live-log-state" not in script
+    assert "正在跟随 Supervisor stdout" not in script
+    assert ".live-log-state" not in styles
+
+
+def test_robot_log_page_keeps_every_open_stream_following_while_releasing_page_wheel_at_log_bottom() -> None:
+    """多路 stdout 持续刷新；日志不断追加时也不能困住页面滚动。"""
+
+    script = (web_console.WEB_ROOT / "robot_logs.js").read_text(encoding="utf-8")
+    styles = (web_console.WEB_ROOT / "robot_logs.css").read_text(encoding="utf-8")
+
+    assert "MAX_LIVE_LOGS" not in script
+    assert "state.liveLogs.size >=" not in script
+    assert "live.output.addEventListener('wheel'" in script
+    assert "window.scrollBy" in script
+    assert "overscroll-behavior: auto" in styles
+    assert "live.output.addEventListener('scroll'" not in script
+    assert "已暂停跟随" not in script
+
+
+def test_robot_log_live_view_reuses_a_bounded_node_pool_and_backpressures_without_dropping_stdout() -> None:
+    """持续 stdout 不能反复创建 DOM；渲染变慢时要反压读取而非跳过日志。"""
+
+    script = (web_console.WEB_ROOT / "robot_logs.js").read_text(encoding="utf-8")
+
+    assert "MAX_LIVE_VISIBLE_LINES" in script
+    assert "MAX_LIVE_RENDER_BATCH_LINES" in script
+    assert "requestAnimationFrame(() => flushLiveLines(live))" in script
+    assert "live.linePool" in script
+    assert "live.output.append(line.node)" in script
+    assert "live.output.childElementCount" not in script
+    assert "await appendLiveText(live" in script
+    assert "function restartLiveTail()" in script
+    assert "/api/robot-logs/tail?" in script
+    assert "/files/${encodeURIComponent(live.file.id)}/tail" not in script
+    assert "已跳过" not in script
+    assert "function stopLiveTail()" in script
+    assert "state.liveTailController?.abort();" in script
+
+
+def test_robot_log_live_updates_cannot_become_the_document_scroll_anchor() -> None:
+    """操作者向下浏览多窗口时，持续 stdout 刷新不能把页面拉回旧位置。"""
+
+    styles = (web_console.WEB_ROOT / "robot_logs.css").read_text(encoding="utf-8")
+
+    assert ".live-log-workspace { overflow-anchor: none; }" in styles
+    assert ".live-log-output { overflow-anchor: none; }" in styles

@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="/refinement.css" />
     <link rel="stylesheet" href="/page_views.css" />
     <link rel="stylesheet" href="/deployment.css" />
+    <link rel="stylesheet" href="/deployment/task-lines.css" />
     <link rel="stylesheet" href="/app_shell.css" />
   </head>
   <body>
@@ -42,7 +43,7 @@
           <p class="eyebrow">DEPLOYMENT / MAP FOUNDATION</p>
           <h1>部署建图</h1>
           <p class="sub">
-            按现场流程配置地图阶段：外部导入或车端建图、2D 标记、定位路线，最后再生成可回滚的机器人部署包。
+            按现场流程准备地图、标记位置、配置任务线路，最后校验并导出部署包。
           </p>
         </div>
       </header>
@@ -51,7 +52,7 @@
           <div>
             <p class="eyebrow">FIELD IMPLEMENTATION GUIDE</p>
             <h2 id="deploymentGuideTitle">按顺序完成部署</h2>
-            <p class="deployment-guide-intro">向导会根据当前项目事实给出唯一下一步。完成一项后再继续，避免地图阶段、标记和定位路线互相错位。</p>
+            <p class="deployment-guide-intro">向导会根据当前项目给出下一步。先准备地图与位置标记，再保存本次任务线路。</p>
           </div>
           <div class="deployment-guide-progress" aria-label="部署完成进度">
             <strong id="deploymentGuideProgressValue">0%</strong>
@@ -77,7 +78,7 @@
           </div>
           <section id="deploymentTaskWorkspace" class="deployment-task-workspace">
             <section id="deploymentTaskPanels" class="page-grid" aria-label="当前任务工作区">
-        <article class="panel span-5 deployment-setup-project" data-deployment-stage="project" data-deployment-tasks="project.createProject">
+        <article class="panel span-5 deployment-setup-project" data-deployment-stage="project" data-deployment-tasks="project.createProject project.edit">
           <div id="newProjectForm">
             <div class="panel-title">
               <div>
@@ -97,7 +98,7 @@
                   <option value="single">单任务点模式</option>
                   <option value="multi">多任务点模式</option>
                 </select>
-                <span class="page-muted">创建后固定；地图标记和引导流程保持一致，仅实验任务包结构不同。</span>
+                <span class="page-muted">可在项目设置中修改；地图标记和引导流程保持一致。</span>
               </label>
             </div>
             <button id="createProject" class="page-top-action" type="button">
@@ -108,6 +109,15 @@
             <p class="eyebrow">CURRENT PROJECT</p>
             <h2 id="currentProjectName">—</h2>
             <p id="currentProjectMeta" class="current-project-meta">—</p>
+            <div class="settings-form">
+              <label>项目名称<input id="editProjectName" maxlength="80" /></label>
+              <label>车辆任务模式<select id="editProjectTaskMode">
+                <option value="single">单任务点模式</option>
+                <option value="multi">多任务点模式</option>
+              </select></label>
+            </div>
+            <button id="saveProjectSettings" class="page-top-action" type="button">保存项目设置</button>
+            <p class="page-muted">修改后需重新校验导出；现有地图、标记和任务线路保留。</p>
             <button id="showNewProjectForm" class="compact-action" type="button">创建其他项目</button>
             <p class="page-muted">当前项目会持续保留；仅在确认需要新项目时再创建。</p>
           </section>
@@ -117,7 +127,7 @@
           <h2>部署流程</h2>
           <div class="deployment-flow-note">
             <span class="deployment-flow-note-icon" aria-hidden="true"></span>
-            <p>页面上方的“现场实施向导”是唯一操作顺序。先按现场实际经过顺序编排地图阶段，再导入地图、标记、配置定位路线。</p>
+            <p>按上方“现场实施向导”准备地图阶段、导入地图、标记位置，再配置任务线路。</p>
           </div>
           <div id="deploymentFlowEditor" class="deployment-flow-editor deployment-hidden">
             <div class="deployment-flow-editor-head">
@@ -153,17 +163,16 @@
               <h2>导入地图</h2>
             </div>
           </div>
-          <p class="page-muted">
-            从打开此网页的电脑选择地图文件。请同时选择 <code>map.yaml</code>
-            与对应 PGM；定位地图只需选择同目录任意命名的 PCD，兼容性 <code>index.txt</code> 可选，普通 2D 地图可不含点云。
-          </p>
+          <p class="page-muted">按当前部署阶段准备地图。已有二维地图可直接导入；只有点云时，可从 PCD 生成二维地图并人工检查。</p>
           <fieldset id="mapSourceChoices" class="deployment-map-source-choices">
             <legend>这张地图从哪里获得？</legend>
             <label><input type="radio" name="mapSource" value="import" data-map-source="import" />导入已有地图</label>
+            <label><input type="radio" name="mapSource" value="pcd" data-map-source="pcd" />PCD 生成二维地图</label>
             <label><input type="radio" name="mapSource" value="mapping" data-map-source="mapping" />车端实时建图</label>
           </fieldset>
+          <div id="mapStageSummary" class="map-stage-summary"></div>
           <div id="importControls" class="settings-form deployment-hidden">
-            <div id="mapStageSummary" class="map-stage-summary"></div>
+            <p class="page-muted">请同时选择 <code>map.yaml</code> 与对应 PGM；定位地图选择同目录的 PCD，兼容性 <code>index.txt</code> 可选。普通二维地图可不含点云。</p>
             <label class="map-folder-picker"
               ><span id="mapFolderLabel">选择地图文件</span><input id="mapFolder" type="file" multiple accept=".yaml,.yml,.pgm,.pcd,.txt,text/plain" aria-describedby="mapImportTarget mapFolderMessage" /></label
             ><p id="mapFolderMessage" class="inline-message map-folder-message">尚未选择地图文件。</p>
@@ -178,6 +187,57 @@
             ><button id="importMap" class="page-top-action" type="button" disabled>
               导入地图快照
             </button>
+          </div>
+          <div id="pcdImportControls" class="pcd-import deployment-hidden" aria-label="从 PCD 生成二维地图">
+            <div class="pcd-upload-row">
+              <label class="map-folder-picker" for="pcdFile">选择点云文件<input id="pcdFile" type="file" accept=".pcd" aria-describedby="pcdFileHelp" /></label>
+              <button id="pcdUpload" class="compact-action" type="button" disabled>上传并分析</button>
+            </div>
+            <p id="pcdFileHelp" class="page-muted">上传一个 PCD 文件，保留原始 XY 坐标。分析完成后再设置高度范围。</p>
+            <div class="pcd-status-row"><p id="pcdStatus" class="inline-message" role="status" aria-live="polite">请选择 PCD 文件。</p><button id="pcdRestore" class="compact-action" type="button" hidden>重新读取</button><button id="pcdCancel" class="compact-action" type="button" hidden>取消本次转换</button></div>
+            <progress id="pcdProgress" max="100" value="0" aria-label="点云处理进度" hidden></progress>
+            <div id="pcdAnalysis" hidden>
+              <div class="pcd-analysis-heading"><h3>点云高度分布</h3><p id="pcdPointSummary" class="page-muted"></p></div>
+              <div id="pcdHistogram" class="pcd-histogram" tabindex="0" role="group" aria-label="点云高度分布，左右方向键查看区间" aria-describedby="pcdHistogramReadout"></div>
+              <p id="pcdHistogramReadout" class="pcd-histogram-readout" role="status" aria-live="polite">横轴：高度（m） · 纵轴：点数。</p>
+              <p id="pcdHeightHelp" class="page-muted">高度为点云坐标中的绝对 Z 值，单位为米。候选层仅供参考，请结合现场检查；坡地可能需要分段处理。</p>
+              <fieldset class="pcd-candidates"><legend>选择候选高度范围</legend><div id="pcdCandidates" class="pcd-candidate-options"></div></fieldset>
+              <div class="pcd-workspace">
+                <fieldset id="pcdParameters" class="pcd-parameters" aria-describedby="pcdHeightHelp">
+                  <legend>投影参数</legend>
+                  <div class="pcd-height-control"><label for="pcdZMin">高度下限 <span>m</span><input id="pcdZMin" type="number" step="0.01" inputmode="decimal" /></label><input id="pcdZMinRange" type="range" step="0.01" aria-label="调整高度下限" title="悬停后滚动鼠标滚轮调节，每次 0.01 m" /></div>
+                  <div class="pcd-height-control"><label for="pcdZMax">高度上限 <span>m</span><input id="pcdZMax" type="number" step="0.01" inputmode="decimal" /></label><input id="pcdZMaxRange" type="range" step="0.01" aria-label="调整高度上限" title="悬停后滚动鼠标滚轮调节，每次 0.01 m" /></div>
+                  <label for="pcdResolution">地图分辨率 <span>米 / 格</span><input id="pcdResolution" type="number" value="0.05" min="0.001" step="0.001" inputmode="decimal" /></label>
+                  <p class="page-muted">默认 0.05。数值越小栅格越细；保留单点细节，不补造障碍。</p>
+                  <label for="pcdPointRadius">预览点半径 <span>像素</span><input id="pcdPointRadius" type="number" value="0.5" min="0.5" max="4" step="0.5" inputmode="decimal" /></label>
+                  <p id="pcdPointRadiusError" class="pcd-error" role="status" hidden></p>
+                  <p class="page-muted">仅调整二维预览点的大小，不改变导出的 PGM。</p>
+                  <label class="pcd-denoise"><input id="pcdDenoise" type="checkbox" checked />移除孤立噪点</label>
+                  <p class="page-muted">默认仅处理没有相邻障碍格的孤立格，保留连续墙线和细小结构；可关闭后对照预览。</p>
+                  <p id="pcdParameterError" class="pcd-error" role="status" hidden></p>
+                  <button id="pcdPreview" class="page-top-action" type="button" disabled>生成二维预览</button>
+                </fieldset>
+                <figure class="pcd-preview-area">
+                  <div id="pcdPreviewWindow" class="pcd-preview-window" data-view="map">
+                    <div id="pcdPreviewViewport" class="pcd-preview-surface" tabindex="0" role="region" aria-label="二维地图预览，可滚轮缩放、拖动平移，方向键平移，加减键缩放，0 键适配"><img id="pcdPreviewImage" alt="当前高度参数的黑白二维显示预览，白色不代表可通行" hidden /><canvas id="pcdRasterPreview" aria-label="保留细墙的二维地图显示" hidden></canvas><p id="pcdPreviewEmpty" role="status" aria-live="polite">调整参数并生成预览，检查障碍轮廓与通道。</p><div id="pcdConversionProgress" class="pcd-conversion-progress" hidden><span id="pcdConversionStage" role="status" aria-live="polite"></span><progress id="pcdConversionBar" max="100" aria-label="二维地图转换进度"></progress></div></div>
+                    <iframe id="pcdSourceFrame" class="pcd-source-frame" title="源 PCD 三维点云查看" hidden></iframe>
+                    <div class="pcd-preview-toolbar" aria-label="预览工具">
+                      <div id="pcdMapTools" class="pcd-floating-tools"><button id="pcdZoomOut" class="compact-action" type="button" aria-label="缩小地图" disabled>−</button><output id="pcdZoomReadout" aria-label="相对适配视图的缩放比例">100%</output><button id="pcdZoomIn" class="compact-action" type="button" aria-label="放大地图" disabled>+</button><button id="pcdFitPreview" class="compact-action" type="button" disabled>适配</button></div>
+                      <div class="pcd-source-actions"><button id="pcdSourceFullscreen" class="compact-action pcd-source-link" type="button" aria-controls="pcdPreviewWindow" aria-pressed="false" hidden>全屏查看</button><button id="pcdSourceViewer" class="compact-action pcd-source-link" type="button" aria-controls="pcdSourceFrame" aria-expanded="false" disabled>查看源 PCD</button></div>
+                    </div>
+                  </div>
+                  <p id="pcdPreviewHelp" class="pcd-preview-help">滚轮缩放 · 拖动平移 · 适配恢复全图</p>
+                  <figcaption id="pcdPreviewCaption">黑色为障碍，其他区域仅在此视图显示为白色；保存地图仍保留未知区域，白色不代表可通行。</figcaption>
+                  <div id="pcdTrajectoryControls" class="pcd-trajectory-controls" hidden>
+                    <label for="pcdTrajectoryFile">叠加轨迹 PCD <span>仅预览</span><input id="pcdTrajectoryFile" type="file" accept=".pcd" /></label>
+                    <div class="pcd-trajectory-actions"><label><input id="pcdTrajectoryVisible" type="checkbox" checked disabled />显示轨迹</label><button id="pcdTrajectoryRemove" class="compact-action" type="button" hidden>移除</button></div>
+                    <p id="pcdTrajectoryStatus" class="page-muted" role="status" aria-live="polite"></p>
+                  </div>
+                </figure>
+              </div>
+              <ul id="pcdWarnings" class="pcd-warnings" hidden></ul>
+              <div id="pcdConfirmControls" class="pcd-confirm-controls" hidden><label for="pcdMapLabel">地图显示名称<input id="pcdMapLabel" maxlength="80" placeholder="例如：电梯大厅" /></label><p class="page-muted">这是离线高度投影。请检查门洞、通道和小障碍物，再确认保存到当前项目。</p><button id="pcdConfirm" class="page-top-action" type="button" disabled>确认导入并继续</button></div>
+            </div>
           </div>
           <p id="importMessage" class="inline-message">
             请先打开一个部署项目。
@@ -208,200 +268,53 @@
         <article class="panel span-12" data-deployment-stages="maps annotations localization" data-deployment-tasks="maps.edit annotations.* localization.*">
           <div class="panel-title">
             <div>
-              <p class="eyebrow">MAPPING WORKSPACE</p>
               <h2>地图画布</h2>
-            </div>
-            <div>
-              <button
-                id="panTool"
-                class="compact-action active-tool"
-                type="button"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path
-                    d="M12 3v18M3 12h18M8 7l4-4 4 4M8 17l4 4 4-4M7 8l-4 4 4 4M17 8l4 4-4 4"
-                  /></svg
-                ><span>平移</span></button
-              ><button
-                data-waypoint-kind="start"
-                class="compact-action waypoint-tool"
-                type="button"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M5 19V5m1 1h9l-2 4 2 4H6" /></svg
-                ><span>起点</span></button
-              ><button
-                data-waypoint-kind="target"
-                class="compact-action waypoint-tool"
-                type="button"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <circle cx="12" cy="12" r="7" />
-                  <circle cx="12" cy="12" r="2" /></svg
-                ><span>目标</span></button
-              ><button
-                data-waypoint-kind="building_entrance"
-                class="compact-action waypoint-tool"
-                type="button"
-                title="户外进入电梯大厅时的自动定位入口"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M5 20V5h14v15M9 20v-8h6v8M8 8h.01M16 8h.01" /></svg
-                ><span>楼栋入口</span></button
-              ><button
-                data-waypoint-kind="transition"
-                class="compact-action waypoint-tool"
-                type="button"
-                title="标记任务去程中的可选过渡点；点选后可配置速度"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M5 7h12M13 3l4 4-4 4M19 17H7m4-4-4 4 4 4" /></svg
-                ><span>过渡点</span></button
-              ><button
-                data-waypoint-kind="elevator"
-                class="compact-action waypoint-tool"
-                type="button"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <rect x="5" y="3" width="14" height="18" rx="1" />
-                  <path d="M12 4v16M8 6v12M16 6v12M10 12h4" /></svg
-                ><span>电梯</span></button
-              ><button
-                data-waypoint-kind="gate"
-                class="compact-action waypoint-tool"
-                type="button"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <rect x="3" y="8" width="18" height="8" rx="1" />
-                  <path d="M7 8v8m5-8v8m5-8v8" /></svg
-                ><span>闸机</span></button
-              ><button
-                data-waypoint-kind="auto_door"
-                class="compact-action waypoint-tool"
-                type="button"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <rect x="3" y="7" width="18" height="10" rx="1" />
-                  <path d="M12 7v10M5 9l5 6m9-6-5 6" /></svg
-                ><span>自动门</span></button
-              ><button
-                data-waypoint-kind="narrow_passage"
-                class="compact-action waypoint-tool"
-                type="button"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M7 3v18M17 3v18M10 7h4M10 12h4M10 17h4" /></svg
-                ><span>窄通道</span></button
-              ><button
-                data-waypoint-kind="ramp"
-                class="compact-action waypoint-tool"
-                type="button"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M4 18h16M6 16l9-9 3 9" /></svg
-                ><span>坡道</span></button
-              ><button
-                data-waypoint-kind="slow_zone"
-                class="compact-action waypoint-tool"
-                type="button"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="m5 17 5-10m0 10 5-10m0 10 4-8" /></svg
-                ><span>减速区</span></button
-              ><button
-                data-waypoint-kind="virtual_wall"
-                class="compact-action waypoint-tool"
-                type="button"
-                title="左键依次确定虚拟墙的起点和终点；拖动红色端点或线段可调整"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M4 7h16M4 12h16M4 17h16" />
-                </svg
-                ><span>虚拟墙</span></button
-              ><span class="toolbar-divider" aria-hidden="true"></span
-              ><span class="eraser-brush-group"
-                ><button
-                  data-waypoint-kind="erase_brush"
-                  class="compact-action waypoint-tool erase-tool"
-                  type="button"
-                  title="拖动擦除地图杂点；滚轮调整直径"
-                  aria-label="启用橡皮擦"
-                >
-                  <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                    <path
-                      d="m7 17 8.7-8.7 3.1 3.1-8.7 8.7H7zM14.5 6.5l1.6-1.6 3.1 3.1-1.6 1.6"
-                    /></svg
-                  ><span
-                    >橡皮擦 <small id="eraserButtonSize">0.8 m</small></span
-                  >
-                </button>
-                <section
-                  id="eraserSizeControl"
-                  class="eraser-size-control deployment-hidden"
-                  aria-label="橡皮擦设置"
-                >
-                  <span
-                    ><b id="eraserDiameterValue">0.8 m</b
-                    ><small>滚轮调节直径</small></span
-                  >
-                  <span class="eraser-shape-toggle" aria-label="橡皮擦形状">
-                    <button
-                      id="eraserCircle"
-                      class="active"
-                      type="button"
-                      title="圆形橡皮擦"
-                      aria-label="圆形橡皮擦"
-                    >
-                      ○
-                    </button>
-                    <button
-                      id="eraserSquare"
-                      type="button"
-                      title="方形橡皮擦"
-                      aria-label="方形橡皮擦"
-                    >
-                      □
-                    </button>
-                  </span>
-                </section></span
-              ><button
-                data-waypoint-kind="erase_polygon"
-                class="compact-action waypoint-tool erase-tool"
-                type="button"
-                title="逐点绘制不规则擦除区域"
-              >
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path
-                    d="M5 6h6l3 4-3 6H5l-2-5zM18 5h1v1h-1zM18 18h1v1h-1z"
-                  /></svg
-                ><span>框选擦除</span></button
-              ><button
-                id="completeErasePolygon"
-                class="compact-action deployment-hidden"
-                type="button"
-              >
-                完成框选</button
-              ><button
-                id="undoMapEdit"
-                class="compact-action erase-history"
-                type="button"
-              >
-                撤销擦除</button
-              ><button
-                id="clearMapEdits"
-                class="compact-action erase-history"
-                type="button"
-              >
-                清空擦除</button
-              ><button id="resetMapView" class="compact-action" type="button">
-                <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg
-                ><span>适配视图</span></button
-              ><span id="mapCursor" class="page-muted">—</span>
             </div>
           </div>
           <div id="mapWorkspace" class="map-workspace" tabindex="-1" aria-label="地图标记工作区">
             <canvas id="mapCanvas" aria-label="部署地图画布"></canvas>
+
+            <div id="mapToolDock" class="map-tool-dock" role="toolbar" aria-label="地图工具">
+              <button id="panTool" class="map-tool-button active-tool" type="button" title="选择与平移" aria-label="选择与平移" aria-pressed="true"><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 3 14 9-7 1-3 7-4-17Z"/></svg><span>选择与平移</span></button>
+<button id="addMapComponent" class="map-tool-button " type="button" title="添加组件" aria-label="添加组件" aria-expanded="false" aria-controls="mapToolPalette" aria-pressed="false"><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>添加组件</span></button>
+<span class="map-tool-divider" aria-hidden="true"></span>
+<button data-waypoint-kind="virtual_wall" class="map-tool-button waypoint-tool map-annotation-tool" type="button" title="虚拟墙" aria-label="虚拟墙" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 18h16M5 7v10m5-10v10m5-10v10m4-10v10"/></svg><span>虚拟墙</span></button>
+<button data-waypoint-kind="erase_brush" class="map-tool-button waypoint-tool map-annotation-tool" type="button" title="橡皮擦" aria-label="橡皮擦" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 14 9-10a2 2 0 0 1 3 0l4 4a2 2 0 0 1 0 3l-8 9H8l-4-4a1.5 1.5 0 0 1 0-2Zm5-5 9 8M12 20h9"/></svg><span>橡皮擦</span></button>
+<button data-waypoint-kind="erase_polygon" class="map-tool-button waypoint-tool map-annotation-tool" type="button" title="框选擦除" aria-label="框选擦除" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 5 14 2-2 12-13-3Z"/><circle cx="5" cy="5" r="1.5"/><circle cx="19" cy="7" r="1.5"/><circle cx="17" cy="19" r="1.5"/><circle cx="4" cy="16" r="1.5"/></svg><span>框选擦除</span></button>
+<span class="map-tool-divider" aria-hidden="true"></span>
+<button id="undoMapEdit" class="map-tool-button " type="button" title="撤销（Ctrl / ⌘ Z）" aria-label="撤销" disabled ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5-4 4 4 4M5 9h9a6 6 0 0 1 0 12"/></svg><span>撤销</span></button>
+<button id="resetMapView" class="map-tool-button " type="button" title="适配视图" aria-label="适配视图" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5"/></svg><span>适配视图</span></button>
+            </div>
+            <section id="mapToolPalette" class="map-tool-palette" aria-label="添加地图组件" hidden>
+              <header><div><h2>添加组件</h2><p>选择后在地图中点击放置</p></div><button id="closeMapToolPalette" class="map-tool-button " type="button" title="关闭组件面板" aria-label="关闭组件面板" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg><span>关闭组件面板</span></button></header>
+              <section class="map-tool-section"><h3>导航标记</h3><div class="map-tool-options"><button data-waypoint-kind="start" class="map-tool-button waypoint-tool" type="button" title="起点" aria-label="起点" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21V4m0 1h12l-2.5 4L18 13H6"/></svg><span>起点</span></button><button data-waypoint-kind="target" class="map-tool-button waypoint-tool" type="button" title="目标" aria-label="目标" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/></svg><span>目标</span></button><button data-waypoint-kind="transition" class="map-tool-button waypoint-tool" type="button" title="过渡点" aria-label="过渡点" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4-4-4 4 4 4"/></svg><span>过渡点</span></button><button data-waypoint-kind="building_entrance" class="map-tool-button waypoint-tool" type="button" title="楼栋入口" aria-label="楼栋入口" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21V4h16v17M9 21V11h6v10M8 7h.01M16 7h.01"/></svg><span>楼栋入口</span></button></div></section>
+<section class="map-tool-section"><h3>设施与通行</h3><div class="map-tool-options"><button data-waypoint-kind="elevator" class="map-tool-button waypoint-tool" type="button" title="电梯" aria-label="电梯" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="M12 4v16m-5-9 2-2 2 2m2 2 2 2 2-2"/></svg><span>电梯</span></button><button data-waypoint-kind="gate" class="map-tool-button waypoint-tool" type="button" title="闸机" aria-label="闸机" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20V9a2 2 0 0 1 4 0v11m6 0V9a2 2 0 0 1 4 0v11M9 12l3 3 3-3M3 20h8m2 0h8"/></svg><span>闸机</span></button><button data-waypoint-kind="auto_door" class="map-tool-button waypoint-tool" type="button" title="自动门" aria-label="自动门" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 5v14M5 12h4m-2-2 2 2-2 2m12-2h-4m2-2-2 2 2 2"/></svg><span>自动门</span></button><button data-waypoint-kind="narrow_passage" class="map-tool-button waypoint-tool" type="button" title="窄通道" aria-label="窄通道" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3v18M19 3v18M8 12h8m-6-2-2 2 2 2m4-4 2 2-2 2"/></svg><span>窄通道</span></button><button data-waypoint-kind="ramp" class="map-tool-button waypoint-tool" type="button" title="坡道" aria-label="坡道" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 19h18L17 5 3 19Zm4-1 9-9M15 9h1v1"/></svg><span>坡道</span></button><button data-waypoint-kind="slow_zone" class="map-tool-button waypoint-tool" type="button" title="减速区" aria-label="减速区" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 18 5-12m0 12 5-12m0 12 5-12"/></svg><span>减速区</span></button></div></section>
+              <footer>放置后可拖动调整位置，右键编辑属性</footer>
+            </section>
+            <div id="mapToolContext" class="map-tool-context" hidden>
+              <div class="map-tool-current"><span><strong id="mapActiveTool">选择与平移</strong><small id="mapActiveToolHint"></small></span><button id="cancelMapTool" class="map-tool-button " type="button" title="取消当前工具" aria-label="取消当前工具" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg><span>取消当前工具</span></button></div>
+              <div id="mapEditModeControl" class="map-edit-mode-control" role="group" aria-label="地图修正模式" hidden>
+                <button id="mapEditEraseMode" type="button" aria-pressed="true"><span class="map-edit-swatch map-edit-swatch-free" aria-hidden="true"></span>擦除<span class="map-edit-mode-detail">白色</span></button>
+                <button id="mapEditWallMode" type="button" aria-pressed="false"><span class="map-edit-swatch map-edit-swatch-wall" aria-hidden="true"></span>补墙<span class="map-edit-mode-detail">黑色</span></button>
+              </div>
+              <section id="eraserSizeControl" class="eraser-size-control deployment-hidden" aria-label="橡皮擦设置">
+                <span><b id="eraserDiameterValue">0.8 m</b><small>滚轮调节直径</small><small id="eraserButtonSize" hidden>0.8 m</small></span>
+                <span class="eraser-shape-toggle" aria-label="橡皮擦形状"><button id="eraserCircle" class="map-tool-button active" type="button" title="圆形橡皮擦" aria-label="圆形橡皮擦" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/></svg><span>圆形橡皮擦</span></button><button id="eraserSquare" class="map-tool-button " type="button" title="方形橡皮擦" aria-label="方形橡皮擦" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="1"/></svg><span>方形橡皮擦</span></button></span>
+              </section>
+              <div id="mapEraseActions" class="map-erase-actions" hidden>
+                <button id="completeErasePolygon" class="map-tool-button deployment-hidden" type="button" title="完成框选" aria-label="完成框选" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg><span>完成框选</span></button>
+
+                <button id="clearMapEdits" class="map-tool-button " type="button" title="清空地图修正" aria-label="清空地图修正" ><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 11v6m4-6v6"/></svg><span>清空修正</span></button>
+              </div>
+            </div>
+            <span id="mapCursor" class="map-cursor-readout" aria-hidden="true">—</span>
+            <div class="map-display-switch" role="group" aria-label="地图显示方式">
+              <button id="rawMapView" type="button" aria-pressed="true">原始</button>
+              <button id="styledMapView" type="button" aria-pressed="false" aria-describedby="mapDisplayStatus" disabled>生成美化</button>
+              <button id="exportMapImage" type="button" disabled title="导出美化 PNG，包含已保存擦除，不含编辑控件">导出图片</button>
+            </div>
+            <span id="mapDisplayStatus" class="map-display-status" role="status">先在原始图补齐缺口，再生成美化</span>
+            <span id="mapDisplayNotice" hidden>美化暂不可用，已显示原图</span>
             <canvas id="mapEraseFrameMask" class="map-erase-frame-mask" aria-hidden="true" hidden></canvas>
             <div id="mapCanvasEmpty" class="map-canvas-empty">
               <b>等待地图资产</b
@@ -481,7 +394,8 @@
               <p id="waypointPopoverDetail" class="page-muted"></p>
               <p id="waypointPopoverPurpose" class="page-muted">删除后需重新在定位路线中选择起点、目标点或过渡点；已保存路线引用时会先阻止删除。</p>
               <p id="waypointPopoverStatus" class="component-popover-status" aria-live="polite"></p>
-              <label id="transitionSpeedControl" class="deployment-hidden">过渡速度模式<select id="waypointTransitionSpeed"><option value="single_point">常规</option><option value="slow_point">减速</option><option value="narrow_point">窄通道</option><option value="task_point">任务点</option></select></label>
+              <label id="transitionNameControl" class="deployment-hidden">名称<input id="waypointTransitionName" type="text" maxlength="80" placeholder="例如：2号门出口、4号门回入口" /></label>
+              <label id="transitionSpeedControl" class="deployment-hidden">过渡速度模式<select id="waypointTransitionSpeed"><option value="normal">常规通过</option><option value="single_point">单点停靠</option><option value="slow_point">减速</option><option value="narrow_point">窄通道</option><option value="task_point">任务点</option></select></label>
               <label id="transitionYawControl" class="deployment-hidden">去程朝向（°）<input id="waypointTransitionYaw" type="number" min="-180" max="180" step="1" inputmode="decimal" /><small>拖动地图上的蓝色圆形方向手柄调整；数字会同步更新。</small></label>
               <p id="transitionReturnDirectionHint" class="page-muted deployment-hidden">实线箭头是去程，虚线箭头是返程自动反向 180°；返程方向不可单独设置。</p>
               <div class="component-actions">
@@ -556,8 +470,9 @@
             </section>
           </div>
           <p id="mapToolHint" class="page-muted">
-                先标记地图上的真实组件并填写属性；系统会按项目场景和地图标记自动生成经过顺序。跨图切换由行为树按定位路线自动执行，返程首节点由该顺序自动派生。
+                先标记真实位置与通行设施，再在任务线路中安排去程访问顺序。系统自动派生返程和实际地图切换。
           </p>
+          <p id="mapRoutePreviewHint" class="inline-message" role="status" aria-live="polite" hidden></p>
         </article>
         <article class="panel span-6 topology-panel" data-deployment-stage="maps" data-deployment-tasks="maps.assign maps.edit">
           <div class="panel-title">
@@ -573,17 +488,19 @@
           <p id="stageAssignmentMessage" class="inline-message">选择地图后可检查其阶段归属。</p>
         </article>
         <article class="panel span-6 localization-binding-panel" data-deployment-stage="localization" data-deployment-tasks="localization.*">
-          <div class="panel-title"><div><h2>定位运行配置</h2></div></div>
-          <p id="localizationPurpose" class="page-muted">完成后，部署包会自动生成定位清单、地图切换顺序和受控路径。</p>
-          <section class="localization-flow-step" aria-labelledby="localizationRoleTitle">
+          <div class="panel-title"><div><h2>配置任务线路</h2></div></div>
+          <p id="localizationPurpose" class="page-muted">选择或新建一条具名线路，只需编排去程。系统自动生成返程与地图切换。</p>
+          <section id="taskLinesEditor" class="task-lines-editor" aria-label="固定任务线路编辑器"></section>
+          <details class="localization-template-settings" id="localizationAutomaticFacts">
+            <summary id="localizationRoleTitle">定位信息 · 自动沿用地图配置</summary>
             <div class="localization-flow-heading">
-              <div><h3 id="localizationRoleTitle">确认每张地图的定位配置</h3><p id="localizationRoleMessage">先选择当前地图；系统从部署拓扑自动复用运行角色和归属，用户楼层仅确认布局模板。</p></div>
+              <div><p id="localizationRoleMessage">地图用途、楼栋和单元沿用地图准备阶段的信息，无需再次确认。</p></div>
               <span id="localizationRoleProgress" class="localization-step-progress">0 / 0 张已完成</span>
             </div>
             <button id="openLocalizationBinding" class="page-top-action" type="button" disabled>确认当前地图的定位配置</button>
             <div id="localizationBindingList" class="localization-binding-list"><div class="page-empty">选择地图后可确认定位配置。</div></div>
-          </section>
-          <section class="localization-flow-step localization-route-step" aria-labelledby="localizationRouteTitle">
+          </details>
+          <details class="localization-template-settings localization-route-review"><summary>系统地图通行路线 · 只读核验</summary><section class="localization-flow-step localization-route-step" aria-labelledby="localizationRouteTitle">
             <div class="localization-flow-heading">
               <div><h3 id="localizationRouteTitle">系统自动派生路线</h3><p id="localizationRoutePurpose">地图标记完成后，系统按项目场景和可通行路径自动计算经过顺序、切图和返程。</p></div>
               <span id="localizationRouteProgress" class="localization-step-progress">等待地图角色完成</span>
@@ -603,6 +520,7 @@
             </div>
           </section>
           </section>
+          </details>
           <details class="localization-template-settings">
             <summary>高级设置：替换定位模板（可选）</summary>
             <p>默认沿用项目模板。仅当现场需要替换定位 YAML 时才选择文件；这不会改变已配置的地图角色和经过顺序。</p>
@@ -732,7 +650,17 @@
           </div>
         </div>
         <div class="task-preview-top-actions">
+          <label class="task-preview-line-control" hidden>线路<select id="taskPreviewLineSelect" aria-label="选择预览线路"><option value="all">全部线路</option></select></label>
           <div id="taskPreviewMapSwitcher" class="task-preview-map-switcher" role="tablist" aria-label="预览地图"></div>
+          <div id="taskPreviewDirection" class="task-preview-appearance task-preview-direction" role="group" aria-label="预览路线方向">
+            <button type="button" data-task-preview-leg="all" aria-pressed="true">全部</button>
+            <button type="button" data-task-preview-leg="outbound" aria-pressed="false">去程</button>
+            <button type="button" data-task-preview-leg="return" aria-pressed="false">返程</button>
+          </div>
+          <div class="task-preview-appearance" role="group" aria-label="预览地图显示方式">
+            <button id="taskPreviewStyledMap" type="button" aria-pressed="false">美化</button>
+            <button id="taskPreviewRawMap" type="button" aria-pressed="true">原始</button>
+          </div>
           <button id="taskPreviewDownload" class="task-preview-button task-preview-button-secondary" type="button">下载实验包</button>
           <button id="closeTaskPreview" class="task-preview-button task-preview-button-primary" type="button">退出预览</button>
         </div>

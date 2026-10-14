@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
+import os
 import re
+import tempfile
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+
+LOGGER = logging.getLogger("ry_aletheia.settings")
 
 
 LEGACY_DEFAULT_NODES = [
@@ -35,6 +42,24 @@ DEFAULT_VEHICLE_CONTROL_PARAMETERS = {
     "press": 1400,
     "movement_acc": 1000,
     "stop_acc": 1200,
+}
+
+
+DEFAULT_MANUAL_RELOCALIZATION = {
+    "z_m": 0.4,
+    "service_timeout_seconds": 12,
+}
+
+
+DEFAULT_SOFTWARE_INVENTORY = {
+    "vehicle": {
+        "vehicle_number": "",
+        "vin": "",
+        "model": "",
+        "project": "",
+        "location": "",
+    },
+    "package_notes": {},
 }
 
 
@@ -80,6 +105,7 @@ class RobotSettings:
     live_observation: dict = field(default_factory=lambda: {
         "enabled": False,
         "idle_stop_seconds": 45,
+        "manual_relocalization": dict(DEFAULT_MANUAL_RELOCALIZATION),
         # 车体轮廓仅用于浏览器二维投影，不影响 ROS2 定位、导航或底盘控制。
         "vehicle_models": [dict(item) for item in DEFAULT_VEHICLE_MODELS],
         "active_vehicle_model": "ry-standard",
@@ -90,6 +116,12 @@ class RobotSettings:
     # 当前小车本机业务日志目录；只供 Desktop 日志下载页面消费，不能改动
     # Aletheia 自身 ToolLogStore 的受控诊断目录。
     robot_logs: dict = field(default_factory=lambda: {"sources": [dict(item) for item in DEFAULT_ROBOT_LOG_SOURCES]})
+    # 车辆软件资产档案：仅保存操作员填写的车辆资料和已安装包说明；
+    # 软件包版本事实始终由受控 dpkg-query 实时读取。
+    software_inventory: dict = field(default_factory=lambda: {
+        "vehicle": dict(DEFAULT_SOFTWARE_INVENTORY["vehicle"]),
+        "package_notes": {},
+    })
     # 仅控制 Aletheia 自身的用户级启动入口，不会启动或重启机器人节点。
     # 放在末尾以保持历史位置参数调用的兼容性。
     autostart_enabled: bool = False
@@ -98,12 +130,29 @@ class SettingsStore:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._diagnostic_lock = threading.Lock()
+        self._load_failures: set[str] = set()
+
+    def _record_load_result(self, section: str, error: Exception | None) -> None:
+        with self._diagnostic_lock:
+            if error is None:
+                if section in self._load_failures:
+                    self._load_failures.remove(section)
+                    LOGGER.info("运行配置读取已恢复：section=%s", section)
+            elif section not in self._load_failures:
+                self._load_failures.add(section)
+                # Persisted values and validator messages may contain paths or
+                # supervisorctl credentials; retain only fixed section/type.
+                LOGGER.warning("运行配置读取降级，使用受控默认值：section=%s error_type=%s", section, type(error).__name__)
 
     def load(self) -> RobotSettings:
         if not self.path.exists():
+            for section in ("console", "robot_logs", "vehicle_control"):
+                self._record_load_result(section, None)
             return RobotSettings()
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
+            section_errors: dict[str, Exception] = {}
             if isinstance(raw.get("ui_preferences"), dict):
                 # RViz was a historical desktop-only convenience. Remove its
                 # persisted preference during migration; test trajectory
@@ -132,6 +181,11 @@ class SettingsStore:
             if isinstance(stored_observation, dict):
                 observation = dict(asdict(RobotSettings())["live_observation"])
                 observation.update(stored_observation)
+                stored_relocalization = stored_observation.get("manual_relocalization")
+                if isinstance(stored_relocalization, dict):
+                    relocalization = dict(DEFAULT_MANUAL_RELOCALIZATION)
+                    relocalization.update(stored_relocalization)
+                    observation["manual_relocalization"] = relocalization
                 # 旧版通用 ROS-Web 接入项没有等价的运行含义。升级时静默移除，
                 # 实时页固定使用本机专用 UDP/WS 遥测，操作者无需再管理端口。
                 for key in ("bridge_host", "bridge_port", "map_source", "embed_url"):
@@ -143,22 +197,45 @@ class SettingsStore:
                 vehicle_control.update(stored_vehicle_control)
                 try:
                     self._validate_vehicle_control(vehicle_control)
-                except ValueError:
+                except ValueError as exc:
                     # 手工损坏或未来版本遗留的参数不能阻止控制台启动，更不能
                     # 带着未知 profile 进入手动控制器；安全回退到受控默认值。
                     vehicle_control = dict(DEFAULT_VEHICLE_CONTROL_PARAMETERS)
+                    section_errors["vehicle_control"] = exc
                 defaults["vehicle_control"] = vehicle_control
+            stored_software_inventory = raw.get("software_inventory")
+            if isinstance(stored_software_inventory, dict):
+                software_inventory = {
+                    "vehicle": dict(DEFAULT_SOFTWARE_INVENTORY["vehicle"]),
+                    "package_notes": {},
+                }
+                stored_vehicle = stored_software_inventory.get("vehicle")
+                if isinstance(stored_vehicle, dict):
+                    software_inventory["vehicle"].update({
+                        key: value for key, value in stored_vehicle.items()
+                        if key in software_inventory["vehicle"]
+                    })
+                stored_notes = stored_software_inventory.get("package_notes")
+                if isinstance(stored_notes, dict):
+                    software_inventory["package_notes"] = stored_notes
+                defaults["software_inventory"] = software_inventory
             stored_robot_logs = raw.get("robot_logs")
             if isinstance(stored_robot_logs, dict):
                 robot_logs = dict(asdict(RobotSettings())["robot_logs"])
                 robot_logs.update(stored_robot_logs)
                 try:
                     self._validate_robot_logs(robot_logs)
-                except ValueError:
+                except ValueError as exc:
                     robot_logs = {"sources": [dict(item) for item in DEFAULT_ROBOT_LOG_SOURCES]}
+                    section_errors["robot_logs"] = exc
                 defaults["robot_logs"] = robot_logs
-            return RobotSettings(**defaults)
-        except (json.JSONDecodeError, TypeError, ValueError):
+            result = RobotSettings(**defaults)
+            for section in ("robot_logs", "vehicle_control"):
+                self._record_load_result(section, section_errors.get(section))
+            self._record_load_result("console", None)
+            return result
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            self._record_load_result("console", exc)
             return RobotSettings()
 
     def save(self, data: dict) -> RobotSettings:
@@ -167,13 +244,44 @@ class SettingsStore:
         updates = {key: value for key, value in data.items() if key in allowed}
         observation_update = updates.pop("live_observation", None)
         robot_logs_update = updates.pop("robot_logs", None)
+        software_inventory_update = updates.pop("software_inventory", None)
         current.update(updates)
         if isinstance(observation_update, dict):
             current["live_observation"].update(observation_update)
+            relocalization_update = observation_update.get("manual_relocalization")
+            if isinstance(relocalization_update, dict):
+                relocalization = dict(DEFAULT_MANUAL_RELOCALIZATION)
+                current_relocalization = current["live_observation"].get("manual_relocalization")
+                if isinstance(current_relocalization, dict):
+                    relocalization.update(current_relocalization)
+                relocalization.update(relocalization_update)
+                current["live_observation"]["manual_relocalization"] = relocalization
             for key in ("bridge_host", "bridge_port", "map_source", "embed_url"):
                 current["live_observation"].pop(key, None)
         elif observation_update is not None:
             current["live_observation"] = observation_update
+        if isinstance(software_inventory_update, dict):
+            stored_inventory = current.get("software_inventory")
+            current_inventory = dict(stored_inventory) if isinstance(stored_inventory, dict) else {
+                "vehicle": dict(DEFAULT_SOFTWARE_INVENTORY["vehicle"]),
+                "package_notes": {},
+            }
+            if "vehicle" in software_inventory_update:
+                vehicle = dict(DEFAULT_SOFTWARE_INVENTORY["vehicle"])
+                existing_vehicle = current_inventory.get("vehicle")
+                if isinstance(existing_vehicle, dict):
+                    vehicle.update(existing_vehicle)
+                update_vehicle = software_inventory_update["vehicle"]
+                if isinstance(update_vehicle, dict):
+                    vehicle.update(update_vehicle)
+                else:
+                    vehicle = update_vehicle
+                current_inventory["vehicle"] = vehicle
+            if "package_notes" in software_inventory_update:
+                current_inventory["package_notes"] = software_inventory_update["package_notes"]
+            current["software_inventory"] = current_inventory
+        elif software_inventory_update is not None:
+            current["software_inventory"] = software_inventory_update
         if isinstance(robot_logs_update, dict):
             current["robot_logs"].update(robot_logs_update)
         elif robot_logs_update is not None:
@@ -181,7 +289,25 @@ class SettingsStore:
         settings = RobotSettings(**current)
         self._validate(settings)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(asdict(settings), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        serialized = json.dumps(asdict(settings), ensure_ascii=False, indent=2) + "\n"
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.path.parent,
+                prefix=self.path.name + ".",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary.write(serialized)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+                temporary_path = Path(temporary.name)
+            os.replace(temporary_path, self.path)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
         return settings
 
     @staticmethod
@@ -209,6 +335,20 @@ class SettingsStore:
             raise ValueError("实时观测自动停止时间无效") from exc
         if not 20 <= idle_stop_seconds <= 600:
             raise ValueError("实时观测自动停止时间必须介于 20 和 600 秒")
+        manual_relocalization = observation.get("manual_relocalization")
+        if not isinstance(manual_relocalization, dict):
+            raise ValueError("手动重定位配置格式错误")
+        if set(manual_relocalization) != set(DEFAULT_MANUAL_RELOCALIZATION):
+            raise ValueError("手动重定位配置字段无效")
+        try:
+            relocalize_z = float(manual_relocalization["z_m"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("重定位 z 值必须是有限数字") from exc
+        if not math.isfinite(relocalize_z) or not 0.0 <= relocalize_z <= 2.0:
+            raise ValueError("重定位 z 值必须介于 0 和 2 米")
+        timeout = manual_relocalization["service_timeout_seconds"]
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 30:
+            raise ValueError("重定位服务超时必须介于 1 和 30 秒")
         models = observation.get("vehicle_models", [])
         active_model = observation.get("active_vehicle_model", "")
         if not isinstance(models, list) or not 1 <= len(models) <= 40:
@@ -237,6 +377,7 @@ class SettingsStore:
             raise ValueError("请选择一个有效的当前车型")
         SettingsStore._validate_vehicle_control(settings.vehicle_control)
         SettingsStore._validate_robot_logs(settings.robot_logs)
+        SettingsStore._validate_software_inventory(settings.software_inventory)
         if not isinstance(settings.nodes, list):
             raise ValueError("Supervisor 节点配置格式错误")
         if not isinstance(settings.monitor_nodes, list) or not all(isinstance(name, str) and SUPERVISOR_PROCESS_NAME.fullmatch(name) for name in settings.monitor_nodes):
@@ -272,6 +413,29 @@ class SettingsStore:
         for node in settings.nodes:
             if not node.get("label") or not isinstance(node.get("supervisor"), str) or not SUPERVISOR_PROCESS_NAME.fullmatch(node["supervisor"]):
                 raise ValueError("每个节点都必须包含 label 和 supervisor")
+
+    @staticmethod
+    def _validate_software_inventory(software_inventory: object) -> None:
+        if not isinstance(software_inventory, dict) or set(software_inventory) != {"vehicle", "package_notes"}:
+            raise ValueError("软件资产配置格式错误")
+        vehicle = software_inventory["vehicle"]
+        expected_vehicle_fields = set(DEFAULT_SOFTWARE_INVENTORY["vehicle"])
+        if not isinstance(vehicle, dict) or set(vehicle) != expected_vehicle_fields:
+            raise ValueError("车辆软件资产档案格式错误")
+        for value in vehicle.values():
+            if not isinstance(value, str) or any(ord(character) < 32 or ord(character) == 127 for character in value):
+                raise ValueError("车辆软件资产档案字段无效")
+        notes = software_inventory["package_notes"]
+        if not isinstance(notes, dict):
+            raise ValueError("软件资产说明目录格式错误")
+        for package_name, note in notes.items():
+            if not isinstance(package_name, str) or not re.fullmatch(r"ry-[a-z0-9][a-z0-9+.-]*", package_name):
+                raise ValueError("软件资产包名无效")
+            if not isinstance(note, dict) or set(note) != {"maintainer", "description"}:
+                raise ValueError("软件资产说明格式错误")
+            for value in note.values():
+                if not isinstance(value, str) or any(ord(character) < 32 or ord(character) == 127 for character in value):
+                    raise ValueError("软件资产说明字段无效")
 
     @staticmethod
     def _validate_vehicle_control(vehicle_control: object) -> None:

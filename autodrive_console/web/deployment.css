@@ -1,5 +1,7 @@
 @import url("/deployment/tools.css");
 @import url("/deployment/compiler.css");
+@import url("/deployment/pcd-import.css");
+@import url("/deployment/map-tools.css");
 
 .deployment-guide {
   margin: 0 0 16px;
@@ -839,6 +841,39 @@ body.theme-light .map-workspace {
 .map-workspace canvas:active {
   cursor: grabbing;
 }
+.map-display-switch {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  border: 1px solid #d0d7df;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, .94);
+  color: #435063;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.map-display-switch { top: 12px; right: 12px; padding: 3px; }
+body:has(#mapWorkspace) .map-display-switch button {
+  min-height: 32px;
+  padding: 6px 13px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #435063;
+  box-shadow: none;
+  font-size: 12px;
+}
+body:has(#mapWorkspace) .map-display-switch button[aria-pressed="true"] {
+  background: #e5edf7 !important;
+  color: #174b80 !important;
+  font-weight: 600;
+}
+body:has(#mapWorkspace) .map-display-switch button:hover { background: #f0f3f7; }
+body:has(#mapWorkspace) .map-display-switch button:focus-visible { outline: 2px solid #0071e3; outline-offset: 1px; }
+.map-display-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#mapDisplayNotice:not([hidden]) { position: absolute; top: 12px; left: 12px; max-width: 45%; padding: 6px 9px; background: rgba(255,255,255,.94); border-radius: 6px; font-size: 12px; }
 .map-workspace .map-erase-frame-mask {
   position: absolute;
   inset: 0;
@@ -2985,6 +3020,9 @@ body.task-preview-open { overflow: hidden; }
 body.task-preview-open > main,
 body.task-preview-open > aside { pointer-events: none; }
 .task-preview-map-mount { position: absolute; inset: 0; z-index: 0; }
+.task-preview-map-mount .map-display-switch,
+.task-preview-map-mount #mapDisplayStatus,
+.task-preview-map-mount #mapDisplayNotice { display: none; }
 .task-preview-map-mount .map-workspace {
   position: absolute !important;
   inset: 0 !important;
@@ -3036,7 +3074,41 @@ body.task-preview-open > aside { pointer-events: none; }
 .task-preview-title-group h2 { margin: 0; font-size: 16px; letter-spacing: -.02em; }
 .task-preview-title-group p { margin: 4px 0 0; color: rgba(245,245,247,.66); font-size: 11px; }
 .task-preview-top-actions { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.task-preview-map-switcher { display: flex; flex: 0 0 auto; width: min(40vw, 300px); gap: 4px; overflow: auto; }
+.task-preview-top-actions button { margin: 0; }
+.task-preview-line-control { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 12px; }
+.task-preview-line-control[hidden] { display: none; }
+.task-preview-line-control select { width: clamp(140px, 14vw, 240px); margin: 0; min-height: 36px; }
+.task-preview-appearance {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 3px;
+  margin-right: 8px;
+  border-radius: 11px;
+  background: rgba(255,255,255,.1);
+}
+.task-preview-appearance button {
+  width: auto;
+  min-width: 54px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  box-shadow: none;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.task-preview-appearance button:hover { background: rgba(255,255,255,.08); }
+.task-preview-appearance button[aria-pressed="true"] { background: #3a3c40; color: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.16); }
+.task-preview-appearance button:focus-visible { outline: 2px solid #007aff; outline-offset: 2px; }
+.task-preview-appearance button:disabled { opacity: .45; cursor: default; }
+.task-preview-direction { margin-right: 0; }
+.task-preview-map-switcher { display: flex; flex: 0 0 auto; width: min(24vw, 240px); gap: 4px; overflow: auto; }
 .task-preview-map-tab,
 .task-preview-button {
   border: 1px solid rgba(255,255,255,.18);
@@ -3055,7 +3127,7 @@ body.task-preview-open > aside { pointer-events: none; }
 .task-preview-map-tab:hover,
 .task-preview-map-tab:focus-visible { border-color: rgba(10,132,255,.85); color: #fff; outline: none; }
 .task-preview-map-tab[aria-selected="true"] { background: rgba(10,132,255,.22); border-color: #0a84ff; color: #fff; }
-.task-preview-button { cursor: pointer; }
+.task-preview-button { width: auto; cursor: pointer; }
 .task-preview-button:active { transform: scale(.98); }
 .task-preview-button:focus-visible { outline: 2px solid #7db7ff; outline-offset: 2px; }
 .task-preview-button-primary { background: #0a84ff; border-color: #0a84ff; color: #fff; }
@@ -3098,10 +3170,18 @@ body.task-preview-open > aside { pointer-events: none; }
   font-size: 11px;
 }
 .task-preview-footer span:first-child { color: #fff; }
+@media (min-width: 801px) and (max-width: 1200px) {
+  .task-preview-topbar { flex-wrap: wrap; gap: 12px; }
+  .task-preview-top-actions { width: 100%; justify-content: flex-end; }
+  .task-preview-map-switcher { flex: 1 1 auto; }
+  .task-preview-inspector { top: 154px; max-height: calc(100dvh - 226px); }
+}
 @media (max-width: 800px) {
   .task-preview-topbar { inset: 10px 10px auto; padding: 10px; flex-wrap: wrap; }
-  .task-preview-top-actions { width: 100%; justify-content: flex-end; }
-  .task-preview-map-switcher { width: min(50vw, 300px); margin-right: auto; }
+  .task-preview-top-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
+  .task-preview-map-switcher { width: 100%; }
+  .task-preview-appearance { margin-right: auto; }
+  .task-preview-direction { margin-right: 0; }
   .task-preview-inspector { top: auto; right: 10px; bottom: 58px; max-height: 38dvh; padding: 13px; }
   .task-preview-footer { left: 10px; right: 10px; bottom: 10px; }
 }
@@ -3123,8 +3203,16 @@ body.theme-light .task-preview-inspector h3,
 body.theme-light .task-preview-task-item strong,
 body.theme-light .task-preview-footer span:first-child,
 body.theme-light .task-preview-title-group h2 { color: #1d1d1f; }
+body.theme-light .task-preview-task-item { border-color: rgba(29,29,31,.12); }
+body.theme-light .task-preview-task-index { border-color: rgba(29,29,31,.22); color: #636366; }
+body.theme-light .task-preview-task-item.is-active .task-preview-task-index { color: #fff; }
 body.theme-light .task-preview-map-tab,
 body.theme-light .task-preview-button { color: #1d1d1f; border-color: rgba(29,29,31,.18); background: rgba(255,255,255,.6); }
+body.theme-light .task-preview-appearance { background: #e9edf2; }
+body.theme-light .task-preview-appearance button { background: transparent; color: #42464d; box-shadow: none; }
+body.theme-light .task-preview-appearance button:hover:not(:disabled) { background: rgba(255,255,255,.6); box-shadow: none; }
+body.theme-light .task-preview-appearance button[aria-pressed="true"],
+body.theme-light .task-preview-appearance button[aria-pressed="true"]:hover:not(:disabled) { background: #fff; color: #0066cc; box-shadow: 0 1px 3px rgba(0,0,0,.16); }
 @media (prefers-reduced-transparency: reduce) {
   .task-preview-topbar,
   .task-preview-inspector,
@@ -3515,6 +3603,11 @@ body:has(#deploymentTaskConsole)[data-deployment-stage] #deploymentTaskWorkspace
   display: none !important;
 }
 
+#newProjectForm.deployment-hidden,
+#currentProjectCard.deployment-hidden {
+  display: none !important;
+}
+
 body[data-deployment-task="project.createProject"] #createProject,
 body[data-deployment-task="project.confirmScene"] #saveDeploymentFlow,
 body[data-deployment-task="maps.source"] #importMap,
@@ -3574,4 +3667,9 @@ body:has(#deploymentTaskConsole) .project-row-actions {
     justify-self: stretch;
     justify-content: end;
   }
+}
+
+/* Canvas widgets remain compact even under shared form/theme rules. */
+body:has(#mapWorkspace) .map-display-switch button {
+  width: auto; margin: 0; flex: 0 0 auto;
 }

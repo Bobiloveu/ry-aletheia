@@ -113,14 +113,21 @@ class _QueryFuture:
 class _EmergencyClient:
     def __init__(self):
         self.calls = []
-        self.future = _QueryFuture()
+        self.futures = []
+        self.ready = True
+
+    @property
+    def future(self):
+        return self.futures[-1]
 
     def service_is_ready(self):
-        return True
+        return self.ready
 
     def call_async(self, request):
         self.calls.append(request)
-        return self.future
+        future = _QueryFuture()
+        self.futures.append(future)
+        return future
 
 
 class _Clock:
@@ -146,7 +153,14 @@ class VehicleControlTests(unittest.TestCase):
         self.clock = _Clock()
         self.control = VehicleControlController(
             clock=self.clock,
-            config=VehicleControlConfig(input_timeout_s=0.3, heartbeat_timeout_s=1.0),
+            config=VehicleControlConfig(
+                input_timeout_s=0.3,
+                heartbeat_timeout_s=1.0,
+                emergency_confirmation_max_age_s=1.0,
+                emergency_query_interval_s=0.1,
+                emergency_query_timeout_s=0.2,
+                emergency_query_failure_limit=2,
+            ),
         )
         # 纯状态机测试：绝不初始化 rclpy 或向真实 topic 发送数据。
         self.control._runtime_state = "ready"
@@ -187,6 +201,107 @@ class VehicleControlTests(unittest.TestCase):
 
         self.assertEqual(pending["transition"], "navigation")
         self.assertEqual(self.control._source_command_publisher.messages[-1].data, "navigation")
+
+    def test_relocalization_hold_can_stop_during_an_active_test_without_a_drivable_session(self):
+        """手动重定位只占用停车控制权，不应被活动测试任务阻断。"""
+        self.control._active_run_guard = lambda: True
+        self.control._on_source_state(SimpleNamespace(data="navigation"))
+
+        pending = self.control.begin_relocalization_hold()
+
+        self.assertEqual(pending["relocalization_hold"], "switching")
+        self.assertEqual(pending["transition"], "miniapp")
+        self.assertFalse(pending["session"]["present"])
+        self.assertEqual(self.control._source_command_publisher.messages[-1].data, "miniapp")
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        active = self.control.status()
+        self.assertEqual(active["relocalization_hold"], "active")
+        self.assertFalse(active["manual_ready"])
+        with self.assertRaisesRegex(VehicleControlConflict, "手动重定位正在占用"):
+            self.control.begin_manual_session()
+
+    def test_active_map_marker_navigation_blocks_manual_and_relocalization_controls(self):
+        """地图标记导航占用 Nav2 时，不允许抢占为 miniapp。"""
+        self.control.set_map_marker_navigation_guard(lambda: True)
+
+        with self.assertRaisesRegex(VehicleControlConflict, "前往地图标记正在进行"):
+            self.control.begin_manual_session()
+        with self.assertRaisesRegex(VehicleControlConflict, "前往地图标记正在进行"):
+            self.control.begin_relocalization_hold()
+
+    def test_relocalization_waits_through_old_source_heartbeats_until_miniapp_confirmation(self):
+        self.control._on_source_state(SimpleNamespace(data="navigation"))
+        self.control.begin_relocalization_hold()
+        self.control._on_source_state(SimpleNamespace(data="navigation"))
+        pending = self.control.status()
+        self.assertEqual(pending["relocalization_hold"], "switching")
+        self.assertEqual(pending["transition"], "miniapp")
+        self.assertFalse(pending["manual_ready"])
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        self.assertEqual(self.control.status()["relocalization_hold"], "active")
+
+    def test_relocalization_old_source_heartbeats_do_not_extend_the_switch_deadline(self):
+        self.control._on_source_state(SimpleNamespace(data="navigation"))
+        self.control.begin_relocalization_hold()
+        self.clock.now += self.control.config.switch_timeout_s + .1
+        self.control._on_source_state(SimpleNamespace(data="navigation"))
+        self.assertEqual(self.control.status()["relocalization_hold"], "failed")
+
+    def test_late_miniapp_acknowledgement_cannot_activate_expired_relocalization(self):
+        self.control._on_source_state(SimpleNamespace(data="navigation"))
+        self.control.begin_relocalization_hold()
+        self.clock.now += self.control.config.switch_timeout_s + .1
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        self.assertEqual(self.control.status()["relocalization_hold"], "failed")
+
+    def test_failed_relocalization_hold_remains_stopped_until_dedicated_recovery(self):
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        self.control.begin_relocalization_hold()
+
+        failed = self.control.finish_relocalization_hold(success=False)
+
+        self.assertEqual(failed["relocalization_hold"], "failed")
+        self.assertEqual(failed["actual_source"], "miniapp")
+        with self.assertRaisesRegex(VehicleControlConflict, "手动重定位正在占用"):
+            self.control.request_navigation()
+        recovery = self.control.recover_navigation_after_relocalization()
+        self.assertEqual(recovery["relocalization_hold"], "recovering")
+        self.assertEqual(recovery["transition"], "navigation")
+        self.control._on_source_state(SimpleNamespace(data="navigation"))
+        self.assertEqual(self.control.status()["relocalization_hold"], "idle")
+
+    def test_failed_relocalization_can_reacquire_stop_without_navigation(self):
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        self.control.begin_relocalization_hold()
+        self.control.finish_relocalization_hold(success=False)
+        state = self.control.begin_relocalization_hold()
+        self.assertEqual(state["relocalization_hold"], "active")
+        self.assertEqual(state["actual_source"], "miniapp")
+        self.assertIsNone(state["transition"])
+        self.assertFalse(state["manual_ready"])
+        with self.assertRaises(VehicleControlConflict):
+            self.control.begin_relocalization_hold()
+
+    def test_failed_relocalization_retries_source_confirmation_after_source_loss(self):
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        self.control.begin_relocalization_hold()
+        self.control._on_source_state(SimpleNamespace(data="navigation"))
+        state = self.control.begin_relocalization_hold()
+        self.assertEqual(state["relocalization_hold"], "switching")
+        self.assertEqual(state["transition"], "miniapp")
+        self.assertFalse(state["manual_ready"])
+
+    def test_failed_begin_cancels_pending_hold_and_late_acknowledgement_allows_retry(self):
+        self.control._on_source_state(SimpleNamespace(data="navigation"))
+        self.control.begin_relocalization_hold()
+        state = self.control.finish_relocalization_hold(success=False)
+        self.assertEqual(state["relocalization_hold"], "failed")
+        self.assertIsNone(state["transition"])
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        self.assertEqual(self.control.status()["relocalization_hold"], "failed")
+        state = self.control.begin_relocalization_hold()
+        self.assertEqual(state["relocalization_hold"], "active")
+        self.assertFalse(state["manual_ready"])
 
     def test_confirmed_miniapp_allows_mobile_vector_after_web_session(self):
         """手机可在网页会话已存在时加入，摇杆输入成为最新运动目标。"""
@@ -318,6 +433,72 @@ class VehicleControlTests(unittest.TestCase):
         self.assertEqual(self.control.status()["emergency_stop"]["state"], "normal")
         self.control._request_emergency_state_if_needed()
         self.assertEqual(len(client.calls), 1)
+
+    def test_timed_out_emergency_query_is_retried_and_its_late_response_is_ignored(self):
+        """A lost chassis reply cannot permanently occupy the emergency query slot."""
+        client = _EmergencyClient()
+        self.control._emergency_state_client = client
+        self.control._GetEmergencyStop = _EmergencyService
+
+        self.control._on_publish_tick()
+        first_future = client.future
+        self.clock.now += self.control.config.emergency_query_timeout_s + 0.01
+        self.control._on_publish_tick()
+        self.clock.now += self.control.config.emergency_query_interval_s
+        self.control._on_publish_tick()
+
+        self.assertEqual(len(client.calls), 2)
+        self.assertIsNot(self.control._emergency_query_future, first_future)
+        first_future.resolve(SimpleNamespace(is_emergency_stop=False))
+        self.assertEqual(self.control.status()["emergency_stop"]["state"], "unknown")
+        client.future.resolve(SimpleNamespace(is_emergency_stop=False))
+        self.assertEqual(self.control.status()["emergency_stop"]["state"], "normal")
+
+    def test_stale_normal_emergency_confirmation_stops_an_active_manual_session(self):
+        """A latched false cannot authorize motion forever after chassis state becomes stale."""
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        session_id = self.control.begin_manual_session()["session"]["id"]
+        self.control.set_command(session_id, "forward")
+        self.clock.now += 1.01
+
+        self.control._on_publish_tick()
+
+        status = self.control.status()
+        self.assertEqual(status["emergency_stop"]["state"], "unknown")
+        self.assertFalse(status["manual_ready"])
+        self.assertEqual((self.control._target_linear, self.control._target_angular), (0.0, 0.0))
+        stop = self.control._velocity_publisher.messages[-1]
+        self.assertEqual((stop.linear.x, stop.angular.z, stop.linear.z), (0.0, 0.0, 1200.0))
+
+    def test_stale_normal_is_reported_as_unknown_even_when_no_manual_session_is_active(self):
+        """A retained false is status information, not an indefinitely fresh motion permit."""
+        self._confirm_emergency_normal()
+        self.clock.now += self.control.config.emergency_confirmation_max_age_s + 0.01
+
+        status = self.control.status()
+
+        self.assertEqual(status["emergency_stop"]["state"], "unknown")
+        self.assertEqual(status["car_state_sync"]["emergency_stop"], "pending")
+
+    def test_unavailable_emergency_service_invalidates_normal_during_manual_control(self):
+        """A required recheck that cannot start fails closed instead of preserving false."""
+        client = _EmergencyClient()
+        client.ready = False
+        self.control._emergency_state_client = client
+        self.control._GetEmergencyStop = _EmergencyService
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        session_id = self.control.begin_manual_session()["session"]["id"]
+        self.control.set_command(session_id, "forward")
+        self.clock.now += 0.11
+
+        self.control._on_publish_tick()
+        self.clock.now += 0.11
+        self.control._on_publish_tick()
+
+        self.assertEqual(self.control.status()["emergency_stop"]["state"], "unknown")
+        self.assertFalse(self.control.status()["manual_ready"])
 
     def test_release_emergency_stop_requires_false_feedback_after_fixed_command(self):
         """发布解除报文不是成功，唯一成功条件是急停 Topic 返回 false。"""

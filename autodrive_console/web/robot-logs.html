@@ -26,7 +26,7 @@
       <header class="page-header">
         <div>
           <h1>机器人日志</h1>
-          <p class="sub">从当前小车已配置的日志目录选择文件。默认将可识别的 ROS 时间转为北京时间后保存到本电脑；工具日志仍在独立页面管理。</p>
+          <p class="sub">从当前小车已配置的日志目录选择文件，可下载归档，也可直接查看 Supervisor stdout 实时输出；工具日志仍在独立页面管理。</p>
         </div>
         <button id="refreshSources" class="outline-button page-top-action" type="button">刷新状态</button>
       </header>
@@ -74,9 +74,23 @@
         </details>
         <div class="file-table-wrap">
           <table>
-            <thead><tr><th scope="col">选择</th><th scope="col">文件名</th><th scope="col">大小</th><th scope="col">修改时间</th></tr></thead>
-            <tbody id="fileList"><tr><td colspan="4" class="table-empty">正在读取日志目录…</td></tr></tbody>
+            <thead><tr><th scope="col">选择</th><th scope="col">文件名</th><th scope="col">大小</th><th scope="col">修改时间</th><th scope="col">操作</th></tr></thead>
+            <tbody id="fileList"><tr><td colspan="5" class="table-empty">正在读取日志目录…</td></tr></tbody>
           </table>
+        </div>
+      </section>
+
+      <section class="panel live-log-panel" aria-labelledby="liveLogHeading">
+        <div class="panel-title robot-panel-title">
+          <div>
+            <h2 id="liveLogHeading">实时 stdout</h2>
+            <p class="page-muted">实时流由 Aletheia 代理已验证的 Supervisor stdout；不会向浏览器公开 Supervisor 管理地址或凭据。</p>
+          </div>
+          <span id="liveLogCount" class="selected-count">未打开实时日志</span>
+        </div>
+        <p id="liveLogMessage" class="download-message" role="status" aria-live="polite"></p>
+        <div id="liveLogWorkspace" class="live-log-workspace">
+          <div class="live-log-empty">在上方日志列表中选择“实时查看”，即可打开对应的 Supervisor stdout。</div>
         </div>
       </section>
     </main>

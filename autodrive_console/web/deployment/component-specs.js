@@ -23,15 +23,9 @@ export const COMPONENT_SPECS = {
   },
   target: {
     name: "目标点",
+    hint: "取货、送货、仓位及执行方式在“任务线路”的每次访问中设置，同一目标点可以重复使用。",
     fields: [
       { key: "door", label: "门牌号", type: "text", placeholder: "例如：1509", default: "" },
-      {
-        key: "arrival_action",
-        label: "到达动作",
-        type: "select",
-        options: [["place_water", "泄水"], ["auto_cargo", "卸货"]],
-        default: "place_water",
-      },
     ],
   },
   building_entrance: {

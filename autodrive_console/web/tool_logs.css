@@ -79,7 +79,6 @@
   align-items: start;
   padding: 11px 12px;
   border: 1px solid #203b54;
-  border-left: 3px solid #3e8dde;
   background: #091727;
   font:
     11px ui-monospace,
@@ -88,6 +87,10 @@
 .log-row time,
 .log-source {
   color: #7d99b1;
+}
+.log-source {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .log-level {
   color: #78d9c0;
@@ -122,21 +125,14 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
-.log-row.level-warning {
-  border-left-color: #e9ad54;
-}
 .log-row.level-warning .log-level {
   color: #f0bc6c;
-}
-.log-row.level-error {
-  border-left-color: #f06b7d;
 }
 .log-row.level-error .log-level,
 .log-row.level-critical .log-level {
   color: #ff8796;
 }
 .log-row.level-critical {
-  border-left-color: #cf4966;
   background: #251522;
 }
 html[data-theme="light"] .diagnostic-file-row,
@@ -204,7 +200,5 @@ html[data-theme="light"] .log-exception pre,
   body:has(#logList) .page-grid > .panel:has(#diagnosticFileList) { grid-column: 1; grid-row: 1 / span 2; }
   body:has(#logList) .page-grid > .panel:has(#logList) { grid-column: 1 / -1; grid-row: 3; }
   body:has(#logList) .diagnostic-file-row { border-color: var(--line); border-radius: 10px; background: var(--surface-sunken); }
-  body:has(#logList) .log-row { border-color: var(--line); border-left: 3px solid var(--accent); border-radius: 8px; background: var(--surface-sunken); }
-  body:has(#logList) .log-row.level-warning { border-left-color: var(--warning); }
-  body:has(#logList) .log-row.level-error, body:has(#logList) .log-row.level-critical { border-left-color: var(--danger); }
+  body:has(#logList) .log-row { border-color: var(--line); border-radius: 8px; background: var(--surface-sunken); }
 }

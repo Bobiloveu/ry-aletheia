@@ -81,3 +81,31 @@ test("requestJson does not hide a transport error", async () => {
     (error) => error === disconnected,
   );
 });
+
+test('requestJson reports caught failures without consuming or exposing request data', async () => {
+  const previous = globalThis.RYAletheiaDiagnostics;
+  const observed = [];
+  globalThis.RYAletheiaDiagnostics = {requestFailure: (...args) => observed.push(args)};
+  try {
+    await assert.rejects(requestJson('/api/example?token=secret', {method:'POST',body:'private'}, {
+      fetchImpl: async () => response({ok:false,status:422,body:{error:'validation failed'}}),
+    }));
+    assert.equal(observed.length,1);
+    assert.equal(observed[0][3],422);
+  } finally { globalThis.RYAletheiaDiagnostics = previous; }
+});
+
+test('diagnostics preserve null and undefined transport rejection values', async () => {
+  const previous = globalThis.RYAletheiaDiagnostics;
+  globalThis.RYAletheiaDiagnostics = {requestFailure() {}};
+  try {
+    for (const reason of [null, undefined]) {
+      let rejected = false;
+      await requestJson('/api/example', {}, {fetchImpl: async () => {throw reason;}}).catch(error => {
+        rejected = true;
+        assert.equal(error, reason);
+      });
+      assert.equal(rejected, true);
+    }
+  } finally {globalThis.RYAletheiaDiagnostics = previous;}
+});

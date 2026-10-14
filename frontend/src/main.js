@@ -13,7 +13,10 @@ import "../../autodrive_console/web/app_shell.js";
 
 const request = async (url, options = {}) => {
   const response = await fetch(url, options);
-  const body = await response.json().catch(() => ({}));
+  const body = await response.json().catch(() => {
+    if (response.ok) globalThis.RYAletheiaDiagnostics?.failure?.('request.json', '接口 JSON 响应无法解析');
+    return {};
+  });
   if (!response.ok)
     throw new Error(body.error || `请求失败（HTTP ${response.status}）`);
   return body;
@@ -62,19 +65,29 @@ createApp({
     const saving = ref(false);
     const upgrading = ref(false);
     const fileInput = ref(null);
-    const upgradeState = computed(() =>
-      upgrade.value.supported ? "可升级" : "不可用",
-    );
-    const upgradeClass = computed(
-      () => `badge ${upgrade.value.supported ? "" : "muted"}`,
-    );
+    const upgradeBlocker = computed(() => {
+      const availability = upgrade.value.availability;
+      return availability?.ready === false ? availability.blocker || null : null;
+    });
+    const upgradeState = computed(() => {
+      if (!upgrade.value.supported) return "不可用";
+      return upgradeBlocker.value ? "已锁定" : "可升级";
+    });
+    const upgradeClass = computed(() => {
+      if (!upgrade.value.supported) return "badge muted";
+      return upgradeBlocker.value ? "badge warning" : "badge";
+    });
     const selectedFileText = computed(() =>
       selectedFile.value
         ? `${selectedFile.value.name} · ${(selectedFile.value.size / 1024 / 1024).toFixed(1)} MiB`
         : "或点击此处选择 ZIP 文件",
     );
     const canUpgrade = computed(
-      () => upgrade.value.supported && selectedFile.value && !upgrading.value,
+      () =>
+        upgrade.value.supported &&
+        !upgradeBlocker.value &&
+        selectedFile.value &&
+        !upgrading.value,
     );
     function applySettings(data) {
       taskDirectory.value = data.task_directory;
@@ -180,6 +193,10 @@ createApp({
     }
     function chooseFile(file) {
       if (!file) return;
+      if (upgradeBlocker.value) {
+        upgradeMessage.value = upgradeBlocker.value.message;
+        return;
+      }
       if (!file.name.toLowerCase().endsWith(".zip")) {
         upgradeMessage.value = "请选择 .zip 格式的离线升级包。";
         return;
@@ -188,7 +205,7 @@ createApp({
       upgradeMessage.value =
         "升级包已选择，点击“校验并应用升级”后将自动重启控制台。";
     }
-    function waitForUpgradeRestart(expectedVersion) {
+    function waitForUpgradeRestart(expectedVersion, previousVersion = "") {
       const startedAt = Date.now();
       const probe = async () => {
         progress.value = `正在等待新版本启动（${Math.round((Date.now() - startedAt) / 1000)}/30 秒）`;
@@ -200,12 +217,13 @@ createApp({
           const body = await response.json().catch(() => ({}));
           // 旧进程在 shutdown 排队期间也可能短暂返回 200。必须确认目标版本已运行，
           // 不能仅依据 HTTP 成功就刷新，否则浏览器会回到即将退出的旧页面。
-          if (
-            response.ok &&
-            String(body.current_version || "") === String(expectedVersion || "")
-          ) {
+          const currentVersion = String(body.current_version || "");
+          const versionConfirmed = expectedVersion
+            ? currentVersion === String(expectedVersion)
+            : Boolean(currentVersion && currentVersion !== String(previousVersion));
+          if (response.ok && versionConfirmed) {
             window.location.replace(
-              `${window.location.pathname}?upgraded=${encodeURIComponent(expectedVersion)}&t=${Date.now()}`,
+              `${window.location.pathname}?upgraded=${encodeURIComponent(currentVersion)}&t=${Date.now()}`,
             );
             return;
           }
@@ -217,7 +235,9 @@ createApp({
           return;
         }
         progress.value = "";
-        upgradeMessage.value = `升级请求已提交，但 30 秒内未确认版本 ${expectedVersion} 已启动；请重新打开工具并核对版本号。`;
+        upgradeMessage.value = expectedVersion
+          ? `升级请求已提交，但 30 秒内未确认版本 ${expectedVersion} 已启动；请重新打开工具并核对版本号。`
+          : "升级连接中断，30 秒内未发现新版本启动；当前程序是否已替换未确认。请重新打开工具并核对版本号。";
         upgrading.value = false;
       };
       setTimeout(probe, 700);
@@ -232,6 +252,7 @@ createApp({
         return;
       upgrading.value = true;
       progress.value = "正在上传 0%";
+      const previousVersion = String(upgrade.value.current_version || "");
       const xhr = new XMLHttpRequest();
       xhr.open("POST", "/api/system/upgrade");
       xhr.setRequestHeader("Content-Type", "application/zip");
@@ -241,10 +262,11 @@ createApp({
           progress.value = `正在上传 ${Math.round((event.loaded / event.total) * 100)}%`;
       };
       xhr.onerror = () => {
-        upgradeMessage.value =
-          "升级连接中断，当前程序未确认替换；请刷新页面检查当前版本。";
-        progress.value = "";
-        upgrading.value = false;
+        // 服务已收包并进入重启时，浏览器也可能先收到连接断开。继续轮询
+        // 版本变化，避免把已替换但尚未重新监听的程序误报成升级失败。
+        progress.value = "升级连接中断，正在确认新版本是否已启动。";
+        upgradeMessage.value = "升级连接中断，正在确认新版本是否已启动。";
+        waitForUpgradeRestart("", previousVersion);
       };
       xhr.onload = () => {
         let data = {};
@@ -289,6 +311,7 @@ createApp({
       fileInput,
       upgradeState,
       upgradeClass,
+      upgradeBlocker,
       selectedFileText,
       canUpgrade,
       saveSettings,
@@ -308,6 +331,17 @@ createApp({
       <article class="panel span-7"><p class="eyebrow">LIVE OBSERVATION / LOCAL TELEMETRY</p><h2>实时运行观测</h2><div class="settings-form"><label class="checkbox-setting"><input v-model="observationEnabled" type="checkbox"> 启用按需实时观测</label></div></article>
       <article class="panel span-5"><p class="eyebrow">OBSERVATION CONNECTION</p><h2>专用遥测边界</h2><p class="config-note">实时观测页仅接收当前小车的专用点云与位姿遥测；地图缓存和 WebRTC 视频维持各自独立链路。</p></article>
       <article class="panel vehicle-library-panel"><div class="panel-title"><div><p class="eyebrow">VEHICLE PROFILE / LIVE OUTLINE</p><h2>车型选择</h2></div><div class="panel-actions"><button class="outline-button" type="button" @click="addVehicleModel">＋ 添加车型</button><button class="page-top-action" type="button" :disabled="saving" @click="saveSettings">{{ saving ? '正在保存' : '保存车型选择' }}</button></div></div><div class="vehicle-model-grid"><label>当前运行车型<select v-model="activeVehicleModel"><option v-for="model in vehicleModels" :key="model.id" :value="model.id">{{ model.name }}</option></select></label></div><div class="vehicle-model-row" v-for="(model, index) in vehicleModels" :key="model.id"><label>标识<input v-model="model.id" maxlength="64" @input="repairActiveVehicle(model)"></label><label>车型名称<input v-model="model.name" maxlength="48"></label><label>车长（m）<input v-model.number="model.length_m" type="number" min="0.2" max="5" step="0.01"></label><label>车宽（m）<input v-model.number="model.width_m" type="number" min="0.15" max="3" step="0.01"></label><button class="danger-outline" type="button" :disabled="vehicleModels.length <= 1" @click="removeVehicleModel(index)">删除</button></div></article>
-      <article class="panel span-7 upgrade-panel"><div class="panel-title"><div><p class="eyebrow">OFFLINE CONSOLE UPGRADE</p><h2>工具离线升级</h2></div><span :class="upgradeClass">{{ upgradeState }}</span></div><input ref="fileInput" class="visually-hidden" type="file" accept=".zip,application/zip" @change="chooseFile($event.target.files[0])"><label class="upgrade-dropzone" @dragover.prevent @drop.prevent="chooseFile($event.dataTransfer.files[0])" @click="fileInput.click()"><span>⇧</span><b>拖入离线升级包</b><small>{{ selectedFileText }}</small></label><div class="upgrade-actions"><button class="page-top-action" type="button" :disabled="!canUpgrade" @click="uploadUpgrade">{{ upgrading ? '正在升级' : '校验并应用升级' }}</button><span>{{ progress }}</span></div><p class="inline-message">{{ upgradeMessage }}</p><p class="upgrade-meta">当前工具版本：<code>{{ consoleVersion }}</code> · 发布者真实性：<code>Ed25519 签名</code> · 文件完整性：<code>SHA-256</code></p><section class="upgrade-safety-note" aria-labelledby="upgradeSafetyTitle"><div><p class="eyebrow">UPGRADE SAFETY</p><h3 id="upgradeSafetyTitle">升级边界</h3></div><p>有执行中、取消中或等待人工恢复的测试计划时，控制台会拒绝升级。校验失败不会替换当前程序。</p></section></article>
+      <article class="panel span-7 upgrade-panel">
+        <div class="panel-title"><div><p class="eyebrow">OFFLINE CONSOLE UPGRADE</p><h2>工具离线升级</h2></div><span :class="upgradeClass">{{ upgradeState }}</span></div>
+        <section class="upgrade-blocker" v-if="upgradeBlocker" aria-live="polite">
+          <div><strong>升级当前已受控锁定</strong><p>{{ upgradeBlocker.message }}</p></div>
+          <a v-if="upgradeBlocker.action_url" class="upgrade-blocker-action" :href="upgradeBlocker.action_url">{{ upgradeBlocker.action_label || '查看处理说明' }}</a>
+        </section>
+        <input ref="fileInput" class="visually-hidden" type="file" accept=".zip,application/zip" @change="chooseFile($event.target.files[0])">
+        <label class="upgrade-dropzone" :class="{ 'upgrade-dropzone-locked': upgradeBlocker }" @dragover.prevent @drop.prevent="chooseFile($event.dataTransfer.files[0])" @click="!upgradeBlocker && fileInput.click()"><span>⇧</span><b>拖入离线升级包</b><small>{{ selectedFileText }}</small></label>
+        <div class="upgrade-actions"><button class="page-top-action" type="button" :disabled="!canUpgrade" @click="uploadUpgrade">{{ upgrading ? '正在升级' : '校验并应用升级' }}</button><span>{{ progress }}</span></div>
+        <p class="inline-message">{{ upgradeMessage }}</p><p class="upgrade-meta">当前工具版本：<code>{{ consoleVersion }}</code> · 发布者真实性：<code>Ed25519 签名</code> · 文件完整性：<code>SHA-256</code></p>
+        <section class="upgrade-safety-note" aria-labelledby="upgradeSafetyTitle"><div><p class="eyebrow">UPGRADE SAFETY</p><h3 id="upgradeSafetyTitle">升级边界</h3></div><p>有执行中、取消中或等待人工恢复的测试计划时，控制台会拒绝升级。校验失败不会替换当前程序。</p></section>
+      </article>
     </section></main>`,
 }).mount("#app");

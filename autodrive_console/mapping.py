@@ -81,6 +81,7 @@ class MappingSessionController:
         self._thread: threading.Thread | None = None
         self._probe_at = 0.0
         self._probe_result: tuple[bool, str] = (False, "尚未检查 Lightning 在线建图运行时")
+        self._preview_cache_failed = False
 
     # ---- Public contract -----------------------------------------------------
 
@@ -194,6 +195,8 @@ class MappingSessionController:
             if self._session and self._session.get("state") in {"prepared", "running", "stopping"}:
                 raise MappingError("已有建图会话；请先完成或停止当前会话")
             self._session = session
+            self._preview_cache_failed = False
+        LOGGER.info("建图会话已准备：session=%s project=%s kind=%s", session_id, cleaned_project_id, map_kind)
         return self._snapshot_locked()
 
     def _clean_project_id(self, project_id: object) -> str:
@@ -249,6 +252,7 @@ class MappingSessionController:
             with self._lock:
                 session["state"] = "failed"
                 session["error"] = f"无法启动 Lightning 在线建图：{exc}"
+            LOGGER.exception("建图会话启动失败：session=%s project=%s", session_id, session["project_id"])
             raise MappingUnavailable(session["error"]) from exc
         with self._lock:
             session["state"] = "running"
@@ -256,6 +260,7 @@ class MappingSessionController:
             session["error"] = ""
             session["log_path"] = str(log_path)
             session["preview"]["state"] = "waiting"
+            LOGGER.info("建图会话已启动：session=%s project=%s pid=%s", session_id, session["project_id"], self._process.pid)
             return self._snapshot_locked()
 
     def stop(self, session_id: str, *, save: bool = True) -> dict[str, Any]:
@@ -270,6 +275,7 @@ class MappingSessionController:
                 self._validate_saved_capture(session)
             except Exception as exc:  # Stop still has to release the process.
                 save_error = f"地图保存请求失败：{exc}"
+                LOGGER.exception("建图会话保存失败：session=%s error=%s", session_id, exc)
         process = self._process
         try:
             if process and process.poll() is None:
@@ -277,6 +283,7 @@ class MappingSessionController:
                 process.wait(timeout=6)
         except Exception:
             if process and process.poll() is None:
+                LOGGER.warning("建图会话停止未完成，强制回收进程：session=%s pid=%s", session_id, process.pid)
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
@@ -289,6 +296,7 @@ class MappingSessionController:
             session["state"] = "saved" if save and not save_error else "stopped"
             session["stopped_at"] = time.time()
             session["error"] = save_error
+            LOGGER.info("建图会话已停止：session=%s state=%s save=%s", session_id, session["state"], save)
             return self._snapshot_locked()
 
     def discard(self, session_id: str) -> dict[str, Any]:
@@ -308,6 +316,7 @@ class MappingSessionController:
             session["discarded_at"] = time.time()
             snapshot = self._snapshot_locked()
             self._session = None
+            LOGGER.info("建图会话已放弃：session=%s", session_id)
             return snapshot
 
     def ingest_grid(
@@ -343,9 +352,15 @@ class MappingSessionController:
         except (OSError, MapAssetError) as exc:
             with self._lock:
                 session["error"] = f"实时地图缓存失败：{exc}"
-            LOGGER.warning("实时建图预览缓存失败：%s", exc)
+                first_failure = not self._preview_cache_failed
+                self._preview_cache_failed = True
+            if first_failure:
+                LOGGER.warning("实时建图预览缓存失败：session=%s error=%s", session["id"], exc)
             return
         with self._lock:
+            if self._preview_cache_failed:
+                self._preview_cache_failed = False
+                LOGGER.info("实时建图预览缓存已恢复：session=%s", session["id"])
             preview = session["preview"]
             preview.update({
                 "state": "streaming",
@@ -397,6 +412,7 @@ class MappingSessionController:
                 f"请检查会话日志：{session.get('log_path') or self.root / session['id'] / 'lightning.log'}"
             )
             session["preview"]["state"] = "unavailable"
+            LOGGER.error("建图进程意外退出：session=%s project=%s pid=%s exit_code=%s", session["id"], session["project_id"], process.pid, exit_code)
             self._process = None
             self._close_process_log()
             should_stop_listener = True

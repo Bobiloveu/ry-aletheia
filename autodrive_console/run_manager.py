@@ -4,8 +4,10 @@ import csv
 from copy import deepcopy
 import html
 import logging
+import os
 import re
 import threading
+import tempfile
 import uuid
 import shutil
 import subprocess
@@ -17,14 +19,16 @@ from typing import Callable
 
 from .models import AttemptResult, RunRecord, TestCase, now_iso
 from .map_assets import CachedMapAsset, MapAssetCache, MapAssetError
+from .native_report_archive import NativeReportArchive, NativeReportArchiveError
 from .robot_gateway import RobotGateway
 from .ros_executor import RosTaskExecutor
 from .settings import SettingsStore
 from .scenario_setup import ScenarioSetupError, ScenarioSetupStore
 from .trajectory import TrajectorySession
-from .trajectory_render import TrajectoryRenderError, render_svg
+from .trajectory_render import TrajectoryRenderError, freeze_map_png, render_svg
 from .return_signal import RosReturnSignalBridge
 from .report_trajectory import REPORT_TRAJECTORY_CSS, REPORT_TRAJECTORY_SCRIPT, trajectory_figure
+from .run_checkpoint import RunCheckpointStore
 
 
 LOGGER = logging.getLogger("ry_aletheia.run")
@@ -88,6 +92,22 @@ class RunManager:
         self._lock = threading.Lock()
         self._execution_lock = threading.Lock()
         self._dependency_restart_count = 0
+        self._map_marker_navigation_guard: Callable[[], bool] = lambda: False
+        self._manual_bag_recording_guard: Callable[[], bool] = lambda: False
+        self._checkpoint_store = RunCheckpointStore(report_dir)
+        self._recover_interrupted_runs()
+
+    def set_map_marker_navigation_guard(self, guard: Callable[[], bool] | None) -> None:
+        """Install the live-observation map-marker Nav2 interlock."""
+        self._map_marker_navigation_guard = guard or (lambda: False)
+
+    def set_manual_bag_recording_guard(self, guard: Callable[[], bool] | None) -> None:
+        """Prevent a test-attempt recorder from overlapping manual evidence capture."""
+        self._manual_bag_recording_guard = guard or (lambda: False)
+
+    def has_active_bag_recording(self) -> bool:
+        with self._lock:
+            return any(getattr(run, "_active_bag_recording", None) is not None for run in self._runs.values())
 
     def start(
         self,
@@ -102,6 +122,8 @@ class RunManager:
             raise ValueError("执行次数必须介于 1 和 1000 之间")
         if not 0 <= interval_s <= 3600:
             raise ValueError("执行间隔必须介于 0 和 3600 秒之间")
+        if self._map_marker_navigation_guard():
+            raise RuntimeError("前往地图标记正在进行，请先取消或等待导航结束")
         if bag_recording is not None and self._bag_recordings is None:
             raise ValueError("当前控制台未启用诊断录包")
         normalized_bag_recording = (
@@ -121,9 +143,62 @@ class RunManager:
             self._cancel_events[run.id] = threading.Event()
             self._resume_events[run.id] = threading.Event()
             self._attempt_interrupt_events[run.id] = threading.Event()
+        try:
+            self._checkpoint_store.save(run, attempt_in_progress=False)
+        except OSError as exc:
+            with self._lock:
+                self._runs.pop(run.id, None)
+                self._cancel_events.pop(run.id, None)
+                self._resume_events.pop(run.id, None)
+                self._attempt_interrupt_events.pop(run.id, None)
+            raise RuntimeError(f"无法保存测试恢复检查点：{exc}") from exc
         threading.Thread(target=self._run, args=(run,), daemon=True, name=f"test-run-{run.id}").start()
         LOGGER.info("创建测试计划：run=%s case=%s rounds=%s", run.id, case.filename, count)
         return run
+
+    @staticmethod
+    def _checkpoint_enabled(run: RunRecord) -> bool:
+        return not getattr(run, "_skip_report", False) and not getattr(run, "_acceptance_sequence", False)
+
+    def _save_checkpoint(self, run: RunRecord, *, attempt_in_progress: bool) -> None:
+        if not self._checkpoint_enabled(run):
+            return
+        try:
+            self._checkpoint_store.save(run, attempt_in_progress=attempt_in_progress)
+        except (OSError, ValueError):
+            LOGGER.exception("保存测试恢复检查点失败：run=%s", run.id)
+
+    def _recover_interrupted_runs(self) -> None:
+        """Rebuild report-only records without touching ROS or execution dependencies."""
+        for snapshot in self._checkpoint_store.load_recoverable():
+            run = snapshot.run
+            if snapshot.attempt_in_progress and run.active_attempt is not None and not any(
+                item.index == run.active_attempt for item in run.attempts
+            ):
+                run.attempts.append(AttemptResult(
+                    run.active_attempt,
+                    "unknown_after_power_loss",
+                    "意外断电或进程终止，当前轮未取得可信结果。",
+                    0.0,
+                    now_iso(),
+                    None,
+                    run.case.id,
+                    run.case.filename,
+                ))
+            run.status = "interrupted"
+            run.error = "意外断电中断；已归档已确认轮次，未确认轮次标记为结果未知。"
+            run.active_attempt = None
+            run.live_progress = None
+            run.finished_at = now_iso()
+            with self._lock:
+                self._runs[run.id] = run
+            try:
+                self._write_report(run)
+            except Exception:
+                LOGGER.exception("中断测试部分报告写入失败：run=%s", run.id)
+                continue
+            self._checkpoint_store.remove(run.id)
+            LOGGER.warning("已恢复断电中断的普通测试报告：run=%s", run.id)
 
     def start_sequence(
         self,
@@ -147,6 +222,8 @@ class RunManager:
             raise ValueError("验收计划至少需要一个任务")
         if not 0 <= interval_s <= 3600:
             raise ValueError("执行间隔必须介于 0 和 3600 秒之间")
+        if self._map_marker_navigation_guard():
+            raise RuntimeError("前往地图标记正在进行，请先取消或等待导航结束")
         normalized_preflight = self._normalize_sequence_preflight(execution_preflight)
         automatic_return = bool(normalized_preflight and normalized_preflight["automatic_return"])
         run = RunRecord(
@@ -249,6 +326,7 @@ class RunManager:
         cancel_event = self._cancel_events[run.id]
         resume_event = self._resume_events[run.id]
         run.status, run.started_at = "preparing", now_iso()
+        LOGGER.info("开始验收执行序列：run=%s tasks=%s", run.id, len(cases))
         sequence_context: dict | None = None
         try:
             if execution_preflight is not None:
@@ -406,6 +484,8 @@ class RunManager:
                 status=run.status,
                 message=run.error or "验收序列已结束",
             )
+            log = LOGGER.warning if run.status in {"blocked", "failed"} else LOGGER.info
+            log("验收执行序列结束：run=%s status=%s attempts=%s error=%s", run.id, run.status, len(run.attempts), run.error or "")
 
     @staticmethod
     def _normalize_sequence_preflight(value: dict | None) -> dict | None:
@@ -570,7 +650,8 @@ class RunManager:
             run.status = "cancelling"
             self._cancel_events[run_id].set()
             LOGGER.info("操作者终止剩余轮次：run=%s", run_id)
-            return run
+        self._save_checkpoint(run, attempt_in_progress=run.active_attempt is not None)
+        return run
 
     def resume(self, run_id: str) -> RunRecord | None:
         """由操作者确认车辆回到起点后，恢复失败轮次之后的执行。"""
@@ -581,7 +662,8 @@ class RunManager:
             run.status = "recovering"
             self._resume_events[run_id].set()
             LOGGER.info("操作者确认恢复测试：run=%s", run_id)
-            return run
+        self._save_checkpoint(run, attempt_in_progress=run.active_attempt is not None)
+        return run
 
     def handle_stall_action(self, run_id: str, action: str) -> RunRecord | None:
         """记录操作者对停滞提醒的处置；不强杀正在执行的 ROS 服务调用。"""
@@ -617,6 +699,7 @@ class RunManager:
             scenario_applied = False
             sequence_context = getattr(run, "_sequence_execution_context", None)
             run.status, run.started_at = "preparing", now_iso()
+            self._save_checkpoint(run, attempt_in_progress=False)
             LOGGER.info("开始执行测试计划：run=%s", run.id)
             try:
                 if cancel_event.is_set():
@@ -717,6 +800,7 @@ class RunManager:
                     run.active_attempt = index
                     run.forced_attempt_failure = None
                     attempt_interrupt_event.clear()
+                    self._save_checkpoint(run, attempt_in_progress=True)
                     # 0% 与“尚未收到可验证路线投影”不是一回事。后者必须明确
                     # 标记为不可用，避免多轮切换时网页把未知状态误画成卡住的 0%。
                     run.live_progress = {"visible": True, "attempt": index, "attempt_total": run.requested_count, "state": "正在等待 /map 与 /odom", "progress_available": False, "percent": 0, "points": 0}
@@ -724,6 +808,8 @@ class RunManager:
                     requested_bag_recording = getattr(run, "_bag_recording_request", None)
                     if requested_bag_recording is not None and index == requested_bag_recording.attempt_index:
                         try:
+                            if self._manual_bag_recording_guard():
+                                raise RuntimeError("手动场景录制正在进行，本轮不能同时启动诊断录包")
                             # Capture is a strict prerequisite for its selected
                             # round: never send an unrecorded task after the
                             # operator explicitly requested diagnostic data.
@@ -767,6 +853,7 @@ class RunManager:
                     return_signal_item = getattr(run, "_sequence_attempt_index", index)
                     return_signal_armed = False
                     delivery_evidence = None
+                    LOGGER.info("开始下发测试轮次：run=%s case=%s attempt=%s mode=%s", run.id, run.case.id, getattr(run, "_sequence_attempt_index", index), run.case.execution_mode)
                     try:
                         # 只在全部预检完成、即将真正下发当前任务时武装。这样上
                         # 一项任务迟到的 103 不会在下一项预检期间误触发返程。
@@ -871,19 +958,25 @@ class RunManager:
                         run.active_attempt = None
                         run.forced_attempt_failure = None
                         run.status = "cancelled"
+                        LOGGER.info("测试轮次结束：run=%s case=%s attempt=%s status=cancelled duration_s=%.3f message=%s", run.id, run.case.id, getattr(run, "_sequence_attempt_index", index), duration, message)
                         break
                     if existing:
                         existing.status, existing.message, existing.duration_s, existing.trajectory, existing.delivery_evidence, existing.relocalization_count, existing.bag_recording = "failed", message, duration, trajectory, delivery_evidence, relocalization_count, bag_recording_summary
                     else:
                         run.attempts.append(AttemptResult(index, "passed" if ok else "failed", message, duration, started, trajectory, run.case.id, run.case.filename, delivery_evidence, relocalization_count, bag_recording_summary))
+                    attempt_result = existing if existing else run.attempts[-1]
+                    log = LOGGER.warning if attempt_result.status == "failed" else LOGGER.info
+                    log("测试轮次结束：run=%s case=%s attempt=%s status=%s duration_s=%.3f message=%s", run.id, run.case.id, getattr(run, "_sequence_attempt_index", index), attempt_result.status, duration, message)
                     run.active_attempt = None
                     run.forced_attempt_failure = None
+                    self._save_checkpoint(run, attempt_in_progress=False)
                     if not ok:
                         if index >= run.requested_count:
                             # 最后一轮已真实记录为失败；计划已结束，不需要人工恢复。
                             index += 1
                             continue
                         failure_message = f"T-{index:03d} 执行失败，已记录为失败。请将车辆人工恢复至测试起点后继续剩余 {run.requested_count - index} 轮。"
+                        LOGGER.warning("测试等待人工恢复：run=%s attempt=%s", run.id, index)
                         while not cancel_event.is_set():
                             run.status, run.error, run.live_progress = "awaiting_recovery", failure_message, None
                             if not resume_event.wait(0.5):
@@ -937,12 +1030,16 @@ class RunManager:
                     self._restore_case_scenario(run)
                 run.finished_at = now_iso()
                 if not getattr(run, "_skip_report", False):
+                    self._save_checkpoint(run, attempt_in_progress=False)
                     try:
                         self._write_report(run)
+                        if self._checkpoint_enabled(run):
+                            self._checkpoint_store.remove(run.id)
                     except Exception as exc:
                         run.error = f"{run.error or ''} 报告写入失败：{exc}".strip()
                         LOGGER.exception("测试报告写入失败：run=%s", run.id)
-                LOGGER.info("测试计划结束：run=%s status=%s", run.id, run.status)
+                log = LOGGER.warning if run.status in {"blocked", "failed"} else LOGGER.info
+                log("测试计划结束：run=%s status=%s error=%s", run.id, run.status, run.error or "")
 
     def _apply_case_scenario(self, run: RunRecord) -> dict:
         """必须在任何 Supervisor 编排动作前完成，以确保重启读取到新参数。"""
@@ -1098,6 +1195,8 @@ class RunManager:
     @staticmethod
     def _record_intervention(run: RunRecord, attempt: int, action: str, detail: str) -> None:
         run.interventions.append({"at": now_iso(), "attempt": attempt, "action": action, "detail": detail})
+        log = LOGGER.warning if action == "recovery_blocked" else LOGGER.info
+        log("测试人工处置：run=%s attempt=%s action=%s detail=%s", run.id, attempt, action, detail)
 
     def _recover_after_manual_intervention(self, run: RunRecord, cancel_event: threading.Event | None = None, *, settings_override=None, skip_orchestration: bool = False) -> tuple[bool, str]:
         """继续前完整重做依赖编排、服务发现与最终节点总闸。"""
@@ -1137,13 +1236,44 @@ class RunManager:
         self.report_dir.mkdir(parents=True, exist_ok=True)
         stem = self._report_stem(run)
         csv_target = self.report_dir / f"{stem}.csv"
-        with csv_target.open("w", newline="", encoding="utf-8-sig") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(["Run_ID", "Test_ID", "Config_File", "Community", "Building", "Unit", "Floor", "Door", "Status", "Message", "Duration_s", "Started_At", "Relocalization_Count"])
-            for item in run.attempts:
-                p = run.case.parameters
-                writer.writerow([run.id, f"T-{item.index:03d}", run.case.filename, p.community, p.building, p.unit, p.floor, p.door, item.status, item.message, item.duration_s, item.started_at, _relocalization_count(item.relocalization_count)])
-        self._write_html_report(run, self.report_dir / f"{stem}.html", csv_target.name)
+        html_target = self.report_dir / f"{stem}.html"
+        csv_descriptor, csv_temporary = tempfile.mkstemp(prefix=f".{stem}.", suffix=".csv.tmp", dir=self.report_dir)
+        html_descriptor, html_temporary = tempfile.mkstemp(prefix=f".{stem}.", suffix=".html.tmp", dir=self.report_dir)
+        try:
+            with os.fdopen(csv_descriptor, "w", newline="", encoding="utf-8-sig") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["Run_ID", "Test_ID", "Config_File", "Community", "Building", "Unit", "Floor", "Door", "Status", "Message", "Duration_s", "Started_At", "Relocalization_Count"])
+                for item in run.attempts:
+                    p = run.case.parameters
+                    writer.writerow([run.id, f"T-{item.index:03d}", run.case.filename, p.community, p.building, p.unit, p.floor, p.door, item.status, item.message, item.duration_s, item.started_at, _relocalization_count(item.relocalization_count)])
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.close(html_descriptor)
+            html_descriptor = None
+            self._write_html_report(run, Path(html_temporary), csv_target.name)
+            with Path(html_temporary).open("rb") as handle:
+                os.fsync(handle.fileno())
+            os.replace(csv_temporary, csv_target)
+            os.replace(html_temporary, html_target)
+            RunCheckpointStore._fsync_directory(self.report_dir)
+        except Exception:
+            if html_descriptor is not None:
+                os.close(html_descriptor)
+            for temporary in (csv_temporary, html_temporary):
+                try:
+                    Path(temporary).unlink()
+                except FileNotFoundError:
+                    pass
+            raise
+        try:
+            NativeReportArchive(self.report_dir).archive_test_report(
+                html_filename=html_target.name,
+                run=run,
+            )
+        except (NativeReportArchiveError, OSError) as exc:
+            # HTML/CSV are already valid legacy outputs.  Native evidence is
+            # deliberately additive and may not erase an operator report.
+            LOGGER.warning("原生测试报告归档失败：run=%s error=%s", run.id, exc)
 
     def _report_stem(self, run: RunRecord) -> str:
         """生成面向测试人员可读且可安全落盘的报告文件名。"""
@@ -1164,10 +1294,16 @@ class RunManager:
         esc = lambda value: html.escape(str(value or "—"))
         case_alias = self._case_alias(run.case.id)
         case_display_name = case_alias or run.case.filename
-        status_text = {"completed": "已完成", "failed": "失败已终止", "cancelled": "已取消", "blocked": "已拦截"}.get(run.status, run.status)
+        status_text = {"completed": "已完成", "failed": "失败已终止", "cancelled": "已取消", "blocked": "已拦截", "interrupted": "意外断电中断"}.get(run.status, run.status)
+        attempt_status_text = {
+            "passed": "通过",
+            "failed": "失败",
+            "cancelled": "已取消",
+            "unknown_after_power_loss": "结果未知（断电）",
+        }
         total_relocalizations = sum(_relocalization_count(item.relocalization_count) for item in run.attempts)
         rows = "".join(
-            f"<tr><td>T-{item.index:03d}</td><td>{esc(_format_report_time(item.started_at))}</td><td class=\"{esc(item.status)}\">{esc(item.status.upper())}</td><td>{item.duration_s / 60:.2f} 分钟</td><td>{_relocalization_count(item.relocalization_count)}</td><td>{esc(item.message)}</td></tr>"
+            f"<tr><td>T-{item.index:03d}</td><td>{esc(_format_report_time(item.started_at))}</td><td class=\"{esc(item.status)}\">{esc(attempt_status_text.get(item.status, item.status))}</td><td>{item.duration_s / 60:.2f} 分钟</td><td>{_relocalization_count(item.relocalization_count)}</td><td>{esc(item.message)}</td></tr>"
             for item in run.attempts
         ) or "<tr><td colspan=\"6\">未执行到任务调用阶段。</td></tr>"
         action_labels = {
@@ -1204,7 +1340,7 @@ class RunManager:
             evidence.append(f"<section class=\"attempt\"><h3>T-{item.index:03d} 轨迹证据 <span>{esc(item.status.upper())}</span></h3>{body}</section>")
         evidence_html = "".join(evidence) or "<p class=\"notice\">测试未进入轨迹采集阶段，因此没有运行轨迹。</p>"
         p = run.case.parameters
-        status_class = run.status if run.status in {"completed", "failed", "cancelled", "blocked"} else "unknown"
+        status_class = run.status if run.status in {"completed", "failed", "cancelled", "blocked", "interrupted"} else "unknown"
         target.write_text(f'''<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1242,7 +1378,7 @@ class RunManager:
     .status-badge::before {{ content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }}
     .status-badge.completed {{ color: var(--success); background: var(--success-soft); }}
     .status-badge.failed, .status-badge.blocked {{ color: var(--danger); background: var(--danger-soft); }}
-    .status-badge.cancelled {{ color: var(--warning); background: var(--warning-soft); }}
+    .status-badge.cancelled, .status-badge.interrupted {{ color: var(--warning); background: var(--warning-soft); }}
     .status-badge.unknown {{ color: var(--muted); background: var(--surface-subtle); }}
     .report-summary {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }}
     .summary-metric {{ min-height: 116px; padding: 18px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); }}
@@ -1272,6 +1408,7 @@ class RunManager:
     td.passed {{ color: var(--success); font-weight: 700; }}
     td.failed {{ color: var(--danger); font-weight: 700; }}
     td.cancelled {{ color: var(--warning); font-weight: 700; }}
+    td.unknown_after_power_loss {{ color: var(--warning); font-weight: 700; }}
     .evidence-card {{ break-inside: avoid; margin-top: 16px; padding: 22px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); }}
     .evidence-card:first-of-type {{ margin-top: 0; }}
     .evidence-card h3 {{ display: flex; align-items: center; gap: 8px; margin: 0 0 14px; font-size: 16px; letter-spacing: -.015em; }}
@@ -1318,6 +1455,7 @@ class RunManager:
       <article class="summary-metric"><small>计划轮次</small><strong>{run.requested_count}</strong><span class="metric-detail">本次计划执行总数</span></article>
       <article class="summary-metric"><small>已执行轮次</small><strong>{summary['completed']}</strong><span class="metric-detail">已产生结果的轮次</span></article>
       <article class="summary-metric"><small>通过 / 失败</small><strong>{summary['passed']} / {summary['failed']}</strong><span class="metric-detail">取消 {summary['cancelled']} 轮</span></article>
+      <article class="summary-metric"><small>结果未知</small><strong>{summary['unknown']}</strong><span class="metric-detail">意外断电时未取得可信结果</span></article>
       <article class="summary-metric"><small>通过率</small><strong>{summary['passRate']}%</strong><span class="metric-detail">取消与未执行不计入</span></article>
       <article class="summary-metric"><small>重定位次数</small><strong>{total_relocalizations}</strong><span class="metric-detail">本次运行累计</span></article>
     </section>
@@ -1325,7 +1463,7 @@ class RunManager:
     <section class="pass-rate" aria-label="通过率构成">
       <div class="pass-rate-head"><h2>已执行轮次通过率</h2><b>{summary['passRate']}%</b></div>
       <div class="progress-track" role="img" aria-label="通过率 {summary['passRate']}%"><div class="progress-value"></div></div>
-      <p>通过 {summary['passed']} 轮；失败 {summary['failed']} 轮；已取消 {summary['cancelled']} 轮不计入通过率。</p>
+      <p>通过 {summary['passed']} 轮；失败 {summary['failed']} 轮；结果未知 {summary['unknown']} 轮、已取消 {summary['cancelled']} 轮和未执行轮次不计入通过率。</p>
     </section>
 
     <section class="section-card">
@@ -1378,6 +1516,7 @@ class RunManager:
         saved_plan = trajectory.get("route_plan")
         ideal_routes = MapAssetCache.ideal_routes_from_plan(saved_plan) if isinstance(saved_plan, list) else MapAssetCache.ideal_routes(run.case.source, assets)
         visualizations = []
+        frozen_maps = []
         render_errors = []
         virtual_walls: dict[str, list[dict]] = {}
         # 同一轮可出现 P1→P2→P1。按地图汇总多个独立路径，不能只保留最后一段，也不能跨切图强连直线。
@@ -1416,6 +1555,13 @@ class RunManager:
         for asset in assets:
             segment = segments_by_asset.get(asset.id, {"map_id": asset.id, "map_label": asset.label, "paths": [], "relocalizations": []})
             svg_target = target_dir / f"T-{index:03d}_{asset.id}.svg"
+            frozen_target = target_dir / f"T-{index:03d}_{asset.id}.map.png"
+            try:
+                frozen_maps.append(freeze_map_png(asset, frozen_target, maximum_bytes=16 * 1024 * 1024))
+            except (OSError, TrajectoryRenderError) as exc:
+                # Native evidence is additive.  The established HTML report
+                # remains available when a map cannot be frozen safely.
+                render_errors.append(f"{asset.label} 冻结底图：{exc}")
             try:
                 walls = MapAssetCache.virtual_walls(asset)
                 virtual_walls[asset.id] = walls
@@ -1431,7 +1577,21 @@ class RunManager:
         trajectory["ideal_routes"] = ideal_routes
         trajectory["virtual_walls"] = virtual_walls
         trajectory["visualizations"] = visualizations
+        trajectory["frozen_maps"] = frozen_maps
         if render_errors:
             trajectory["render_errors"] = render_errors
-        target.write_text(json.dumps(trajectory, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{target.stem}.", suffix=".tmp", dir=target.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(trajectory, handle, ensure_ascii=False, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+            RunCheckpointStore._fsync_directory(target.parent)
+        except Exception:
+            try:
+                Path(temporary).unlink()
+            except FileNotFoundError:
+                pass
+            raise
         return target

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import time
+from unittest.mock import patch
 from types import SimpleNamespace
 from pathlib import Path
 
-from autodrive_console.models import MultiDestination, MultiTaskRequest, TaskParameters, TestCase as AcceptanceTestCase
+from autodrive_console.models import AttemptResult, MultiDestination, MultiTaskRequest, RunRecord, TaskParameters, TestCase as AcceptanceTestCase
+from autodrive_console.run_checkpoint import RunCheckpointStore
 from autodrive_console.run_manager import RunManager
 
 
@@ -50,6 +52,62 @@ class FakeExecutor:
                 for item in request.destinations
             ],
         )
+
+
+def test_manager_recovers_power_loss_as_unknown_without_executing_robot_code(tmp_path):
+    reports = tmp_path / "reports"
+    case = AcceptanceTestCase("case", "case.json", "普通测试", TaskParameters("园区", 1, 1, 1, 101), "unused.json")
+    original = RunRecord(
+        "123456789abc", case, 10, 0,
+        status="running", started_at="2026-10-09T18:00:00+08:00",
+        attempts=[AttemptResult(1, "passed", "已完成", 1.0, "2026-10-09T18:00:01+08:00")],
+        active_attempt=2,
+    )
+    RunCheckpointStore(reports).save(original, attempt_in_progress=True)
+
+    class NeverExecute:
+        def __getattr__(self, name):
+            raise AssertionError(f"recovery must not access executor.{name}")
+
+    manager = RunManager(reports, NeverExecute(), FakeSettings())
+    recovered = manager.get(original.id)
+
+    assert recovered is not None
+    assert recovered.status == "interrupted"
+    assert [(item.index, item.status) for item in recovered.attempts] == [
+        (1, "passed"),
+        (2, "unknown_after_power_loss"),
+    ]
+    report = next(reports.glob("*.html"))
+    assert report.is_file()
+    assert "意外断电中断" in report.read_text(encoding="utf-8")
+    assert "结果未知（断电）" in report.read_text(encoding="utf-8")
+    assert next(reports.glob("*.csv")).is_file()
+    assert not (reports / ".run-checkpoints" / f"{original.id}.json").exists()
+
+
+def test_report_does_not_publish_csv_when_html_generation_fails(tmp_path):
+    reports = tmp_path / "reports"
+    run = RunRecord(
+        "123456789abc",
+        AcceptanceTestCase("case", "case.json", "普通测试", TaskParameters("园区", 1, 1, 1, 101), "unused.json"),
+        1,
+        0,
+        status="interrupted",
+        started_at="2026-10-09T18:00:00+08:00",
+    )
+    manager = RunManager(reports, FakeExecutor(), FakeSettings())
+
+    with patch.object(manager, "_write_html_report", side_effect=OSError("disk full")):
+        try:
+            manager._write_report(run)
+        except OSError:
+            pass
+        else:
+            raise AssertionError("report write must propagate an incomplete pair")
+
+    assert not list(reports.glob("*.csv"))
+    assert not list(reports.glob("*.html"))
 
 
 def test_run_manager_dispatches_one_r6b_chain_to_execute_multi(monkeypatch, tmp_path):

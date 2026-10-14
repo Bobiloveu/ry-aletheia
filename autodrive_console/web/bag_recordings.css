@@ -1,1 +1,24 @@
-header .text-button{width:auto;height:max-content}.archive-list{display:grid;gap:10px}.archive-card{display:grid;grid-template-columns:minmax(260px,1fr) auto;gap:18px;padding:15px;border:1px solid #203b55;border-radius:6px;background:#0a1726}.archive-card h3{font:600 13px ui-monospace,monospace;margin:0;color:#dbe8f5;overflow-wrap:anywhere}.archive-card p{margin:7px 0 0;color:#91a8bd;font-size:11px}.archive-meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.archive-meta span{padding:4px 6px;border:1px solid #264662;border-radius:3px;color:#aac3d8;font:9px ui-monospace,monospace}.audit-badge{color:#75e2bc!important;border-color:#1d6556!important}.audit-badge.warning{color:#f0be69!important;border-color:#705625!important}.audit-badge.failed{color:#ff8296!important;border-color:#733344!important}.archive-actions{display:flex;align-items:center;gap:7px}.archive-actions button{width:auto;margin:0;padding:8px 11px;box-shadow:none}.archive-actions .delete{border-color:#8e3b4d;background:#562233}dialog{color:var(--ink);background:#102034;border:1px solid #315273;border-radius:8px;max-width:min(720px,92vw)}dialog::backdrop{background:#020712aa}dialog article{min-width:min(620px,82vw)}dialog .text-button{float:right;width:auto;margin:0}dialog pre{white-space:pre-wrap;overflow:auto;max-height:60vh;padding:12px;border-radius:5px;background:#091524;color:#b8cadb;font:11px ui-monospace,monospace}@media(max-width:700px){.archive-card{grid-template-columns:1fr}.archive-actions{justify-content:flex-end}dialog article{min-width:0}}
+header .text-button { width: auto; height: max-content; }
+.manual-recording-panel { display: flex; align-items: center; justify-content: space-between; gap: 22px; margin-bottom: 18px; }
+.manual-recording-panel h2 { margin: 3px 0 6px; }
+.manual-recording-panel p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+.manual-recording-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 0 0 auto; }
+.manual-recording-actions .outline-button, .manual-recording-actions button { width: auto; margin: 0; white-space: nowrap; }
+.manual-recording-actions .delete, .archive-actions .delete { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); background: var(--danger-soft); }
+.archive-list { display: grid; gap: 10px; }
+.archive-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; padding: 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-sunken); }
+.archive-card h3 { margin: 0; color: var(--ink); font: 650 13px ui-monospace, monospace; overflow-wrap: anywhere; }
+.archive-card p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.archive-meta { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 11px; }
+.archive-meta span { padding: 4px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: color-mix(in srgb, var(--surface-raised) 72%, transparent); font: 10px ui-monospace, monospace; }
+.audit-badge { color: var(--success) !important; border-color: color-mix(in srgb, var(--success) 42%, var(--line)) !important; background: var(--success-soft) !important; }
+.audit-badge.warning { color: var(--warning) !important; border-color: color-mix(in srgb, var(--warning) 42%, var(--line)) !important; background: color-mix(in srgb, var(--warning) 13%, transparent) !important; }
+.audit-badge.failed { color: var(--danger) !important; border-color: color-mix(in srgb, var(--danger) 42%, var(--line)) !important; background: var(--danger-soft) !important; }
+.archive-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }
+.archive-actions button { width: auto; margin: 0; padding: 8px 11px; box-shadow: none; }
+dialog { color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); max-width: min(720px, 92vw); }
+dialog::backdrop { background: rgb(0 0 0 / 52%); }
+dialog article { min-width: min(620px, 82vw); }
+dialog .text-button { float: right; width: auto; margin: 0; }
+dialog pre { white-space: pre-wrap; overflow: auto; max-height: 60vh; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-sunken); color: var(--ink); font: 11px ui-monospace, monospace; }
+@media (max-width: 700px) { .manual-recording-panel { align-items: flex-start; flex-direction: column; } .archive-card { grid-template-columns: 1fr; } .archive-actions { justify-content: flex-start; } dialog article { min-width: 0; } }

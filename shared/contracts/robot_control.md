@@ -30,6 +30,16 @@
 
 只有机器人 Backend 可以发布或订阅这些 Topic。Web 和 Mobile 不得直接使用 ROS、发布 Twist 或自行选择控制源 Topic。
 
+### 前往地图标记的 Nav2 所有权
+
+Backend 的 `MapMarkerNavigationController` 是唯一可以使用 `/navigate_to_pose`（`nav2_msgs/action/NavigateToPose`）的 Aletheia 组件。它只在 `/control_source_state` 已确认 `navigation`、急停已确认 `normal`、定位状态为 `normal`、当前地图严格匹配且没有活动测试、手动会话或手动重定位占用时，向 `map` frame 发送一个受控地图标记 Goal。浏览器和 Mobile 不得发布 `/goal_pose`、创建 Action、传入坐标、航向、地图路径、速度或行为树，也不得把该能力伪装为 `/command`、`/vector` 或手动控制扩展。
+
+该操作进行中的 `checking`、`navigating`、`cancelling`、`cancellation_unconfirmed` 均为车辆控制互斥占用。新手动会话和手动重定位必须被拒绝；反向地，确认的 `miniapp` 会话、重定位占用、急停、控制源丢失或定位异常必须使控制器请求取消自己的 Goal。控制器不切换到 `miniapp`，不发布 Twist，只通过 Nav2 Goal cancel 终止操作。
+
+`/is_emergency_stop=false` 只在新鲜确认窗口内可作为运动或地图标记导航许可。手动会话、重定位占用、切至 `miniapp` 或地图标记导航进行时，Backend 必须受限地异步复查 `/get_emergency_stop`；Topic/服务确认超时或连续服务失败会清空目标、发送 STOP 并将急停状态变为 `unknown`。地图标记刚进入 `checking` 而急停仍为 `pending` 时，Backend 最多等待一个固定且短暂的确认窗口；期间持续互锁且绝不发送 Nav2 Goal，窗口结束仍未确认则拒绝。不能持续确认急停的车辆不得保留既有 `false` 的运动权限。
+
+地图标记导航的路线数据只能由上述 Backend Action worker 在已接受的自有 Goal 期间只读订阅 `/plan`；它不是新的控制入口。worker 只公开经过 `map` frame、有限坐标、当前 Goal 终点匹配和点数上限校验的二维快照，并在取消、终态、失效安全条件、切图和新 Goal 时清空。Web 只消费该受控快照，Mobile 不消费或展示路线数据。
+
 ## 控制源状态机
 
 允许 Aletheia 请求的控制源值为 `navigation` 和 `miniapp`。车端状态 Topic 还可能报告如 `remote` 的外部控制源；任何非空回传均为已确认的实际状态。`remote` 只表示当前来源，不是浏览器禁用切换请求的理由。
@@ -41,6 +51,14 @@
 5. 若其他控制源接管、控制源确认超时或 ROS2 控制器不可用，Backend 必须清除运动并拒绝后续移动。
 6. 只有 `/is_emergency_stop=false` 且控制源已实际确认 `miniapp` 时，手动会话才允许输出非零 Twist。`true` 或 `unknown` 会立即停止并拒绝后续运动。
 7. 软件解除急停只发布固定 `/command` 报文，随后最多等待 4.0 s；仅在收到 `/is_emergency_stop=false` 后才可显示成功。该动作不请求也不改变控制源。
+
+### 手动重定位占用
+
+PC 手动重定位是 Backend 内部的不可驾驶 `miniapp` 占用，不是 `/api/vehicle-control/enter` 会话。它可在自动测试任务执行时建立，但必须先清空运动目标、发布 STOP，并等待 `/control_source_state=miniapp` 的真实确认。占用期间普通浏览器手动会话、非零速度和常规 `navigation` 请求均被拒绝；测试任务状态不会被 HTTP 控制层取消、暂停或改写。
+
+定位算法自身的自动重定位/初始化/异常状态不阻止建立该停车占用。操作者可在失败占用上显式重新开始手动对齐：清空目标并重发 STOP，若实际来源不为 miniapp 则重新请求并等待真实来源确认；不经过 navigation，不创建可驾驶会话。活动占用、恢复/切源在途、手动会话和地图标记导航仍互斥。影响消费者为 Backend 与 PC Web，Mobile 控制契约不变。
+
+第二阶段重定位服务的 `success=true` 仅表示车辆接受外部位姿初始化请求，并不表示定位完成。Backend 必须在该请求之后确认 `/localization/status` 经历 `initializing` 或 `relocalizing` 再回到新鲜的 `normal`，才请求 `navigation` 并等待真实确认。服务未明确确认、定位状态未完成该转换、超时、拒绝或恢复失败时必须保持 `miniapp` 停车，不能假设车辆已恢复自动驾驶；仅专用的显式恢复操作可以再次请求 `navigation`。
 
 ## 受控 HTTP API
 
@@ -107,7 +125,7 @@
 
 Backend 以 **20 Hz** 发布。保持输入必须在 **350 ms** 前刷新；会话心跳必须在 **1200 ms** 前到达。缺失输入或心跳会触发安全停止；浏览器 UI 的刷新频率不能代替 Backend 看门狗。两项请求速度必须是 **0.10–1.00**（含边界）范围内的有限值。默认线速度为 **0.20 m/s**，默认角速度为 **0.30 rad/s**。客户端不能覆盖这些限制。
 
-`car_state_sync.control_source` 与 `car_state_sync.emergency_stop` 取值为 `pending` 或 `confirmed`，分别说明实际控制源和急停真值是否已从车端收到。控制源收到 `remote` 等外部值时也必须为 `confirmed`，客户端应展示外部接管而非“正在读取”。客户端可把首次 `pending` 呈现为“正在读取车端状态”，但不得据此启用接管或运动；它不是将 unknown 推断为正常。
+`car_state_sync.control_source` 与 `car_state_sync.emergency_stop` 取值为 `pending` 或 `confirmed`，分别说明实际控制源和急停真值是否已从车端收到。控制源收到 `remote` 等外部值时也必须为 `confirmed`，客户端应展示外部接管而非“正在读取”。急停确认窗口到期后的 `pending` 与首次读取语义相同：客户端必须显示“正在重新确认”，不得将缓存的 `false` 显示或推断为正常、启用接管或运动。
 
 Desktop Web 的车辆执行状态页通过 Backend 内部 `VehicleExecutionStatusMonitor` 只读消费本控制器快照：`emergency_stop.state=triggered` 显示“急停已触发”，已确认的 `actual_source=miniapp` 显示“手动控制中”。这不创建新的浏览器控制接口、不改变多端会话或底盘安全门控，也不得由浏览器会话、点击结果或 `pending` 状态推断。
 
@@ -115,7 +133,7 @@ Desktop Web 的车辆执行状态页通过 Backend 内部 `VehicleExecutionStatu
 
 `/vector` 不是直接 ROS 速度接口：`target_linear = linear_ratio × linear_mps`，`target_angular = angular_ratio × angular_radps`。移动端和 PC Web 都以车头向上为视觉坐标：上/下分别为正/负 `linear_ratio`，左/右分别为正/负 `angular_ratio`；因此右上为正线速度与负角速度，即前进并右转的弧线。它不是横向右前平移。新的向量目标与旧的 `/command` 目标互斥；多个客户端中最后一条有效 `/command` 或 `/vector` 更新该唯一目标。任一后续 `/speed` 更新必须按保存的比例重新换算。急停、未知急停、外部切源、拥有当前目标的会话输入/心跳超时、任一 `stop`、`release`、`exit` 和 `(0,0)` 均清除两类目标并使用 `stop_acc`。每次实际清除运动都发布固定三帧零 Twist，之后停止发布；这不是持续制动流。
 
-`emergency_stop.state` 只能为 `normal`、`triggered` 或 `unknown`；unknown 不等价于 normal。`release` 为 `idle`、`waiting_confirmation`、`confirmed`、`failed` 或 `unconfirmable`，只能由实际 Bool 回调或超时变更。非零 Twist 使用持久化的 `movement_acc`，任何零 Twist（主动停止、输入/心跳超时、退出或外部控制源接管）使用 `stop_acc`。解除急停的固定 `acc=2000`、`press=1400` 与这些手动驾驶参数保持分离。
+`emergency_stop.state` 只能为 `normal`、`triggered` 或 `unknown`；只有当前确认窗口内的车端 `false` 才能是 `normal`，unknown 不等价于 normal。`release` 为 `idle`、`waiting_confirmation`、`confirmed`、`failed` 或 `unconfirmable`，只能由实际 Bool 回调或超时变更。非零 Twist 使用持久化的 `movement_acc`，任何零 Twist（主动停止、输入/心跳超时、退出或外部控制源接管）使用 `stop_acc`。解除急停的固定 `acc=2000`、`press=1400` 与这些手动驾驶参数保持分离。
 
 `/is_emergency_stop` 订阅使用 `RELIABLE + TRANSIENT_LOCAL` QoS，以读取底盘锁存的当前状态。控制台启动期若仍为 `unknown`，同一 ROS 节点会以非阻塞、至多一个在途请求的方式调用 `/get_emergency_stop`；它只可填补 unknown，绝不能覆盖已由 Topic 确认的状态。服务不可用、超时或异常时仍为 `unknown` 并锁定手动运动，不能以订阅创建成功、旧缓存或服务失败推断为未急停。
 

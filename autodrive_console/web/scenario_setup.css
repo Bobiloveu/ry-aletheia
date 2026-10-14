@@ -50,6 +50,24 @@
 .scenario-state p {
   margin: 4px 0 0;
 }
+.scenario-activation {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+  padding: 13px;
+  border: 1px solid color-mix(in srgb, var(--accent) 46%, var(--line));
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.scenario-activation[hidden] { display: none; }
+.scenario-activation > strong { font-size: 13px; }
+.scenario-activation > p { margin: 0; color: var(--muted); }
+.scenario-activation-stages { display: grid; gap: 5px; margin: 2px 0 0; padding: 0; list-style: none; }
+.scenario-activation-stages li { display: grid; gap: 2px; padding-top: 6px; border-top: 1px solid color-mix(in srgb, var(--accent) 24%, transparent); }
+.scenario-activation-stages span { color: var(--muted); font: 10px ui-monospace, monospace; overflow-wrap: anywhere; }
 .scenario-state.pending {
   border-color: #e0a44e;
   background: #302617;
@@ -171,6 +189,12 @@ body.theme-light .scenario-state.error {
   border-color: #c77983;
   color: #823440;
 }
+html[data-theme="light"] .scenario-activation,
+body.theme-light .scenario-activation { background: #edf6ff; color: #18334c; }
+html[data-theme="light"] .scenario-activation > p,
+body.theme-light .scenario-activation > p,
+html[data-theme="light"] .scenario-activation-stages span,
+body.theme-light .scenario-activation-stages span { color: #587087; }
 html[data-theme="light"] .scenario-profile,
 body.theme-light .scenario-profile {
   background: #f7fbfe;

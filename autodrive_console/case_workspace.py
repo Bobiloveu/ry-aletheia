@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import tempfile
+import threading
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -13,6 +15,9 @@ from pathlib import Path
 
 from .case_store import CaseStore
 from .models import TestCase
+
+
+LOGGER = logging.getLogger("ry_aletheia.case_workspace")
 
 
 class CasePackageError(ValueError):
@@ -39,6 +44,17 @@ class CaseWorkspace:
     def __init__(self, config_dir: Path, case_dir: Path) -> None:
         self.path = config_dir / "case_workspace.json"
         self.case_dir = case_dir
+        self._diagnostic_lock = threading.Lock()
+        self._load_failed = False
+
+    def _record_load_result(self, error: Exception | None) -> None:
+        with self._diagnostic_lock:
+            if error is not None and not self._load_failed:
+                self._load_failed = True
+                LOGGER.warning("用例管理信息读取降级，使用空登记表：error_type=%s", type(error).__name__)
+            elif error is None and self._load_failed:
+                self._load_failed = False
+                LOGGER.info("用例管理信息读取已恢复")
 
     @staticmethod
     def _now() -> str:
@@ -50,16 +66,19 @@ class CaseWorkspace:
 
     def load(self) -> dict:
         if not self.path.is_file():
+            self._record_load_result(None)
             return self._default_document()
         try:
             document = json.loads(self.path.read_text(encoding="utf-8"))
             if not isinstance(document, dict) or document.get("schema") != self.SCHEMA or not isinstance(document.get("cases"), dict):
                 raise ValueError
+            self._record_load_result(None)
             return document
-        except (OSError, json.JSONDecodeError, ValueError):
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
             # A broken optional registry must never prevent existing task JSON
             # files from being discovered/executed.  The UI reports untracked
             # cases and the next metadata write repairs the registry.
+            self._record_load_result(exc)
             return self._default_document()
 
     def _save(self, document: dict) -> None:

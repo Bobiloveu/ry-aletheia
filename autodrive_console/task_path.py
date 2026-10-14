@@ -15,7 +15,7 @@ class TaskPathError(ValueError):
 
 
 TASK_TRANSITION_SPEED_MODES = frozenset({
-    "task_point", "single_point", "slow_point", "narrow_point",
+    "normal", "task_point", "single_point", "slow_point", "narrow_point",
 })
 
 
@@ -39,7 +39,7 @@ def task_segment_transitions(
         speed_mode = str(waypoint.get("speed_mode") or "single_point")
         if speed_mode not in TASK_TRANSITION_SPEED_MODES:
             raise TaskPathError(
-                "过渡点速度模式仅支持 task_point、single_point、slow_point 或 narrow_point"
+                "过渡点速度模式仅支持 normal、task_point、single_point、slow_point 或 narrow_point"
             )
         transitions.append({
             "x": _number(waypoint.get("x"), "任务过渡点 x 坐标"),

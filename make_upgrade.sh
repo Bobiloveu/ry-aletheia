@@ -5,7 +5,9 @@ set -euo pipefail
 # ShmSDK 相机模板。--deb 同时生成内置 MediaMTX 与 VAAPI GStreamer runtime、
 # 普通账户视频启动器的完整首次安装 DEB。
 # 用法：./make_upgrade.sh <版本号> [--shm] [--deb]
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+source "$ROOT/scripts/build-environment.sh"
+aletheia_enter_build_environment "$ROOT" "$ROOT/make_upgrade.sh" "$@"
 SETUP="$ROOT/install/setup.bash"
 if [[ $# -lt 1 || $# -gt 3 ]]; then
   echo "用法：./make_upgrade.sh <版本号> [--shm] [--deb]" >&2

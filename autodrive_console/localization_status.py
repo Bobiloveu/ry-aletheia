@@ -55,6 +55,10 @@ class LocalizationStatusMonitor:
         self._thread: threading.Thread | None = None
         self._event_sequence = 0
         self._events: deque[dict[str, object]] = deque(maxlen=max(1, int(max_events)))
+        # Manual Service initialization may have fault_id=0. Keep its evidence
+        # separate from the incident stream used by reports and trajectories.
+        self._state_sequence = 0
+        self._state_events: deque[dict[str, object]] = deque(maxlen=max(1, int(max_events)))
         # 事件正文可以限长；故障实例 ID 的去重记忆不能随之淘汰，
         # 否则长时间运行后同一 incident 会被错误地二次计数。
         self._seen_fault_ids: set[object] = set()
@@ -85,7 +89,7 @@ class LocalizationStatusMonitor:
                 LOGGER.exception("销毁定位状态 ROS node 失败")
 
     def observe(self, message: object, *, received_at: float | None = None) -> None:
-        """Normalize one LocalizationStatus message and record a deduplicated reset edge."""
+        """Normalize health and retain independent state and fault histories."""
         state_code = _as_int(getattr(message, "state", None))
         error_code = _as_int(getattr(message, "error_code", None))
         fault_id = _fault_id(getattr(message, "fault_id", None))
@@ -104,8 +108,22 @@ class LocalizationStatusMonitor:
             "label": label,
             "detail": detail,
             "updated_at": received,
+            "state_code": state_code if state_code in _STATE_PUBLIC else None,
+            "error_code": error_code if error_code in _ERROR_DETAILS else None,
+            "error_detail": _ERROR_DETAILS.get(error_code, "错误码不可用"),
+            "error_retained": state_code == 1 and error_code not in {None, 0},
         }
         with self._lock:
+            previous_phase = self._latest.get("phase") if self._latest is not None else None
+            # Repeated normal heartbeats must not evict a short initialization.
+            # Repeated reset samples still establish fresh post-request evidence.
+            if phase != previous_phase or phase in {"initializing", "relocalizing"}:
+                self._state_sequence += 1
+                self._state_events.append({
+                    "sequence": self._state_sequence,
+                    "received_at": received,
+                    "state": phase,
+                })
             self._latest = snapshot
             if state_code == 4 and fault_id is not None and fault_id not in self._seen_fault_ids:
                 self._seen_fault_ids.add(fault_id)
@@ -127,21 +145,37 @@ class LocalizationStatusMonitor:
             runtime_state, runtime_error = self._runtime_state, self._runtime_error
         if latest is None:
             return _unavailable_snapshot(
-                None, _runtime_unavailable_detail(runtime_state, runtime_error)
+                None, _runtime_unavailable_detail(runtime_state, runtime_error), None,
             )
         updated_at = float(latest["updated_at"])
+        age_ms = max(0, round((now - updated_at) * 1000))
         if now - updated_at > self.freshness_s:
             detail = (
                 _runtime_unavailable_detail(runtime_state, runtime_error)
                 if runtime_state == "unavailable"
                 else "等待新的定位状态"
             )
-            return _unavailable_snapshot(updated_at, detail)
+            return _unavailable_snapshot(updated_at, detail, age_ms)
+        latest["age_ms"] = age_ms
         return latest
 
     def cursor(self) -> int:
         with self._lock:
             return self._event_sequence
+
+    def state_cursor(self) -> int:
+        """Mark the current state stream independently of fault incident IDs."""
+        with self._lock:
+            return self._state_sequence
+
+    def state_events_since(self, cursor: int) -> tuple[int, list[dict[str, object]]]:
+        """Return bounded state evidence strictly newer than a manual request."""
+        lower_bound = int(cursor)
+        with self._lock:
+            return self._state_sequence, [
+                dict(event) for event in self._state_events
+                if int(event["sequence"]) > lower_bound
+            ]
 
     def events_since(self, cursor: int) -> tuple[int, list[dict[str, object]]]:
         """Return bounded reset incidents strictly newer than a session cursor."""
@@ -210,12 +244,19 @@ def _fault_id(value: object) -> object | None:
     return normalized if normalized > 0 else None
 
 
-def _unavailable_snapshot(updated_at: float | None, detail: str) -> dict[str, object]:
+def _unavailable_snapshot(
+    updated_at: float | None, detail: str, age_ms: int | None,
+) -> dict[str, object]:
     return {
         "phase": "unavailable",
         "label": "定位状态暂不可用",
         "detail": detail,
         "updated_at": updated_at,
+        "state_code": None,
+        "error_code": None,
+        "error_detail": "错误码不可用",
+        "error_retained": False,
+        "age_ms": age_ms,
     }
 
 

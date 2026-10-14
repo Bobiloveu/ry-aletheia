@@ -81,9 +81,11 @@ def test_onefile_release_builder_uses_vehicle_runtime_for_localization_interface
 
     assert '--runtime-hook "$BUILD_ROOT/packaging/runtime_hooks/ros_runtime_interfaces.py"' in builder
     assert "--exclude-module master_interfaces" in builder
+    assert "--exclude-module lightning" in builder
     assert "--collect-all master_interfaces" not in builder
+    assert "--collect-all lightning" not in builder
     assert "--hidden-import master_interfaces.msg._localization_status" not in builder
-    assert "for package in tf2_msgs; do" in builder
+    assert "for package in tf2_msgs nav2_msgs sensor_msgs; do" in builder
 
 
 def test_robot_dependency_export_does_not_require_optional_localization_message() -> None:

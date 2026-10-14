@@ -57,6 +57,17 @@ export function isRotateHandleHit(component, canvasPoint, map, view) {
   return Math.hypot(point.x - width / 2 - 29, point.y - height / 2 - 9) <= 13;
 }
 
+export function rotationYawFromDrag(drag, pointer) {
+  const start = Math.atan2(drag.center.y - drag.pointer.y, drag.pointer.x - drag.center.x);
+  const current = Math.atan2(drag.center.y - pointer.y, pointer.x - drag.center.x);
+  // The handle is offset from the heading. Apply only the pointer's rotation
+  // since pointerdown, including when its angle crosses the atan2 boundary.
+  const delta = Math.atan2(Math.sin(current - start), Math.cos(current - start));
+  const increment = Math.PI / 18;
+  const yaw = drag.yaw + Math.round(delta / increment) * increment;
+  return Math.atan2(Math.sin(yaw), Math.cos(yaw));
+}
+
 export function zoomAt(view, canvasPoint, deltaY) {
   const old = view.scale;
   const scale = Math.max(5, Math.min(500, old * (deltaY < 0 ? 1.12 : 0.89)));
@@ -65,4 +76,17 @@ export function zoomAt(view, canvasPoint, deltaY) {
     x: canvasPoint.x - ((canvasPoint.x - view.x) * scale) / old,
     y: canvasPoint.y - ((canvasPoint.y - view.y) * scale) / old,
   };
+}
+
+export function nearestCanvasVertex(points, map, view, pointer, tolerancePx = 10) {
+  let nearest = -1, distance = Infinity;
+  for (const [index, point] of points.entries()) {
+    const vertex = mapPointToCanvas(point, map, view);
+    const squared = (pointer.x - vertex.x) ** 2 + (pointer.y - vertex.y) ** 2;
+    if (squared <= tolerancePx ** 2 && squared < distance) {
+      nearest = index;
+      distance = squared;
+    }
+  }
+  return nearest;
 }

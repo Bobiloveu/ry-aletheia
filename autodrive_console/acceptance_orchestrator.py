@@ -24,7 +24,7 @@ from .acceptance_report import AcceptanceReportWriter
 from .models import TestCase, now_iso
 
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("ry_aletheia.acceptance_orchestrator")
 _REPORTABLE_TERMINAL_STATUSES = frozenset({"completed", "cancelled", "blocked", "failed"})
 
 
@@ -199,12 +199,14 @@ class AcceptanceOrchestrator:
                 raise AcceptanceConflict("验收计划没有待执行任务")
             plan.status, plan.current_index = "preparing", 0
             self.plan_store.save(plan)
+            LOGGER.info("Acceptance starting plan=%s items=%d", plan.plan_id, len(cases))
             try:
                 arguments = {"event_callback": lambda event: self._on_run_event(plan.plan_id, event)}
                 if plan.execution_preflight is not None:
                     arguments["execution_preflight"] = deepcopy(plan.execution_preflight)
                 run = self.run_manager.start_sequence(cases, **arguments)
             except Exception as exc:
+                LOGGER.exception("Acceptance start failed plan=%s", plan.plan_id)
                 plan.status = "blocked"
                 plan.updated_at = now_iso()
                 self._archive_terminal_report(plan)
@@ -212,6 +214,7 @@ class AcceptanceOrchestrator:
                 raise AcceptanceConflict(str(exc)) from exc
             plan.status, plan.run_id = "running", run.id
             self.plan_store.save(plan)
+            LOGGER.info("Acceptance started plan=%s run=%s", plan.plan_id, run.id)
             return plan.to_public_dict()
 
     def resume(self, plan_id: str) -> dict[str, Any]:
@@ -224,6 +227,7 @@ class AcceptanceOrchestrator:
             plan.status = "recovering"
             plan.manual_interventions += 1
             self.plan_store.save(plan)
+            LOGGER.info("Acceptance resuming plan=%s run=%s interventions=%d", plan.plan_id, plan.run_id, plan.manual_interventions)
             return plan.to_public_dict()
 
     def cancel(self, plan_id: str) -> dict[str, Any]:
@@ -236,6 +240,7 @@ class AcceptanceOrchestrator:
             # slot reserved until the worker sends its terminal callback.
             plan.status = "cancelling"
             self.plan_store.save(plan)
+            LOGGER.info("Acceptance cancellation requested plan=%s run=%s", plan.plan_id, plan.run_id)
             return plan.to_public_dict()
 
     def resolve_interruption(self, plan_id: str, resolution: str) -> dict[str, Any]:
@@ -419,18 +424,24 @@ class AcceptanceOrchestrator:
                 item.finished_at = now_iso()
                 if not lifecycle_locked:
                     plan.status = "running"
+                LOGGER.info("Acceptance item finished plan=%s item=%d status=%s duration_s=%s",
+                            plan.plan_id, index + 1, item.status, item.duration_s)
             elif event_type == "awaiting_recovery":
                 if not lifecycle_locked:
+                    if plan.status != "awaiting_recovery":
+                        LOGGER.warning("Acceptance awaiting recovery plan=%s item=%d", plan.plan_id, index + 1)
                     plan.status = "awaiting_recovery"
             elif event_type == "recovered":
                 if not lifecycle_locked:
                     plan.status = "running"
+                    LOGGER.info("Acceptance recovered plan=%s item=%d", plan.plan_id, index + 1)
             elif event_type == "sequence_finished":
                 status = str(event.get("status", "failed"))
                 plan.status = "completed" if status == "completed" else status
                 plan.run_id = None
                 plan.current_index = None
                 self._archive_terminal_report(plan)
+                LOGGER.info("Acceptance finished plan=%s status=%s items=%d", plan.plan_id, plan.status, len(plan.items))
             self.plan_store.save(plan)
 
     def _archive_terminal_report(self, plan: AcceptancePlan) -> None:
@@ -444,3 +455,4 @@ class AcceptanceOrchestrator:
             plan.warnings.append(f"验收报告写入失败：{exc}")
             return
         plan.report_filename = report.html_filename
+        LOGGER.info("Acceptance report archived plan=%s status=%s", plan.plan_id, plan.status)

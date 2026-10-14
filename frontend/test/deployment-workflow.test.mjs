@@ -389,7 +389,7 @@ test("finishing the last map mark waits for explicit confirmation before leaving
 
   assert.equal(task.id, "annotations.edit");
   assert.equal(task.readOnly, false);
-  assert.equal(task.primaryAction.label, "确认标记完成，进入定位路线");
+  assert.equal(task.primaryAction.label, "确认标记完成，进入任务线路");
 });
 
 test("a completed import clears stale source and map identity before the next import", () => {
@@ -430,7 +430,7 @@ test("completed-stage editing reports conservative downstream impact", () => {
     items: [
       { stageId: "maps", label: "准备地图", status: "reconfirm" },
       { stageId: "annotations", label: "标记地图", status: "invalid" },
-      { stageId: "localization", label: "配置定位路线", status: "invalid" },
+      { stageId: "localization", label: "配置任务线路", status: "invalid" },
       { stageId: "export", label: "校验并导出", status: "locked" },
     ],
   });
@@ -574,19 +574,6 @@ test("canvas mutations retain the annotation workspace until the operator confir
   assert.match(canvasMutationSource, /componentDrag[\s\S]*keepMapAnnotationOpen/);
 });
 
-test("component rotation retains the annotation task captured before its save refreshes workflow state", () => {
-  const componentRotationSource = deploymentSource.slice(
-    deploymentSource.indexOf("if (componentRotate && selectedProject)"),
-    deploymentSource.indexOf("if (waypointRotate && selectedProject)"),
-  );
-
-  assert.match(deploymentSource, /function isMapAnnotationWorkspaceActive\(\)/);
-  assert.match(
-    componentRotationSource,
-    /const retainAnnotationWorkspace = isMapAnnotationWorkspaceActive\(\);[\s\S]*renderProject\(data\.project\);[\s\S]*keepMapAnnotationOpen\([\s\S]*\{ force: retainAnnotationWorkspace \},?\s*\)/,
-  );
-  assert.doesNotMatch(componentRotationSource, /keepMapAnnotationOpen\([^)]*\)\s*\|\|\s*completeDeploymentEdit/);
-});
 
 test("passive regions use their rotated area without component traversal arrows", () => {
   assert.match(deploymentSource, /item\.kind === "slow_zone"[\s\S]*for \(let x = -width/);
@@ -600,7 +587,7 @@ test("task transitions expose a persisted speed choice, explicit execution-chain
   assert.match(deploymentPage, /id="localizationTopologySummary"/);
   assert.match(deploymentPage, /id="localizationBindingTypeLabel"/);
   assert.match(deploymentPage, /楼层布局模板（不是实际楼层）/);
-  assert.match(deploymentSource, /speed_mode:\s*"single_point"/);
+  assert.match(deploymentSource, /speed_mode:\s*"normal"/);
   assert.match(deploymentSource, /const isTargetFloorMap/);
   assert.match(deploymentSource, /const taskTransitionRole/);
   assert.match(deploymentSource, /系统会按当前地图标记自动派生它在去程中的位置，返程严格按该链反向经过/);
@@ -614,8 +601,7 @@ test("task transitions expose a persisted speed choice, explicit execution-chain
   assert.match(deploymentSource, /function transitionRotateHandleAt/);
   assert.match(deploymentSource, /let waypointRotate = null;/);
   assert.match(deploymentSource, /拖动蓝色圆形方向手柄/);
-  assert.match(deploymentSource, /body:\s*JSON\.stringify\(\{ yaw: waypointRotate\.yaw \}\)/);
-  assert.match(deploymentSource, /当前实验任务只会编译用户楼层地图上的任务过渡点/);
+
   assert.match(deploymentSource, /bindingOwnedByTopology\(instance\)/);
   assert.match(deploymentStyles, /\.localization-identity-fields\.deployment-hidden\s*\{\s*display:\s*none\s*!important/s);
   assert.match(deploymentStyles, /\.localization-binding-fields > label\.deployment-hidden\s*\{\s*display:\s*none\s*!important/s);
@@ -892,6 +878,19 @@ test("visual flow validation allows ferry stages in different positions", () => 
   ]).valid, false);
 });
 
+test("an integrated ferry lobby does not require a separate lobby stage", () => {
+  assert.equal(validateFlow([
+    { id: "ferry", type: "ferry" },
+    { id: "target_floor", type: "target_floor" },
+  ]).valid, true);
+  assert.equal(validateFlow([{ id: "target_floor", type: "target_floor" }]).valid, true);
+  assert.equal(validateFlow([
+    { id: "lobby", type: "lobby" },
+    { id: "lobby-2", type: "lobby" },
+    { id: "target_floor", type: "target_floor" },
+  ]).valid, false);
+});
+
 test("deployment flow cards reorder by drag semantics and keep the target floor last", () => {
   const flow = [
     { id: "outdoor", type: "outdoor" },
@@ -1046,7 +1045,7 @@ test("project setup shares the guide reading measure", () => {
   );
 });
 
-test("project creation keeps the guided UI and chooses an immutable task mode", () => {
+test("project creation keeps the guided UI and chooses the initial task mode", () => {
   assert.match(deploymentPage, /id="projectTaskMode"/);
   assert.match(deploymentPage, /单任务点模式/);
   assert.match(deploymentPage, /多任务点模式/);

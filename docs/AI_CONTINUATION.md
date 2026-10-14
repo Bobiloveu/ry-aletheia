@@ -1,5 +1,21 @@
 # 当前开发断点
 
+## 2026-09-29：Backend Mobile 原生报告数据（最新）
+
+### 已完成
+
+- Backend 新增 `NativeReportArchive`：仅从已保存的结构化轨迹 JSON、验收资产清单和同轮冻结 PNG 归档 schema v1 原生报告；不解析 HTML/CSV/SVG，不读取当前地图，不暴露路径、文件名、URL、原始 ROS 或报告正文。
+- 新测试和验收报告在既有 HTML/CSV 写入后尝试创建原生 sidecar；轨迹采集阶段冻结受尺寸/字节限制的 PNG。历史报告由 HTTP 监听后的低优先级 worker 分批回填；缺少历史冻结 PNG 的轨迹明确标为 `unavailable`，不会伪造地图。
+- 增加报告摘要、分页详情、轨迹、冻结 `map.png` 和采样只读 API；所有 ID/cursor/limit 均受限。畸形请求返回 400，格式正确但不存在、已删除或跨报告的资源返回 404。`GET /api/reports` 仅对有效 sidecar 增量返回 `native_report`；既有 HTML/CSV、PC Web 和 filename 删除行为保持，并在删除时联动 native sidecar/PNG。
+- Shared 契约已标记为 Backend Existing；Mobile 当前不改代码。报告模型、Repository、分页和轨迹工作区已在 2026-09-28 的锁定 FVM 环境通过定向验证。
+
+### 验证与恢复提示
+
+- 2026-09-29 通过 `./scripts/test-backend.sh`：796 passed（仅 2 个既有 PytestCollectionWarning）；`./scripts/test-web.sh`：197 passed，并完成 Vite 生产构建。新增路由级回归覆盖 400/404 区分、旧索引增量兼容、PNG 作用域、删除联动和后台回填。
+- 当前 Backend/Web 工作站没有 `fvm`、`flutter` 或 `dart`，无法在不绕过版本锁定的前提下重跑 Mobile。发布前请在 Mobile profile 运行 `./scripts/test-mobile.sh` 或无代理 `fvm flutter analyze` + `fvm flutter test --no-pub test/features/reports`；随后以实际报告手动验证深/浅色、分页、冻结地图、PNG 失败重试和多地图段。
+- 主要文件：`autodrive_console/native_report_archive.py`、`autodrive_console/{run_manager,acceptance_report,trajectory_render}.py`、`web_console.py`、`tests/test_native_report_archive.py`、`tests/test_offline_modules.py`、`tests/test_acceptance.py`、`shared/contracts/task_execution.md`。
+- Resume Prompt：`阅读 AGENTS.md、autodrive_console/AGENTS.md、shared/contracts/task_execution.md 与本节。保持 Mobile 原生报告只读边界；先在锁定 FVM 环境运行 reports 定向测试，再用新生成和历史回填报告检查 400/404、分页、冻结 PNG、删除联动与 HTML/CSV 兼容。不要在 App 中读取报告文件、当前地图或 ROS。`
+
 ## 2026-09-24：Mobile 非叠层详情与状态过渡修复（最新）
 
 ### 已完成

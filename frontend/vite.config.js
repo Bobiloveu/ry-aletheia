@@ -68,6 +68,11 @@ function previewDashboardAtRoot() {
     name: "ry-aletheia-preview-dashboard-root",
     configureServer(server) {
       server.middlewares.use((request, _response, next) => {
+        // The legacy guide uses the production /vue/ URL. npm dev serves
+        // source pages at /; keep this dedicated viewer out of SPA fallback.
+        if (request.url === "/vue/pcd-viewer.html" || request.url?.startsWith("/vue/pcd-viewer.html?")) {
+          request.url = request.url.slice("/vue".length);
+        }
         if (request.url === "/" || request.url?.startsWith("/?")) {
           request.url = `/dashboard.html${request.url.slice(1)}`;
         }
@@ -79,7 +84,14 @@ function previewDashboardAtRoot() {
 
 export default defineConfig({
   base: "/vue/",
-  plugins: [previewDashboardAtRoot()],
+  plugins: [previewDashboardAtRoot(), {
+    name: 'ry-aletheia-client-diagnostics',
+    // Runs for every entry in dev and build. The Backend serves this shared
+    // classic script at the root path even when the entry lives under /vue/.
+    transformIndexHtml() {
+      return [{tag:'script',attrs:{src:'/platform/client-diagnostics.js'},injectTo:'head-prepend'}];
+    },
+  }],
   define: {
     __VUE_OPTIONS_API__: true,
     __VUE_PROD_DEVTOOLS__: false,
@@ -108,6 +120,7 @@ export default defineConfig({
         ),
         dashboard: resolve(import.meta.dirname, "dashboard.html"),
         liveObservation: resolve(import.meta.dirname, "live-observation.html"),
+        pcdViewer: resolve(import.meta.dirname, "pcd-viewer.html"),
       },
     },
   },

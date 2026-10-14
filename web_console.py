@@ -5,7 +5,9 @@ import errno
 import io
 import mimetypes
 import os
+import queue
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -18,10 +20,20 @@ from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
+from typing import Callable
 from urllib.parse import parse_qs, quote, unquote, urlparse
+
+# Keep the upgrade probe independent from ROS setup and console construction.
+# It validates that the packaged entry point can be unpacked and started;
+# importing runtime modules or re-executing into the robot environment here
+# would make deployment performance part of the bootloader health check.
+if __name__ == "__main__" and sys.argv[1:] == ["--self-check"]:
+    print("RY Aletheia self-check OK")
+    raise SystemExit(0)
 
 from autodrive_console.case_store import CaseStore
 from autodrive_console.bag_recording import BagRecordingError, BagRecordingManager
+from autodrive_console.manual_bag_recording import ManualRecordingController, ManualRecordingError
 from autodrive_console.acceptance_catalog import AcceptanceTaskCatalog
 from autodrive_console.multi_task_catalog import MultiTaskCatalog
 from autodrive_console.acceptance_orchestrator import AcceptanceConflict, AcceptanceOrchestrator, AcceptanceValidationError
@@ -29,26 +41,49 @@ from autodrive_console.acceptance_plan import AcceptancePlanStore
 from autodrive_console.autostart import AutostartError, AutostartManager
 from autodrive_console.case_workspace import CasePackageError, CaseWorkspace
 from autodrive_console.deployment import DeploymentError, DeploymentStore
+from autodrive_console.map_projection_jobs import MapProjectionJobs, MapProjectionError, MapProjectionConflict
 from autodrive_console.component_defaults import ComponentDefaultsError, component_speed_defaults
 from autodrive_console.mapping import MappingError, MappingSessionController, MappingUnavailable
 from autodrive_console.localization_status import LocalizationStatusMonitor
+from autodrive_console.manual_relocalization import (
+    ManualRelocalizationConflict,
+    ManualRelocalizationController,
+    ManualRelocalizationError,
+    ManualRelocalizationUnavailable,
+)
 from autodrive_console.observation import ObservationError, ObservationManager
+from autodrive_console.manual_map_markers import ManualMapMarkerStore
+from autodrive_console.map_marker_navigation import (
+    MapMarkerNavigationConflict,
+    MapMarkerNavigationController,
+    MapMarkerNavigationError,
+    MapMarkerNavigationUnavailable,
+)
 from autodrive_console.task_compiler import CompilationError
 from autodrive_console.robot_gateway import RobotGateway
 from autodrive_console.ros_executor import RosTaskExecutor
-from autodrive_console.runtime_env import clear_legacy_fastdds_override
+from autodrive_console.runtime_env import clear_legacy_fastdds_override, should_resource_robot_setup
 from autodrive_console.robot_logs import (
     RobotLogError,
     RobotLogDownloadTracker,
     RobotLogStore,
+    RobotLogTailTracker,
     ensure_utf8_text_stream,
     iter_ros_time_converted_bytes,
 )
 from autodrive_console.run_manager import RunManager
+from autodrive_console.native_report_archive import (
+    NativeReportArchive,
+    NativeReportArchiveError,
+    NativeReportNotFound,
+)
 from autodrive_console.scenario_setup import ScenarioSetupError, ScenarioSetupStore
+from autodrive_console.scenario_activation import ScenarioActivationTracker
 from autodrive_console.settings import SettingsStore
+from autodrive_console.software_inventory import SoftwareInventory, SoftwareInventoryError, SoftwareInventoryUnavailable
 from autodrive_console.supervisor import SupervisorClient
 from autodrive_console.tool_logging import ToolLogStore
+from autodrive_console.tool_audit import BrowserEventRecorder, audit_request, inject_client_diagnostics
 from autodrive_console.upgrade_manager import UpgradeError, UpgradeManager
 from autodrive_console.video import ConsoleVideoRuntime, VideoConfigurationError, VideoManager, VideoRuntime
 from autodrive_console.trajectory_render import _png_gray, _read_pgm
@@ -62,14 +97,13 @@ from autodrive_console.vehicle_control import (
 from autodrive_console.vehicle_execution_status import VehicleExecutionStatusMonitor
 
 
-def ensure_ros_environment() -> None:
+ROS_ENVIRONMENT_REEXEC_MARKER = "ROVER_QA_ROS_ENV_REEXEC"
+
+
+def ensure_ros_environment(*, force_source: bool = False) -> None:
     """让双击/直接执行二进制也使用机器人原有 ROS2 环境。"""
     setup_script = os.environ.get("ROVER_QA_SETUP_SCRIPT", "/opt/ry/install/setup.bash")
-    robot_prefix = str(Path(setup_script).parent)
-    loaded_prefixes = os.environ.get("AMENT_PREFIX_PATH", "").split(os.pathsep)
-    required_library_path = str(Path(robot_prefix) / "master_interfaces" / "lib")
-    loaded_libraries = os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
-    if os.environ.get("ROVER_QA_ROS_READY") == "1" or (robot_prefix in loaded_prefixes and required_library_path in loaded_libraries):
+    if not should_resource_robot_setup(os.environ, setup_script, force=force_source):
         return
     if not Path(setup_script).is_file():
         return
@@ -77,12 +111,18 @@ def ensure_ros_environment() -> None:
     if not getattr(sys, "frozen", False):
         command.append(str(Path(__file__).resolve()))
     command.extend(sys.argv[1:])
-    environment = {**os.environ, "ROVER_QA_ROS_READY": "1"}
+    environment = {
+        **os.environ,
+        "ROVER_QA_ROS_READY": "1",
+        ROS_ENVIRONMENT_REEXEC_MARKER: "1",
+    }
     os.execvpe("/bin/bash", ["bash", "-c", 'source "$1" && shift && exec "$@"', "--", setup_script, *command], environment)
 
 
-clear_legacy_fastdds_override()
-ensure_ros_environment()
+legacy_fastdds_removed = False
+if os.environ.get(ROS_ENVIRONMENT_REEXEC_MARKER) != "1":
+    legacy_fastdds_removed = clear_legacy_fastdds_override()
+ensure_ros_environment(force_source=legacy_fastdds_removed)
 
 ROOT = Path(getattr(__import__("sys"), "_MEIPASS", Path(__file__).resolve().parent))
 # 运行数据必须落在可写的工程目录；打包时不能写入 _MEIPASS。
@@ -99,10 +139,16 @@ ACCEPTANCE_REPORT_FILENAME = re.compile(r"acceptance_[0-9a-f]{12}_\d{8}_\d{6}\.h
 REPORT_FILENAME = re.compile(
     r"(?:run_[0-9a-f]{12}_[^/]+|报告_\d{8}_\d{6}_[^/]+_[0-9a-f]{12}|acceptance_[0-9a-f]{12}_\d{8}_\d{6})\.html"
 )
+LOGS = ToolLogStore(WORKSPACE / "logs")
+LOGGER = LOGS.configure()
+CLIENT_DIAGNOSTICS = BrowserEventRecorder()
+# Configure before constructors recover persisted jobs/runs and emit diagnostics.
 STORE = CaseStore(TASK_DIR)
 CASE_WORKSPACE = CaseWorkspace(CONFIG_DIR, TASK_DIR)
 DEPLOYMENTS = DeploymentStore(WORKSPACE / "deployments")
+MAP_PROJECTIONS = MapProjectionJobs(DEPLOYMENTS)
 SETTINGS = SettingsStore(CONFIG_DIR / "console.json")
+SOFTWARE_INVENTORY = SoftwareInventory(SETTINGS)
 LOCALIZATION_STATUS = LocalizationStatusMonitor()
 
 
@@ -119,12 +165,18 @@ def _autostart_launcher() -> list[str]:
 AUTOSTART = AutostartManager(WORKSPACE, launcher=_autostart_launcher())
 ROBOT_LOGS = RobotLogStore(SETTINGS)
 ROBOT_LOG_DOWNLOADS = RobotLogDownloadTracker()
+ROBOT_LOG_TAILS = RobotLogTailTracker()
 SCENARIO_SETUP = ScenarioSetupStore(CONFIG_DIR)
 BAG_RECORDINGS = BagRecordingManager(WORKSPACE / "bag_recordings")
 RUNS = RunManager(
     WORKSPACE / "reports", RosTaskExecutor(), SETTINGS, SCENARIO_SETUP,
     localization_monitor=LOCALIZATION_STATUS, bag_recordings=BAG_RECORDINGS,
 )
+MANUAL_BAG_RECORDINGS = ManualRecordingController(
+    BAG_RECORDINGS,
+    test_recording_active=lambda: RUNS.has_active_bag_recording(),
+)
+RUNS.set_manual_bag_recording_guard(MANUAL_BAG_RECORDINGS.has_active_recording)
 ACCEPTANCE = AcceptanceOrchestrator(
     catalog=AcceptanceTaskCatalog(Path(SETTINGS.load().task_directory)),
     multi_catalog=MultiTaskCatalog(Path("/opt/ry/data/tasks/multi_tasks")),
@@ -140,6 +192,11 @@ VEHICLE_CONTROL = VehicleControlController(
     active_run_guard=RUNS.manual_control_blocked,
     twist_profile=MiniappTwistProfile(**SETTINGS.load().vehicle_control),
 )
+MANUAL_RELOCALIZATION = ManualRelocalizationController(
+    VEHICLE_CONTROL,
+    SCENARIO_SETUP,
+    localization_status=LOCALIZATION_STATUS,
+)
 # 执行状态是只读的全局车辆事实，不附着到按轮创建/停止的 TrajectorySession。
 # 即使没有浏览器打开，其 volatile ROS 话题也必须被持续接收。
 VEHICLE_EXECUTION_STATUS = VehicleExecutionStatusMonitor(
@@ -152,14 +209,38 @@ MAPPING = MappingSessionController(WORKSPACE / "deployments" / ".mapping-session
 WEB_ROOT = ROOT / "autodrive_console" / "web"
 VUE_WEB_ROOT = ROOT / "autodrive_console" / "web-vue"
 UPGRADES = UpgradeManager(WORKSPACE, Path(sys.executable), getattr(sys, "frozen", False))
-LOGS = ToolLogStore(WORKSPACE / "logs")
-LOGGER = LOGS.configure()
 SYSTEMD_USER_SERVICE = "ry-aletheia.service"
 _LIVE_PREPROCESSOR = ROOT / "aletheia_live_cloud" if getattr(sys, "frozen", False) else ROOT / "build" / "live_preprocessor" / "aletheia_live_cloud"
 _VIDEO_INGEST = ROOT / "aletheia_video_ingest" if getattr(sys, "frozen", False) else ROOT / "build" / "live_preprocessor" / "aletheia_video_ingest"
 OBSERVATION = ObservationManager(WORKSPACE / "maps_cache", WORKSPACE / "logs", _LIVE_PREPROCESSOR)
+MAP_MARKERS = ManualMapMarkerStore(CONFIG_DIR / "live_map_markers.json")
+MAP_MARKER_NAVIGATION = MapMarkerNavigationController(
+    MAP_MARKERS, OBSERVATION,
+    VEHICLE_CONTROL, LOCALIZATION_STATUS, active_run_guard=RUNS.has_active_run,
+)
+RUNS.set_map_marker_navigation_guard(MAP_MARKER_NAVIGATION.blocks_runs)
+VEHICLE_CONTROL.set_map_marker_navigation_guard(MAP_MARKER_NAVIGATION.blocks_runs)
 VIDEO = VideoManager(CONFIG_DIR / "video.json", ROOT / "config" / "video.json")
 SCENARIO_RUNTIME_LOCK = SCENARIO_SETUP.runtime_lock
+
+
+def _is_systemd_service_context(cgroup_reader: Callable[[], str] | None = None) -> bool:
+    """Return whether this process is owned by Aletheia's user service.
+
+    ``INVOCATION_ID`` alone is not a service-ownership proof: desktop terminals
+    can inherit it from their session.  Aletheia may ask systemd to replace its
+    own cgroup only when both the invocation marker and the concrete service
+    cgroup agree.  Otherwise a direct launch must retain the detached-spawn
+    restart path.
+    """
+
+    if not os.environ.get("INVOCATION_ID"):
+        return False
+    try:
+        cgroups = (cgroup_reader or (lambda: Path("/proc/self/cgroup").read_text(encoding="utf-8")))()
+    except OSError:
+        return False
+    return any(f"/{SYSTEMD_USER_SERVICE}" in line for line in cgroups.splitlines())
 
 
 def _spawn_upgrade_restart(workspace: Path, executable: Path) -> bool:
@@ -173,7 +254,7 @@ def _spawn_upgrade_restart(workspace: Path, executable: Path) -> bool:
     restart_environment = os.environ.copy()
     restart_environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     restart_environment.pop("INVOCATION_ID", None)
-    if os.environ.get("INVOCATION_ID"):
+    if _is_systemd_service_context():
         command = ["systemctl", "--user", "restart", "--no-block", SYSTEMD_USER_SERVICE]
         try:
             result = subprocess.run(
@@ -211,6 +292,137 @@ def _spawn_upgrade_restart(workspace: Path, executable: Path) -> bool:
     return True
 
 
+def _handoff_to_systemd_after_upgrade() -> None:
+    """End a replaced service immediately after systemd accepts its restart.
+
+    The user service owns every console child in its cgroup.  During an
+    upgrade systemd's restart job will terminate that cgroup before starting
+    the new binary.  Waiting for Python/ROS cleanup here has previously held
+    the stop job until ``TimeoutStopSec`` and left operators with no console.
+    This path is deliberately limited to the verified service cgroup; direct
+    terminal launches still take the normal bounded cleanup path below.
+    """
+
+    os._exit(0)
+
+
+def _install_console_shutdown_signal_handlers(server: ThreadingHTTPServer):
+    """Route process termination through the console's owned-resource cleanup.
+
+    ``BaseServer.shutdown`` must run outside the thread currently serving
+    requests.  POSIX invokes Python signal handlers on that serving main
+    thread, so the handler only starts the orderly shutdown in a small daemon
+    thread.  Repeated systemd signals are intentionally idempotent: the first
+    one has already begun releasing the video and observation process trees.
+    """
+
+    shutdown_requested = threading.Event()
+    previous_handlers = {}
+
+    def request_shutdown(signum, _frame) -> None:
+        if shutdown_requested.is_set():
+            return
+        shutdown_requested.set()
+        LOGGER.info("收到退出信号 %s，正在受控关闭 Aletheia", signum)
+        threading.Thread(
+            target=server.shutdown,
+            name="console-signal-shutdown",
+            daemon=True,
+        ).start()
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        previous_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, request_shutdown)
+
+    def restore() -> None:
+        for signum, previous in previous_handlers.items():
+            signal.signal(signum, previous)
+
+    return restore
+
+
+def _close_console_resources(
+    native_backfill_stop: threading.Event,
+    video_runtime: ConsoleVideoRuntime,
+    server: ThreadingHTTPServer,
+) -> None:
+    """Release owned resources without letting one failed child strand an upgrade."""
+
+    # The binary replacement has already completed before shutdown begins.
+    # Each owner provides its own bounded stop path; an unexpected exception
+    # here must be recorded, but cannot be allowed to skip the new binary's
+    # restart below.
+    def close_one(label: str, operation) -> None:
+        try:
+            operation()
+        except Exception:
+            LOGGER.exception("关闭控制台资源失败：%s", label)
+
+    close_one("原生报告回填", native_backfill_stop.set)
+    # Keep the console-owned video lifecycle explicit: this is the only
+    # process family whose shutdown may briefly wait for encoder children.
+    # Failure is isolated so an already replaced binary is still restarted.
+    try:
+        video_runtime.stop()
+    except Exception:
+        LOGGER.exception("关闭控制台资源失败：视频运行时")
+
+    for label, operation in (
+        ("手动场景录制", MANUAL_BAG_RECORDINGS.close),
+        ("在线建图", MAPPING.close),
+        ("地图标记导航", MAP_MARKER_NAVIGATION.close),
+        ("手动重定位地图查询", MANUAL_RELOCALIZATION.close),
+        ("车辆控制", VEHICLE_CONTROL.close),
+        ("车辆执行状态", VEHICLE_EXECUTION_STATUS.close),
+        ("定位状态", LOCALIZATION_STATUS.close),
+        ("实时观测", OBSERVATION.stop),
+        ("HTTP 服务", server.server_close),
+    ):
+        close_one(label, operation)
+
+
+def _upgrade_status() -> dict:
+    """Expose upgrade readiness before an operator commits an upload."""
+
+    status = UPGRADES.status()
+    if not status.get("supported"):
+        status["availability"] = {
+            "ready": False,
+            "blocker": {
+                "kind": "unsupported",
+                "message": str(status.get("message") or "当前运行方式不支持离线升级。"),
+                "action_label": "",
+                "action_url": "",
+            },
+        }
+        return status
+    if RUNS.has_active_run():
+        status["availability"] = {
+            "ready": False,
+            "blocker": {
+                "kind": "active_run",
+                "message": "当前存在执行中、取消中或等待人工恢复的测试计划。请先安全结束测试后再升级。",
+                "action_label": "前往任务指挥台",
+                "action_url": "/",
+            },
+        }
+        return status
+    if SCENARIO_SETUP.has_unresolved_transaction():
+        transaction = SCENARIO_SETUP.status().get("transaction", {})
+        status["availability"] = {
+            "ready": False,
+            "blocker": {
+                "kind": "scenario_recovery",
+                "message": str(transaction.get("message") or "当前存在未完成的场景恢复事务。请先恢复常规启动配置后再升级。"),
+                "action_label": "前往恢复常规配置",
+                "action_url": "/scenario-setup.html",
+            },
+        }
+        return status
+    status["availability"] = {"ready": True, "blocker": None}
+    return status
+
+
 def restore_scenario_runtime() -> dict:
     """只恢复受控启动脚本，不操作任何 Supervisor 节点。"""
     # ThreadingHTTPServer 可同时处理重复点击/多个网页标签。恢复事务的“读取 →
@@ -221,15 +433,32 @@ def restore_scenario_runtime() -> dict:
         return SCENARIO_SETUP.restore()
 
 
-def apply_scenario_runtime(profile_id: str, document: dict | None = None) -> dict:
+def apply_scenario_runtime(
+    profile_id: str,
+    document: dict | None = None,
+    progress_callback: Callable[[str, str, dict | None], None] | None = None,
+) -> dict:
     """应用场景并使相应运行依赖实际重新读取参数。"""
+    def progress(phase: str, message: str, details: dict | None = None) -> None:
+        if progress_callback is not None:
+            progress_callback(phase, message, details)
+
     with SCENARIO_RUNTIME_LOCK:
+        progress("writing", "正在校验并写入场景启动参数。")
         if document is not None:
             SCENARIO_SETUP.save(document)
         result = SCENARIO_SETUP.apply(profile_id)
+        progress("restarting", "启动参数已写入，正在重启定位与导航依赖。")
+
+        def runtime_progress(details: dict) -> None:
+            stages = details.get("stages") if isinstance(details, dict) else []
+            active = next((stage for stage in stages if stage.get("state") not in {"pending", "ready"}), None)
+            label = f"第 {active['index']} 阶段" if isinstance(active, dict) and active.get("index") else "定位与导航依赖"
+            progress("waiting", f"正在等待{label}稳定就绪。", details)
+
         try:
             gateway = RobotGateway(SETTINGS.load())
-            runtime_ok, runtime_message = gateway.restart_configured_dependencies()
+            runtime_ok, runtime_message = gateway.restart_configured_dependencies(progress_callback=runtime_progress)
         except Exception as exc:
             runtime_ok, runtime_message = False, f"启动运行依赖时发生异常：{exc}"
         if not runtime_ok:
@@ -238,6 +467,11 @@ def apply_scenario_runtime(profile_id: str, document: dict | None = None) -> dic
         result["runtime_restart"] = runtime_message
         result["message"] = f"{result['message']}；{runtime_message}"
         return result
+
+
+SCENARIO_ACTIVATIONS = ScenarioActivationTracker(
+    lambda profile_id, document, progress: apply_scenario_runtime(profile_id, document, progress),
+)
 
 # 移动端使用独立入口（/m/），但继续调用完全相同的受控 API 与页面控制器。
 # 不依据单一 UA 字段：优先采用浏览器 Client Hint，再兼容常见移动浏览器标识。
@@ -288,6 +522,35 @@ def _log_unhandled_thread_exception(args) -> None:
     LOGGER.critical("后台线程发生未处理异常：%s", args.thread.name if args.thread else "unknown", exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
 
 
+def _backfill_native_report_batch(workspace: Path, *, maximum: int = 4) -> int:
+    """Upgrade a small number of legacy report sidecars outside HTTP requests."""
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+        raise ValueError("原生报告回填批次无效")
+    archive = NativeReportArchive(Path(workspace) / "reports")
+    created = 0
+    for filename in archive.historic_filenames()[:maximum]:
+        if archive.archive_historic_report(filename):
+            created += 1
+    return created
+
+
+def _native_report_backfill_worker(stop_event: threading.Event, workspace: Path) -> None:
+    """Yield between bounded legacy batches so startup and tests stay responsive."""
+    archive = NativeReportArchive(Path(workspace) / "reports")
+    try:
+        filenames = archive.historic_filenames()
+        for offset in range(0, len(filenames), 4):
+            if stop_event.is_set():
+                return
+            for filename in filenames[offset:offset + 4]:
+                if stop_event.is_set():
+                    return
+                archive.archive_historic_report(filename)
+            stop_event.wait(0.05)
+    except OSError as exc:
+        LOGGER.warning("原生报告历史回填失败：%s", exc)
+
+
 sys.excepthook = _log_unhandled_exception
 threading.excepthook = _log_unhandled_thread_exception
 
@@ -304,12 +567,31 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             # 淹没真正需要处理的服务端异常。
             return
         except Exception:
-            LOGGER.exception("HTTP 请求处理发生未处理异常：client=%s", self.client_address[0] if self.client_address else "unknown")
+            if not getattr(self, "_tool_exception_logged", False):
+                LOGGER.exception("HTTP 请求处理发生未处理异常：client=%s", self.client_address[0] if self.client_address else "unknown")
             raise
 
+    def send_response(self, code, message=None) -> None:
+        audit = getattr(self, "_tool_audit", None)
+        if audit is not None:
+            audit.status = int(code)
+        super().send_response(code, message)
+        if audit is not None and audit.is_api:
+            self.send_header("X-Request-ID", audit.request_id)
+
+    def send_error(self, code, message=None, explain=None) -> None:
+        audit = getattr(self, "_tool_audit", None)
+        if audit is not None:
+            audit.response(code, {"error": message} if isinstance(message, str) else None)
+        super().send_error(code, message, explain)
+
+    @audit_request
     def do_GET(self) -> None:
         request = urlparse(self.path)
         path = request.path
+        if path.startswith("/api/deployments/") and "/map-projections" in path:
+            self._map_projection_request("GET", path, request.query)
+            return
         explicit_mobile_page = mobile_page_name(path)
         query = parse_qs(request.query)
         preferred_view = query.get("view", [""])[0].lower()
@@ -420,6 +702,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._export_case_package(unquote(path.removeprefix("/api/cases/").removesuffix("/export").rstrip("/")))
         elif path == "/api/settings":
             self._json(self._settings())
+        elif path == "/api/software-inventory":
+            self._json(SOFTWARE_INVENTORY.snapshot())
+        elif path == "/api/scenario-setup/activation":
+            self._json({"operation": SCENARIO_ACTIVATIONS.status()})
         elif path == "/api/scenario-setup":
             self._json(SCENARIO_SETUP.status())
         elif path == "/api/scenario-setup/file":
@@ -449,6 +735,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._json({"topics": BAG_RECORDINGS.available_topics()})
             except BagRecordingError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE)
+        elif path == "/api/bag-recordings/manual":
+            self._json({"manual": MANUAL_BAG_RECORDINGS.status()})
         elif path == "/api/bag-recordings":
             self._json({"archives": BAG_RECORDINGS.list_archives()})
         elif match := re.fullmatch(r"/api/bag-recordings/([0-9a-f]{32})/download", path):
@@ -458,16 +746,41 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._json(BAG_RECORDINGS.archive_detail(match.group(1)))
             except BagRecordingError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+        elif path.startswith("/api/reports/") and "/native" in path:
+            self._native_report_route(path, parse_qs(request.query, keep_blank_values=True))
         elif path == "/api/reports":
             self._json({"reports": self._reports()})
         elif path == "/api/system/upgrade":
-            self._json(UPGRADES.status())
+            self._json(_upgrade_status())
         elif path == "/api/observation/active-map":
             # 地图切换标记只有一个短 ID，供实时页快速发现 map_server 生命周期
             # 切换；绝不通过此接口传输或轮询 OccupancyGrid 栅格数据。
             self._json({"active_map_id": OBSERVATION.active_map_id()})
         elif path == "/api/observation/localization-status":
             self._json(LOCALIZATION_STATUS.status())
+        elif path == "/api/observation/relocalization":
+            try:
+                query = parse_qs(request.query, keep_blank_values=True)
+                if "request_id" in query:
+                    self._json(MANUAL_RELOCALIZATION.operation_status(query["request_id"][0]))
+                else:
+                    self._json(MANUAL_RELOCALIZATION.status(SETTINGS.load()))
+            except ManualRelocalizationError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path == "/api/observation/relocalization/configs":
+            try:
+                query = parse_qs(request.query, keep_blank_values=True)
+                self._json(MANUAL_RELOCALIZATION.browse_configs(query.get("path", [""])[0]))
+            except ManualRelocalizationError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path == "/api/observation/map-markers":
+            active_map_id = OBSERVATION.active_manual_map_id()
+            if active_map_id is None:
+                self._json({"map_ready": False, "points": []})
+            else:
+                self._json({"map_ready": True, "points": MAP_MARKERS.list_for_map(active_map_id)})
+        elif path == "/api/observation/map-marker-navigation":
+            self._json(MAP_MARKER_NAVIGATION.status())
         elif path == "/api/observation":
             self._json(OBSERVATION.status(SETTINGS.load()))
         elif path == "/api/video/status":
@@ -507,6 +820,22 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._download_tracked_robot_log_file(match.group(1))
         elif match := re.fullmatch(r"/api/robot-logs/sources/([a-z0-9_-]{1,32})/files/([0-9a-f]{24})/download", path):
             self._download_robot_log_file(*match.groups(), convert_ros_time=query.get("ros_time", [""])[0] == "beijing")
+        elif path == "/api/robot-logs/tail":
+            streams = []
+            for value in query.get("stream", []):
+                match = re.fullmatch(r"([a-z0-9_-]{1,32}):([0-9a-f]{24})", value)
+                if not match:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "实时日志标识无效")
+                    return
+                stream = match.groups()
+                if stream not in streams:
+                    streams.append(stream)
+            if not streams:
+                self.send_error(HTTPStatus.BAD_REQUEST, "请至少选择一条实时日志")
+                return
+            self._tail_robot_logs_stdout(streams)
+        elif match := re.fullmatch(r"/api/robot-logs/sources/([a-z0-9_-]{1,32})/files/([0-9a-f]{24})/tail", path):
+            self._tail_robot_log_stdout(*match.groups())
         elif match := re.fullmatch(r"/api/robot-logs/sources/([a-z0-9_-]{1,32})/files", path):
             try:
                 query = parse_qs(request.query).get("query", [""])[0]
@@ -526,8 +855,47 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         else:
             self._static_from(WEB_ROOT, "index.html" if path == "/" else path.lstrip("/"))
 
+    @audit_request
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if path == "/api/tool-logs/client-events":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if not 2 <= content_length <= 8192:
+                    self.close_connection = True
+                    raise ValueError("浏览器诊断请求大小无效")
+                payload = json.loads(self.rfile.read(content_length))
+                recorded = CLIENT_DIAGNOSTICS.record(payload, self.client_address[0])
+                self._json({"recorded": recorded}, HTTPStatus.ACCEPTED)
+            except OverflowError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.TOO_MANY_REQUESTS)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/map-projections" in path:
+            self._map_projection_request("POST", path)
+            return
+        if path == "/api/bag-recordings/manual":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if not 2 <= content_length <= 8192:
+                    raise ManualRecordingError("手动录制请求无效")
+                payload = json.loads(self.rfile.read(content_length))
+                self._json({"manual": MANUAL_BAG_RECORDINGS.start(payload)}, HTTPStatus.ACCEPTED)
+            except (ManualRecordingError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
+            return
+        if path == "/api/bag-recordings/manual/stop":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length:
+                    payload = json.loads(self.rfile.read(content_length))
+                    if payload != {}:
+                        raise ManualRecordingError("停止手动录制不接受参数")
+                self._json({"manual": MANUAL_BAG_RECORDINGS.stop()}, HTTPStatus.ACCEPTED)
+            except (ManualRecordingError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
+            return
         if path == "/api/robot-logs/downloads":
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
@@ -640,6 +1008,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
+        if path.startswith("/api/deployments/") and path.endswith("/settings"):
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                parts = path.split("/")
+                if len(parts) != 5 or parts[4] != "settings":
+                    raise DeploymentError("项目设置路径无效")
+                project_id = unquote(parts[3])
+                self._json({"project": DEPLOYMENTS.update_project_settings(project_id, data)})
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         if path.startswith("/api/deployments/") and path.endswith("/task-compiler/config"):
             try:
                 data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
@@ -659,6 +1038,24 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._json({"preview": DEPLOYMENTS.task_compiler_preview(project_id)})
             except CompilationError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.UNPROCESSABLE_ENTITY)
+            except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/deployments/") and "/task-lines" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) not in {5, 6, 7} or parts[4] != "task-lines":
+                    raise DeploymentError("任务线路路径无效")
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                project_id = unquote(parts[3])
+                if len(parts) == 7:
+                    if parts[6] != "select" or not isinstance(data, dict) or data:
+                        raise DeploymentError("选择任务线路请求必须为空对象")
+                    project = DEPLOYMENTS.select_task_line(project_id, unquote(parts[5]))
+                    self._json({"project": project})
+                else:
+                    line = DEPLOYMENTS.save_task_line(project_id, data, unquote(parts[5]) if len(parts) == 6 else None)
+                    self._json({"task_line": line, "project": DEPLOYMENTS.get(project_id)})
             except (TypeError, ValueError, json.JSONDecodeError, DeploymentError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
@@ -907,6 +1304,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/cases/") and path.endswith("/management"):
             self._update_case_management(unquote(path.removeprefix("/api/cases/").removesuffix("/management").rstrip("/")))
             return
+        if path == "/api/software-inventory":
+            try:
+                data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                self._json(SOFTWARE_INVENTORY.save(data))
+            except SoftwareInventoryUnavailable as exc:
+                self._json({"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except (SoftwareInventoryError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         if path == "/api/settings":
             try:
                 data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
@@ -1042,6 +1448,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
             action = str(data.get("action", ""))
             if action == "save":
+                if SCENARIO_ACTIVATIONS.is_active():
+                    raise ScenarioSetupError("场景方案正在应用，请等待运行依赖确认完成")
                 payload = SCENARIO_SETUP.save(data.get("document"))
                 result = {"message": "场景前置方案已保存", "document": payload}
             elif action == "preview":
@@ -1054,10 +1462,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # 方案，用户修改字段后直接点应用会得到与页面不一致的实际参数。
                 # 应用也必须让相关运行依赖重新读取脚本；否则页面会显示“已
                 # 应用”，车辆却仍运行上一套参数。
-                result = apply_scenario_runtime(str(data.get("profile_id", "")), data.get("document"))
+                operation = SCENARIO_ACTIVATIONS.start(str(data.get("profile_id", "")), data.get("document"))
+                self._json({"operation": operation}, HTTPStatus.ACCEPTED)
+                return
             elif action == "restore":
                 if RUNS.has_active_run():
                     raise ScenarioSetupError("存在执行中测试计划，不能恢复启动配置")
+                if SCENARIO_ACTIVATIONS.is_active():
+                    raise ScenarioSetupError("场景方案正在应用，请等待运行依赖确认完成")
                 result = restore_scenario_runtime()
             elif action == "bind-case":
                 case_id = str(data.get("case_id", ""))
@@ -1082,6 +1494,74 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             elif path == "/api/observation/stop":
                 OBSERVATION.stop()
                 payload = OBSERVATION.status(settings)
+            elif path == "/api/observation/relocalization/begin":
+                payload = MANUAL_RELOCALIZATION.begin(settings)
+            elif path == "/api/observation/relocalization/apply":
+                content_length = int(self.headers.get("Content-Length", 0))
+                if content_length < 2 or content_length > 16 * 1024:
+                    raise ValueError("重定位请求大小无效")
+                data = json.loads(self.rfile.read(content_length))
+                if not isinstance(data, dict):
+                    raise ValueError("重定位请求必须是 JSON 对象")
+                if set(data) - {"x", "y", "yaw", "config_path", "source_map_id", "request_id"}:
+                    raise ManualRelocalizationError("重定位请求包含不支持的字段")
+                values = {key: data.get(key) for key in ("x", "y", "yaw")}
+                if "config_path" in data:
+                    values["config_path"] = data["config_path"]
+                if "source_map_id" in data:
+                    values["source_map_id"] = data["source_map_id"]
+                if "request_id" in data:
+                    values["request_id"] = data["request_id"]
+                payload = MANUAL_RELOCALIZATION.apply(settings, values)
+            elif path == "/api/observation/relocalization/cancel":
+                payload = MANUAL_RELOCALIZATION.cancel()
+            elif path == "/api/observation/relocalization/resolve":
+                content_length = int(self.headers.get("Content-Length", 0))
+                if not 2 <= content_length <= 1024:
+                    raise ManualRelocalizationError("重定位请求大小无效")
+                data = json.loads(self.rfile.read(content_length))
+                if not isinstance(data, dict) or set(data) != {"request_id"}:
+                    raise ManualRelocalizationError("重定位结果查询格式无效")
+                payload = MANUAL_RELOCALIZATION.resolve_operation(data["request_id"])
+            elif path == "/api/observation/relocalization/recover-navigation":
+                payload = MANUAL_RELOCALIZATION.recover_navigation()
+            elif path == "/api/observation/map-markers":
+                content_length = int(self.headers.get("Content-Length", 0))
+                if not 2 <= content_length <= 16 * 1024:
+                    raise ValueError("地图标记请求大小无效")
+                data = json.loads(self.rfile.read(content_length))
+                if not isinstance(data, dict) or set(data) != {"alias", "x", "y", "yaw"}:
+                    raise ValueError("地图标记请求格式无效")
+                active_map_id = OBSERVATION.active_manual_map_id()
+                if active_map_id is None:
+                    raise ValueError("当前地图尚未确认")
+                point = MAP_MARKERS.create(active_map_id, **data)
+                LOGGER.info("地图标记已创建：id=%s", point["id"])
+                payload = {"ok": True, "point": point}
+            elif path == "/api/observation/map-markers/remove":
+                content_length = int(self.headers.get("Content-Length", 0))
+                if not 2 <= content_length <= 16 * 1024:
+                    raise ValueError("地图标记请求大小无效")
+                data = json.loads(self.rfile.read(content_length))
+                if not isinstance(data, dict) or set(data) != {"id"}:
+                    raise ValueError("地图标记请求格式无效")
+                active_map_id = OBSERVATION.active_manual_map_id()
+                if active_map_id is None:
+                    raise ValueError("当前地图尚未确认")
+                marker_id = str(data["id"])
+                MAP_MARKERS.remove(active_map_id, marker_id)
+                LOGGER.info("地图标记已删除：id=%s", marker_id)
+                payload = {"ok": True}
+            elif path == "/api/observation/map-marker-navigation/begin":
+                content_length = int(self.headers.get("Content-Length", 0))
+                if not 2 <= content_length <= 16 * 1024:
+                    raise ValueError("前往地图标记请求大小无效")
+                data = json.loads(self.rfile.read(content_length))
+                if not isinstance(data, dict) or set(data) != {"id"}:
+                    raise ValueError("前往地图标记请求格式无效")
+                payload = MAP_MARKER_NAVIGATION.begin_marker(str(data["id"]))
+            elif path == "/api/observation/map-marker-navigation/cancel":
+                payload = MAP_MARKER_NAVIGATION.cancel()
             elif path == "/api/observation/live-layers":
                 data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                 self._json(OBSERVATION.live_layers(data), HTTPStatus.OK)
@@ -1105,11 +1585,27 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             else:
                 self._json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
                 return
-            self._json(payload, HTTPStatus.ACCEPTED)
+            pending = payload.get("phase") in {"switching_to_miniapp", "calling_service", "switching_to_navigation"}
+            self._json(payload, HTTPStatus.ACCEPTED if pending else HTTPStatus.OK)
+        except ManualRelocalizationUnavailable as exc:
+            LOGGER.warning("手动重定位服务不可用：%s", exc)
+            self._json({"error": str(exc), "status": MANUAL_RELOCALIZATION.status(settings)}, HTTPStatus.SERVICE_UNAVAILABLE)
+        except ManualRelocalizationConflict as exc:
+            LOGGER.warning("手动重定位被安全策略拒绝：%s", exc)
+            self._json({"error": str(exc), "status": MANUAL_RELOCALIZATION.status(settings)}, HTTPStatus.CONFLICT)
+        except ManualRelocalizationError as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        except MapMarkerNavigationUnavailable as exc:
+            self._json({"error": str(exc), "status": MAP_MARKER_NAVIGATION.status()}, HTTPStatus.SERVICE_UNAVAILABLE)
+        except MapMarkerNavigationConflict as exc:
+            self._json({"error": str(exc), "status": MAP_MARKER_NAVIGATION.status()}, HTTPStatus.CONFLICT)
+        except MapMarkerNavigationError as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except (ObservationError, TypeError, ValueError, json.JSONDecodeError) as exc:
             LOGGER.warning("实时观测操作被拒绝：%s", exc)
             self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
 
+    @audit_request
     def do_PUT(self) -> None:
         path = urlparse(self.path).path
         if path == "/api/robot-logs/sources":
@@ -1256,10 +1752,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.ACCEPTED if payload.get("transition") or waiting_release else HTTPStatus.OK
             self._json(payload, status)
         except VehicleControlUnavailable as exc:
-            LOGGER.warning("车辆控制 ROS2 模块不可用：%s", exc)
             self._json({"error": str(exc), "status": VEHICLE_CONTROL.status()}, HTTPStatus.SERVICE_UNAVAILABLE)
         except VehicleControlConflict as exc:
-            LOGGER.warning("手动控制请求被安全策略拒绝：%s", exc)
             self._json({"error": str(exc), "status": VEHICLE_CONTROL.status()}, HTTPStatus.CONFLICT)
         except (VehicleControlError, TypeError, ValueError, json.JSONDecodeError) as exc:
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
@@ -1294,6 +1788,164 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
+
+    def _projection_payload(self) -> dict:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise MapProjectionError("请求长度无效") from exc
+        if not 1 <= length <= 16 * 1024:
+            raise MapProjectionError("地图预览请求大小无效")
+        try:
+            payload = json.loads(self.rfile.read(length))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise MapProjectionError("地图预览请求必须是有效 JSON") from exc
+        if not isinstance(payload, dict):
+            raise MapProjectionError("地图预览请求必须是 JSON 对象")
+        return payload
+
+    def _map_projection_request(self, method: str, path: str, query: str = "") -> None:
+        match = re.fullmatch(r"/api/deployments/([^/]+)/map-projections(?:/([^/]+))?(?:/(preview|confirm|preview\.png|source-preview\.bin|source-detail\.bin|trajectory-preview\.bin))?", path)
+        if not match:
+            self._json({"error": "地图生成请求路径无效"}, HTTPStatus.NOT_FOUND)
+            return
+        project, job, action = match.groups()
+        project = unquote(project)
+        job = unquote(job) if job else None
+        try:
+            if method == "POST" and job is None:
+                self._upload_map_projection(project)
+                return
+            if method == "GET" and job == "latest" and action is None:
+                self._json({"projection": MAP_PROJECTIONS.latest(project)})
+                return
+            if job and job != "latest":
+                if method == "POST" and action == "trajectory-preview.bin":
+                    if query:
+                        raise MapProjectionError("轨迹预览请求不接受查询参数")
+                    MAP_PROJECTIONS.get(project, job)
+                    self._upload_map_projection(project, trajectory_job=job)
+                    return
+                if method == "GET" and action is None:
+                    self._json({"projection": MAP_PROJECTIONS.get(project, job)})
+                    return
+                if method == "GET" and action == "preview.png":
+                    options = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=3)
+                    if set(options) - {"revision", "display"}:
+                        raise MapProjectionError("地图预览查询参数无效")
+                    display = options.get("display")
+                    if display is not None and display != ["monochrome"]:
+                        raise MapProjectionError("地图预览显示模式无效")
+                    values = options.get("revision", [])
+                    if len(values) != 1 or not re.fullmatch(r"[1-9][0-9]{0,8}", values[0]):
+                        raise MapProjectionError("请指定当前地图预览版本")
+                    source = MAP_PROJECTIONS.preview_path(project, job, int(values[0]))
+                    width, height, pixels = _read_pgm(source)
+                    if display is not None:
+                        pixels = pixels.translate(bytes([0] + [255] * 255))
+                    body = _png_gray(width, height, pixels)
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "image/png")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if method == "GET" and action in {"source-preview.bin", "source-detail.bin"}:
+                    if query:
+                        raise MapProjectionError("点云样本请求不接受查询参数")
+                    sample = (MAP_PROJECTIONS.source_detail(project, job) if action == "source-detail.bin"
+                              else MAP_PROJECTIONS.source_preview(project, job))
+                    if sample is None:
+                        self._json({"state": "preparing"}, HTTPStatus.ACCEPTED)
+                        return
+                    body, metadata = sample
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    for header, key in (("X-Point-Count", "point_count"),
+                                        ("X-Source-Point-Count", "source_point_count"),
+                                        ("X-Finite-Point-Count", "finite_point_count")):
+                        self.send_header(header, str(metadata[key]))
+                    self.send_header("X-Point-Origin", json.dumps(metadata["origin"], separators=(",", ":"), allow_nan=False))
+                    self.send_header("X-Point-Bounds", json.dumps(metadata["bounds"], separators=(",", ":"), allow_nan=False))
+                    if action == "source-detail.bin":
+                        self.send_header("X-Point-Format", metadata["format"])
+                        self.send_header("X-Point-Attributes", json.dumps(metadata["attributes"], separators=(",", ":"), allow_nan=False))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if method == "POST" and action == "preview":
+                    projection = MAP_PROJECTIONS.preview(project, job, self._projection_payload())
+                    self._json({"projection": projection}, HTTPStatus.ACCEPTED)
+                    return
+                if method == "POST" and action == "confirm":
+                    payload = self._projection_payload()
+                    if set(payload) != {"label", "revision"}:
+                        raise MapProjectionError("确认地图仅接受名称和当前预览版本")
+                    asset = MAP_PROJECTIONS.confirm(project, job, payload["label"], payload["revision"])
+                    self._json({"map": asset, "project": DEPLOYMENTS.get(project)}, HTTPStatus.CREATED)
+                    return
+                if method == "DELETE" and action is None:
+                    self._json({"projection": MAP_PROJECTIONS.cancel(project, job)})
+                    return
+            self._json({"error": "地图生成请求不存在"}, HTTPStatus.NOT_FOUND)
+        except MapProjectionConflict as exc:
+            self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
+        except (MapProjectionError, DeploymentError, OSError, ValueError) as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
+    def _upload_map_projection(self, project_id: str, *, trajectory_job=None) -> None:
+        # Validate ownership before consuming a potentially large upload.
+        DEPLOYMENTS.get(project_id)
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise MapProjectionError("上传长度无效") from exc
+        content_type = self.headers.get("Content-Type", "")
+        if not 1 <= length <= MAX_MAP_UPLOAD_BYTES:
+            raise MapProjectionError("地图上传大小无效或超过 2 GiB 限制")
+        if not content_type.startswith("multipart/form-data"):
+            raise MapProjectionError("请选择一份 PCD 文件上传")
+        form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={
+            "REQUEST_METHOD": "POST", "CONTENT_TYPE": content_type, "CONTENT_LENGTH": str(length),
+        })
+        if set(form.keys()) != {"file"} or isinstance(form["file"], list):
+            raise MapProjectionError("请只上传一份 PCD 文件")
+        item = form["file"]
+        name = str(item.filename or "")
+        if not name or name != Path(name).name or "\\" in name or Path(name).suffix.lower() != ".pcd" or len(name) > 180:
+            raise MapProjectionError("请选择文件名有效的 PCD 文件")
+        staging = DEPLOYMENTS.root / ".map-projection-uploads"
+        staging.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="pcd-", dir=staging) as directory:
+            source = Path(directory) / name
+            written = 0
+            with source.open("xb") as output:
+                while chunk := item.file.read(1024 * 1024):
+                    written += len(chunk)
+                    if written > DeploymentStore.MAX_MAP_BYTES:
+                        raise MapProjectionError("点云文件超过 2 GiB 限制")
+                    output.write(chunk)
+            if not written:
+                raise MapProjectionError("点云文件为空")
+            if trajectory_job:
+                body, metadata = MAP_PROJECTIONS.trajectory_preview(project_id, trajectory_job, source)
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("X-Point-Format", metadata['format'])
+                self.send_header("X-Point-Count", str(metadata['point_count']))
+                self.send_header("X-Point-Origin", json.dumps(metadata['origin'], separators=(',', ':'), allow_nan=False))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self._json({"projection": MAP_PROJECTIONS.create(project_id, source)}, HTTPStatus.ACCEPTED)
 
     def _mapping_preview(self, session_id: str) -> None:
         try:
@@ -1562,8 +2214,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         LOGGER.info("已删除测试用例：%s", case.filename)
         return {"id": case.id, "filename": case.filename}
 
+    @audit_request
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
+        if path.startswith("/api/deployments/") and "/map-projections" in path:
+            self._map_projection_request("DELETE", path)
+            return
         if match := re.fullmatch(r"/api/bag-recordings/([0-9a-f]{32})", path):
             try:
                 BAG_RECORDINGS.delete_archive(match.group(1))
@@ -1647,6 +2303,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             except DeploymentError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
+        if path.startswith("/api/deployments/") and "/task-lines/" in path:
+            try:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "task-lines":
+                    raise DeploymentError("任务线路路径无效")
+                project_id = unquote(parts[3])
+                DEPLOYMENTS.delete_task_line(project_id, unquote(parts[5]))
+                self._json({"project": DEPLOYMENTS.get(project_id)})
+            except DeploymentError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         if path.startswith("/api/deployments/") and "/localization-bindings/" in path:
             try:
                 parts = path.split("/")
@@ -1704,24 +2371,104 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         return {"task_directory": item.task_directory, "command_timeout_s": item.command_timeout_s, "elevator_wait_timeout_s": item.elevator_wait_timeout_s, "task_execution_timeout_s": item.task_execution_timeout_s, "case_aliases": item.case_aliases, "ui_preferences": item.ui_preferences, "dependency_plan": item.dependency_plan, "monitor_nodes": monitor_nodes, "live_observation": item.live_observation, "vehicle_control": item.vehicle_control, "autostart_enabled": bool(autostart["enabled"]), "autostart": autostart}
 
     @staticmethod
+    def _native_report_archive() -> NativeReportArchive:
+        """Bind each request to the current workspace (tests patch it)."""
+        return NativeReportArchive(WORKSPACE / "reports")
+
+    @staticmethod
+    def _native_page_query(
+        query: dict[str, list[str]],
+        *,
+        default_limit: int,
+        maximum_limit: int,
+        require_cursor: bool = False,
+    ) -> tuple[str | None, int]:
+        if set(query) - {"cursor", "limit"}:
+            raise NativeReportArchiveError("原生报告查询参数无效")
+        for name in ("cursor", "limit"):
+            if len(query.get(name, [])) > 1:
+                raise NativeReportArchiveError("原生报告查询参数无效")
+        cursor_values = query.get("cursor", [])
+        cursor = cursor_values[0] if cursor_values else None
+        if require_cursor and not cursor:
+            raise NativeReportArchiveError("分页标识无效")
+        if cursor == "":
+            raise NativeReportArchiveError("分页标识无效")
+        raw_limit = query.get("limit", [None])[0]
+        if raw_limit is None:
+            return cursor, default_limit
+        if not isinstance(raw_limit, str) or not re.fullmatch(r"[1-9][0-9]*", raw_limit):
+            raise NativeReportArchiveError("分页数量无效")
+        limit = int(raw_limit)
+        if limit > maximum_limit:
+            raise NativeReportArchiveError("分页数量无效")
+        return cursor, limit
+
+    def _native_report_route(self, path: str, query: dict[str, list[str]]) -> None:
+        """Serve only fixed, report-scoped Mobile native-report resources."""
+        detail = re.fullmatch(r"/api/reports/([^/]+)/native", path)
+        trajectory = re.fullmatch(r"/api/reports/([^/]+)/native/trajectories/([^/]+)", path)
+        map_png = re.fullmatch(r"/api/reports/([^/]+)/native/trajectories/([^/]+)/map\.png", path)
+        samples = re.fullmatch(r"/api/reports/([^/]+)/native/trajectories/([^/]+)/samples", path)
+        archive = self._native_report_archive()
+        try:
+            if detail:
+                report_id = unquote(detail.group(1))
+                cursor, limit = self._native_page_query(query, default_limit=50, maximum_limit=100)
+                self._json(archive.detail_page(report_id, cursor, limit))
+                return
+            if trajectory:
+                if query:
+                    raise NativeReportArchiveError("原生报告查询参数无效")
+                self._json(archive.trajectory(unquote(trajectory.group(1)), unquote(trajectory.group(2))))
+                return
+            if map_png:
+                if query:
+                    raise NativeReportArchiveError("原生报告查询参数无效")
+                body = archive.trajectory_map_png(unquote(map_png.group(1)), unquote(map_png.group(2)))
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store, max-age=0")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if samples:
+                report_id, trajectory_id = unquote(samples.group(1)), unquote(samples.group(2))
+                cursor, limit = self._native_page_query(query, default_limit=1000, maximum_limit=1000, require_cursor=True)
+                self._json(archive.sample_page(report_id, trajectory_id, cursor, limit))
+                return
+            raise NativeReportArchiveError("原生报告路径无效")
+        except NativeReportNotFound as exc:
+            self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+        except NativeReportArchiveError as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
+    @staticmethod
     def _reports() -> list[dict]:
         report_dir = WORKSPACE / "reports"
         if not report_dir.is_dir():
             return []
+        archive = NativeReportArchive(report_dir)
         records = []
         report_files = (target for target in report_dir.glob("*.html") if REPORT_FILENAME.fullmatch(target.name))
         for target in sorted(report_files, key=lambda item: item.stat().st_mtime, reverse=True):
             stat = target.stat()
             csv_target = target.with_suffix(".csv")
             is_acceptance = bool(ACCEPTANCE_REPORT_FILENAME.fullmatch(target.name))
-            records.append({
+            record = {
                 "filename": target.name,
                 "size": stat.st_size,
                 "modified_at": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds"),
                 "csv_filename": csv_target.name if csv_target.is_file() else None,
                 "report_type": "acceptance" if is_acceptance else "test",
                 "title": "部署验收报告" if is_acceptance else "自动测试运行报告",
-            })
+            }
+            native = archive.summary_for_filename(target.name)
+            if native is not None:
+                record["native_report"] = native
+            records.append(record)
         return records[:200]
 
     def _report_file(self, requested: str) -> None:
@@ -1871,6 +2618,220 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         )
         if completed:
             ROBOT_LOG_DOWNLOADS.complete(download_id)
+        else:
+            audit = getattr(self, "_tool_audit", None)
+            if audit is not None and audit.status < 400 and not audit.interrupted:
+                audit.response(audit.status, {"error": "机器人日志下载未完成"})
+
+    def _tail_robot_log_stdout(self, source_id: str, file_id: str) -> None:
+        """Proxy one selected Supervisor stdout stream to its current browser.
+
+        The browser supplies only opaque source/file identifiers.  The current
+        filesystem identity is rechecked before the filename is matched to a
+        process discovered from Supervisor; arbitrary process names and the
+        protected Supervisor HTTP port are never exposed to the browser.
+        """
+
+        try:
+            selected = ROBOT_LOGS.open_file(source_id, file_id)
+        except RobotLogError as exc:
+            self.send_error(HTTPStatus.NOT_FOUND, str(exc))
+            return
+        try:
+            filename = selected.name
+        finally:
+            selected.stream.close()
+
+        program_name = filename.removesuffix(".out.log")
+        if program_name == filename or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", program_name):
+            self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, "该日志不是可跟随的 Supervisor stdout 日志")
+            return
+
+        supervisor = SupervisorClient(SETTINGS.load().supervisor_command, SETTINGS.load().command_timeout_s)
+        tail_token = None
+        tail_process = None
+        try:
+            matching_processes = [
+                process.name
+                for process in supervisor.discover()
+                if process.name.rsplit(":", 1)[-1] == program_name
+            ]
+            if len(matching_processes) != 1:
+                raise RobotLogError("未找到对应的 Supervisor 进程")
+            tail_token = ROBOT_LOG_TAILS.reserve()
+            tail_process = supervisor.tail_stdout(matching_processes[0])
+        except RobotLogError as exc:
+            self.send_error(HTTPStatus.NOT_FOUND, str(exc))
+            return
+        except RuntimeError as exc:
+            if tail_token is not None:
+                ROBOT_LOG_TAILS.release(tail_token)
+            self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
+            return
+
+        try:
+            if tail_process.stdout is None:
+                raise RuntimeError("Supervisor 日志跟随未提供 stdout")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            while True:
+                chunk = tail_process.stdout.read(4096)
+                if chunk:
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                    continue
+                if tail_process.poll() is not None:
+                    return_code = tail_process.poll()
+                    if return_code:
+                        LOGGER.error("Supervisor 日志跟随进程异常退出：source=%s file=%s returncode=%s", source_id, file_id, return_code)
+                        audit = getattr(self, "_tool_audit", None)
+                        if audit is not None:
+                            audit.response(audit.status, {"error": "Supervisor 日志跟随进程异常退出"})
+                    break
+        except (BrokenPipeError, ConnectionResetError):
+            # 切换/关闭一个实时卡片就是正常的流生命周期，不记录为服务错误。
+            audit = getattr(self, "_tool_audit", None)
+            if audit is not None:
+                audit.interrupted = True
+            pass
+        except RuntimeError as exc:
+            LOGGER.exception("Supervisor 日志跟随失败：source=%s file=%s error=%s", source_id, file_id, exc)
+            audit = getattr(self, "_tool_audit", None)
+            if audit is not None:
+                audit.response(audit.status, {"error": str(exc)})
+        finally:
+            if tail_process is not None and tail_process.poll() is None:
+                tail_process.terminate()
+                try:
+                    tail_process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    tail_process.kill()
+                    tail_process.wait(timeout=1)
+            if tail_token is not None:
+                ROBOT_LOG_TAILS.release(tail_token)
+
+    def _tail_robot_logs_stdout(self, streams: list[tuple[str, str]]) -> None:
+        """Multiplex selected stdout followers into one browser connection.
+
+        Browsers limit concurrent HTTP/1.1 connections per origin.  A separate
+        long-poll for every visible card can therefore starve normal navigation;
+        this endpoint keeps every Supervisor tail server-side but emits tagged
+        NDJSON through a single, opaque-ID-only client stream.
+        """
+
+        tails: list[tuple[str, object, object]] = []
+        try:
+            supervisor = SupervisorClient(SETTINGS.load().supervisor_command, SETTINGS.load().command_timeout_s)
+            for source_id, file_id in streams:
+                selected = ROBOT_LOGS.open_file(source_id, file_id)
+                try:
+                    filename = selected.name
+                finally:
+                    selected.stream.close()
+                program_name = filename.removesuffix(".out.log")
+                if program_name == filename or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", program_name):
+                    raise RobotLogError("该日志不是可跟随的 Supervisor stdout 日志")
+                matching_processes = [
+                    process.name
+                    for process in supervisor.discover()
+                    if process.name.rsplit(":", 1)[-1] == program_name
+                ]
+                if len(matching_processes) != 1:
+                    raise RobotLogError("未找到对应的 Supervisor 进程")
+                tail_token = ROBOT_LOG_TAILS.reserve()
+                try:
+                    tail_process = supervisor.tail_stdout(matching_processes[0])
+                except RuntimeError:
+                    ROBOT_LOG_TAILS.release(tail_token)
+                    raise
+                if tail_process.stdout is None:
+                    ROBOT_LOG_TAILS.release(tail_token)
+                    raise RuntimeError("Supervisor 日志跟随未提供 stdout")
+                tails.append((f"{source_id}:{file_id}", tail_token, tail_process))
+        except RobotLogError as exc:
+            self.send_error(HTTPStatus.NOT_FOUND, str(exc))
+            return
+        except RuntimeError as exc:
+            self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
+            return
+        finally:
+            if len(tails) != len(streams):
+                for _, tail_token, tail_process in tails:
+                    if tail_process.poll() is None:
+                        tail_process.terminate()
+                    ROBOT_LOG_TAILS.release(tail_token)
+
+        events: queue.Queue[tuple[str, str | None]] = queue.Queue(maxsize=64)
+        closed = threading.Event()
+
+        def follow(stream_id: str, tail_process: object) -> None:
+            try:
+                while not closed.is_set():
+                    chunk = tail_process.stdout.read(4096)
+                    if chunk:
+                        while not closed.is_set():
+                            try:
+                                events.put((stream_id, chunk.decode("utf-8", errors="replace")), timeout=0.2)
+                                break
+                            except queue.Full:
+                                continue
+                    elif tail_process.poll() is not None:
+                        return_code = tail_process.poll()
+                        if return_code:
+                            LOGGER.error("Supervisor 合并日志跟随进程异常退出：stream=%s returncode=%s", stream_id, return_code)
+                            audit = getattr(self, "_tool_audit", None)
+                            if audit is not None:
+                                audit.response(audit.status, {"error": "Supervisor 合并日志跟随进程异常退出"})
+                        break
+            except (OSError, RuntimeError):
+                LOGGER.exception("Supervisor 合并日志跟随读取失败：stream=%s", stream_id)
+                audit = getattr(self, "_tool_audit", None)
+                if audit is not None:
+                    audit.response(audit.status, {"error": "Supervisor 合并日志跟随读取失败"})
+            finally:
+                while not closed.is_set():
+                    try:
+                        events.put((stream_id, None), timeout=0.2)
+                        break
+                    except queue.Full:
+                        continue
+
+        workers = [threading.Thread(target=follow, args=(stream_id, tail_process), daemon=True) for stream_id, _, tail_process in tails]
+        for worker in workers:
+            worker.start()
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            remaining = len(workers)
+            while remaining:
+                stream_id, text = events.get()
+                if text is None:
+                    remaining -= 1
+                    continue
+                self.wfile.write((json.dumps({"stream": stream_id, "text": text}, ensure_ascii=False) + "\n").encode("utf-8"))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            audit = getattr(self, "_tool_audit", None)
+            if audit is not None:
+                audit.interrupted = True
+            pass
+        finally:
+            closed.set()
+            for _, tail_token, tail_process in tails:
+                if tail_process.poll() is None:
+                    tail_process.terminate()
+                    try:
+                        tail_process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        tail_process.kill()
+                        tail_process.wait(timeout=1)
+                ROBOT_LOG_TAILS.release(tail_token)
 
     def _download_robot_log_file(
         self,
@@ -1940,8 +2901,19 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                         if progress:
                             progress(download.size_bytes - remaining)
                 return True
+        except (BrokenPipeError, ConnectionResetError):
+            LOGGER.info("机器人日志下载连接关闭：source=%s file=%s", source_id, file_id)
+            audit = getattr(self, "_tool_audit", None)
+            if audit is not None:
+                audit.interrupted = True
+            if failed:
+                failed("浏览器连接中断或日志读取失败")
+            return False
         except OSError as exc:
-            LOGGER.warning("机器人日志下载中断：source=%s file=%s error=%s", source_id, file_id, exc)
+            LOGGER.exception("机器人日志下载读取失败：source=%s file=%s error=%s", source_id, file_id, exc)
+            audit = getattr(self, "_tool_audit", None)
+            if audit is not None:
+                audit.response(audit.status, {"error": "机器人日志下载读取失败"})
             if failed:
                 failed("浏览器连接中断或日志读取失败")
             return False
@@ -1981,6 +2953,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             manifest.unlink()
         for trajectory_dir in trajectory_dirs:
             shutil.rmtree(trajectory_dir)
+        NativeReportArchive(report_root).delete_for_filename(target.name)
 
     def _static_from(self, root: Path, requested: str, *, inject_console_shell: bool = True) -> None:
         target = (root / requested).resolve()
@@ -1989,6 +2962,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         body = target.read_bytes()
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        if target.suffix == ".html":
+            body = inject_client_diagnostics(body)
         if target.suffix == ".html" and inject_console_shell:
             # 所有控制台页面共享品牌版本提示，避免四个独立页面重复维护同一段标记。
             shell_scripts = b'<script src="/brand_version.js"></script>'
@@ -2018,6 +2993,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if target.suffix != ".html":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
+        body = inject_client_diagnostics(body)
         shell_head = b'<link rel="stylesheet" href="/mobile_console.css">'
         shell_body = b'<script src="/brand_version.js"></script><script defer src="/mobile_console.js"></script>'
         # 构建产物和传统页面均有标准 head/body。若未来模板异常，宁可保留页面
@@ -2068,6 +3044,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _json(self, payload, status=HTTPStatus.OK) -> None:
+        audit = getattr(self, "_tool_audit", None)
+        if audit is not None:
+            audit.response(status, payload)
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -2092,15 +3071,6 @@ def run_console() -> None:
         # not run.  VideoManager.status() reports the same error to the page.
         LOGGER.warning("视频配置迁移未执行：%s", exc)
     try:
-        # 手动控制首次页面请求不能承担 ROS2 节点创建和锁存状态回放的延迟。
-        # 节点无法启动时仍保留控制台和状态页，由 fail-closed 状态明确锁定。
-        VEHICLE_CONTROL.start()
-    except VehicleControlUnavailable as exc:
-        LOGGER.warning("车辆控制 ROS2 模块预热失败：%s", exc)
-    # 状态监控始终只读；ROS 不可用时页面安全显示“状态暂不可用”，不能阻塞控制台。
-    VEHICLE_EXECUTION_STATUS.start()
-    LOCALIZATION_STATUS.start()
-    try:
         server = ThreadingHTTPServer(("0.0.0.0", 8087), ConsoleHandler)
     except OSError as exc:
         if exc.errno == errno.EADDRINUSE:
@@ -2109,8 +3079,27 @@ def run_console() -> None:
             print("如需重新启动，请先在现有网页中点击“安全退出”，再以普通账户运行 ry-aletheia。")
             raise SystemExit(0)
         raise
+    try:
+        # 手动控制首次页面请求不能承担 ROS2 节点创建和锁存状态回放的延迟。
+        # 仅在已确认本进程拥有监听端口后创建 ROS 资源；否则第二个进程退出时
+        # 会遗留初始化中的线程，冻结程序可能因此异常终止并被 systemd 反复重启。
+        VEHICLE_CONTROL.start()
+    except VehicleControlUnavailable as exc:
+        LOGGER.warning("车辆控制 ROS2 模块预热失败：%s", exc)
+    # 状态监控始终只读；ROS 不可用时页面安全显示“状态暂不可用”，不能阻塞控制台。
+    VEHICLE_EXECUTION_STATUS.start()
+    LOCALIZATION_STATUS.start()
     server.upgrade_pending = False
     server.restart_command = None
+    native_backfill_stop = threading.Event()
+    # The socket is already listening after ThreadingHTTPServer construction.
+    # Historical evidence is therefore strictly post-listen, daemonized work.
+    threading.Thread(
+        target=_native_report_backfill_worker,
+        args=(native_backfill_stop, WORKSPACE),
+        daemon=True,
+        name="native-report-backfill",
+    ).start()
     # 长连接代理不应拖住安全退出或离线升级后的新版本启动。
     server.daemon_threads = True
     video_command = [str(sys.executable), "--video-runner"]
@@ -2124,21 +3113,29 @@ def run_console() -> None:
     print("RY Aletheia 自动测试平台：http://0.0.0.0:8087")
     print("局域网访问：http://<小车IP>:8087")
     print("按 Ctrl+C 停止服务")
+    restore_signal_handlers = _install_console_shutdown_signal_handlers(server)
+    restart_scheduled: bool | None = None
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
-        pass
     finally:
-        video_runtime.stop()
-        MAPPING.close()
-        VEHICLE_CONTROL.close()
-        VEHICLE_EXECUTION_STATUS.close()
-        LOCALIZATION_STATUS.close()
-        OBSERVATION.stop()
-        server.server_close()
+        # A successful systemd restart owns the whole console cgroup.  Do not
+        # wait for arbitrary ROS executor teardown after the replacement has
+        # already committed: systemd would otherwise hold this restart in its
+        # stop phase until TimeoutStopSec, then launch too late or collide with
+        # a manual recovery process.  This does not apply to terminal starts.
+        if server.restart_command and _is_systemd_service_context():
+            restart_scheduled = _spawn_upgrade_restart(WORKSPACE, Path(server.restart_command[0]))
+            if restart_scheduled:
+                LOGGER.info("离线升级已交由 systemd 重启控制台")
+                _handoff_to_systemd_after_upgrade()
+        try:
+            _close_console_resources(native_backfill_stop, video_runtime, server)
+        finally:
+            restore_signal_handlers()
     if server.restart_command:
-        restart_scheduled = _spawn_upgrade_restart(WORKSPACE, Path(server.restart_command[0]))
-        if not restart_scheduled and os.environ.get("INVOCATION_ID"):
+        if restart_scheduled is None:
+            restart_scheduled = _spawn_upgrade_restart(WORKSPACE, Path(server.restart_command[0]))
+        if not restart_scheduled and _is_systemd_service_context():
             # 让 Restart=on-failure 接管 systemctl 不可用的异常路径，避免
             # 服务正常退出后留下“已替换但无人启动”的新二进制。
             raise SystemExit(1)

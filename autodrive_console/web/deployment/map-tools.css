@@ -1,0 +1,139 @@
+/* The map stays the working surface. Tools occupy a compact, translucent rail. */
+#mapWorkspace {
+  --map-tool-ink: #25272c;
+  --map-tool-muted: #565c66;
+  --map-tool-glass: rgba(250, 251, 253, .84);
+  --map-tool-blue: #0066d6;
+}
+#mapWorkspace .map-tool-dock,
+#mapWorkspace .map-tool-palette,
+#mapWorkspace .map-tool-context,
+#mapWorkspace .map-display-switch {
+  background: var(--map-tool-glass);
+  color: var(--map-tool-ink);
+  border: 0;
+  box-shadow: 0 5px 20px rgba(28, 39, 55, .14), inset 0 0 0 1px rgba(255, 255, 255, .75);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  touch-action: manipulation;
+}
+#mapWorkspace .map-tool-dock {
+  position: absolute; top: 14px; left: 14px; z-index: 5;
+  display: flex; flex-direction: column; gap: 3px;
+  width: 52px; padding: 5px; border-radius: 15px;
+}
+#mapWorkspace .map-tool-button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+  width: auto; min-width: 0; min-height: 40px; height: auto;
+  margin: 0; padding: 9px; border: 0 !important; border-radius: 10px;
+  background: transparent !important; color: var(--map-tool-ink) !important;
+  box-shadow: none !important; font-size: 13px; font-weight: 500;
+  line-height: 1.3; cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+#mapWorkspace .map-tool-button .tool-icon {
+  width: 21px; height: 21px; fill: none; stroke: currentColor;
+  stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; opacity: 1;
+}
+#mapWorkspace .map-tool-button span { float: none; color: inherit; font: inherit; }
+#mapWorkspace .map-tool-button:hover { background: rgba(30, 43, 60, .07) !important; }
+#mapWorkspace .map-tool-button:focus-visible { outline: 3px solid #007aff; outline-offset: 2px; }
+#mapWorkspace .map-tool-button.active-tool,
+#mapWorkspace .map-tool-button[aria-pressed="true"],
+#mapWorkspace #addMapComponent[aria-expanded="true"] {
+  background: rgba(0, 102, 214, .12) !important; color: var(--map-tool-blue) !important;
+}
+#mapWorkspace .map-tool-button:disabled { opacity: .4; cursor: default; }
+#mapWorkspace .map-tool-dock .map-tool-button > span,
+#mapWorkspace #closeMapToolPalette > span,
+#mapWorkspace #cancelMapTool > span,
+#mapWorkspace .eraser-shape-toggle .map-tool-button > span {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap;
+}
+#mapWorkspace .map-tool-divider { height: 1px; margin: 4px 6px; background: rgba(39, 47, 60, .12); }
+#mapWorkspace .map-tool-palette {
+  position: absolute; top: 14px; left: 78px; z-index: 6;
+  width: 284px; max-width: calc(100% - 92px); max-height: calc(100% - 28px);
+  padding: 17px; border-radius: 17px; overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: #a5acb6 transparent;
+}
+#mapWorkspace .map-tool-palette header { display: flex; align-items: start; justify-content: space-between; gap: 8px; }
+#mapWorkspace .map-tool-palette header h2 { margin: 1px 0 4px; color: var(--map-tool-ink); font-size: 16px; font-weight: 650; letter-spacing: -.02em; }
+#mapWorkspace .map-tool-palette header p { margin: 0; color: var(--map-tool-muted); font-size: 11px; line-height: 1.6; }
+#mapWorkspace .map-tool-palette header > button { min-height: 28px; padding: 4px; margin: -2px -4px 0 0; }
+#mapWorkspace .map-tool-palette header > button .tool-icon { width: 18px; height: 18px; }
+#mapWorkspace .map-tool-section { margin: 19px 0 0; }
+#mapWorkspace .map-tool-section h3 { margin: 0 0 7px 8px; color: var(--map-tool-muted); font-size: 11px; font-weight: 500; }
+#mapWorkspace .map-tool-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px 7px; }
+#mapWorkspace .map-tool-options .map-tool-button { justify-content: start; min-height: 42px; padding: 10px 8px; white-space: nowrap; }
+#mapWorkspace .map-tool-palette footer { margin-top: 15px; padding: 12px 5px 0; border-top: 1px solid rgba(39, 47, 60, .1); color: var(--map-tool-muted); font-size: 10px; line-height: 1.6; }
+#mapWorkspace .map-tool-context { position: absolute; bottom: 14px; left: 14px; z-index: 5; width: max-content; max-width: calc(100% - 28px); padding: 6px 8px; border-radius: 14px; }
+#mapWorkspace .map-tool-current { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-left: 6px; }
+#mapWorkspace .map-tool-current > span { display: grid; gap: 3px; padding: 4px 0; }
+#mapWorkspace .map-tool-current strong { font-size: 12px; font-weight: 600; color: var(--map-tool-ink); }
+#mapWorkspace .map-tool-current small { font-size: 10px; color: var(--map-tool-muted); }
+#mapWorkspace #cancelMapTool { padding: 6px; min-height: 32px; }
+#mapWorkspace #cancelMapTool .tool-icon { width: 16px; height: 16px; }
+#mapWorkspace .eraser-size-control { position: static; min-width: 0; min-height: 40px; padding: 7px 6px; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--map-tool-muted); }
+#mapWorkspace .eraser-size-control b { color: var(--map-tool-ink); font: 600 12px -apple-system, BlinkMacSystemFont, sans-serif; font-variant-numeric: tabular-nums; }
+#mapWorkspace .eraser-size-control small { color: var(--map-tool-muted); font-size: 10px; }
+#mapWorkspace .eraser-shape-toggle { padding: 2px; border: 0; background: rgba(39, 47, 60, .06); border-radius: 9px; }
+#mapWorkspace .eraser-shape-toggle .map-tool-button { width: 32px; min-height: 30px; padding: 5px; border-radius: 7px; }
+#mapWorkspace .eraser-shape-toggle .map-tool-button .tool-icon { width: 17px; height: 17px; }
+#mapWorkspace .eraser-shape-toggle .map-tool-button.active { background: #fff !important; color: var(--map-tool-blue) !important; }
+#mapWorkspace .map-erase-actions { display: flex; flex-wrap: wrap; gap: 3px; padding-top: 4px; border-top: 1px solid rgba(39, 47, 60, .1); }
+#mapWorkspace .map-erase-actions .map-tool-button { min-height: 34px; padding: 7px; font-size: 11px; gap: 5px; }
+#mapWorkspace .map-erase-actions .map-tool-button .tool-icon { width: 16px; height: 16px; }
+#mapWorkspace #completeErasePolygon { color: var(--map-tool-blue) !important; }
+#mapWorkspace #clearMapEdits { color: #a52422 !important; }
+#mapWorkspace .map-cursor-readout { position: absolute; right: 15px; bottom: 13px; z-index: 2; padding: 4px 7px; border-radius: 5px; background: rgba(255,255,255,.7); color: #565c66; pointer-events: none; font-size: 10px; font-variant-numeric: tabular-nums; }
+#mapWorkspace:has(.map-tool-context:not([hidden])) .map-cursor-readout { display: none; }
+#mapWorkspace .map-display-switch { top: 14px; right: 14px; padding: 4px; border-radius: 12px; }
+#mapWorkspace .map-display-switch button { border-radius: 8px; min-height: 32px; font-size: 11px; }
+#mapWorkspace .map-display-switch button:focus-visible { outline: 3px solid #007aff; outline-offset: 2px; }
+#mapWorkspace .map-display-switch button:disabled { opacity: .48; cursor: default; }
+#mapWorkspace .map-display-status {
+  position: absolute; top: 62px; right: 16px; z-index: 4; width: auto; height: auto;
+  max-width: calc(100% - 94px); overflow: visible; clip-path: none; white-space: normal;
+  padding: 5px 9px; border-radius: 7px; background: rgba(250,251,253,.94);
+  color: var(--map-tool-muted); font-size: 11px; line-height: 1.5; text-align: right;
+}
+#mapWorkspace [hidden], #mapWorkspace .deployment-hidden { display: none !important; }
+body[data-deployment-stage="maps"] #mapWorkspace .map-annotation-tool,
+body[data-deployment-stage="maps"] #mapWorkspace #addMapComponent,
+body[data-deployment-stage="maps"] #mapWorkspace .map-tool-divider,
+body[data-deployment-stage="maps"] #mapWorkspace .map-tool-palette,
+body[data-deployment-stage="maps"] #mapWorkspace .map-tool-context,
+.task-preview-map-mount #mapWorkspace .map-tool-dock,
+.task-preview-map-mount #mapWorkspace .map-tool-palette,
+.task-preview-map-mount #mapWorkspace .map-tool-context,
+.task-preview-map-mount #mapWorkspace .map-cursor-readout { display: none !important; }
+@media (max-width: 560px) {
+  #mapWorkspace .map-tool-dock { top: 10px; left: 10px; width: 48px; padding: 4px; }
+  #mapWorkspace .map-tool-palette { top: 62px; left: 66px; max-width: calc(100% - 76px); padding: 12px; max-height: calc(100% - 74px); }
+  #mapWorkspace .map-tool-options { gap: 3px; }
+  #mapWorkspace .map-tool-options .map-tool-button { font-size: 12px; padding-inline: 5px; gap: 6px; }
+  #mapWorkspace .map-tool-options .tool-icon { width: 19px; height: 19px; }
+  #mapWorkspace .map-display-switch { top: 10px; right: 10px; }
+  #mapWorkspace .map-tool-context { bottom: 10px; left: 66px; max-width: calc(100% - 76px); }
+}
+@media (prefers-reduced-transparency: reduce) {
+  #mapWorkspace { --map-tool-glass: #fafbfd; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #mapWorkspace .map-tool-button { transition: none; }
+}
+
+/* The same correction mode applies to brush strokes and polygon selections. */
+#mapWorkspace .map-edit-mode-control { display: flex; gap: 3px; padding: 3px; margin-top: 5px; background: rgba(39,47,60,.06); border-radius: 10px; }
+#mapWorkspace .map-edit-mode-control button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; flex: 1; min-height: 36px; margin: 0; padding: 6px 8px; white-space: nowrap; border: 0; border-radius: 7px; background: transparent; color: var(--map-tool-muted); font-size: 12px; font-weight: 550; box-shadow: none; }
+#mapWorkspace .map-edit-mode-control button[aria-pressed="true"] { background: #fff; color: var(--map-tool-ink); box-shadow: 0 1px 3px rgba(20,30,45,.12); }
+#mapWorkspace .map-edit-mode-control button:hover:not(:disabled) { color: var(--map-tool-ink); }
+#mapWorkspace .map-edit-mode-control button:focus-visible { outline: 2px solid var(--map-tool-blue); outline-offset: 2px; }
+#mapWorkspace .map-edit-mode-control button:disabled { opacity: .48; cursor: wait; }
+#mapWorkspace .map-edit-swatch { width: 12px; height: 12px; flex: 0 0 12px; border: 1px solid rgba(39,47,60,.25); border-radius: 3px; }
+#mapWorkspace .map-edit-swatch-free { background: #fff; }
+#mapWorkspace .map-edit-swatch-wall { background: #111; }
+#mapWorkspace .map-edit-mode-detail { font-size: 10px; font-weight: 400; }

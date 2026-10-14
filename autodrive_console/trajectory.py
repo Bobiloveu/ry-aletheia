@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -10,6 +11,9 @@ from typing import Any, Callable
 
 from .map_assets import CachedMapAsset, MapAssetCache
 from .navigation_status import NavigationStatusMonitor
+
+
+LOGGER = logging.getLogger("ry_aletheia.trajectory")
 
 
 class TrajectoryError(RuntimeError):
@@ -89,6 +93,7 @@ class TrajectorySession:
         self._localization_cursor = _localization_cursor(localization_monitor)
         self._relocalizations: list[dict[str, Any]] = []
         self._last_verified_map_sample: dict[str, Any] | None = None
+        self._localization_monitor_failed = False
 
     def start(self) -> None:
         try:
@@ -118,6 +123,7 @@ class TrajectorySession:
         self._executor.add_node(self._node)
         self._thread = threading.Thread(target=self._executor.spin, daemon=True, name="trajectory-recorder")
         self._thread.start()
+        LOGGER.info("轨迹采集已启动：sample_hz=%.2f maps=%s routes=%s", 1 / self.minimum_interval, len(self.maps), len(self.route_plan))
 
     def stop(self) -> dict[str, Any]:
         # 定时器最后一次采样可能尚未来得及触发。先在 ROS executor 仍活跃时把
@@ -126,7 +132,7 @@ class TrajectorySession:
             self._on_sample()
         except Exception:
             # 收尾采样只能补充证据，绝不能让已有轨迹因一次 TF 瞬态失败而丢失。
-            pass
+            LOGGER.warning("轨迹收尾采样失败，保留已采集证据", exc_info=True)
         # 最后一条有效轨迹点之后才到达的重定位仍属于本轮；保留该事件的统计，
         # 但没有可信坐标时绝不能虚构地图位置。
         self._record_relocalizations_for_sample(self._last_verified_map_sample)
@@ -138,7 +144,7 @@ class TrajectorySession:
             self._node.destroy_node()
         with self._lock:
             segments = list(self._segments.values())
-            return {
+            result = {
                 "sample_hz": round(1 / self.minimum_interval, 2),
                 "points": sum(len(item["points"]) for item in segments),
                 "segments": segments,
@@ -159,6 +165,9 @@ class TrajectorySession:
                     "map_last_error": self._map_last_error,
                 },
             }
+        log = LOGGER.warning if self._points_rejected or self._tf_errors or self._map_unmatched or self._map_last_error else LOGGER.info
+        log("轨迹采集已结束：points=%s segments=%s rejected=%s tf_errors=%s map_unmatched=%s relocalizations=%s detail=%s", result["points"], len(segments), self._points_rejected, self._tf_errors, self._map_unmatched, len(self._relocalizations), self._tf_last_error or self._map_last_error)
+        return result
 
     def _on_map(self, message) -> None:
         info = message.info
@@ -314,7 +323,13 @@ class TrajectorySession:
             next_cursor, events = monitor.events_since(self._localization_cursor)
         except Exception:
             # 定位观测只是报告证据；监控异常不得干扰轨迹采样或任务执行。
+            if not self._localization_monitor_failed:
+                self._localization_monitor_failed = True
+                LOGGER.warning("轨迹重定位事件读取失败，继续采样", exc_info=True)
             return
+        if self._localization_monitor_failed:
+            self._localization_monitor_failed = False
+            LOGGER.info("轨迹重定位事件读取已恢复")
         self._localization_cursor = int(next_cursor)
         for event in events if isinstance(events, list) else []:
             if not isinstance(event, dict):

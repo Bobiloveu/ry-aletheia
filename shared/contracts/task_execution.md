@@ -13,13 +13,55 @@ PC Web 仍只消费 `GET /api/vehicle-execution-status` 的 `{phase,label}`，�
 
 Backend 拥有任务文件、校验、执行状态、报告、取消、恢复和 supervisor 协调能力。现有 API 家族包括 `/api/cases`、`/api/runs`、`/api/runs/latest`、`/api/reports`、`/api/acceptance`、`/api/scenario-setup`、`/api/supervisor/processes` 和 `/api/tool-logs`。
 
+## 受控地图标记前往与执行互斥（PC 实时观测）
+
+PC 实时观测的“受控地图标记前往”由 Backend 的 `MapMarkerNavigationController` 通过受控 Nav2 Action 实现，不属于任务下发、验收或 Mobile 能力，也不会读取任务文件。控制器处于 `checking`、`navigating`、`cancelling` 或 `cancellation_unconfirmed` 时，`RunManager` 必须以 HTTP 409 拒绝新的普通测试和部署验收运行；同样，任一 `queued`、`preparing`、`running`、`awaiting_recovery`、`recovering`、`cancelling` 或 `interrupted` 的运行都必须阻止该导航操作开始。两侧均不得暂停、替换、取消或重发对方的任务。
+
+控制器只允许前往已验证且与当前活动地图严格一致的受控地图标记；地图不匹配、控制源不是已确认的 `navigation`、急停/定位状态不满足、手动会话或手动重定位占用均应拒绝，而不是推测安全或切换地图。该增量仅由 PC `web_console` 消费；Mobile 不是消费者，不新增 API 调用、任务入口或 ROS 控制能力。
+
 变更性操作属于受控动作：客户端 UI 必须呈现目标、确认、返回错误和当前状态。Mobile 可以消费这些 API，但不得直接改写机器人任务、执行任意命令或创建离线升级包。
+
+## 离线升级可用性（Desktop Web）
+
+**运行时执行方：** Backend `UpgradeManager`、`RunManager` 与 `ScenarioSetupManager`；**现有消费者：** PC Web `/runtime-settings.html`；**非消费者：** Mobile。移动端不提供离线升级 ZIP，也不消费此端点。
+
+`GET /api/system/upgrade` 保持既有升级能力字段，并增量返回 `availability`，供页面在选择 ZIP 前展示当前是否允许升级：
+
+```json
+{
+  "availability": {
+    "ready": false,
+    "blocker": {
+      "kind": "scenario_recovery",
+      "message": "当前存在未完成的场景恢复事务。请先恢复常规启动配置后再升级。",
+      "action_label": "前往恢复常规配置",
+      "action_url": "/scenario-setup.html"
+    }
+  }
+}
+```
+
+`availability.ready` 为 `true` 时 `blocker` 必须为 `null`；为 `false` 时 `blocker` 必须提供受控中文说明。当前 `kind` 可以是 `unsupported`、`active_run` 或 `scenario_recovery`。`active_run` 指向任务指挥台，`scenario_recovery` 指向场景恢复页；页面必须显示该说明、禁止选择/应用 ZIP，并只提供返回的受控入口。该字段是向后兼容的前置提示，不能替代 `POST /api/system/upgrade` 的服务端互斥与恢复校验；旧客户端可忽略它，服务端仍必须拒绝不安全升级。
+
+当前定向验证为 `scripts/test-backend.sh` 和 `scripts/test-web.sh`；Mobile 不受此增量影响。
 
 ## 用例管理（Desktop Web）
 
 **运行时执行方：** Backend `CaseStore`、`CaseWorkspace` 与既有场景方案/设置存储；**现有消费者：** PC Web `/case-library.html`；**非消费者：** Mobile。
 
 `DELETE /api/cases/{case_id}` 仅删除当前正式任务目录中已扫描、通过基础校验的一个本地 JSON 用例。`case_id` 必须是精确的已发现文件标识，不能包含路径分隔符；Backend 再次确认其解析路径仍位于正式任务目录，绝不接受浏览器提交的文件路径。执行任务存在时必须返回 HTTP 409，不能删除。成功删除后仅清理该用例的本地别名、场景方案绑定和可选管理元数据，不触碰其他用例、机器人运行时或 ROS 控制边界。PC 页面必须在“用例管理与交付”区域以行内二次确认展示完整文件名与不可恢复提示；失败时保留确认状态并展示 Backend 返回的原因。该操作不提供给 Mobile，新增消费者前须更新本文档并完成其定向验证。
+
+## 普通测试断电中断恢复（Desktop Web）
+
+**运行时执行方：** Backend `RunManager`；**现有消费者：** PC Web `/index.html`；**非消费者：** Mobile。Mobile 不消费 `/api/runs`、`/api/runs/latest` 或普通测试 AttemptResult，因此本增量不修改移动端。
+
+普通循环测试在创建后、每轮真正下发前、可信结果及其轨迹证据写入后、取消/人工恢复状态变化和运行终态时，都会在报告目录下保存私有检查点。检查点只保存冻结的报告数据和报告目录内的证据引用，并以文件 fsync、原子替换和目录 fsync 持久化；它不能保存 ROS client、线程、进行中的服务调用或可重发任务源。
+
+控制台启动时只读取自己的普通测试检查点。仍处于活动状态的记录会转为 `RunRecord.status = interrupted`；如果某轮已经开始但没有可信终态，Backend 追加 `AttemptResult.status = unknown_after_power_loss`，文案为“结果未知（断电）”。`unknown_after_power_loss` 不是通过、失败或取消，`summary.unknown` 单独计数，`passRate` 始终只按 `passed / (passed + failed)` 计算。断电发生在两轮之间时不得创建虚构未知轮次。
+
+恢复仅归档：Backend 从已验证的快照和轨迹文件写出同一运行 ID 对应的唯一部分 HTML/CSV 报告，成功后才删除检查点；报告写入失败时保留检查点供下次启动重试。恢复不得创建 `RobotGateway`、ROS client、导航目标、执行线程或任何车辆控制指令，不得自动恢复、补发或重发任务。
+
+`interrupted` 是历史终态，不占普通自动测试互斥锁，也不增加新的确认步骤。PC 页面必须以非阻塞说明显示“意外断电中断”和结果未知轮次，允许操作者按既有前置检查直接开始新的测试；不得把该提示实现为 resume、取消或任何 ROS 控制动作。部署验收的独立持久化、人工核对和范围锁定语义不受此规则影响。
 
 ## 部署验收（Desktop Web）
 
@@ -80,16 +122,12 @@ R6B 链路执行期间只读监听既有 `/task_status`；注册表可验证的 
 
 `restarting_nodes` 仅表示 `RunManager` 正在执行 Aletheia 已配置的 Supervisor 依赖控制与稳定等待，绝不从普通运行状态、进程名或浏览器行为推测。当前 PC 页面只显示 `phase` 与 `label`；未来 Mobile/车载消费者接入前必须在本文档更新消费者清单并运行其定向验证。当前定向验证为 `scripts/test-backend.sh` 和 `scripts/test-web.sh`。
 
-## Planned（规划中）
-
-新的任务 schema 版本在使用前，需要在 `shared/schemas` 中提供 JSON Schema、经过 Backend 校验、完成消费者兼容性评审并给出迁移说明。
-
 ### Mobile Native Reports（Mobile 原生测试报告）
 
-**Status: Planned（仅契约，尚未由 Backend 实现）**
-**未来运行时生产者：** `robot_backend`
-**未来消费者：** `mobile`；**PC Web：非消费者**，保持现有 HTML/CSV 报告流程不变。
-**兼容性：** 本节是对既有报告索引的增量约定。本文档的 Existing `GET /api/reports`、文件下载、预览和 filename 删除语义在 Backend 完成迁移并通过消费者验证前均保持不变。
+**Status: Existing（Backend schema v1 已实现）**
+**运行时生产者：** `robot_backend`（`NativeReportArchive`）
+**消费者：** `mobile`；**PC Web：非消费者**，保持现有 HTML/CSV 报告流程不变。
+**兼容性：** 本节是对既有报告索引的增量约定。`GET /api/reports` 的既有字段、文件下载、预览和 filename 删除语义均保持不变。
 
 #### 索引增量字段
 
@@ -121,8 +159,6 @@ R6B 链路执行期间只读监听既有 `/task_status`；注册表可验证的 
 
 #### 分页详情端点
 
-Backend 完成实现后提供：
-
 ```text
 GET /api/reports/{report_id}/native?cursor=<opaque>&limit=<1..100>
 ```
@@ -148,7 +184,7 @@ GET /api/reports/{report_id}/native?cursor=<opaque>&limit=<1..100>
 
 `item_id` 与 `report_id` 使用相同的 opaque identifier 约束；单项 `status` 可为上述固定值，未知的未来状态由客户端显示为 `unknown`。`summary` 与 `detail` 仅允许受控纯文本诊断摘要，必须受长度限制；不得返回或渲染本机路径、文件 URL、HTML、CSV、SVG、任意富文本、原始 ROS 消息、指令、凭据或未脱敏现场数据。无效或不属于当前授权报告的 `report_id` 必须返回 `404`；无效 cursor/limit 必须返回受控 `400`，不得泄露报告目录或其他报告的存在性。
 
-#### 地图轨迹证据（Planned）
+#### 地图轨迹证据
 
 为了让 Mobile 原生报告与既有 HTML 报告使用同一份已归档的运行证据，`items` 中可以增量包含 `trajectory_refs`。缺失等价于空数组，表示该项尚未归档原生轨迹，不影响原有任务结果展示：
 
@@ -169,8 +205,6 @@ GET /api/reports/{report_id}/native?cursor=<opaque>&limit=<1..100>
 
 `trajectory_id` 与 `report_id` 都是服务端签发的不透明标识；`label` 与 `integrity_warning` 是长度受限的受控纯文本。`status` 只允许 `available`、`incomplete`、`unavailable`；`sample_count` 必须为非负有限整数。未知枚举、非法 identifier 或畸形数据表示该条引用不可安全展示，Mobile 不得猜测、补全或读取报告文件。
 
-Backend 完成实现后提供以下只读报告专属端点：
-
 ```text
 GET /api/reports/{report_id}/native/trajectories/{trajectory_id}
 GET /api/reports/{report_id}/native/trajectories/{trajectory_id}/map.png
@@ -188,20 +222,25 @@ GET /api/reports/{report_id}/native/trajectories/{trajectory_id}/samples?cursor=
 #### 迁移、影响与升级条件
 
 - Backend 先在生成新报告时写入受控的结构化 sidecar/存储记录，并仅在完整校验通过时向索引添加 `native_report`；历史 HTML/CSV 可以按需回填，但不是客户端解析历史文件的理由。
-- Mobile 在 `native_report` 缺失或不安全时保持不可导航的迁移状态；只在 summary 有效时请求 Planned 详情端点。它不读取、下载、保存或导出报告文件。
+- Mobile 在 `native_report` 缺失或不安全时保持不可导航的迁移状态；只在 summary 有效时请求 Existing 详情端点。它不读取、下载、保存或导出报告文件。
 - Mobile 仅在已验证的 `trajectory_refs` 存在时按需请求报告专属轨迹端点；它使用冻结底图及同一报告的坐标元数据进行原生渲染，不读取 HTML/SVG、当前 Observation 地图或 Deployment 地图。
 - PC Web 不消费此字段或详情端点，不改变现有报告页面、下载与删除行为。
 - 既有 `DELETE /api/reports/{filename}` 的 filename 受控删除路径保持不变；`report_id` 不能替代、扩展或绕过它。
-- 将本节端点从 Planned 提升为 Existing 前，Backend 必须完成输入/输出校验、404/400 安全语义、旧索引兼容与迁移说明；Mobile 必须验证缺失/畸形/分页/错误状态；PC Web 必须确认忽略新增字段仍保持既有流程。然后在本文档记录三方验证证据与实际权威实现。
+- Backend 已完成输入/输出校验、400/404 安全语义、旧索引兼容、历史回填与 filename 删除联动。2026-09-29 已通过 `scripts/test-backend.sh`（796 项）和 `scripts/test-web.sh`（197 项及生产构建）；Mobile 报告模型、Repository、分页与轨迹工作区在 2026-09-28 的锁定 FVM 环境已完成定向验证，且本次没有 Mobile 源码或依赖改动。当前 Backend/Web 环境未安装 FVM，因此不把该环境缺失伪装为新的 Flutter 回归；发布前仍应在 Mobile profile 重跑 `scripts/test-mobile.sh` 或报告 feature 定向检查。
 
 ## 诊断 ROS Bag 录制（Desktop Web）
 
-**Status: Existing（Backend schema v1）**。运行时执行方为 `BagRecordingManager` 与普通 `RunManager`；Existing 消费者为 Desktop Web 的任务指挥台和 `/bag-recordings.html`；Mobile、验收序列、导航/底盘控制、视频及实时观测均为非消费者。
+**Status: Existing（Backend schema v1）**。运行时执行方为 `BagRecordingManager` 与普通 `RunManager`；Existing 消费者为 Desktop Web 的任务指挥台、`/bag-recording-config.html` 和 `/bag-recordings.html`；Mobile、验收序列、导航/底盘控制、视频及实时观测均为非消费者。
 
 普通测试 `POST /api/runs` 可增量携带 `bagRecording: null | {attemptIndex,topics}`。它只允许一个 `1..count` 的目标轮及 1–32 个不重复 Topic；浏览器不能提交命令、输出路径、压缩参数或 ROS 环境。未启用时原测试路径不变。录包生命周期由 Backend 测试线程持有，不绑定浏览器页面、HTTP 连接、轮询或页面可见性；操作者切换页面、刷新或关闭标签页不会停止录包、改变目标轮或改变审查状态。目标轮下发任务前，Backend 必须再次验证 Topic 仍是单一类型、有 DDS 发布者的可审查 Topic，并确认已通过 ROS Humble 环境预检、受控 recorder 进程存活和只读计数器就绪；任一项失败时该轮不得下发任务并必须记录失败原因。
 
-`GET /api/bag-recordings/topics` 只返回 `{name,type,publisher_count}`。它不列出隐藏、无发布者、多类型 Topic，也不列出已迁移到 ShmSDK 的 `sensor_msgs/msg/Image`、压缩/立体图像、`CameraInfo`、`PointCloud*` 或 `LaserScan` 类型；这些流不经过 DDS，不能录入 rosbag。`GET /api/bag-recordings` 返回受控归档摘要；`GET /api/bag-recordings/{id}` 返回已过滤清单详情；`DELETE /api/bag-recordings/{id}` 只能删除 Backend 发现的非活动受控目录。ID 固定为 32 位小写十六进制，接口绝不接受文件路径。
+任务指挥台只显示本次录制开关、已选摘要和配置入口；`/bag-recording-config.html` 在同一浏览器会话中保存目标轮与 Topic 草稿，返回任务指挥台后才由操作者确认创建测试。该草稿不是 Backend 持久化配置，不会发出 ROS 命令，也不会改变已运行任务。`GET /api/bag-recordings/topics` 只返回 `{name,type,publisher_count}`。Backend 在一个有界 DDS 图发现窗口内合并多个快照，避免新建 DDS 参与者尚未发现远端发布者时错误显示为空；它不列出隐藏、无发布者、多类型 Topic，也不列出已迁移到 ShmSDK 的 `sensor_msgs/msg/Image`、压缩/立体图像、`CameraInfo`、`PointCloud*` 或 `LaserScan` 类型；这些流不经过 DDS，不能录入 rosbag。`GET /api/bag-recordings` 返回受控归档摘要；`GET /api/bag-recordings/{id}` 返回已过滤清单详情；`DELETE /api/bag-recordings/{id}` 只能删除 Backend 发现的非活动受控目录。ID 固定为 32 位小写十六进制，接口绝不接受文件路径。
+
+除测试轮次外，Desktop Web 的诊断录包页还提供手动场景录制。`POST /api/bag-recordings/manual` 只接受 `{topics, durationMinutes, label?}`：`topics` 为 1–32 个不重复可录 Topic，`durationMinutes` 只能是 5、10、15 或 20，`label` 是可选的短场景名称。该操作只启动同一受控 recorder，不发送底盘、导航或任务控制指令；用户可切换页面并使用既有手动遥控，录制持续到用户显式 `POST /api/bag-recordings/manual/stop` 或时间到期。`GET /api/bag-recordings/manual` 只返回受控状态、已选 Topic 数量、可选名称和剩余时间。页面关闭、刷新、切换到其他页面都不会停止录制或改变状态。自动化测试录包与手动录制互斥：任一方已处于开始或归档过程中，另一方必须拒绝开始，且不得中断、取消或重发对方的工作。控制台受控退出会先停止并归档该录制；异常中断保留 staging 数据并按既有规则显示未完成。手动归档在既有清单中标记 `source: "manual"`，记录可选场景名称、时长上限和实际录制秒数；普通测试归档保持既有兼容字段。
 
 录制固定使用 SQLite3、Zstd 文件级压缩、8 槽压缩队列、2 个压缩线程和 512 MiB cache。清单记录受限 ROS 环境指纹、固定 profile、选中 Topic 类型、metadata 计数、独立只读计数、文件大小、SHA-256 和审查结论。文件先写入 `bag_recordings/.staging`，再以 fsync 与原子 rename 发布；控制台重启发现的 staging 数据必须保留并标记未完成。审查把计数器接收数与 rosbag2 metadata 写入数比较：≤1% 通过、>1% 且 ≤5% 警告、>5% 失败；metadata/哈希/Topic/进程/计数器异常也为失败。该审查不声称能证明上游发布者自身绝对零丢帧。
 
 变更影响为 Backend 与 Desktop Web；当前 Mobile 非消费者，无需 Mobile 工具链。定向验证为 Backend 录包/RunManager/HTTP 测试与 Desktop Web 模块检查；不构建离线升级包、不部署或重启机器人。
+## Planned（规划中）
+
+新的任务 schema 版本在使用前，需要在 `shared/schemas` 中提供 JSON Schema、经过 Backend 校验、完成消费者兼容性评审并给出迁移说明。

@@ -1,11 +1,14 @@
 import base64
+import errno
 import hashlib
 import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 import re
@@ -19,10 +22,12 @@ import web_console
 from autodrive_console.case_store import CaseStore
 from autodrive_console.models import AttemptResult, RunRecord, TaskParameters, TestCase
 from autodrive_console.map_assets import CachedMapAsset, MapAssetCache
+from autodrive_console.native_report_archive import NativeReportArchive
 from autodrive_console.map_snapshot import ObservationMapSnapshot
 from autodrive_console.observation import ObservationError, ObservationManager
 from autodrive_console.telemetry import TelemetryGateway
 from autodrive_console.trajectory import ActiveMap, TrajectorySession
+from autodrive_console.trajectory_render import _png_gray
 from autodrive_console.run_manager import RunManager
 from autodrive_console.scenario_setup import ScenarioSetupError, ScenarioSetupStore
 from autodrive_console.robot_gateway import RobotGateway
@@ -94,6 +99,222 @@ class _SupervisorClient(SupervisorClient):
 
 
 class OfflineModuleTests(unittest.TestCase):
+    def test_systemd_sigterm_runs_console_cleanup_before_exit(self):
+        """systemd 停止控制台时必须主动回收其视频与观测子进程树。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ready = root / "ready"
+            cleanup = root / "cleanup"
+            script = f"""
+import os
+import threading
+from pathlib import Path
+from types import SimpleNamespace
+
+import web_console
+
+ready = Path({str(ready)!r})
+cleanup = Path({str(cleanup)!r})
+
+def record(name):
+    with cleanup.open("a", encoding="utf-8") as output:
+        output.write(name + "\\n")
+
+class ProbeServer:
+    def __init__(self, *_args):
+        self.stop_event = threading.Event()
+
+    def serve_forever(self):
+        ready.write_text("ready", encoding="utf-8")
+        if not self.stop_event.wait(5):
+            raise RuntimeError("console did not receive shutdown")
+
+    def shutdown(self):
+        record("shutdown")
+        self.stop_event.set()
+
+    def server_close(self):
+        record("server")
+
+class VideoRuntime:
+    def __init__(self, *_args):
+        pass
+
+    def start_if_enabled(self):
+        return False
+
+    def stop(self):
+        record("video")
+
+web_console.VIDEO = SimpleNamespace(migrate_config=lambda: False)
+web_console.VEHICLE_CONTROL = SimpleNamespace(start=lambda: None, close=lambda: record("vehicle"))
+web_console.VEHICLE_EXECUTION_STATUS = SimpleNamespace(start=lambda: None, close=lambda: record("execution"))
+web_console.LOCALIZATION_STATUS = SimpleNamespace(start=lambda: None, close=lambda: record("localization"))
+web_console.MAPPING = SimpleNamespace(close=lambda: record("mapping"))
+web_console.OBSERVATION = SimpleNamespace(stop=lambda: record("observation"))
+web_console.ConsoleVideoRuntime = VideoRuntime
+web_console.ThreadingHTTPServer = ProbeServer
+web_console._native_report_backfill_worker = lambda *_args: None
+web_console.run_console()
+"""
+            environment = {**os.environ, "ROVER_QA_ROS_READY": "1"}
+            process = subprocess.Popen(
+                [sys.executable, "-c", script],
+                cwd=Path(__file__).resolve().parents[1],
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                for _ in range(50):
+                    if ready.is_file():
+                        break
+                    if process.poll() is not None:
+                        stdout, stderr = process.communicate()
+                        self.fail(f"console exited before the probe became ready: {stdout}\n{stderr}")
+                    time.sleep(0.02)
+                else:
+                    self.fail("console did not begin serving before SIGTERM")
+
+                process.send_signal(__import__("signal").SIGTERM)
+                stdout, stderr = process.communicate(timeout=3)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+
+            self.assertEqual(process.returncode, 0, f"stdout:\n{stdout}\nstderr:\n{stderr}")
+            self.assertEqual(
+                set(cleanup.read_text(encoding="utf-8").splitlines()),
+                {"shutdown", "video", "mapping", "vehicle", "execution", "localization", "observation", "server"},
+            )
+
+    def test_upgrade_restart_is_not_skipped_when_one_cleanup_step_fails(self):
+        """A failed owned-resource cleanup must not strand an already replaced console."""
+
+        class ProbeServer:
+            def __init__(self, *_args):
+                self.restart_command = None
+
+            def serve_forever(self):
+                self.restart_command = ["/tmp/replaced-ry-aletheia"]
+
+            def server_close(self):
+                pass
+
+        class BrokenVideoRuntime:
+            def __init__(self, *_args):
+                pass
+
+            def start_if_enabled(self):
+                return False
+
+            def stop(self):
+                raise RuntimeError("video child did not exit")
+
+        harmless = SimpleNamespace(start=lambda: None, close=lambda: None)
+        with patch.object(web_console, "VIDEO", SimpleNamespace(migrate_config=lambda: False)), patch.object(
+            web_console, "VEHICLE_CONTROL", harmless
+        ), patch.object(web_console, "VEHICLE_EXECUTION_STATUS", harmless), patch.object(
+            web_console, "LOCALIZATION_STATUS", harmless
+        ), patch.object(web_console, "MAPPING", SimpleNamespace(close=lambda: None)), patch.object(
+            web_console, "OBSERVATION", SimpleNamespace(stop=lambda: None)
+        ), patch.object(web_console, "ConsoleVideoRuntime", BrokenVideoRuntime), patch.object(
+            web_console, "ThreadingHTTPServer", ProbeServer
+        ), patch.object(web_console, "_native_report_backfill_worker", lambda *_args: None), patch.object(
+            web_console, "_install_console_shutdown_signal_handlers", lambda _server: lambda: None
+        ), patch.object(web_console, "_spawn_upgrade_restart", return_value=True) as restart:
+            web_console.run_console()
+
+        restart.assert_called_once_with(web_console.WORKSPACE, Path("/tmp/replaced-ry-aletheia"))
+
+    def test_systemd_upgrade_hands_off_without_waiting_for_console_cleanup(self):
+        """已接受的服务重启不能被旧 ROS 清理路径卡住。"""
+
+        class ProbeServer:
+            def __init__(self, *_args):
+                self.restart_command = None
+
+            def serve_forever(self):
+                self.restart_command = ["/tmp/replaced-ry-aletheia"]
+
+            def server_close(self):
+                raise AssertionError("systemd 接管后不应等待旧 HTTP 服务清理")
+
+        class VideoRuntime:
+            def __init__(self, *_args):
+                pass
+
+            def start_if_enabled(self):
+                return False
+
+            def stop(self):
+                raise AssertionError("systemd 接管后不应等待旧视频运行时清理")
+
+        class HandoffComplete(Exception):
+            pass
+
+        harmless = SimpleNamespace(start=lambda: None, close=lambda: None)
+        with patch.object(web_console, "VIDEO", SimpleNamespace(migrate_config=lambda: False)), patch.object(
+            web_console, "VEHICLE_CONTROL", harmless
+        ), patch.object(web_console, "VEHICLE_EXECUTION_STATUS", harmless), patch.object(
+            web_console, "LOCALIZATION_STATUS", harmless), patch.object(
+            web_console, "ConsoleVideoRuntime", VideoRuntime
+        ), patch.object(web_console, "ThreadingHTTPServer", ProbeServer), patch.object(
+            web_console, "_native_report_backfill_worker", lambda *_args: None
+        ), patch.object(web_console, "_install_console_shutdown_signal_handlers", lambda _server: lambda: None), patch.object(
+            web_console, "_is_systemd_service_context", return_value=True
+        ), patch.object(web_console, "_spawn_upgrade_restart", return_value=True) as restart, patch.object(
+            web_console, "_handoff_to_systemd_after_upgrade", side_effect=HandoffComplete
+        ) as handoff:
+            with self.assertRaises(HandoffComplete):
+                web_console.run_console()
+
+        restart.assert_called_once_with(web_console.WORKSPACE, Path("/tmp/replaced-ry-aletheia"))
+        handoff.assert_called_once_with()
+
+    def test_port_conflict_exits_before_starting_ros_resources(self):
+        """A second console must not start ROS threads before discovering 8087 is occupied."""
+
+        def occupied_server(*_args):
+            raise OSError(errno.EADDRINUSE, "Address already in use")
+
+        vehicle = SimpleNamespace(start=Mock(), close=Mock())
+        execution = SimpleNamespace(start=Mock(), close=Mock())
+        localization = SimpleNamespace(start=Mock(), close=Mock())
+        with patch.object(web_console, "VIDEO", SimpleNamespace(migrate_config=lambda: False)), patch.object(
+            web_console, "VEHICLE_CONTROL", vehicle
+        ), patch.object(web_console, "VEHICLE_EXECUTION_STATUS", execution), patch.object(
+            web_console, "LOCALIZATION_STATUS", localization
+        ), patch.object(web_console, "ThreadingHTTPServer", occupied_server):
+            with self.assertRaises(SystemExit) as exited:
+                web_console.run_console()
+
+        self.assertEqual(exited.exception.code, 0)
+        vehicle.start.assert_not_called()
+        execution.start.assert_not_called()
+        localization.start.assert_not_called()
+
+    def test_settings_supply_and_validate_manual_relocalization_defaults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "console.json")
+            self.assertEqual(
+                store.load().live_observation["manual_relocalization"],
+                {"z_m": 0.4, "service_timeout_seconds": 12},
+            )
+            with self.assertRaisesRegex(ValueError, "重定位 z 值"):
+                store.save(
+                    {
+                        "live_observation": {
+                            "manual_relocalization": {
+                                "z_m": float("nan"),
+                                "service_timeout_seconds": 12,
+                            }
+                        }
+                    }
+                )
+
     def test_map_upload_picker_allows_multiple_files_not_directory_only(self):
         """Prevents the desktop chooser from locking operators into folder-only mode."""
         class Inputs(HTMLParser):
@@ -339,6 +560,12 @@ class OfflineModuleTests(unittest.TestCase):
             handler.do_POST()
         self.assertEqual(handler._json.call_args.args[1], HTTPStatus.CONFLICT)
         handler.server.shutdown.assert_not_called()
+
+    def test_safe_shutdown_ui_surfaces_the_server_rejection_reason(self):
+        """操作者必须看见安全拦截的实际原因，而不是笼统的“未接受”。"""
+        source = (web_console.WEB_ROOT / "app.js").read_text(encoding="utf-8")
+        _assert_source_contains(source, "const body = await response.json().catch(() => ({}));")
+        _assert_source_contains(source, "if (!response.ok) throw new Error(body.error || '控制台未接受退出请求');")
 
     def test_resume_refuses_active_manual_control_session(self):
         """恢复验收前必须退出手控会话，避免自动任务抢占手控。"""
@@ -664,6 +891,9 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("selectedOccurrence", source)
         self.assertIn("occurrence: candidate.occurrence", source)
         self.assertIn("action: 'apply', profile_id: row.dataset.id, document: collect()", source)
+        self.assertIn("/api/scenario-setup/activation", source)
+        self.assertIn("startActivationPolling", source)
+        self.assertIn("正在等待稳定", source)
         self.assertIn("$('restoreDefault').hidden", source)
         self.assertIn("工具只会恢复已登记的启动参数，不会重启任何服务。", source)
         self.assertNotIn("工具会重启相关服务并确认恢复完成。", source)
@@ -680,7 +910,7 @@ class OfflineModuleTests(unittest.TestCase):
                 pass
 
             @staticmethod
-            def restart_configured_dependencies():
+            def restart_configured_dependencies(**_kwargs):
                 return True, "定位与导航启动节点已重启并稳定 RUNNING"
 
         with patch.object(web_console.SCENARIO_SETUP, "save") as save, \
@@ -697,7 +927,7 @@ class OfflineModuleTests(unittest.TestCase):
                 pass
 
             @staticmethod
-            def restart_configured_dependencies():
+            def restart_configured_dependencies(**_kwargs):
                 return False, "MODULES:209-lightning 未稳定 RUNNING"
 
         with patch.object(web_console.SCENARIO_SETUP, "apply", return_value={"message": "已应用场景前置方案：大厅"}), \
@@ -903,7 +1133,9 @@ class OfflineModuleTests(unittest.TestCase):
                 "walls:\n  - x: -2.0\n    y: 2.0\n  - x: -1.0\n    y: 2.0\n", encoding="utf-8",
             )
             manager = ObservationManager(root / "cache", root / "logs")
-            with patch.object(MapAssetCache, "ALLOWED_ROOTS", (root / "maps",)):
+            with patch.object(manager, "_map_server_yaml_path", return_value=maps / "map.yaml"), patch.object(
+                MapAssetCache, "ALLOWED_ROOTS", (root / "maps",)
+            ):
                 # ROS OccupancyGrid 的 resolution 为 float32；浏览器经 CDR
                 # 解码后会带出尾差，不能因此遗漏同目录虚拟墙。
                 result = manager.live_layers({"width": 2, "height": 2, "resolution": 0.2500000037252903, "origin": [-3.0, 1.5], "frame_id": "map"})
@@ -912,6 +1144,94 @@ class OfflineModuleTests(unittest.TestCase):
             self.assertEqual(result["virtual_walls"][0]["points"], [{"x": -2.0, "y": 2.0}, {"x": -1.0, "y": 2.0}])
             self.assertEqual(cached_result, result)
             self.assertEqual(manager.active_map_id(), result["map_id"])
+            self.assertEqual(manager.active_task_map_path(), (maps / "map.yaml").resolve())
+
+    def test_live_layers_bind_a_runtime_snapshot_to_a_distinct_verified_static_map(self):
+        """A /map content hash must not be mistaken for the map_server asset ID."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            maps = root / "maps" / "P2"
+            maps.mkdir(parents=True)
+            (maps / "map.pgm").write_bytes(b"P5\n2 2\n255\n\x00\xff\xff\x00")
+            (maps / "map.yaml").write_text(
+                "image: map.pgm\nresolution: 0.25\norigin: [-3.0, 1.5, 0.0]\n", encoding="utf-8",
+            )
+            cache_dir = root / "cache"
+            cache = MapAssetCache(cache_dir, allowed_roots=(root,))
+            runtime = cache.cache_occupancy_grid(
+                resolution=0.25, width=2, height=2, origin=[-3.0, 1.5], frame_id="map", data=[0, 100, -1, 50],
+            )
+            static = cache._cache_one(maps / "map.yaml")
+            self.assertNotEqual(runtime.id, static.id)
+            manager = ObservationManager(cache_dir, root / "logs")
+            manager._write_live_map_marker(runtime, "map")
+
+            with patch.object(manager, "_map_server_yaml_path", return_value=maps / "map.yaml"), patch.object(
+                MapAssetCache, "ALLOWED_ROOTS", (root,)
+            ):
+                self.assertTrue(manager.live_layers({"width": 2, "height": 2, "resolution": 0.25, "origin": [-3.0, 1.5], "frame_id": "map"})["matched"])
+
+            self.assertEqual(manager.active_map_id(), runtime.id)
+            self.assertEqual(manager.active_manual_map_id(), static.id)
+            self.assertEqual(manager.active_task_map_path(), (maps / "map.yaml").resolve())
+
+    def test_active_snapshot_without_walls_uses_verified_map_server_walls(self):
+        """当前快照漏拷贝墙时，只能回退到 map_server 已验证的当前地图。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "maps" / "gk1" / "P2"
+            source.mkdir(parents=True)
+            (source / "map.pgm").write_bytes(b"P5\n2 2\n255\n\x00\xff\xff\x00")
+            (source / "map.yaml").write_text(
+                "image: map.pgm\nresolution: 0.25\norigin: [-3.0, 1.5, 0.0]\n", encoding="utf-8",
+            )
+            (source / "map_walls.yaml").write_text(
+                "walls:\n  - x: -2.0\n    y: 2.0\n  - x: -1.0\n    y: 2.0\n", encoding="utf-8",
+            )
+            cache_dir = root / "cache"
+            cache = MapAssetCache(cache_dir, allowed_roots=(root,))
+            snapshot = cache.cache_occupancy_grid(
+                resolution=0.25, width=2, height=2, origin=[-3.0, 1.5], frame_id="map", data=[0, 100, -1, 50],
+            )
+            historical = cache.cache_occupancy_grid(
+                resolution=0.25, width=2, height=2, origin=[-3.0, 1.5], frame_id="map", data=[100, 0, 50, -1],
+            )
+            manager = ObservationManager(cache_dir, root / "logs")
+            manager._write_live_map_marker(snapshot, "map")
+            verified_source = MapAssetCache(cache_dir, allowed_roots=(root,))._cache_one(source / "map.yaml")
+
+            with patch.object(manager, "_map_server_asset", return_value=verified_source) as map_server_asset:
+                historical_layers = manager.layers(historical.id)
+                layers = manager.layers(snapshot.id)
+
+            self.assertEqual(historical_layers["virtual_walls"], [])
+            self.assertEqual(layers["virtual_walls"][0]["points"], [{"x": -2.0, "y": 2.0}, {"x": -1.0, "y": 2.0}])
+            map_server_asset.assert_called_once_with(
+                unittest.mock.ANY, snapshot.resolution, snapshot.width, snapshot.height, snapshot.origin,
+            )
+
+    def test_task_start_map_requires_current_yaml_and_live_snapshot_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "maps" / "active"
+            source.mkdir(parents=True)
+            (source / "map.pgm").write_bytes(b"P5\n2 2\n255\n\x00\xff\xff\x00")
+            active_yaml = source / "map.yaml"
+            active_yaml.write_text("image: map.pgm\nresolution: 0.25\norigin: [-3.0, 1.5, 0.0]\n", encoding="utf-8")
+            other_yaml = root / "maps" / "other.yaml"
+            other_yaml.write_text("image: active/map.pgm\nresolution: 0.25\norigin: [-3.0, 1.5, 0.0]\n", encoding="utf-8")
+            cache_dir = root / "cache"
+            cache = MapAssetCache(cache_dir, allowed_roots=(root,))
+            asset = cache._cache_one(active_yaml)
+            manager = ObservationManager(cache_dir, root / "logs")
+            manager._write_live_map_marker(asset, "map")
+            with patch.object(manager, "_map_server_yaml_path", return_value=active_yaml), patch.object(MapAssetCache, "ALLOWED_ROOTS", (root,)):
+                self.assertEqual(manager.verify_active_task_map(active_yaml), (True, "当前地图匹配"))
+                self.assertEqual(manager.verify_active_task_map(other_yaml)[0], False)
+            # 没有活动快照时，即使 YAML 相同也绝不放行。
+            (cache_dir / "active_map.json").unlink()
+            with patch.object(manager, "_map_server_yaml_path", return_value=active_yaml):
+                self.assertEqual(manager.verify_active_task_map(active_yaml), (False, "当前地图尚未确认"))
 
     def test_map_metadata_ambiguity_never_selects_wrong_virtual_wall(self):
         """同元数据的两张地图无法安全区分时，宁可不显示虚拟墙。"""
@@ -959,7 +1279,7 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("const ACTIVE_MAP_SYNC_MS = 1000;", source)
         self.assertIn("function invalidateMapScopedCloud()", source)
         self.assertIn("generation: mapGeneration", source)
-        self.assertIn("async function refreshActiveMap(observation)", source)
+        self.assertIn("async function refreshActiveMap(observation,", source)
         self.assertIn("if (!mapId || mapId === loadedMapId || mapId === requestedActiveMapId) return;", source)
         self.assertIn("const POINT_LIMIT = 3000;", source)
         self.assertIn("const CLOUD_COMPOSITE_MIN_INTERVAL_MS = 125;", source)
@@ -984,7 +1304,7 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertNotIn("getContext('2d')", source)
         _assert_source_contains(source, "points.fill((mobileConsoleEnabled() ? MAP_PALETTE : DESKTOP_MAP_PALETTE).cloud);")
         self.assertIn("const DESKTOP_MAP_PALETTE", source)
-        _assert_source_contains(source, "pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiCostmapLayer, pixiWallLayer, pixiCloudLayer);")
+        _assert_source_contains(source, "pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiCostmapLayer, pixiWallLayer, pixiNavigationRouteLayer, pixiMapMarkerLayer, pixiCloudLayer);")
         _assert_source_contains(source, "openLane('costmap', '/costmap'")
         self.assertIn("function updateTelemetryCostmap(data)", source)
         self.assertIn("if (!mobileConsoleEnabled())", source)
@@ -1085,12 +1405,113 @@ class OfflineModuleTests(unittest.TestCase):
             self.assertEqual(manager.status()["current_version"], "0.1")
             self.assertEqual(UpgradeManager(root, binary, True).status()["current_version"], "0.2")
 
+    def test_upgrade_status_exposes_pending_scenario_recovery_before_upload(self):
+        """升级页必须在选包前指出场景恢复锁，而不是上传后才返回 409。"""
+        transaction = {
+            "state": "applied",
+            "message": "待恢复：玻璃长廊场景 已于 2026-09-30T10:49:43+08:00 应用。",
+            "restore_available": True,
+        }
+        with patch.object(web_console.UPGRADES, "status", return_value={"supported": True, "current_version": "2.5.6"}), patch.object(
+            web_console.RUNS, "has_active_run", return_value=False
+        ), patch.object(web_console.SCENARIO_SETUP, "has_unresolved_transaction", return_value=True), patch.object(
+            web_console.SCENARIO_SETUP, "status", return_value={"transaction": transaction}
+        ):
+            status = web_console._upgrade_status()
+
+        self.assertEqual(
+            status["availability"],
+            {
+                "ready": False,
+                "blocker": {
+                    "kind": "scenario_recovery",
+                    "message": "待恢复：玻璃长廊场景 已于 2026-09-30T10:49:43+08:00 应用。",
+                    "action_label": "前往恢复常规配置",
+                    "action_url": "/scenario-setup.html",
+                },
+            },
+        )
+
+    def test_upgrade_refuses_an_unbootable_candidate_before_replacing_current_program(self):
+        """签名完整但无法启动的单文件程序不得覆盖当前可用控制台。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "ry-aletheia"
+            executable.write_bytes(b"current program")
+            candidate = b"signed but unbootable program"
+            manifest, test_public_key = _signed_upgrade_manifest(candidate)
+            archive = root / "candidate.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("manifest.json", json.dumps(manifest))
+                bundle.writestr("ry-aletheia", candidate)
+            manager = UpgradeManager(root, executable, True)
+            with patch.object(upgrade_signature, "RELEASE_PUBLIC_KEY_B64", test_public_key), patch(
+                "autodrive_console.upgrade_manager.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 1, "", "PYZ archive entry not found"),
+            ):
+                with self.assertRaisesRegex(UpgradeError, "无法启动"):
+                    manager.apply(io.BytesIO(archive.read_bytes()), archive.stat().st_size, "candidate.zip")
+            self.assertEqual(executable.read_bytes(), b"current program")
+
+    def test_self_check_does_not_source_robot_environment(self):
+        """升级检查必须在 ROS 环境重启之前返回，避免把运行时初始化计入超时。"""
+        with tempfile.TemporaryDirectory() as directory:
+            setup = Path(directory) / "slow-robot-setup.bash"
+            setup.write_text("exit 93\n", encoding="utf-8")
+            environment = {
+                **os.environ,
+                "ROVER_QA_SETUP_SCRIPT": str(setup),
+            }
+            environment.pop("ROVER_QA_ROS_READY", None)
+            environment.pop("ROVER_QA_ROS_ENV_REEXEC", None)
+            environment.pop("AMENT_PREFIX_PATH", None)
+            environment.pop("LD_LIBRARY_PATH", None)
+            result = subprocess.run(
+                [sys.executable, str(Path("web_console.py").resolve()), "--self-check"],
+                cwd=Path(__file__).resolve().parents[1],
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("RY Aletheia self-check OK", result.stdout)
+
+    def test_upgrade_boot_check_timeout_hides_internal_command_details(self):
+        """升级页面的失败消息不应暴露暂存路径或 subprocess 命令。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "updates" / "staging" / "upload-secret" / "ry-aletheia"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(b"candidate")
+            manager = UpgradeManager(root, root / "ry-aletheia", True)
+            with patch(
+                "autodrive_console.upgrade_manager.subprocess.run",
+                side_effect=subprocess.TimeoutExpired([str(candidate), "--self-check"], 12),
+            ):
+                with self.assertRaises(UpgradeError) as raised:
+                    manager._verify_candidate_bootable(candidate)
+
+        message = str(raised.exception)
+        self.assertIn("启动检查超时", message)
+        self.assertNotIn(str(candidate), message)
+        self.assertNotIn("Command", message)
+
     def test_upgrade_frontend_waits_for_the_requested_version_before_reloading(self):
         """旧服务 shutdown 排队期间仍能返回 200，不能据此误判新版本已启动。"""
         source = Path("frontend/src/main.js").read_text(encoding="utf-8")
-        self.assertIn("function waitForUpgradeRestart(expectedVersion)", source)
-        _assert_source_contains(source, "body.current_version || '') === String(expectedVersion || '')")
+        self.assertIn('function waitForUpgradeRestart(expectedVersion, previousVersion = "")', source)
+        _assert_source_contains(source, "currentVersion === String(expectedVersion)")
         self.assertIn("waitForUpgradeRestart(data.version)", source)
+
+    def test_upgrade_frontend_probes_after_a_post_upload_disconnect(self):
+        """重启切断 XHR 时应继续确认版本，不能直接误报“未确认替换”。"""
+        source = Path("frontend/src/main.js").read_text(encoding="utf-8")
+        _assert_source_contains(source, "const previousVersion = String(upgrade.value.current_version || '');")
+        _assert_source_contains(source, "waitForUpgradeRestart('', previousVersion)")
+        self.assertIn("升级连接中断，正在确认新版本是否已启动。", source)
 
     def test_upgrade_restart_uses_systemd_for_user_service_autostart(self):
         """systemd 自启必须由服务管理器重启，不能把子进程留在旧 cgroup。"""
@@ -1098,7 +1519,9 @@ class OfflineModuleTests(unittest.TestCase):
         executable = workspace / "dist" / "ry-aletheia"
         with patch.dict(os.environ, {"INVOCATION_ID": "test-invocation"}, clear=False), patch(
             "web_console.subprocess.run", return_value=subprocess.CompletedProcess([], 0)
-        ) as runner, patch("web_console.subprocess.Popen") as popen:
+        ) as runner, patch("web_console.subprocess.Popen") as popen, patch(
+            "web_console._is_systemd_service_context", return_value=True
+        ):
             self.assertTrue(web_console._spawn_upgrade_restart(workspace, executable))
         runner.assert_called_once_with(
             ["systemctl", "--user", "restart", "--no-block", "ry-aletheia.service"],
@@ -1112,6 +1535,31 @@ class OfflineModuleTests(unittest.TestCase):
         )
         popen.assert_not_called()
         self.assertNotIn("INVOCATION_ID", runner.call_args.kwargs["env"])
+
+    def test_upgrade_restart_does_not_treat_a_terminal_as_the_console_service(self):
+        """终端也可能继承 INVOCATION_ID，实际 cgroup 才能确认服务归属。"""
+        with patch.dict(os.environ, {"INVOCATION_ID": "terminal-inherited"}, clear=False):
+            self.assertFalse(
+                web_console._is_systemd_service_context(
+                    lambda: "0::/user.slice/user-1000.slice/user@1000.service/app.slice/vte-spawn.scope\\n"
+                )
+            )
+            self.assertTrue(
+                web_console._is_systemd_service_context(
+                    lambda: "0::/user.slice/user-1000.slice/user@1000.service/app.slice/ry-aletheia.service\\n"
+                )
+            )
+
+    def test_upgrade_restart_falls_back_to_direct_spawn_for_terminal_with_invocation_id(self):
+        """误继承的 INVOCATION_ID 不能把终端控制台送入错误的 systemd 重启路径。"""
+        workspace = Path("/tmp/ry-aletheia-upgrade-workspace")
+        executable = workspace / "dist" / "ry-aletheia"
+        with patch.dict(os.environ, {"INVOCATION_ID": "terminal-inherited"}, clear=False), patch(
+            "web_console._is_systemd_service_context", return_value=False
+        ), patch("web_console.subprocess.run") as runner, patch("web_console.subprocess.Popen") as popen:
+            self.assertTrue(web_console._spawn_upgrade_restart(workspace, executable))
+        runner.assert_not_called()
+        popen.assert_called_once()
 
     def test_upgrade_restart_keeps_direct_spawn_for_non_systemd_launch(self):
         """终端/桌面启动没有 systemd 服务上下文时仍直接拉起新二进制。"""
@@ -1205,6 +1653,7 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn("car_state_sync", script)
         self.assertIn("正在读取车端状态", script)
         self.assertIn("已由车端确认切换至", script)
+        self.assertLess(script.index("if (pending) {"), script.index('if (state === "normal")'))
 
     def test_failed_round_recovery_exposes_manual_control_entry(self):
         """现场必须能从等待人工恢复状态直接进入手动控制页面。"""
@@ -1213,11 +1662,12 @@ class OfflineModuleTests(unittest.TestCase):
         self.assertIn('href="/manual-control.html"', page)
         self.assertIn("退出手动控制，再点击继续", page)
 
-    def test_console_prewarms_vehicle_control_before_listening_for_http_requests(self):
-        """首个浏览器请求不应承担控制源和急停订阅节点的创建延迟。"""
+    def test_console_prewarms_vehicle_control_after_port_ownership_before_requests(self):
+        """首个浏览器请求不应承担预热，同时端口冲突不得启动 ROS 线程。"""
         source = Path("web_console.py").read_text(encoding="utf-8")
         script = (web_console.WEB_ROOT / "manual_control.js").read_text(encoding="utf-8")
-        self.assertLess(source.index("VEHICLE_CONTROL.start()"), source.index("server = ThreadingHTTPServer"))
+        self.assertLess(source.index("server = ThreadingHTTPServer"), source.index("VEHICLE_CONTROL.start()"))
+        self.assertLess(source.index("VEHICLE_CONTROL.start()"), source.index("server.serve_forever()"))
         self.assertIn("外部控制源", script)
 
     def test_manual_control_uses_paired_range_and_numeric_inputs_for_every_tunable_value(self):
@@ -1265,13 +1715,33 @@ class OfflineModuleTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "必须以 status 结尾"):
             SupervisorClient("supervisorctl restart", 1)._base_args()
 
+    def test_supervisor_stdout_tail_uses_only_the_precise_program_and_stdout_stream(self):
+        """实时日志不可退化为通配的 Supervisor 命令或 stderr 流。"""
+
+        with patch("autodrive_console.supervisor.subprocess.Popen") as popen:
+            SupervisorClient("sudo -n supervisorctl status", 1).tail_stdout("DRIVERS:104-livox_lidar")
+
+        popen.assert_called_once_with(
+            ["sudo", "-n", "supervisorctl", "tail", "-f", "DRIVERS:104-livox_lidar", "stdout"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=False,
+            bufsize=0,
+        )
+        with self.assertRaisesRegex(RuntimeError, "节点名称不合法"):
+            SupervisorClient("sudo -n supervisorctl status", 1).tail_stdout("DRIVERS:* stdout")
+
     def test_supervisor_sudoers_are_scoped_to_declared_programs(self):
         postinst = Path("packaging/debian/postinst").read_text(encoding="utf-8")
         self.assertIn("SUPERVISOR_NODES=(", postinst)
         self.assertIn("SUPERVISOR_NODES+=(\"$node\")", postinst)
         self.assertIn('sudoers_node="${node//:/\\\\:}"', postinst)
         self.assertIn("%s start %s, %s restart %s", postinst)
+        self.assertIn("%s tail -f %s stdout", postinst)
+        self.assertIn('"$SUPERVISORCTL" status', postinst)
         self.assertNotIn("%s start *, %s restart *", postinst)
+        self.assertNotIn("%s tail -f * stdout", postinst)
         self.assertIn("systemctl disable ry-aletheia.service", postinst)
         self.assertNotIn("systemctl disable --now ry-aletheia.service", postinst)
 
@@ -1314,7 +1784,11 @@ class OfflineModuleTests(unittest.TestCase):
                 old_backups = root / "updates" / "backups"
                 old_backups.mkdir(parents=True)
                 (old_backups / "ry-aletheia_older.bak").write_bytes(b"obsolete")
-                result = manager.apply(io.BytesIO(archive.read_bytes()), archive.stat().st_size, archive.name)
+                with patch(
+                    "autodrive_console.upgrade_manager.subprocess.run",
+                    return_value=subprocess.CompletedProcess([], 0),
+                ):
+                    result = manager.apply(io.BytesIO(archive.read_bytes()), archive.stat().st_size, archive.name)
                 self.assertEqual(result["version"], "0.2")
                 self.assertEqual((root / "ry-aletheia").read_bytes(), binary)
                 backups = list(old_backups.glob("*.bak"))
@@ -1392,10 +1866,183 @@ class OfflineModuleTests(unittest.TestCase):
                 "relocalizations": [{"map_id": "map", "x": 1, "y": 1, "position_available": True}],
             }
 
-            RunManager(report_dir, object(), settings)._write_trajectory(run, 1, trajectory, [asset])
+            trajectory_file = RunManager(report_dir, object(), settings)._write_trajectory(run, 1, trajectory, [asset])
             svg = next((report_dir / "run_123456789abc_trajectory").glob("*.svg")).read_text(encoding="utf-8")
+            saved = json.loads(trajectory_file.read_text(encoding="utf-8"))
+            frozen = saved["frozen_maps"]
+            frozen_png = trajectory_file.parent / frozen[0]["filename"]
+            frozen_body = frozen_png.read_bytes()
 
         self.assertIn('class="relocalization-marker"', svg)
+        self.assertEqual(frozen[0]["map_id"], "map")
+        self.assertTrue(frozen_body.startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_new_test_report_archives_native_sidecar_after_html_and_csv(self):
+        """The Mobile payload must be written only after legacy report files exist."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "map.pgm"
+            image.write_bytes(b"P5\n2 2\n255\n\xff\x00\xff\x00")
+            report_dir = root / "reports"
+            settings = SettingsStore(root / "console.json")
+            case = TestCase("case", "case.json", "测试", TaskParameters("园区", 1, 1, 1, 1), "unused.json")
+            run = RunRecord("123456789abc", case, 1, 0, status="completed", started_at="2026-09-28T10:00:00+08:00")
+            trajectory = {
+                "route_plan": [],
+                "segments": [{"map_id": "map", "map_label": "P1", "route_name": "去程", "points": [{"x": 0, "y": 0, "timestamp_ns": 1}]}],
+            }
+            run.attempts.append(AttemptResult(1, "passed", "服务成功", 1.5, run.started_at, trajectory))
+            manager = RunManager(report_dir, object(), settings)
+            manager._write_trajectory(
+                run,
+                1,
+                trajectory,
+                [CachedMapAsset("map", "P1", "", "", str(image), 1.0, [0.0, 0.0], 2, 2)],
+            )
+
+            manager._write_report(run)
+
+            html = next(report_dir.glob("*.html"))
+            self.assertTrue(html.with_suffix(".csv").is_file())
+            self.assertIsNotNone(NativeReportArchive(report_dir).summary_for_filename(html.name))
+
+    def test_native_report_detail_route_returns_only_structured_archive_data(self):
+        """Native report routes must never fall through to static report files."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report_dir = root / "reports"
+            report_dir.mkdir()
+            html = report_dir / "报告_20260928_100001_测试_123456789abc.html"
+            html.write_text("do not parse this HTML", encoding="utf-8")
+            trajectory_dir = report_dir / "run_123456789abc_trajectory"
+            trajectory_dir.mkdir()
+            trajectory_dir.joinpath("T-001.json").write_text(
+                json.dumps({"segments": []}, ensure_ascii=False), encoding="utf-8"
+            )
+            archive = NativeReportArchive(report_dir)
+            self.assertTrue(archive.archive_historic_report(html.name))
+            report_id = archive.summary_for_filename(html.name)["report_id"]
+            with patch.object(web_console, "WORKSPACE", root):
+                index = web_console.ConsoleHandler._reports()
+            self.assertEqual(set(index[0]).difference({"native_report"}), {
+                "filename", "size", "modified_at", "csv_filename", "report_type", "title"
+            })
+            self.assertEqual(index[0]["native_report"]["report_id"], report_id)
+            handler = object.__new__(web_console.ConsoleHandler)
+            handler.path = f"/api/reports/{report_id}/native?limit=1"
+            handler.headers = {"User-Agent": "desktop-test"}
+            handler._json = Mock()
+            handler.send_error = Mock()
+
+            with patch.object(web_console, "WORKSPACE", root):
+                handler.do_GET()
+
+            handler._json.assert_called_once()
+            payload = handler._json.call_args.args[0]
+            self.assertEqual(payload["report"]["report_id"], report_id)
+            self.assertNotIn("报告_", json.dumps(payload, ensure_ascii=False))
+
+    def test_native_report_route_distinguishes_invalid_input_from_missing_report(self):
+        """Mobile needs a stable 400/404 split without a report-directory leak."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "reports").mkdir()
+            handler = object.__new__(web_console.ConsoleHandler)
+            handler.headers = {"User-Agent": "mobile-test"}
+            handler._json = Mock()
+
+            handler.path = "/api/reports/not%2Fa%2Ftoken/native?limit=0"
+            with patch.object(web_console, "WORKSPACE", root):
+                handler.do_GET()
+            self.assertEqual(handler._json.call_args.args[1], HTTPStatus.BAD_REQUEST)
+
+            handler._json.reset_mock()
+            handler.path = "/api/reports/rpt_missing/native"
+            with patch.object(web_console, "WORKSPACE", root):
+                handler.do_GET()
+            self.assertEqual(handler._json.call_args.args[1], HTTPStatus.NOT_FOUND)
+
+    def test_native_report_map_route_returns_only_the_report_scoped_frozen_png(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report_dir = root / "reports"
+            report_dir.mkdir()
+            filename = "报告_20260928_100001_测试_123456789abc.html"
+            (report_dir / filename).write_text("legacy", encoding="utf-8")
+            source_dir = report_dir / "run_123456789abc_trajectory"
+            source_dir.mkdir()
+            png_name = "T-001_map.map.png"
+            (source_dir / png_name).write_bytes(_png_gray(2, 2, b"\xff\x00\xff\x00"))
+            (source_dir / "T-001.json").write_text(
+                json.dumps(
+                    {
+                        "segments": [{"map_id": "map", "map_label": "大厅", "route_name": "去程", "points": [{"x": 0, "y": 0, "timestamp_ns": 1}]}],
+                        "frozen_maps": [{"map_id": "map", "filename": png_name, "label": "大厅", "resolution_m": 1, "width_cells": 2, "height_cells": 2, "origin_x_m": 0, "origin_y_m": 0}],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            archive = NativeReportArchive(report_dir)
+            self.assertTrue(archive.archive_historic_report(filename))
+            summary = archive.summary_for_filename(filename)
+            trajectory_id = archive.detail_page(summary["report_id"], None, 50)["items"][0]["trajectory_refs"][0]["trajectory_id"]
+            handler = object.__new__(web_console.ConsoleHandler)
+            handler.path = f"/api/reports/{summary['report_id']}/native/trajectories/{trajectory_id}/map.png"
+            handler.headers = {"User-Agent": "desktop-test"}
+            handler._json = Mock()
+            handler.send_response = Mock()
+            handler.send_header = Mock()
+            handler.end_headers = Mock()
+            handler.wfile = io.BytesIO()
+
+            with patch.object(web_console, "WORKSPACE", root):
+                handler.do_GET()
+
+            handler.send_response.assert_called_once_with(HTTPStatus.OK)
+            self.assertIn(("Content-Type", "image/png"), [call.args for call in handler.send_header.call_args_list])
+            self.assertTrue(handler.wfile.getvalue().startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_filename_delete_removes_its_native_sidecar_without_touching_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report_dir = root / "reports"
+            report_dir.mkdir()
+            filename = "报告_20260928_100001_测试_123456789abc.html"
+            html = report_dir / filename
+            html.write_text("legacy", encoding="utf-8")
+            source_dir = report_dir / "run_123456789abc_trajectory"
+            source_dir.mkdir()
+            source = source_dir / "T-001.json"
+            source.write_text(json.dumps({"segments": []}), encoding="utf-8")
+            archive = NativeReportArchive(report_dir)
+            self.assertTrue(archive.archive_historic_report(filename))
+
+            with patch.object(web_console, "WORKSPACE", root):
+                web_console.ConsoleHandler._delete_report(filename)
+
+            self.assertFalse(html.exists())
+            self.assertIsNone(archive.summary_for_filename(filename))
+            # Legacy test-report deletion owns this source directory too; the
+            # native archive must not broaden that established deletion scope.
+            self.assertFalse(source_dir.exists())
+
+    def test_native_report_backfill_runs_outside_request_handling(self):
+        """A finite worker batch upgrades legacy sidecars without a GET request."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report_dir = root / "reports"
+            report_dir.mkdir()
+            filename = "报告_20260928_100001_测试_123456789abc.html"
+            (report_dir / filename).write_text("legacy", encoding="utf-8")
+            source_dir = report_dir / "run_123456789abc_trajectory"
+            source_dir.mkdir()
+            (source_dir / "T-001.json").write_text(json.dumps({"segments": []}), encoding="utf-8")
+
+            created = web_console._backfill_native_report_batch(root, maximum=4)
+
+            self.assertEqual(created, 1)
+            self.assertIsNotNone(NativeReportArchive(report_dir).summary_for_filename(filename))
 
     def test_report_filename_prefers_alias_and_keeps_run_id(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1440,6 +2087,42 @@ class OfflineModuleTests(unittest.TestCase):
 
         run.status = "recovering"
         self.assertTrue(manager.manual_control_blocked())
+
+    def test_manual_map_marker_navigation_contracts_define_pc_only_safe_nav2_boundary(self):
+        observation = Path("shared/contracts/realtime_observation.md").read_text(encoding="utf-8")
+        control = Path("shared/contracts/robot_control.md").read_text(encoding="utf-8")
+        execution = Path("shared/contracts/task_execution.md").read_text(encoding="utf-8")
+        console = Path("web_console.py").read_text(encoding="utf-8")
+
+        self.assertIn("/api/observation/map-markers", observation)
+        self.assertIn("/api/observation/map-marker-navigation/begin", observation)
+        self.assertIn("/api/observation/map-markers", console)
+        self.assertIn("/api/observation/map-marker-navigation/begin", console)
+        self.assertIn('set(data) != {"alias", "x", "y", "yaw"}', console)
+        self.assertIn('set(data) != {"id"}', console)
+        self.assertNotIn("/api/observation/task-points", console)
+        self.assertNotIn("task-point-navigation", console)
+        marker_section = observation.split("## PC 手动地图标记", 1)[1].split("##", 1)[0]
+        self.assertNotIn("任务目录", marker_section)
+        self.assertNotIn("map_path", marker_section)
+        self.assertIn("300 秒", observation)
+        self.assertIn("Mobile 不是", observation)
+        self.assertIn("navigate_to_pose", control)
+        self.assertIn("cancellation_unconfirmed", observation)
+        self.assertIn("200 ms", observation)
+        self.assertIn("急停", control)
+        self.assertIn("受控地图标记前往", execution)
+        self.assertIn("`/plan`", observation)
+        self.assertIn("最多 512", observation)
+        self.assertIn("终态、取消、失效安全条件、切图和新 Goal 都必须清除路线", observation)
+        self.assertIn("PC 实时页消费", observation)
+        self.assertIn("Mobile 不消费或展示", observation)
+        self.assertIn("路线数据", control)
+
+    def test_frozen_build_collects_nav2_action_interfaces(self):
+        build = Path("build_binary.sh").read_text(encoding="utf-8")
+        self.assertIn("import nav2_msgs.action", build)
+        self.assertIn("--collect-all nav2_msgs", build)
 
     def test_live_progress_rejects_late_attempt_callbacks_and_unknown_zero_percent(self):
         case = TestCase("case", "case.json", "测试", TaskParameters("园区", 1, 1, 1, 1), "unused.json")

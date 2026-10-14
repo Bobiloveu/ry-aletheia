@@ -139,6 +139,25 @@ class RobotLogDownloadTracker:
         }
 
 
+class RobotLogTailTracker:
+    """Track active Supervisor followers so closed browser streams release resources."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active: set[str] = set()
+
+    def reserve(self) -> str:
+        with self._lock:
+            while (token := secrets.token_hex(12)) in self._active:
+                pass
+            self._active.add(token)
+            return token
+
+    def release(self, token: str) -> None:
+        with self._lock:
+            self._active.discard(token)
+
+
 def convert_ros_time_to_beijing(text: str) -> str:
     """Convert legacy RYLog's recognised ROS/Unix timestamp forms in text."""
 

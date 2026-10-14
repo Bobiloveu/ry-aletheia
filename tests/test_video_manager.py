@@ -7,6 +7,9 @@ from unittest.mock import patch
 
 import web_console
 from autodrive_console.video import ConsoleVideoRuntime, GatewayHealth, VideoManager, VideoRuntime
+from test_build_environment import (
+    assert_binary_build_embeds_selected_video_profile_at_canonical_file_and_cleans_stage,
+)
 
 
 ROOT = Path(__file__).parents[1]
@@ -129,8 +132,19 @@ class VideoManagerTests(unittest.TestCase):
         self.assertIn('RY_ALETHEIA_VIDEO_CONFIG="$VIDEO_TEMPLATE"', release)
         self.assertIn('releases/$VERSION-$VIDEO_PROFILE', release)
         self.assertIn('VIDEO_CONFIG_DEFAULT="${RY_ALETHEIA_VIDEO_CONFIG:-$BUILD_ROOT/config/video.ros.json}"', binary)
-        self.assertIn('--add-data "$VIDEO_CONFIG_DEFAULT:config/video.json"', binary)
+        for profile in ("ros", "shm"):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as directory:
+                assert_binary_build_embeds_selected_video_profile_at_canonical_file_and_cleans_stage(
+                    Path(directory), profile, 0,
+                )
         self.assertIn('VIDEO_CONFIG_DEFAULT="${RY_ALETHEIA_VIDEO_CONFIG:-$ROOT/config/video.ros.json}"', deb)
+
+    def test_onefile_release_builder_uses_a_fresh_pyinstaller_work_directory(self):
+        """A stale PYZ TOC must not be reused to produce an unloadable onefile binary."""
+        binary = (ROOT / "build_binary.sh").read_text(encoding="utf-8")
+
+        self.assertIn('PYINSTALLER_WORKPATH="$(mktemp -d)"', binary)
+        self.assertIn('--workpath "$PYINSTALLER_WORKPATH"', binary)
 
     def test_shmsdk_input_is_limited_to_its_fixed_physical_camera_stream(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -415,7 +429,10 @@ class VideoManagerTests(unittest.TestCase):
         binary_script = (ROOT / "build_binary.sh").read_text(encoding="utf-8")
         deb_script = (ROOT / "build_deb_package.sh").read_text(encoding="utf-8")
         postinst = (ROOT / "packaging" / "debian" / "postinst").read_text(encoding="utf-8")
-        self.assertIn('--add-data "$VIDEO_CONFIG_DEFAULT:config/video.json"', binary_script)
+        with tempfile.TemporaryDirectory() as directory:
+            assert_binary_build_embeds_selected_video_profile_at_canonical_file_and_cleans_stage(
+                Path(directory), "ros", 0,
+            )
         self.assertIn('--add-data "$VIDEO_RUNTIME:runtime/video"', binary_script)
         self.assertIn('build_video_runtime.sh" --output-dir "$VIDEO_RUNTIME"', binary_script)
         self.assertIn('defaults/config/video.json', deb_script)
@@ -437,19 +454,20 @@ class VideoManagerTests(unittest.TestCase):
         self.assertIn('std::thread shm_reader_', source)
         self.assertIn('find_package(JPEG REQUIRED)', cmake)
         self.assertIn('Node(options.node_name)', source)
-        self.assertIn('std::this_thread::sleep_until(next_frame_at)', source)
-        self.assertIn('latest_frame_ = std::move(image);', source)
-        self.assertIn('const std::string raw_format = options_.encoding == "bgr8" ? "bgr" : "rgb";', source)
-        self.assertIn('"rawvideoparse", "format=" + raw_format', source)
-        self.assertIn('"vaapih264enc"', source)
-        self.assertIn('"rtspclientsink"', source)
+        # Latest-slot, FPS, stride and both hardware pipelines are exercised by
+        # the ROS/SDK-free video_frames and video_io CTest targets. Their
+        # extraction from this translation unit should not break integration.
+        self.assertIn('video_frames.hpp', source)
+        self.assertIn('video_pipeline.hpp', source)
         self.assertIn("视频输入等待首帧", source)
         self.assertIn("视频输入已中断", source)
-        self.assertIn("视频输入已收到 %llu 个%s图像但没有兼容帧", source)
-        self.assertIn("视频输入已就绪", source)
-        self.assertIn("GStreamer 输入管道已中断：errno=%d", source)
+        self.assertIn("视频尚未形成持续输出", source)
+        self.assertIn("首帧已完整提交编码子进程", source)
+        self.assertIn("GStreamer 本地写管道失败", source)
         self.assertNotIn('const std::string device = "device="', source)
-        self.assertIn('"/dev/dri/renderD128"', (ROOT / "config" / "video.json").read_text(encoding="utf-8"))
+        defaults = VideoManager(ROOT / 'config' / 'video.json').load_config()
+        self.assertEqual(defaults['runtime']['encoder'], 'auto')
+        self.assertEqual(defaults['runtime']['vaapi_device'], 'auto')
         self.assertIn('add_executable(aletheia_video_ingest', cmake)
         self.assertIn('--add-binary "$VIDEO_INGEST:."', build)
 
@@ -536,6 +554,7 @@ class VideoManagerTests(unittest.TestCase):
         self.assertIn("$HOME/.bashrc", launcher)
         self.assertIn('config/video.json', console_launcher)
         self.assertIn('export ROS_DOMAIN_ID', console_launcher)
+        self.assertIn('export AMENT_PREFIX_PATH="/opt/ry/install:${AMENT_PREFIX_PATH:-}"', console_launcher)
         self.assertIn('setsid "$RUNNER" --video-runner', launcher)
         self.assertIn("runner_has_private_process_group", launcher)
         self.assertIn('kill "-$signal" -- "-$pid"', launcher)
@@ -549,6 +568,13 @@ class VideoManagerTests(unittest.TestCase):
         console = (ROOT / "web_console.py").read_text(encoding="utf-8")
         self.assertIn("video_runtime.start_if_enabled()", console)
         self.assertIn("video_runtime.stop()", console)
+
+    def test_diagnostic_bag_counter_bundles_sensor_message_type_support(self):
+        """冻结控制台的动态订阅必须能加载 sensor_msgs 的 C 类型支持。"""
+        binary_script = (ROOT / "build_binary.sh").read_text(encoding="utf-8")
+
+        self.assertIn("for package in tf2_msgs nav2_msgs sensor_msgs; do", binary_script)
+        self.assertIn("--collect-all sensor_msgs", binary_script)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>配置诊断录包 · RY Aletheia</title>
+  <script src="/theme_bootstrap.js"></script>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/app_shell.css" />
+  <link rel="stylesheet" href="/bag_recording_config.css" />
+</head>
+<body>
+  <aside><div class="brand"><div class="mark"></div><div><b>RY <span>Aletheia</span></b><small>AUTOMATED TEST SYSTEM</small></div></div><nav></nav></aside>
+  <main>
+    <header class="bag-config-header">
+      <div><h1 id="pageTitle">配置诊断录包</h1><p id="pageSubtitle" class="sub">选择一轮测试和需要保留的 DDS Topic。开始测试时，系统会再次验证 Topic 和录包环境。</p></div>
+      <a id="returnLink" class="outline-button" href="/">返回测试计划</a>
+    </header>
+    <section class="bag-config-layout" aria-label="诊断录包配置">
+      <section class="panel bag-config-selection">
+        <h2>录制范围</h2>
+        <div id="testAttemptScope"><label>在第几轮录制<input id="attemptIndex" type="number" min="1" value="1" /></label>
+        <p class="bag-config-note">只录制这一轮；例如填 3 表示仅在第 3 轮录制。</p></div>
+        <div id="manualScope" hidden>
+          <label>场景名称（选填）<input id="sceneLabel" type="text" maxlength="80" placeholder="例如：窄通道避障复现" /></label>
+          <label>录制时长<select id="durationMinutes"><option value="5">5 分钟</option><option value="10">10 分钟</option><option value="15" selected>15 分钟</option><option value="20">20 分钟</option></select></label>
+          <p class="bag-config-note">开始后可切换页面或手动遥控；录制会持续到手动停止或达到时长。</p>
+        </div>
+        <p class="bag-config-note">图像、点云和 LaserScan 已走共享内存，不能通过 DDS 录入 rosbag。</p>
+        <div class="bag-config-selection-state"><strong id="selectedCount">尚未选择 Topic</strong><span id="selectionHint">最多选择 32 个 Topic。</span></div>
+        <button id="save" type="button">保存配置并返回测试计划</button>
+        <a id="cancelLink" class="text-button bag-config-cancel" href="/">取消</a>
+      </section>
+      <section class="panel bag-config-topics">
+        <div class="bag-config-topics-head"><div><h2>可录 Topic</h2><p id="topicHint">刷新时会在短暂发现窗口内读取当前 ROS 图。</p></div><button id="refresh" class="text-button" type="button">刷新 Topic</button></div>
+        <label class="bag-config-filter">筛选 Topic<input id="filter" type="search" placeholder="按名称或类型筛选" /></label>
+        <div id="topicList" class="bag-config-topic-list" aria-live="polite"></div>
+      </section>
+    </section>
+  </main>
+  <script src="/app_shell.js"></script><script type="module" src="/bag-recording-config.js"></script>
+</body>
+</html>

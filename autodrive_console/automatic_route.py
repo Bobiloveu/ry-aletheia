@@ -645,6 +645,7 @@ def _pose(value: dict[str, Any]) -> dict[str, float]:
 
 def _map_path(
     asset: dict[str, Any], start: dict[str, float], end: dict[str, float], *, virtual_walls: object = (),
+    grid_override: Grid | None = None,
 ) -> list[tuple[float, float]]:
     walls = _normalise_virtual_walls(virtual_walls)
     wall_segments: list[WallSegment] = [
@@ -654,7 +655,7 @@ def _map_path(
         )
         for wall in walls
     ]
-    grid = _read_grid(asset)
+    grid = grid_override if grid_override is not None else _read_grid(asset)
     if grid is None:
         return _direct_map_path(start, end, wall_segments)
     width, height, free = grid

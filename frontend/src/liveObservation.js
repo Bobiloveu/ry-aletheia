@@ -7,6 +7,9 @@ import {
   Texture,
 } from "pixi.js";
 import "../../autodrive_console/web/app_shell.js";
+import { freezeMapViewportForRelocalization } from "./mapViewportLock.js";
+import { createRelocalizationConfigPicker } from "./relocalizationConfigPicker.js";
+import { relocalizationProgressState } from "./relocalizationProgress.js";
 
 // Aletheia 专用遥测帧。地图仍从既有 HTTP 缓存读取；点云已经由小车端 C++
 // 投影至 map，仅含紧凑 x/y float32；位姿仅含 x/y/yaw。没有 ROS CDR、TF 或
@@ -44,7 +47,11 @@ const MAP_RENDER_INTERVAL_MS = 16;
 // active_map.json 是地图缓存的轻量标记；点云、位姿重构不改变地图加载机制。
 const ACTIVE_MAP_SYNC_MS = 1000;
 const LOCALIZATION_STATUS_REFRESH_MS = 1000;
+const RELOCALIZATION_STATUS_REFRESH_MS = 700;
 const VIDEO_INPUT_READINESS_TIMEOUT_MS = 8000;
+const WEBRTC_CONNECT_TIMEOUT_MS = 5000;
+const WEBRTC_FRAME_TIMEOUT_MS = 8000;
+const WEBRTC_RETRY_DELAY_MS = 3000;
 const DEFAULT_VIEW_METERS = 16;
 const MIN_PIXELS_PER_METER = 8;
 const MAX_PIXELS_PER_METER = 420;
@@ -123,6 +130,8 @@ let pixiMapLayer;
 let pixiGridLayer;
 let pixiCostmapLayer;
 let pixiWallLayer;
+let pixiNavigationRouteLayer;
+let pixiMapMarkerLayer;
 let pixiCloudLayer;
 let pixiMapSprite;
 let pixiMapTexture;
@@ -142,6 +151,12 @@ let costmapPacketQueued = false;
 let costmapExpiryTimer;
 let costmapUpdatedAt = 0;
 let costmapVisible = true;
+let mapMarkersVisible = true;
+let navigationRouteVisible = true;
+let mapMarkers = [];
+let selectedMapMarker;
+let mapMarkerNavigationTimer;
+let mapMarkerNavigationStatus;
 let costmap;
 let tfVehiclePose;
 let renderedVehiclePose;
@@ -166,6 +181,10 @@ let virtualWalls = [];
 let wallStatus = "等待虚拟墙匹配";
 let loadedMapId;
 let requestedActiveMapId;
+let liveWallCompensationTimer;
+let activeLiveWallSignature;
+let resolvedLiveWallSignature;
+let liveWallCompensationAttempts = 0;
 // 工业相机不经过实时遥测：每张卡片都由 HTMLVideoElement 接收
 // WHEP/WebRTC，再由 PixiJS Video Texture 合成。即便新增流失败，也不会影响
 // 现有地图、点云或诊断图像订阅。
@@ -211,12 +230,51 @@ const activeObservationDiagnostics = new Set();
 const videoWaitingSince = new Map();
 let videoGatewayOfflineSince = 0;
 let localizationStatusTimer;
+let relocalizationStatusTimer;
+let relocalizationStatus;
+let relocalizationPreview;
+let relocalizationEditing = false;
+let relocalizationDraftRevision = 0;
+let relocalizationSubmittedRevision = 0;
+let relocalizationPreviewMapId;
+let relocalizationWorkflowPending = false;
+let relocalizationSubmissionUncertain = false;
+let relocalizationOutcomePending = false;
+let relocalizationRequestId;
+let relocalizationDrag;
+let relocalizationPlacing = false;
+let relocalizationPlacementOriginal;
+let relocalizationRasterQueued = false;
+let relocalizationActionPending = false;
+let relocalizationActionNotice = "";
+let relocalizationConfigPicker;
+let relocalizationActionEpoch = 0;
+let relocalizationPollPending = false;
+let relocalizationAwaitingPose = false;
+let relocalizationSwitchingMap = false;
+let relocalizationWaitingForMap = false;
+let relocalizationMapUnconfirmed = false;
+let relocalizationTargetMapId;
+let relocalizationTargetMapAcknowledged = false;
+let displayedMapId;
+let activeMapRequestEpoch = 0;
+let activeMapPollPending = false;
+let relocalizationHandoffTimer;
+let relocalizationLayerBarrier = 0n;
+let lastPoseTimestamp = 0n;
+let rawVehiclePose;
+const MAP_OVERLAY_OPEN_EVENT = "ry-aletheia:map-overlay-open";
+
+function announceMapOverlayOpen(name) {
+  document.dispatchEvent(new CustomEvent(MAP_OVERLAY_OPEN_EVENT, { detail: name }));
+}
 
 function mobileConsoleEnabled() {
   return document.documentElement.classList.contains("mobile-console");
 }
 function mobileWebRtcPlaybackAllowed() {
-  return !mobileConsoleEnabled() || mobileConsoleView === "camera";
+  return !document.hidden &&
+    (!mobileConsoleEnabled() || mobileConsoleView === "camera");
 }
 function mirrorMobileConnection(id, value) {
   if (id === "connectionState") {
@@ -239,9 +297,15 @@ function setText(id, value) {
 function request(url, options = {}) {
   return fetch(url, { cache: "no-store", ...options }).then(
     async (response) => {
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok)
-        throw new Error(body.error || `请求失败（HTTP ${response.status}）`);
+      const body = await response.json().catch(() => {
+        if (response.ok) globalThis.RYAletheiaDiagnostics?.failure?.('request.json', '接口 JSON 响应无法解析');
+        return {};
+      });
+      if (!response.ok) {
+        const error = new Error(body.error || `请求失败（HTTP ${response.status}）`);
+        error.status = response.status;
+        throw error;
+      }
       return body;
     },
   );
@@ -266,6 +330,38 @@ function applyLocalizationStatus(snapshot) {
   root.setAttribute("aria-label", `${label}：${detail}`);
   setText("localizationStatusLabel", label);
   setText("localizationStatusDetail", detail);
+  const errorDetail = String(snapshot?.error_detail || "暂无诊断说明");
+  setText("localizationStateSummary", label || "等待定位状态");
+  setText(
+    "localizationIssueSummary",
+    snapshot?.error_retained === true ? `先前异常已恢复：${errorDetail}` : errorDetail,
+  );
+  setText("localizationFreshness", formatLocalizationFreshness(snapshot?.age_ms));
+}
+function formatLocalizationFreshness(ageMs) {
+  if (!Number.isFinite(ageMs) || ageMs < 0) return "等待数据";
+  if (ageMs < 1000) return "刚刚收到";
+  return `${(ageMs / 1000).toFixed(ageMs < 10_000 ? 1 : 0)} 秒前`;
+}
+function setupLocalizationStatusOverlay() {
+  const root = $("localizationStatus");
+  const toggle = $("localizationStatusToggle");
+  const panel = $("localizationStatusPanel");
+  if (!root || !toggle || !panel) return;
+  const setExpanded = (expanded) => {
+    panel.hidden = !expanded;
+    toggle.setAttribute("aria-expanded", String(expanded));
+  };
+  toggle.addEventListener("click", () => setExpanded(panel.hidden));
+  document.addEventListener("pointerdown", (event) => {
+    if (!panel.hidden && !root.contains(event.target)) setExpanded(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !panel.hidden) {
+      setExpanded(false);
+      toggle.focus();
+    }
+  });
 }
 async function refreshLocalizationStatus() {
   try {
@@ -279,6 +375,689 @@ async function refreshLocalizationStatus() {
       detail: "等待定位状态接口恢复",
     });
   }
+}
+function relocalizationCandidateFromLivePose() {
+  if (!rawVehiclePose || performance.now() - rawVehiclePose.receivedAt + (rawVehiclePose.sourceAgeMs || 0) >= LIVE_POSE_FALLBACK_MS)
+    return undefined;
+  const candidate = { x: rawVehiclePose.x, y: rawVehiclePose.y, yaw: rawVehiclePose.yaw };
+  return hasFiniteRelocalizationCandidate(candidate) ? candidate : undefined;
+}
+function canEditRelocalization() {
+  return !mobileConsoleEnabled() && !relocalizationWaitingForMap;
+}
+function beginLocalRelocalizationPreview() {
+  if (!canEditRelocalization() || !mapInfo) return;
+  relocalizationEditing = true;
+  relocalizationDraftRevision++;
+  freezeMapViewportForRelocalization(mapView, lastMapLayout);
+  overviewUntilMovement = false;
+  if (!relocalizationPreview && !relocalizationPlacing) initializeRelocalizationPreview();
+}
+function editRelocalizationPreview(candidate) {
+  relocalizationEditing = true;
+  relocalizationDraftRevision++;
+  setRelocalizationPreview(candidate);
+}
+function canSubmitRelocalization() {
+  return canEditRelocalization() && !relocalizationPlacing &&
+    !relocalizationActionPending && !relocalizationWorkflowPending &&
+    !relocalizationSubmissionUncertain && !relocalizationOutcomePending &&
+    !["calling_service", "switching_to_miniapp", "switching_to_navigation"].includes(relocalizationStatus?.phase) &&
+    hasFiniteRelocalizationCandidate(relocalizationPreview) &&
+    /^[a-f0-9]{16}$/.test(relocalizationPreviewMapId || "") &&
+    relocalizationPreviewMapId === displayedMapId;
+}
+function discardRelocalizationPreview() {
+  relocalizationEditing = false;
+  clearRelocalizationPreview();
+  relocalizationConfigPicker?.reset();
+  relocalizationActionNotice = relocalizationWorkflowPending || relocalizationOutcomePending
+    ? "已取消本地预览，本次已确认的请求继续执行" : "已取消本地预览，车辆控制状态未改变";
+  renderRelocalizationControls();
+}
+function showRelocalizationMapOverview() {
+  if (typeof mapInfo === "undefined" || !mapInfo) return;
+  mapView.center = {
+    x: mapInfo.origin.x + mapInfo.width * mapInfo.resolution / 2,
+    y: mapInfo.origin.y + mapInfo.height * mapInfo.resolution / 2,
+  };
+  mapView.pixelsPerMeter = Math.min(
+    mapViewport.width / (mapInfo.width * mapInfo.resolution),
+    mapViewport.height / (mapInfo.height * mapInfo.resolution),
+  ) * 0.92;
+  mapView.followVehicle = false;
+  mapView.followOffset = { x: 0, y: 0 };
+  overviewUntilMovement = false;
+  scheduleMapDraw(true);
+}
+function initializeRelocalizationPreview() {
+  const candidate = relocalizationCandidateFromLivePose();
+  const info = typeof mapInfo === "undefined" ? undefined : mapInfo;
+  const layout = info ? currentMapLayout() : undefined;
+  const point = layout && viewportPointForMapPosition(candidate, layout);
+  const onMap = candidate && (!info || (
+    candidate.x >= info.origin.x && candidate.y >= info.origin.y &&
+    candidate.x <= info.origin.x + info.width * info.resolution &&
+    candidate.y <= info.origin.y + info.height * info.resolution));
+  const visible = !layout || (point && point.x >= 24 && point.y >= 24 &&
+    point.x <= mapViewport.width - 24 && point.y <= mapViewport.height - 24);
+  relocalizationPlacing = !onMap || !visible;
+  relocalizationPlacementOriginal = undefined;
+  if (relocalizationPlacing) showRelocalizationMapOverview();
+  setRelocalizationPreview(relocalizationPlacing ? undefined : candidate);
+}
+function setRelocalizationPlacement(enabled) {
+  relocalizationDraftRevision++;
+  stopRelocalizationDrag();
+  if (enabled) {
+    relocalizationEditing = true;
+    freezeMapViewportForRelocalization(mapView, lastMapLayout);
+    overviewUntilMovement = false;
+    relocalizationPlacementOriginal = relocalizationPreview && { ...relocalizationPreview };
+    relocalizationPlacing = true;
+  } else {
+    relocalizationPlacing = false;
+    setRelocalizationPreview(relocalizationPlacementOriginal);
+    relocalizationPlacementOriginal = undefined;
+  }
+  renderRelocalizationControls();
+}
+function stopRelocalizationDrag() {
+  const interaction = $("mapInteraction");
+  const pointer = relocalizationDrag?.pointerId;
+  relocalizationDrag = undefined;
+  if (pointer !== undefined && interaction?.hasPointerCapture(pointer))
+    interaction.releasePointerCapture(pointer);
+  interaction?.classList.remove("is-panning", "is-rotating");
+}
+function hasFiniteRelocalizationCandidate(candidate) {
+  return Boolean(
+    candidate &&
+      [candidate.x, candidate.y, candidate.yaw].every(Number.isFinite),
+  );
+}
+function setRelocalizationPreview(candidate) {
+  if (!hasFiniteRelocalizationCandidate(candidate)) {
+    relocalizationPreview = undefined;
+  } else {
+    relocalizationPreview = { ...candidate };
+  }
+  relocalizationPreviewMapId = relocalizationPreview ? displayedMapId : undefined;
+  renderCostmap();
+  scheduleRelocalizationCloudRender();
+  scheduleMapDraw(true);
+  renderRelocalizationControls();
+}
+function clearRelocalizationPreview() {
+  const changed = Boolean(relocalizationPreview || relocalizationPlacing);
+  relocalizationDraftRevision++;
+  relocalizationPreview = undefined;
+  relocalizationPreviewMapId = undefined;
+  relocalizationPlacing = false;
+  relocalizationPlacementOriginal = undefined;
+  stopRelocalizationDrag();
+  if (!changed) return;
+  renderCostmap();
+  scheduleRelocalizationCloudRender();
+  scheduleMapDraw(true);
+}
+function scheduleRelocalizationCloudRender() {
+  if (relocalizationRasterQueued) return;
+  relocalizationRasterQueued = true;
+  requestAnimationFrame(() => {
+    relocalizationRasterQueued = false;
+    renderCloudPoints(cloud?.packedMapPoints || packCloudPoints(cloud?.mapPoints || []));
+  });
+}
+function relocalizationPreviewTransform() {
+  if (!relocalizationPreview) return undefined;
+  const source = relocalizationCandidateFromLivePose();
+  if (!source) return undefined;
+  return {
+    source,
+    target: relocalizationPreview,
+    yaw: normalizeAngle(relocalizationPreview.yaw - source.yaw),
+  };
+}
+function transformRelocalizationPoint(point, transform = relocalizationPreviewTransform()) {
+  if (!transform) return { x: Number(point.x), y: Number(point.y), yaw: Number(point.yaw) || 0 };
+  const dx = Number(point.x) - transform.source.x;
+  const dy = Number(point.y) - transform.source.y;
+  const cosine = Math.cos(transform.yaw);
+  const sine = Math.sin(transform.yaw);
+  return {
+    x: transform.target.x + cosine * dx - sine * dy,
+    y: transform.target.y + sine * dx + cosine * dy,
+    yaw: normalizeAngle((Number(point.yaw) || 0) + transform.yaw),
+  };
+}
+function previewVehiclePose(vehicle) {
+  if (!relocalizationPreview) return vehicle;
+  return {
+    ...vehicle,
+    position: { x: relocalizationPreview.x, y: relocalizationPreview.y },
+    yaw: relocalizationPreview.yaw,
+  };
+}
+function manualRelocalizationCopy(value, fallback) {
+  return String(value || fallback)
+    .replaceAll("校准定位", "手动重定位")
+    .replaceAll("定位校准", "手动重定位")
+    .replaceAll("校准", "手动重定位");
+}
+function renderMapOperationStatus() {
+  const popup = $("mapOperationStatus");
+  if (!popup) return;
+  const progress = relocalizationProgressState({
+    phase: relocalizationStatus?.phase,
+    pending: relocalizationActionPending,
+    switchingMap: relocalizationSwitchingMap,
+    waitingMap: relocalizationWaitingForMap,
+    awaitingPose: relocalizationAwaitingPose,
+  });
+  popup.hidden = !progress;
+  if (!progress) return;
+  popup.dataset.state = progress.state;
+  setText("mapOperationTitle", progress.title);
+  setText("mapOperationDetail", progress.detail);
+}
+function renderRelocalizationControls() {
+  renderMapOperationStatus();
+  const root = $("relocalizationControl");
+  if (!root) return;
+  const status = relocalizationStatus || {};
+  const phase = String(status.phase || "idle");
+  const canApply = canSubmitRelocalization();
+  const place = $("relocalizationPlace");
+  if (place) {
+    place.hidden = false;
+    place.disabled = !canEditRelocalization() || !mapInfo;
+    place.title = place.disabled ? "等待当前地图显示" : "仅调整本地预览，不移动车辆；点击地图落位";
+    place.setAttribute("aria-pressed", String(relocalizationPlacing));
+    place.textContent = relocalizationPlacing ? "取消找回" : "一键找回车体";
+  }
+  $("mapInteraction")?.classList.toggle("is-placing-vehicle", relocalizationPlacing && canEditRelocalization());
+  const overview = $("relocalizationOverview");
+  if (overview) overview.disabled = !mapInfo || relocalizationActionPending || relocalizationAwaitingPose || relocalizationWaitingForMap;
+  relocalizationConfigPicker?.setEditable(canEditRelocalization());
+  root.dataset.phase = phase;
+  setText("relocalizationLabel", "手动重定位");
+  setText(
+    "relocalizationDetail",
+    relocalizationActionNotice || manualRelocalizationCopy(status.detail, "可直接拖动车体调整位置与朝向，确认后执行重定位。"),
+  );
+  const step = $("relocalizationStep");
+  if (step)
+    step.textContent = relocalizationWaitingForMap
+      ? "等待目标二维地图就绪，车体与动态层暂不显示"
+      : relocalizationAwaitingPose
+      ? "定位已确认，等待新的实时车体位姿"
+      : relocalizationActionPending || relocalizationWorkflowPending
+      ? "正在执行已确认的位置；可继续调整下一次预览"
+      : relocalizationPlacing
+        ? "车体跟随鼠标，点击落位；按住拖动可设置朝向"
+      : !hasFiniteRelocalizationCandidate(relocalizationPreview)
+        ? "无需寻找原车体，点击一键找回后在地图上落位"
+      : relocalizationEditing
+      ? (relocalizationCandidateFromLivePose()
+        ? "左键移位 · 右键调整朝向；确认前仅为预览"
+        : "无实时位姿，仍可设置位置与朝向；动态层暂不显示")
+      : phase === "failed"
+        ? "可直接拖动车体重新预览，确认时再核验停车"
+        : "可直接拖动车体；确认后才请求停车并重定位";
+  for (const [id, enabled] of [
+    ["relocalizationApply", canApply && !relocalizationActionPending && (relocalizationConfigPicker?.ready() ?? true)],
+    ["relocalizationCancel", Boolean(relocalizationEditing || relocalizationPreview || relocalizationPlacing)],
+    ["relocalizationRecover", status.can_recover_navigation === true],
+    ["relocalizationCheck", relocalizationSubmissionUncertain || relocalizationOutcomePending],
+  ]) {
+    const button = $(id);
+    if (button) {
+      button.hidden = id === "relocalizationApply" ? false : !enabled;
+      button.disabled = !enabled || (id !== "relocalizationCancel" && (relocalizationActionPending || relocalizationWorkflowPending));
+    }
+  }
+}
+function setRelocalizationMapVisibility(visible) {
+  const world = $("mapWorld");
+  if (world) world.style.visibility = visible ? "" : "hidden";
+  if (!visible) {
+    const vehicle = $("vehicleLayer");
+    if (vehicle) vehicle.hidden = true;
+  }
+}
+function updateRelocalizationMapTarget(snapshot) {
+  if (snapshot.phase === "calibrating" && snapshot.source_map_id === displayedMapId)
+    relocalizationMapUnconfirmed = false;
+  if (!relocalizationWaitingForMap) return;
+  const target = snapshot.target_map_id;
+  if (typeof target === "string" && /^[a-f0-9]{16}$/.test(target)) {
+    relocalizationTargetMapId = target;
+    if (displayedMapId === target) {
+      setRelocalizationMapVisibility(true);
+      relocalizationWaitingForMap = false;
+      relocalizationMapUnconfirmed = false;
+    } else refreshActiveMap({active_map_id:target}, true);
+  } else if (snapshot.phase === "calibrating" && !relocalizationActionPending) {
+    relocalizationWaitingForMap = false;
+    setRelocalizationMapVisibility(true);
+  } else if (snapshot.phase === "failed") {
+    relocalizationWaitingForMap = false;
+    relocalizationMapUnconfirmed = true;
+    setRelocalizationMapVisibility(true);
+    rawVehiclePose = tfVehiclePose = renderedVehiclePose = latestLiveMotion = undefined;
+    invalidateMapScopedCloud();
+    relocalizationActionNotice = `${snapshot.detail || "重定位未完成"}；当前显示上次底图，提交前将重新核验地图`;
+    refreshActiveMapFromServer();
+  }
+}
+function applyRelocalizationStatus(snapshot) {
+  const previousPhase = relocalizationStatus?.phase;
+  relocalizationStatus = snapshot && typeof snapshot === "object" ? snapshot : {};
+  updateRelocalizationMapTarget(relocalizationStatus);
+  if (relocalizationOutcomePending && relocalizationStatus.operation_id === relocalizationRequestId) {
+    relocalizationSubmissionUncertain = false;
+    if (relocalizationStatus.operation_outcome === "succeeded") completeRelocalizationSubmission();
+    else if (["failed", "not_admitted"].includes(relocalizationStatus.operation_outcome)) {
+      relocalizationOutcomePending = false;
+      relocalizationActionNotice = relocalizationStatus.detail || "重定位未完成，可继续调整预览";
+    }
+  } else if (!relocalizationOutcomePending) relocalizationSubmissionUncertain = false;
+  if (relocalizationStatus.can_apply === true && previousPhase !== "calibrating" && !relocalizationEditing && !relocalizationPreview)
+    beginLocalRelocalizationPreview();
+  if (!canEditRelocalization()) stopRelocalizationDrag();
+  renderRelocalizationControls();
+}
+async function refreshRelocalizationStatus() {
+  if (relocalizationActionPending || relocalizationWorkflowPending || relocalizationPollPending) return;
+  relocalizationPollPending = true;
+  const epoch = relocalizationActionEpoch;
+  try {
+    const pendingId = relocalizationOutcomePending ? relocalizationRequestId : undefined;
+    let result = await request(`/api/observation/relocalization${pendingId ? `?request_id=${encodeURIComponent(pendingId)}` : ""}`);
+    if (epoch !== relocalizationActionEpoch || relocalizationActionPending) return;
+    if (pendingId && result.operation_id === pendingId && result.operation_outcome === "unknown") {
+      result = await request("/api/observation/relocalization/resolve", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({request_id: pendingId}),
+      });
+      if (epoch !== relocalizationActionEpoch || relocalizationActionPending) return;
+    }
+    applyRelocalizationStatus(result);
+  } catch (error) {
+    if (epoch !== relocalizationActionEpoch || relocalizationActionPending) return;
+    relocalizationStatus = {
+      phase: "unavailable", label: "手动重定位暂不可用",
+      detail: error.message || "等待手动重定位服务恢复",
+    };
+    renderRelocalizationControls();
+  } finally {
+    relocalizationPollPending = false;
+  }
+}
+function completeRelocalizationSubmission() {
+  relocalizationOutcomePending = false;
+  relocalizationSubmissionUncertain = false;
+  relocalizationAwaitingPose = true;
+  relocalizationLayerBarrier = lastPoseTimestamp;
+  invalidateMapScopedCloud();
+  window.clearTimeout(relocalizationHandoffTimer);
+  relocalizationHandoffTimer = window.setTimeout(() => {
+    if (!relocalizationAwaitingPose) return;
+    if (relocalizationSubmittedRevision === relocalizationDraftRevision) {
+      relocalizationEditing = false;
+      clearRelocalizationPreview();
+      relocalizationConfigPicker?.reset();
+    }
+    renderRelocalizationControls();
+  }, LIVE_POSE_FALLBACK_MS);
+}
+async function postRelocalizationAction(path, payload = {}) {
+  if (relocalizationActionPending) return;
+  const isApply = path.endsWith("/apply");
+  if (isApply && !relocalizationWorkflowPending) relocalizationSubmittedRevision = relocalizationDraftRevision;
+  if (isApply && payload.request_id) {
+    relocalizationRequestId = payload.request_id;
+    relocalizationOutcomePending = true;
+  }
+  relocalizationSwitchingMap = isApply && Boolean(payload.config_path);
+  if (relocalizationSwitchingMap) {
+    relocalizationWaitingForMap = true;
+    activeMapRequestEpoch++;
+    requestedActiveMapId = undefined;
+    relocalizationTargetMapId = undefined;
+    relocalizationTargetMapAcknowledged = false;
+    setRelocalizationMapVisibility(false);
+  } else if (!isApply) {
+    relocalizationWaitingForMap = false;
+    relocalizationTargetMapId = undefined;
+    relocalizationTargetMapAcknowledged = false;
+    setRelocalizationMapVisibility(true);
+  }
+  relocalizationActionPending = true;
+  relocalizationActionEpoch++;
+  if (relocalizationSwitchingMap) stopRelocalizationDrag();
+  if (isApply) {
+    freezeMapViewportForRelocalization(mapView, lastMapLayout);
+    overviewUntilMovement = false;
+    scheduleMapDraw(true);
+  }
+  relocalizationActionNotice = relocalizationSwitchingMap
+    ? "正在切换二维地图并执行重定位"
+    : isApply ? "正在提交当前预览位姿" : "正在确认操作";
+  renderRelocalizationControls();
+  try {
+    const result = await request(path, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    relocalizationActionNotice = "";
+    if (isApply && ["switching_to_navigation", "idle"].includes(result.phase)) {
+      completeRelocalizationSubmission();
+    }
+    if (isApply && result.phase === "failed") relocalizationOutcomePending = false;
+    applyRelocalizationStatus(result);
+    return result;
+  } catch (error) {
+    // 结果未知时保留本地编辑，按请求 ID 查询结果，绝不自动重发。
+    relocalizationStatus = { phase: "unavailable", label: "手动重定位未完成" };
+    relocalizationSubmissionUncertain = ![400, 409].includes(error.status);
+    if (!relocalizationSubmissionUncertain) relocalizationOutcomePending = false;
+    relocalizationActionNotice = error.message || "重定位服务未确认请求，车辆保持停车";
+  } finally {
+    relocalizationSwitchingMap = false;
+    relocalizationActionPending = false;
+    relocalizationActionEpoch++;
+    renderRelocalizationControls();
+  }
+}
+async function submitRelocalizationPreview() {
+  if (!canSubmitRelocalization()) return;
+  let payload;
+  try {
+    payload = { ...relocalizationConfigPicker.payload({ ...relocalizationPreview }),
+      source_map_id: relocalizationPreviewMapId,
+      request_id: globalThis.crypto?.randomUUID?.() || `manual-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}` };
+  } catch (error) {
+    relocalizationActionNotice = error.message;
+    renderRelocalizationControls();
+    return;
+  }
+  relocalizationWorkflowPending = true;
+  relocalizationSubmittedRevision = relocalizationDraftRevision;
+  relocalizationAwaitingPose = false;
+  window.clearTimeout(relocalizationHandoffTimer);
+  relocalizationActionEpoch++;
+  relocalizationActionNotice = "正在确认车辆停车";
+  renderRelocalizationControls();
+  try {
+    let status = await request("/api/observation/relocalization");
+    applyRelocalizationStatus(status);
+    if (["idle", "failed"].includes(status.phase))
+      status = await postRelocalizationAction("/api/observation/relocalization/begin");
+    for (let attempt = 0; status?.phase === "switching_to_miniapp" && attempt < 30; attempt++) {
+      await new Promise(resolve => window.setTimeout(resolve, 150));
+      status = await request("/api/observation/relocalization");
+      applyRelocalizationStatus(status);
+    }
+    if (status?.can_apply !== true)
+      throw new Error(status?.detail || relocalizationActionNotice || "车辆停车尚未确认，未下发重定位");
+    if (payload.source_map_id !== displayedMapId || (status.source_map_id && status.source_map_id !== payload.source_map_id))
+      throw new Error("地图已变化，请在当前地图重新设置位姿后确认");
+    await postRelocalizationAction("/api/observation/relocalization/apply", payload);
+  } catch (error) {
+    relocalizationActionNotice = error.message || "重定位未完成，可继续调整本地预览";
+  } finally {
+    relocalizationWorkflowPending = false;
+    relocalizationActionEpoch++;
+    renderRelocalizationControls();
+  }
+}
+function setupRelocalizationControl() {
+  const control = $("relocalizationControl");
+  const toggle = $("relocalizationToggle");
+  const panel = $("relocalizationPanel");
+  if (!control || !toggle || !panel || mobileConsoleEnabled()) return;
+  relocalizationConfigPicker = createRelocalizationConfigPicker({
+    root: panel, request, onChange: (userInitiated) => {
+      if (userInitiated) relocalizationDraftRevision++;
+      renderRelocalizationControls();
+    },
+  });
+  const setExpanded = (expanded) => {
+    if (!expanded) relocalizationConfigPicker.close();
+    panel.hidden = !expanded;
+    toggle.setAttribute("aria-expanded", String(expanded));
+  };
+  toggle.addEventListener("click", () => {
+    const expanded = panel.hidden;
+    setExpanded(expanded);
+    if (expanded) {
+      beginLocalRelocalizationPreview();
+      announceMapOverlayOpen("relocalization");
+    }
+  });
+  document.addEventListener(MAP_OVERLAY_OPEN_EVENT, (event) => {
+    if (event.detail !== "relocalization" && !panel.hidden) setExpanded(false);
+  });
+  $("relocalizationOverview")?.addEventListener("click", showRelocalizationMapOverview);
+  $("relocalizationPlace")?.addEventListener("click", () => {
+    if (!canEditRelocalization() || !mapInfo) return;
+    setRelocalizationPlacement(!relocalizationPlacing);
+  });
+  $("relocalizationCancel")?.addEventListener("click", discardRelocalizationPreview);
+  $("relocalizationRecover")?.addEventListener("click", () => {
+    if (!window.confirm("确认恢复自动驾驶？请先确认车辆和现场状态。")) return;
+    discardRelocalizationPreview();
+    postRelocalizationAction("/api/observation/relocalization/recover-navigation");
+  });
+  $("relocalizationApply")?.addEventListener("click", submitRelocalizationPreview);
+  $("relocalizationCheck")?.addEventListener("click", refreshRelocalizationStatus);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && relocalizationPlacing && canEditRelocalization()) {
+      setRelocalizationPlacement(false);
+      return;
+    }
+    if (event.key === "Escape" && relocalizationEditing) {
+      discardRelocalizationPreview();
+      return;
+    }
+    if (event.key === "Escape" && !panel.hidden) {
+      setExpanded(false);
+      toggle.focus();
+    }
+  });
+  refreshRelocalizationStatus();
+  relocalizationStatusTimer = window.setInterval(
+    refreshRelocalizationStatus,
+    RELOCALIZATION_STATUS_REFRESH_MS,
+  );
+}
+function closeMapMarkerMenu() {
+  selectedMapMarker = undefined;
+  const menu = $("mapMarkerMenu");
+  if (menu) menu.hidden = true;
+}
+function closeMapMarkerForm({ focus = false } = {}) {
+  const form = $("mapMarkerForm");
+  const toggle = $("mapMarkerCreateToggle");
+  if (form) form.hidden = true;
+  if (toggle) toggle.setAttribute("aria-expanded", "false");
+  if (focus) toggle?.focus();
+}
+function renderMapMarkerMenu() {
+  const menu = $("mapMarkerMenu");
+  const action = $("mapMarkerNavigate");
+  if (!menu || menu.hidden || !action) return;
+  const phase = mapMarkerNavigationStatus?.phase;
+  const navigating = mapMarkerNavigationStatus?.can_cancel === true;
+  const stopping = phase === "cancelling" || phase === "cancellation_unconfirmed";
+  action.disabled = stopping;
+  action.textContent = navigating ? "取消导航" : stopping ? "导航正在停止" : "前往此标记";
+  setText(
+    "mapMarkerMenuDetail",
+    navigating || stopping
+      ? (mapMarkerNavigationStatus.detail || "正在前往地图标记")
+      : "将由后端再次核验地图和车辆状态",
+  );
+}
+function openMapMarkerMenu(point, clientX, clientY) {
+  if (!point || mobileConsoleEnabled()) return;
+  selectedMapMarker = point;
+  closeMapMarkerForm();
+  const menu = $("mapMarkerMenu");
+  const wrap = $("mapInteraction")?.parentElement;
+  if (!menu || !wrap) return;
+  setText("mapMarkerMenuLabel", point.alias || "地图标记");
+  menu.hidden = false;
+  const rect = wrap.getBoundingClientRect();
+  const maxX = Math.max(10, rect.width - menu.offsetWidth - 10);
+  const maxY = Math.max(10, rect.height - menu.offsetHeight - 10);
+  menu.style.left = `${Math.max(10, Math.min(maxX, clientX - rect.left + 8))}px`;
+  menu.style.top = `${Math.max(10, Math.min(maxY, clientY - rect.top + 8))}px`;
+  renderMapMarkerMenu();
+}
+function isValidMapMarker(point) {
+  return point && typeof point.id === "string" && typeof point.alias === "string" &&
+    Number.isFinite(Number(point.x)) && Number.isFinite(Number(point.y)) && Number.isFinite(Number(point.yaw));
+}
+async function refreshMapMarkers() {
+  if (mobileConsoleEnabled() || !mapMarkersVisible) return;
+  const generation = mapGeneration;
+  const activeMapId = requestedActiveMapId;
+  try {
+    const snapshot = await request("/api/observation/map-markers");
+    if (generation !== mapGeneration || activeMapId !== requestedActiveMapId) return;
+    mapMarkers = snapshot.map_ready === true && Array.isArray(snapshot.points)
+      ? snapshot.points.filter(isValidMapMarker)
+      : [];
+    renderMapMarkers();
+    scheduleMapDraw();
+  } catch (_) {
+    if (generation !== mapGeneration || activeMapId !== requestedActiveMapId) return;
+    mapMarkers = [];
+    renderMapMarkers();
+  }
+}
+function updateMapMarkerNavigationPolling() {
+  const active = ["navigating", "cancelling", "cancellation_unconfirmed"].includes(
+    mapMarkerNavigationStatus?.phase,
+  );
+  if (!active && mapMarkerNavigationTimer) {
+    window.clearInterval(mapMarkerNavigationTimer);
+    mapMarkerNavigationTimer = undefined;
+  } else if (active && !mapMarkerNavigationTimer) {
+    mapMarkerNavigationTimer = window.setInterval(refreshMapMarkerNavigationStatus, 1000);
+  }
+}
+async function refreshMapMarkerNavigationStatus() {
+  if (mobileConsoleEnabled()) return;
+  try {
+    mapMarkerNavigationStatus = await request("/api/observation/map-marker-navigation");
+    updateMapMarkerNavigationPolling();
+    renderMapMarkerMenu();
+    renderNavigationRoute();
+    scheduleMapDraw();
+  } catch (_) {
+    // The backend remains the safety authority; an unavailable status must not
+    // invent a cancellation affordance or alter a point's cached map position.
+  }
+}
+async function beginMapMarkerNavigation() {
+  const point = selectedMapMarker;
+  if (!point) return;
+  if (["cancelling", "cancellation_unconfirmed"].includes(mapMarkerNavigationStatus?.phase)) return;
+  const navigating = mapMarkerNavigationStatus?.can_cancel === true;
+  if (!window.confirm(navigating ? "确认取消当前地图标记导航？" : `确认让车辆自动前往“${point.alias}”？`)) return;
+  const action = $("mapMarkerNavigate");
+  if (action) action.disabled = true;
+  try {
+    mapMarkerNavigationStatus = navigating
+      ? await request("/api/observation/map-marker-navigation/cancel", { method: "POST" })
+      : await request("/api/observation/map-marker-navigation/begin", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: point.id }),
+        });
+    updateMapMarkerNavigationPolling();
+    renderMapMarkerMenu();
+  } catch (error) {
+    setText("mapMarkerMenuDetail", error.message || "无法开始导航");
+  } finally {
+    if (action) action.disabled = false;
+  }
+}
+async function removeSelectedMapMarker() {
+  const point = selectedMapMarker;
+  if (!point || !window.confirm(`确认删除地图标记“${point.alias}”？`)) return;
+  const action = $("mapMarkerRemove");
+  if (action) action.disabled = true;
+  try {
+    await request("/api/observation/map-markers/remove", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: point.id }),
+    });
+    closeMapMarkerMenu();
+    await refreshMapMarkers();
+  } catch (error) {
+    setText("mapMarkerMenuDetail", error.message || "无法删除标记");
+  } finally {
+    if (action) action.disabled = false;
+  }
+}
+async function saveMapMarker() {
+  const alias = $("mapMarkerAlias")?.value || "";
+  const x = Number($("mapMarkerX")?.value);
+  const y = Number($("mapMarkerY")?.value);
+  const yawDegrees = Number($("mapMarkerYaw")?.value);
+  const yaw = yawDegrees * Math.PI / 180;
+  if (!alias.trim() || ![x, y, yawDegrees].every(Number.isFinite) || Math.abs(yawDegrees) > 180) {
+    setText("mapMarkerFormDetail", "请填写名称、X、Y 和 -180 到 180 度的 yaw（角度）。");
+    return;
+  }
+  const action = $("mapMarkerSave");
+  if (action) action.disabled = true;
+  try {
+    await request("/api/observation/map-markers", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ alias, x, y, yaw }),
+    });
+    ["mapMarkerAlias", "mapMarkerX", "mapMarkerY", "mapMarkerYaw"].forEach((id) => { const input = $(id); if (input) input.value = ""; });
+    setText("mapMarkerFormDetail", "标记只保存到当前已确认地图。");
+    closeMapMarkerForm();
+    await refreshMapMarkers();
+  } catch (error) {
+    setText("mapMarkerFormDetail", error.message || "无法保存标记");
+  } finally {
+    if (action) action.disabled = false;
+  }
+}
+function setupMapMarkerLayer() {
+  if (mobileConsoleEnabled()) return;
+  $("mapMarkerNavigate")?.addEventListener("click", beginMapMarkerNavigation);
+  $("mapMarkerRemove")?.addEventListener("click", removeSelectedMapMarker);
+  $("mapMarkerSave")?.addEventListener("click", saveMapMarker);
+  $("mapMarkerCancel")?.addEventListener("click", () => closeMapMarkerForm({ focus: true }));
+  $("mapMarkerCreateToggle")?.addEventListener("click", () => {
+    const form = $("mapMarkerForm");
+    const toggle = $("mapMarkerCreateToggle");
+    if (!form || !toggle) return;
+    const expand = form.hidden;
+    form.hidden = !expand;
+    toggle.setAttribute("aria-expanded", String(expand));
+    if (expand) {
+      announceMapOverlayOpen("map-marker");
+      closeMapMarkerMenu();
+      setText("mapMarkerFormDetail", "标记只保存到当前已确认地图。");
+      $("mapMarkerAlias")?.focus();
+    }
+  });
+  document.addEventListener(MAP_OVERLAY_OPEN_EVENT, (event) => {
+    if (event.detail !== "map-marker") closeMapMarkerForm();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeMapMarkerMenu();
+      closeMapMarkerForm({ focus: true });
+    }
+  });
+  window.addEventListener("resize", closeMapMarkerMenu);
+  refreshMapMarkerNavigationStatus();
 }
 function reportObservation(level, message) {
   const body = JSON.stringify({
@@ -514,7 +1293,8 @@ function renderCostmap() {
     !pixiReady ||
     !pixiCostmapLayer ||
     !mapInfo ||
-    !costmapVisible ||
+    !costmapVisible || relocalizationMapUnconfirmed ||
+    ((relocalizationEditing || relocalizationPreview) && !relocalizationCandidateFromLivePose()) ||
     mobileConsoleEnabled() ||
     !costmapIsCurrent()
   ) {
@@ -546,11 +1326,18 @@ function renderCostmap() {
   const mapScale = resolution / mapInfo.resolution;
   pixiCostmapSprite.width = width * mapScale;
   pixiCostmapSprite.height = height * mapScale;
+  positionCostmapSprite(origin);
+}
+function positionCostmapSprite(origin = costmap?.origin) {
+  if (!pixiCostmapSprite || !mapInfo || !origin) return;
+  pixiCostmapSprite.visible = !((relocalizationEditing || relocalizationPreview) && !relocalizationCandidateFromLivePose());
+  const transform = relocalizationPreviewTransform();
+  const previewOrigin = transformRelocalizationPoint(origin, transform);
   pixiCostmapSprite.position.set(
-    (origin.x - mapInfo.origin.x) / mapInfo.resolution,
-    mapInfo.height - (origin.y - mapInfo.origin.y) / mapInfo.resolution,
+    (previewOrigin.x - mapInfo.origin.x) / mapInfo.resolution,
+    mapInfo.height - (previewOrigin.y - mapInfo.origin.y) / mapInfo.resolution,
   );
-  pixiCostmapSprite.rotation = -origin.yaw;
+  pixiCostmapSprite.rotation = -previewOrigin.yaw;
 }
 function scheduleCostmapExpiry() {
   window.clearTimeout(costmapExpiryTimer);
@@ -664,7 +1451,9 @@ function renderWebRtcStreamControls(streams) {
 }
 function setWebRtcPlayerState(state, detail) {
   state.detail.textContent = detail;
-  state.label.textContent = state.streamStatus || "等待中";
+  state.label.textContent = state.hasDecodedFrame
+    ? "播放中"
+    : state.playbackStatus || state.streamStatus || "等待中";
 }
 function layoutWebRtcSprite(state) {
   if (!state.sprite || !state.viewport) return;
@@ -682,6 +1471,7 @@ function layoutWebRtcSprite(state) {
   );
 }
 async function initializeWebRtcRenderer(state) {
+  if (state.destroyed) return;
   if (state.initialization) return state.initialization;
   state.initialization = (async () => {
     const rect = state.surface.getBoundingClientRect();
@@ -696,6 +1486,10 @@ async function initializeWebRtcRenderer(state) {
       autoDensity: true,
       resolution: window.devicePixelRatio || 1,
     });
+    if (state.destroyed) {
+      app.destroy(true, { children: true });
+      return;
+    }
     app.ticker.stop();
     app.canvas.classList.add("pixi-webrtc-canvas");
     app.canvas.setAttribute("aria-hidden", "true");
@@ -718,27 +1512,52 @@ async function initializeWebRtcRenderer(state) {
     });
     state.resizeObserver.observe(state.surface);
   })().catch((error) => {
-    setWebRtcPlayerState(
-      state,
-      `PixiJS 初始化失败：${error?.message || "未知错误"}`,
-    );
+    state.initialization = undefined;
+    if (!state.destroyed)
+      setWebRtcPlayerState(
+        state,
+        `PixiJS 初始化失败：${error?.message || "未知错误"}`,
+      );
     throw error;
   });
   return state.initialization;
 }
 function stopWebRtcFramePump(state) {
-  if (state.videoFrameRequest && state.video.cancelVideoFrameCallback)
-    state.video.cancelVideoFrameCallback(state.videoFrameRequest);
+  if (state.videoFrameRequest !== undefined) {
+    if (state.video.requestVideoFrameCallback)
+      state.video.cancelVideoFrameCallback?.(state.videoFrameRequest);
+    else window.cancelAnimationFrame(state.videoFrameRequest);
+  }
   state.videoFrameRequest = undefined;
 }
 function startWebRtcFramePump(state) {
   stopWebRtcFramePump(state);
+  const peer = state.pc;
+  let lastVideoTime;
   const render = () => {
-    if (!state.pc || state.video.paused || state.video.ended) return;
-    // Pixi v8 VideoSource 在这里按实际解码帧更新，而不是启动全局 ticker 空转。
-    state.texture?.source?.update?.();
-    layoutWebRtcSprite(state);
-    state.app?.render();
+    if (state.pc !== peer || state.video.paused || state.video.ended) return;
+    // rVFC is a decoded-frame notification. The older-browser fallback only
+    // uploads when media time changes, rather than repeatedly drawing one frame.
+    const decoded = state.video.requestVideoFrameCallback ||
+      (state.video.readyState >= 2 && state.video.videoWidth > 0 &&
+        state.video.currentTime !== lastVideoTime);
+    if (decoded) {
+      lastVideoTime = state.video.currentTime;
+      state.lastDecodedAt = performance.now();
+      state.texture?.source?.update?.();
+      layoutWebRtcSprite(state);
+      state.app?.render();
+      if (!state.hasDecodedFrame) {
+        state.hasDecodedFrame = true;
+        window.clearTimeout(state.firstFrameTimer);
+        state.firstFrameTimer = undefined;
+        setWebRtcPlayerState(state, `${state.stream.resolution} · H.264 · WebRTC`);
+        resolveObservationDiagnostic(
+          `webrtc-${state.stream.name}`,
+          `视频流已恢复播放：${state.stream.name}（${state.stream.source_label || state.stream.source_topic || "视频输入"}）。`,
+        );
+      }
+    }
     if (state.video.requestVideoFrameCallback)
       state.videoFrameRequest = state.video.requestVideoFrameCallback(render);
     else state.videoFrameRequest = requestAnimationFrame(render);
@@ -754,25 +1573,55 @@ function clearWebRtcTexture(state) {
   state.texture?.destroy(true);
   state.texture = undefined;
 }
+function deleteWebRtcSession(url) {
+  if (url)
+    fetch(url, { method: "DELETE", keepalive: true }).catch(() => {});
+}
 function closeWebRtcPlayer(state, message) {
+  window.clearTimeout(state.connectTimer);
+  window.clearTimeout(state.firstFrameTimer);
+  state.connectTimer = undefined;
+  state.firstFrameTimer = undefined;
+  state.abortController?.abort();
+  state.abortController = undefined;
+  const hadTexture = !!state.texture;
   clearWebRtcTexture(state);
-  if (state.sessionUrl)
-    fetch(state.sessionUrl, { method: "DELETE", keepalive: true }).catch(
-      () => {},
-    );
+  // Removing a sprite does not erase pixels already drawn to the canvas.
+  if (hadTexture) state.app?.render();
+  deleteWebRtcSession(state.sessionUrl);
   state.sessionUrl = undefined;
-  state.pc?.close();
+  const peer = state.pc;
+  // Invalidate ownership before close can dispatch a connection-state event.
   state.pc = undefined;
+  peer?.close();
+  state.hasDecodedFrame = false;
+  state.lastDecodedAt = undefined;
+  state.playbackStatus = undefined;
   state.video.pause();
   state.video.srcObject = null;
   if (message) setWebRtcPlayerState(state, message);
 }
+function failWebRtcPlayer(state, peer, detail) {
+  if (state.pc !== peer) return;
+  state.retryAfter = performance.now() + WEBRTC_RETRY_DELAY_MS;
+  closeWebRtcPlayer(state);
+  state.playbackStatus = "等待重连";
+  setWebRtcPlayerState(state, detail);
+  reportObservationOnce(
+    `webrtc-${state.stream.name}`,
+    "WARNING",
+    `视频流播放失败：${state.stream.name}；${detail}`,
+  );
+}
 function destroyWebRtcPlayer(name) {
   const state = webrtcPlayers.get(name);
   if (!state) return;
+  state.destroyed = true;
   closeWebRtcPlayer(state);
   state.resizeObserver?.disconnect();
   state.app?.destroy(true, { children: true });
+  state.app = undefined;
+  state.resizeObserver = undefined;
   state.card.remove();
   webrtcPlayers.delete(name);
 }
@@ -854,86 +1703,85 @@ async function connectWebRtcPlayer(state, stream) {
     );
     return;
   }
-  if (!stream.url || performance.now() < state.retryAfter) return;
+  if (state.destroyed || !stream.url || performance.now() < state.retryAfter)
+    return;
   closeWebRtcPlayer(state);
   state.url = stream.url;
+  state.playbackStatus = "连接中";
   setWebRtcPlayerState(state, "正在建立 WHEP/WebRTC 会话…");
   const peer = new RTCPeerConnection();
+  const controller = new AbortController();
   state.pc = peer;
+  state.abortController = controller;
+  state.connectTimer = window.setTimeout(() => {
+    failWebRtcPlayer(state, peer, "WHEP 建连超时，等待自动重连。");
+  }, WEBRTC_CONNECT_TIMEOUT_MS);
   peer.addTransceiver("video", { direction: "recvonly" });
   peer.ontrack = async (event) => {
     if (state.pc !== peer) return;
     state.video.srcObject = event.streams[0] || new MediaStream([event.track]);
     try {
       await state.video.play();
-      await initializeWebRtcRenderer(state);
       if (state.pc !== peer) return;
+      await initializeWebRtcRenderer(state);
+      if (state.pc !== peer || state.destroyed) return;
       if (!state.texture) {
         state.texture = Texture.from(state.video);
+        // Our decoded-frame pump owns uploads; disable Pixi's second pump.
+        state.texture.source.autoUpdate = false;
         state.sprite = new Sprite(state.texture);
         state.app?.stage.addChild(state.sprite);
       }
       startWebRtcFramePump(state);
-      setWebRtcPlayerState(state, `${stream.resolution} · H.264 · WebRTC`);
-      resolveObservationDiagnostic(
-        `webrtc-${stream.name}`,
-        `视频流已恢复播放：${stream.name}（${stream.source_label || stream.source_topic || "视频输入"}）。`,
-      );
     } catch (error) {
-      const detail = error?.message || "未知原因";
-      setWebRtcPlayerState(state, `浏览器播放被阻止：${detail}`);
-      reportObservationOnce(
-        `webrtc-${stream.name}`,
-        "ERROR",
-        `视频流浏览器播放失败：${stream.name}；${detail}`,
-      );
+      failWebRtcPlayer(state, peer,
+        `浏览器播放或渲染失败：${error?.message || "未知原因"}，等待自动重连。`);
     }
   };
   peer.onconnectionstatechange = () => {
     if (state.pc !== peer) return;
-    if (peer.connectionState === "connected")
-      setWebRtcPlayerState(state, `${stream.resolution} · H.264 · WebRTC`);
-    if (["failed", "disconnected", "closed"].includes(peer.connectionState)) {
-      state.retryAfter = performance.now() + 3000;
-      if (peer.connectionState !== "closed")
-        reportObservationOnce(
-          `webrtc-${stream.name}`,
-          "WARNING",
-          `视频流 WebRTC 连接中断：${stream.name}；状态=${peer.connectionState}，将自动重连。`,
-        );
-      if (peer.connectionState !== "closed")
-        closeWebRtcPlayer(state, "WebRTC 已断开，等待重连。");
+    if (peer.connectionState === "connected" && !state.hasDecodedFrame) {
+      state.playbackStatus = "等待首帧";
+      setWebRtcPlayerState(state, "连接已建立，等待浏览器解码首帧…");
     }
+    if (["failed", "disconnected", "closed"].includes(peer.connectionState))
+      failWebRtcPlayer(state, peer,
+        `WebRTC 已断开（${peer.connectionState}），等待自动重连。`);
   };
   try {
     const offer = await peer.createOffer();
+    if (state.pc !== peer) return;
     await peer.setLocalDescription(offer);
+    if (state.pc !== peer) return;
     await waitForIceGathering(peer);
+    if (state.pc !== peer) return;
     const response = await fetch(stream.url, {
       method: "POST",
       headers: { Accept: "application/sdp", "Content-Type": "application/sdp" },
       body: peer.localDescription?.sdp || "",
+      signal: controller.signal,
     });
-    if (!response.ok) throw new Error(`WHEP HTTP ${response.status}`);
     const location = response.headers.get("Location");
-    state.sessionUrl = location
-      ? new URL(location, stream.url).toString()
-      : undefined;
-    await peer.setRemoteDescription({
-      type: "answer",
-      sdp: await response.text(),
-    });
-  } catch (error) {
-    if (state.pc === peer) {
-      const detail = error?.message || "未知错误";
-      state.retryAfter = performance.now() + 3000;
-      closeWebRtcPlayer(state, `WebRTC 连接失败：${detail}`);
-      reportObservationOnce(
-        `webrtc-${stream.name}`,
-        "ERROR",
-        `视频流 WHEP/WebRTC 建连失败：${stream.name} (${stream.source_label || stream.source_topic || "视频输入"})；${detail}`,
-      );
+    const sessionUrl = location ? new URL(location, stream.url).toString() : undefined;
+    if (state.pc !== peer) {
+      deleteWebRtcSession(sessionUrl);
+      return;
     }
+    state.sessionUrl = sessionUrl;
+    if (!response.ok) throw new Error(`WHEP HTTP ${response.status}`);
+    const sdp = await response.text();
+    if (state.pc !== peer) return;
+    await peer.setRemoteDescription({ type: "answer", sdp });
+    if (state.pc !== peer) return;
+    window.clearTimeout(state.connectTimer);
+    state.connectTimer = undefined;
+    if (!state.hasDecodedFrame)
+      state.firstFrameTimer = window.setTimeout(() => {
+        failWebRtcPlayer(state, peer, "浏览器解码首帧超时，等待自动重连。");
+      }, WEBRTC_FRAME_TIMEOUT_MS);
+  } catch (error) {
+    failWebRtcPlayer(state, peer,
+      `WebRTC 连接失败：${error?.message || "未知错误"}，等待自动重连。`);
   }
 }
 function diagnoseWebRtcStatus(enabled, gateway, streams) {
@@ -959,6 +1807,11 @@ function diagnoseWebRtcStatus(enabled, gateway, streams) {
     if (!enabled || stream.enabled !== true) {
       videoWaitingSince.delete(stream.name);
       activeObservationDiagnostics.delete(key);
+      continue;
+    }
+    if (stream.status !== "online" && stream.error_code && stream.detail) {
+      videoWaitingSince.delete(stream.name);
+      reportObservationOnce(key, "ERROR", `视频输入不可用：${stream.name}；${stream.detail}`);
       continue;
     }
     if (stream.status === "online") {
@@ -992,6 +1845,10 @@ function diagnoseWebRtcStatus(enabled, gateway, streams) {
 function applyWebRtcVideoStatus(payload) {
   const enabled = payload?.enabled === true;
   const gateway = payload?.gateway || {};
+  const runtime = payload?.runtime || {};
+  const runtimeError = enabled && runtime.state === "error"
+    ? runtime.detail || "硬件视频编码器不可用。"
+    : undefined;
   const configuredStreams = Array.isArray(payload?.streams)
     ? payload.streams
     : [];
@@ -1008,8 +1865,18 @@ function applyWebRtcVideoStatus(payload) {
     "mobileCameraSummary",
     `视频 ${activeStreams.filter((stream) => stream.status === "online").length} / ${configuredStreams.length}`,
   );
-  setWebRtcGatewayState(gateway.online === true, gateway.detail);
-  diagnoseWebRtcStatus(enabled, gateway, configuredStreams);
+  setWebRtcGatewayState(
+    gateway.online === true,
+    runtimeError || runtime.detail || gateway.detail,
+  );
+  if (runtimeError) {
+    $("webrtcGatewayBadge").textContent = "视频不可用";
+    $("webrtcGatewayBadge").className = "badge muted";
+  }
+  diagnoseWebRtcStatus(enabled && !runtimeError, gateway, configuredStreams);
+  if (runtimeError)
+    reportObservationOnce("video-runtime", "ERROR", `视频运行时不可用：${runtimeError}`);
+  else resolveObservationDiagnostic("video-runtime", "视频运行时已恢复。");
   renderWebRtcStreamControls(configuredStreams);
   const grid = $("webrtcVideoGrid");
   grid.dataset.count = String(streams.length);
@@ -1026,7 +1893,11 @@ function applyWebRtcVideoStatus(payload) {
     state.card.dataset.active = String(active);
     state.card.dataset.standby = String(!active);
     state.streamStatus = active
-      ? stream.status === "online"
+      ? runtimeError
+        ? "视频不可用"
+        : stream.error_code
+          ? "输入异常"
+          : stream.status === "online"
         ? "在线"
         : stream.status === "waiting"
           ? "等待相机"
@@ -1039,23 +1910,28 @@ function applyWebRtcVideoStatus(payload) {
       : active
         ? "关闭"
         : "开启";
-    if (active && stream.status === "online" && mobileWebRtcPlaybackAllowed()) {
+    if (active && !runtimeError && stream.status === "online" && mobileWebRtcPlaybackAllowed()) {
+      // Reuse the existing three-second status cadence for stall checks. No
+      // stats polling or additional work is added to the per-frame path.
+      if (state.pc && state.hasDecodedFrame && !document.hidden &&
+          performance.now() - state.lastDecodedAt > WEBRTC_FRAME_TIMEOUT_MS)
+        failWebRtcPlayer(state, state.pc, "视频解码已停滞，等待自动重连。");
       if (
         state.url !== stream.url ||
         !state.pc ||
         ["failed", "closed"].includes(state.pc.connectionState)
       )
         connectWebRtcPlayer(state, stream);
-    } else if (active && stream.status === "online")
+    } else if (active && !runtimeError && stream.status === "online")
       closeWebRtcPlayer(state, "相机页未显示，浏览器解码已暂停。");
     else
       closeWebRtcPlayer(
         state,
-        active && stream.status === "waiting"
-          ? "编码端正在等待 ROS 图像。"
+        runtimeError || (active && stream.detail) || (active && stream.status === "waiting"
+          ? `编码端正在等待 ${stream.source_label || stream.source_topic || "视频输入"} 的首帧。`
           : active
             ? "MediaMTX 未就绪。"
-            : "该路视频处于待机状态。",
+            : "该路视频处于待机状态。"),
       );
   }
   syncMobilePrimaryWebRtcStream(activeStreams.length ? activeStreams : streams);
@@ -1206,6 +2082,7 @@ function setupMapInteraction() {
   };
   const applyPinch = () => {
     if (!pinch || touchPoints.size !== 2 || !mapInfo) return;
+    closeMapMarkerMenu();
     const point = midpoint();
     const factor = distanceBetweenTouches() / pinch.distance;
     mapView.pixelsPerMeter = Math.max(
@@ -1222,20 +2099,25 @@ function setupMapInteraction() {
       y: pinch.anchor.y + (-sine * dx + cosine * dy) / mapView.pixelsPerMeter,
     };
     const vehicle = vehiclePoseInMap();
-    if (vehicle?.position) {
+    if (vehicle?.position && !relocalizationEditing && !relocalizationPreview) {
       mapView.followVehicle = true;
       mapView.followOffset = {
         x: desiredCenter.x - vehicle.position.x,
         y: desiredCenter.y - vehicle.position.y,
       };
-    } else mapView.center = desiredCenter;
+    } else {
+      mapView.center = desiredCenter;
+      if (relocalizationEditing || relocalizationPreview) mapView.followVehicle = false;
+    }
     overviewUntilMovement = false;
     scheduleMapDraw(true);
   };
   const onWheel = (event) => {
     if (!mapInfo) return;
+    if (event.target?.closest?.(".relocalization-control, .map-layers-control, .localization-status, .map-marker-control, .map-marker-form, .map-marker-menu")) return;
     event.preventDefault();
     event.stopPropagation();
+    closeMapMarkerMenu();
     setInteractionActive(true);
     deferInteractionEnd();
     overviewUntilMovement = false;
@@ -1265,18 +2147,23 @@ function setupMapInteraction() {
       y: anchor.y + (-sine * dx + cosine * dy) / mapView.pixelsPerMeter,
     };
     const vehicle = vehiclePoseInMap();
-    if (vehicle?.position) {
+    if (vehicle?.position && !relocalizationEditing && !relocalizationPreview) {
       mapView.followVehicle = true;
       mapView.followOffset = {
         x: desiredCenter.x - vehicle.position.x,
         y: desiredCenter.y - vehicle.position.y,
       };
-    } else mapView.center = desiredCenter;
+    } else {
+      mapView.center = desiredCenter;
+      if (relocalizationEditing || relocalizationPreview) mapView.followVehicle = false;
+    }
     scheduleMapDraw(true);
   };
   // 监听整个地图容器，避免覆盖图层或图例改变后吞掉滚轮事件。
   wrap.addEventListener("wheel", onWheel, { passive: false });
   interaction.addEventListener("dblclick", () => {
+    if (relocalizationEditing || relocalizationPreview || relocalizationPlacing) return;
+    closeMapMarkerMenu();
     overviewUntilMovement = false;
     mapView.followVehicle = true;
     mapView.followOffset = { x: 0, y: 0 };
@@ -1285,7 +2172,31 @@ function setupMapInteraction() {
       mapView.center = { x: vehicle.position.x, y: vehicle.position.y };
     scheduleMapDraw(true);
   });
-  const finishPan = (event) => {
+  const isRelocalizationPreviewHit = (pointer) => {
+    if (!canEditRelocalization()) return false;
+    const layout = currentMapLayout();
+    const candidate = relocalizationPreview ? previewVehiclePose(layout?.vehicle) : layout?.vehicle;
+    if (!hasFiniteRelocalizationCandidate(relocalizationPreview || relocalizationCandidateFromLivePose())) return false;
+    const vehiclePoint = viewportPointForMapPosition(candidate?.position, layout);
+    const footprint = projectVehicleFootprint(vehicleModel, layout?.pixelsPerMeter);
+    const hitRadius = Math.max(24, Math.hypot(footprint.length, footprint.width) * 0.55);
+    return Boolean(vehiclePoint && Math.hypot(pointer.x - vehiclePoint.x, pointer.y - vehiclePoint.y) <= hitRadius);
+  };
+  const finishPan = (event, cancelled = false) => {
+    if (relocalizationDrag && (!event || event.pointerId === relocalizationDrag.pointerId)) {
+      const drag = relocalizationDrag;
+      relocalizationDrag = undefined;
+      if (drag.mode === "place") {
+        relocalizationPlacing = false;
+        if (cancelled) setRelocalizationPreview(relocalizationPlacementOriginal);
+        relocalizationPlacementOriginal = undefined;
+      }
+      if (interaction.hasPointerCapture(drag.pointerId))
+        interaction.releasePointerCapture(drag.pointerId);
+      renderRelocalizationControls();
+      interaction.classList.remove("is-panning", "is-rotating");
+      return;
+    }
     if (!pan || (event && event.pointerId !== pan.pointerId)) return;
     if (interaction.hasPointerCapture(pan.pointerId))
       interaction.releasePointerCapture(pan.pointerId);
@@ -1293,11 +2204,48 @@ function setupMapInteraction() {
     interaction.classList.remove("is-panning");
   };
   interaction.addEventListener("pointerdown", (event) => {
-    // 同时支持左键和中键拖拽；中键仍保留，左键避免操作者误以为地图不能拖动。
-    if ((event.button !== 0 && event.button !== 1) || !mapInfo) return;
-    event.preventDefault();
-    setInteractionActive(true);
+    if (event.button !== 2) closeMapMarkerMenu();
+    // 左/中键仍可拖拽地图；手动重定位时，在车体上用左键移位、右键调整朝向。
+    if (event.pointerType === "touch" && relocalizationDrag) return;
+    const standardPanButton = event.button === 0 || event.button === 1;
+    const rotatePreview = event.button === 2 && canEditRelocalization();
+    if ((!standardPanButton && !rotatePreview) || !mapInfo) return;
+    if (event.button === 0 && relocalizationPlacing && canEditRelocalization() && !relocalizationDrag) {
+      event.preventDefault();
+      setInteractionActive(true);
+      const point = worldAtViewportPoint(eventViewportPoint(event), currentMapLayout());
+      const yaw = relocalizationPreview?.yaw ?? relocalizationCandidateFromLivePose()?.yaw ?? 0;
+      editRelocalizationPreview({ ...point, yaw });
+      relocalizationDrag = { pointerId: event.pointerId, mode: "place", x: point.x, y: point.y };
+      interaction.setPointerCapture(event.pointerId);
+      return;
+    }
+    if ((event.button === 0 || event.button === 2) && canEditRelocalization()) {
+      const pointer = eventViewportPoint(event);
+      if (isRelocalizationPreviewHit(pointer)) {
+        event.preventDefault();
+        setInteractionActive(true);
+        editRelocalizationPreview(relocalizationPreview || relocalizationCandidateFromLivePose());
+        freezeMapViewportForRelocalization(mapView, currentMapLayout());
+        overviewUntilMovement = false;
+        const point = worldAtViewportPoint(pointer, currentMapLayout());
+        relocalizationDrag = {
+          pointerId: event.pointerId, mode: event.button === 2 ? "rotate" : "move",
+          x: relocalizationPreview.x - point.x, y: relocalizationPreview.y - point.y,
+          startYaw: relocalizationPreview.yaw,
+          startAngle: Math.hypot(point.x - relocalizationPreview.x, point.y - relocalizationPreview.y) > 0.03
+            ? Math.atan2(point.y - relocalizationPreview.y, point.x - relocalizationPreview.x) : undefined,
+        };
+        interaction.setPointerCapture(event.pointerId);
+        interaction.classList.add("is-panning");
+        interaction.classList.toggle("is-rotating", relocalizationDrag.mode === "rotate");
+        return;
+      }
+    }
     if (event.pointerType === "touch") {
+      if (!standardPanButton) return;
+      event.preventDefault();
+      setInteractionActive(true);
       touchPoints.set(event.pointerId, eventViewportPoint(event));
       interaction.setPointerCapture(event.pointerId);
       if (touchPoints.size === 2) beginPinch();
@@ -1308,11 +2256,34 @@ function setupMapInteraction() {
       }
       return;
     }
+    if (event.button === 2) return;
+    event.preventDefault();
+    setInteractionActive(true);
     pan = { pointerId: event.pointerId, point: eventViewportPoint(event) };
     interaction.setPointerCapture(event.pointerId);
     interaction.classList.add("is-panning");
   });
+  interaction.addEventListener("contextmenu", (event) => {
+    const pointer = eventViewportPoint(event);
+    if (isRelocalizationPreviewHit(pointer)) {
+      event.preventDefault();
+      return;
+    }
+    const point = mapMarkerAtViewportPoint(pointer);
+    if (!point) {
+      closeMapMarkerMenu();
+      return;
+    }
+    event.preventDefault();
+    openMapMarkerMenu(point, event.clientX, event.clientY);
+  });
   interaction.addEventListener("pointermove", (event) => {
+    if (relocalizationPlacing && canEditRelocalization() && mapInfo && !relocalizationDrag && !pan && event.pointerType !== "touch") {
+      const point = worldAtViewportPoint(eventViewportPoint(event), currentMapLayout());
+      const yaw = relocalizationPreview?.yaw ?? relocalizationCandidateFromLivePose()?.yaw ?? 0;
+      editRelocalizationPreview({ ...point, yaw });
+      return;
+    }
     if (event.pointerType === "touch" && touchPoints.has(event.pointerId)) {
       touchPoints.set(event.pointerId, eventViewportPoint(event));
       if (pinch) {
@@ -1320,6 +2291,28 @@ function setupMapInteraction() {
         applyPinch();
         return;
       }
+    }
+    if (relocalizationDrag?.pointerId === event.pointerId && relocalizationPreview && mapInfo && canEditRelocalization()) {
+      event.preventDefault();
+      const point = worldAtViewportPoint(eventViewportPoint(event), currentMapLayout());
+      if (relocalizationDrag.mode === "place") {
+        const dx = point.x - relocalizationDrag.x;
+        const dy = point.y - relocalizationDrag.y;
+        if (Math.hypot(dx, dy) > 0.15)
+          editRelocalizationPreview({ ...relocalizationPreview, yaw: Math.atan2(dy, dx) });
+      } else if (relocalizationDrag.mode === "rotate") {
+        const distance = Math.hypot(point.x - relocalizationPreview.x, point.y - relocalizationPreview.y);
+        if (distance > 0.03) {
+          const angle = Math.atan2(point.y - relocalizationPreview.y, point.x - relocalizationPreview.x);
+          relocalizationDrag.startAngle ??= angle;
+          editRelocalizationPreview({
+            ...relocalizationPreview,
+            yaw: normalizeAngle(relocalizationDrag.startYaw + angle - relocalizationDrag.startAngle),
+          });
+        }
+      } else editRelocalizationPreview({ ...relocalizationPreview,
+        x: point.x + relocalizationDrag.x, y: point.y + relocalizationDrag.y });
+      return;
     }
     if (!pan || event.pointerId !== pan.pointerId || !mapInfo) return;
     const next = eventViewportPoint(event);
@@ -1351,7 +2344,7 @@ function setupMapInteraction() {
       interaction.classList.add("is-panning");
     } else {
       pinch = undefined;
-      finishPan();
+      finishPan(undefined, cancelled);
     }
   };
   interaction.addEventListener("pointerup", (event) => {
@@ -1361,14 +2354,14 @@ function setupMapInteraction() {
   });
   interaction.addEventListener("pointercancel", (event) => {
     if (event.pointerType === "touch") finishTouch(event, true);
-    else finishPan(event);
+    else finishPan(event, true);
     if (!touchPoints.size) setInteractionActive(false);
   });
   interaction.addEventListener("lostpointercapture", (event) => {
     if (event.pointerType === "touch") touchPoints.delete(event.pointerId);
     if (!touchPoints.size) {
       pinch = undefined;
-      finishPan(event);
+      finishPan(event, true);
       setInteractionActive(false);
     }
   });
@@ -1404,8 +2397,10 @@ async function initializePixiRenderer() {
     pixiGridLayer = new Container();
     pixiCostmapLayer = new Container();
     pixiWallLayer = new Container();
+    pixiNavigationRouteLayer = new Container();
+    pixiMapMarkerLayer = new Container();
     pixiCloudLayer = new Container();
-    pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiCostmapLayer, pixiWallLayer, pixiCloudLayer);
+    pixiWorld.addChild(pixiMapLayer, pixiGridLayer, pixiCostmapLayer, pixiWallLayer, pixiNavigationRouteLayer, pixiMapMarkerLayer, pixiCloudLayer);
     app.stage.addChild(pixiWorld);
     pixiReady = true;
     renderStaticWorld();
@@ -1569,7 +2564,9 @@ function requestVehicleAnimation() {
     }
     clientPerformance.lastVehicleFrameAt = frameAt;
     clientPerformance.vehicleFrames += 1;
-    const vehicle = renderedVehiclePoseInMap();
+    // 预览拖拽期间，地图重绘与这一独立合成层必须使用同一位姿。否则实时
+    // 定位帧会把刚被拖到目标位置的车体立即写回原处，造成来回闪烁。
+    const vehicle = previewVehiclePose(renderedVehiclePoseInMap());
     if (vehicle?.position) syncVehicleLayer(vehicle, lastMapLayout);
     // 仅更新独立 DOM 车体层；不重新绘制地图、虚拟墙或点云。
     if (
@@ -1815,7 +2812,8 @@ function drawMap() {
   pixiWorld.position.set(layout.left, layout.top);
   pixiWorld.scale.set(layout.ratio, layout.ratio);
   pixiWorld.rotation = layout.rotation;
-  syncVehicleLayer(layout.vehicle, layout);
+  positionCostmapSprite();
+  syncVehicleLayer(previewVehiclePose(layout.vehicle), layout);
   pixiApp.render();
 }
 
@@ -1831,6 +2829,14 @@ function renderStaticWorld() {
   pixiMapLayer.addChild(pixiMapSprite);
   metricGridSignature = undefined;
   pixiGridLayer.removeChildren().forEach((child) => child.destroy());
+  renderVirtualWalls();
+  renderNavigationRoute();
+  renderMapMarkers();
+  renderCostmap();
+  pixiApp.render();
+}
+function renderVirtualWalls() {
+  if (!pixiWallLayer || !mapInfo || !pixiReady) return;
   pixiWallLayer.removeChildren().forEach((child) => child.destroy());
   const walls = new Graphics();
   const mobile = mobileConsoleEnabled();
@@ -1871,13 +2877,79 @@ function renderStaticWorld() {
     join: "round",
   });
   pixiWallLayer.addChild(walls);
-  renderCostmap();
-  pixiApp.render();
+}
+function renderMapMarkers() {
+  if (!pixiMapMarkerLayer || !mapInfo || !pixiReady) return;
+  pixiMapMarkerLayer.removeChildren().forEach((child) => child.destroy());
+  if (!mapMarkersVisible || mobileConsoleEnabled()) return;
+  const radius = Math.max(4, Math.min(12, 0.14 / mapInfo.resolution));
+  for (const point of mapMarkers) {
+    const x = (Number(point.x) - mapInfo.origin.x) / mapInfo.resolution;
+    const y = mapInfo.height - (Number(point.y) - mapInfo.origin.y) / mapInfo.resolution;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < -radius || y < -radius || x > mapInfo.width + radius || y > mapInfo.height + radius) continue;
+    // ROS yaw 以地图 +X 为零、逆时针增加；Pixi 的屏幕 Y 轴向下，因此 Y 分量取反。
+    // 用一个小箭头替代无朝向的菱形，既保留轻量的目标点轮廓，也能直接判断到点朝向。
+    const headingX = Math.cos(Number(point.yaw));
+    const headingY = -Math.sin(Number(point.yaw));
+    const sideX = -headingY;
+    const sideY = headingX;
+    const arrowTip = radius * 1.05;
+    const arrowTail = radius * 0.42;
+    const arrowHalfWidth = radius * 0.43;
+    const marker = new Graphics();
+    marker.circle(x, y, radius + 1.25).fill({ color: 0xffffff, alpha: 0.82 });
+    marker.circle(x, y, radius).fill({ color: 0x2d8ddd, alpha: 0.94 });
+    marker.poly([
+      x + headingX * arrowTip,
+      y + headingY * arrowTip,
+      x - headingX * arrowTail + sideX * arrowHalfWidth,
+      y - headingY * arrowTail + sideY * arrowHalfWidth,
+      x - headingX * arrowTail - sideX * arrowHalfWidth,
+      y - headingY * arrowTail - sideY * arrowHalfWidth,
+    ]).fill({ color: 0xf6fbff, alpha: 0.98 });
+    pixiMapMarkerLayer.addChild(marker);
+  }
+}
+function navigationRoutePoints() {
+  const route = mapMarkerNavigationStatus?.phase === "navigating"
+    ? mapMarkerNavigationStatus.route
+    : undefined;
+  if (route?.frame_id !== "map" || !Array.isArray(route.points) || route.points.length < 2) return [];
+  const points = [];
+  for (const point of route.points) {
+    const x = Number(point?.x);
+    const y = Number(point?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return [];
+    points.push({ x, y });
+  }
+  return points;
+}
+function renderNavigationRoute() {
+  if (!pixiNavigationRouteLayer || !mapInfo || !pixiReady) return;
+  pixiNavigationRouteLayer.removeChildren().forEach((child) => child.destroy());
+  if (!navigationRouteVisible || mobileConsoleEnabled()) return;
+  const points = navigationRoutePoints();
+  if (points.length < 2) return;
+  const route = new Graphics();
+  points.forEach((point, index) => {
+    const x = (point.x - mapInfo.origin.x) / mapInfo.resolution;
+    const y = mapInfo.height - (point.y - mapInfo.origin.y) / mapInfo.resolution;
+    if (index === 0) route.moveTo(x, y);
+    else route.lineTo(x, y);
+  });
+  route.stroke({
+    color: 0x36a967,
+    width: Math.max(1.5, 0.07 / mapInfo.resolution),
+    alpha: 0.94,
+    cap: "round",
+    join: "round",
+  });
+  pixiNavigationRouteLayer.addChild(route);
 }
 function renderCloudPoints(packedPoints) {
   if (!pixiReady || !mapInfo) return;
   pixiCloudLayer.removeChildren().forEach((child) => child.destroy());
-  if (!packedPoints?.length) {
+  if (!packedPoints?.length || relocalizationMapUnconfirmed || ((relocalizationEditing || relocalizationPreview) && !relocalizationCandidateFromLivePose())) {
     pixiApp.render();
     return;
   }
@@ -1886,11 +2958,15 @@ function renderCloudPoints(packedPoints) {
   // 大屏采用 0.52 px 让抽稀后的导航点在白底图上可稳定辨识；手机保持 0.82 px
   // 以应对更高的物理像素密度。两端共用相同点云帧，差异仅为显示尺度。
   const pointRadius = mobile ? 0.82 : 0.52;
+  const transform = relocalizationPreviewTransform();
   for (let index = 0; index < packedPoints.length; index += 2) {
-    const x = (packedPoints[index] - mapInfo.origin.x) / mapInfo.resolution;
+    const previewPoint = transformRelocalizationPoint({
+      x: packedPoints[index],
+      y: packedPoints[index + 1],
+    }, transform);
+    const x = (previewPoint.x - mapInfo.origin.x) / mapInfo.resolution;
     const y =
-      mapInfo.height -
-      (packedPoints[index + 1] - mapInfo.origin.y) / mapInfo.resolution;
+      mapInfo.height - (previewPoint.y - mapInfo.origin.y) / mapInfo.resolution;
     if (x >= 0 && x < mapInfo.width && y >= 0 && y < mapInfo.height)
       points.rect(
         x - pointRadius,
@@ -1905,33 +2981,55 @@ function renderCloudPoints(packedPoints) {
   pixiCloudLayer.addChild(points);
   pixiApp.render();
 }
-function syncVehicleLayer(vehicle, layout) {
-  const element = $("vehicleLayer");
-  if (
-    !vehicle?.position ||
-    !mapInfo ||
-    !Number.isFinite(Number(vehicle.position.x)) ||
-    !Number.isFinite(Number(vehicle.position.y))
-  ) {
-    element.hidden = true;
-    return;
-  }
-  const nativeX = (vehicle.position.x - mapInfo.origin.x) / mapInfo.resolution;
+function viewportPointForMapPosition(position, layout) {
+  if (!position || !mapInfo || !layout) return undefined;
+  if (!Number.isFinite(Number(position.x)) || !Number.isFinite(Number(position.y))) return undefined;
+  const nativeX = (position.x - mapInfo.origin.x) / mapInfo.resolution;
   const nativeY =
     mapInfo.height -
-    (vehicle.position.y - mapInfo.origin.y) / mapInfo.resolution;
+    (position.y - mapInfo.origin.y) / mapInfo.resolution;
   const baseX = layout.left + nativeX * layout.ratio;
   const baseY = layout.top + nativeY * layout.ratio;
   const centerX = layout.viewportWidth / 2;
   const centerY = layout.viewportHeight / 2;
   const cosine = Math.cos(layout.rotation);
   const sine = Math.sin(layout.rotation);
-  const x = centerX + cosine * (baseX - centerX) - sine * (baseY - centerY);
-  const y = centerY + sine * (baseX - centerX) + cosine * (baseY - centerY);
-  const { length, width } = projectVehicleFootprint(
+  return {
+    x: centerX + cosine * (baseX - centerX) - sine * (baseY - centerY),
+    y: centerY + sine * (baseX - centerX) + cosine * (baseY - centerY),
+  };
+}
+function mapMarkerAtViewportPoint(pointer) {
+  if (!mapMarkersVisible || relocalizationEditing || relocalizationPreview || relocalizationPlacing) return undefined;
+  const layout = currentMapLayout();
+  let closest;
+  for (const point of mapMarkers) {
+    const viewport = viewportPointForMapPosition(point, layout);
+    if (!viewport) continue;
+    const distance = Math.hypot(pointer.x - viewport.x, pointer.y - viewport.y);
+    if (distance <= 16 && (!closest || distance < closest.distance)) closest = { point, distance };
+  }
+  return closest?.point;
+}
+function syncVehicleLayer(vehicle, layout) {
+  const element = $("vehicleLayer");
+  if (relocalizationWaitingForMap || (relocalizationMapUnconfirmed && !relocalizationPreview)) { if (element) element.hidden = true; return; }
+  const viewport = viewportPointForMapPosition(vehicle?.position, layout);
+  if (!viewport) {
+    element.hidden = true;
+    return;
+  }
+  const footprint = projectVehicleFootprint(
     vehicleModel,
     layout.pixelsPerMeter,
   );
+  // A recovered preview replaces the pointer even at whole-site zoom levels.
+  // Keep its icon legible; actual observation and submitted metres stay unchanged.
+  const preview = hasFiniteRelocalizationCandidate(relocalizationPreview);
+  const iconScale = preview ? Math.max(1, 32 / footprint.length) : 1;
+  const length = footprint.length * iconScale;
+  const width = footprint.width * iconScale;
+  element.setAttribute("aria-label", preview ? "重定位预览位置及车头方向，尚未下发" : "小车实时位置及车头方向");
   element.hidden = false;
   if (element.style.width !== `${width}px`) element.style.width = `${width}px`;
   if (element.style.height !== `${length}px`)
@@ -1941,6 +3039,7 @@ function syncVehicleLayer(vehicle, layout) {
   // ROS yaw 以 +X 为零、逆时针增加；屏幕 Y 轴向下而车体图标默认朝上，故须
   // 转换为 pi/2 - yaw。只旋转车体，底图、点云和虚拟墙始终保持 map 朝向。
   const localYaw = Math.PI / 2 - vehicle.yaw;
+  const { x, y } = viewport;
   const transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%) rotate(${localYaw}rad)`;
   if (element.style.transform !== transform)
     element.style.transform = transform;
@@ -2050,7 +3149,25 @@ function updateLivePose(message, sourceAgeMs = 0) {
     !Number.isFinite(Number(position.y))
   )
     return;
-  // C++ 已完成 map->base 查找；浏览器只处理专用紧凑位姿帧。
+  // 原始 map 位姿用于重定位；显示平滑和预测不能成为服务请求的坐标来源。
+  rawVehiclePose = { x: Number(position.x), y: Number(position.y), yaw: yawOf(orientation),
+    receivedAt: performance.now(), sourceAgeMs };
+  if (relocalizationAwaitingPose) {
+    relocalizationLayerBarrier = lastPoseTimestamp;
+    invalidateMapScopedCloud();
+    relocalizationAwaitingPose = false;
+    window.clearTimeout(relocalizationHandoffTimer);
+    latestLiveMotion = undefined;
+    renderedVehiclePose = undefined;
+    tfVehiclePose = undefined;
+    if (relocalizationSubmittedRevision === relocalizationDraftRevision) {
+      relocalizationEditing = false;
+      clearRelocalizationPreview();
+      relocalizationConfigPicker?.reset();
+    }
+    relocalizationActionNotice = "已接收重定位后的实时位姿";
+    renderRelocalizationControls();
+  }
   livePoseUpdatedAt = performance.now();
   clientPerformance.poseApplied += 1;
   vehicleUpdatedAt = livePoseUpdatedAt;
@@ -2074,6 +3191,11 @@ function updateLivePose(message, sourceAgeMs = 0) {
     yawRate,
     sourceAgeMs,
   };
+  // 最新点云与代价地图以最新原始位姿为锚点，目标始终由操作者控制。
+  if (relocalizationPreview) {
+    positionCostmapSprite();
+    scheduleRelocalizationCloudRender();
+  }
   // 轻量位姿是当前性能路径；它也必须能驱动概览 -> 随车视图，不能依赖
   // 轻量位姿首次到达即可从全图进入跟车视角，不能依赖其它 ROS 话题。
   leaveOverviewAfterMovement(stablePosition);
@@ -2126,6 +3248,8 @@ function updateTelemetryPose(data) {
   const y = header.view.getFloat32(TELEMETRY_HEADER_BYTES + 4, false);
   const yaw = header.view.getFloat32(TELEMETRY_HEADER_BYTES + 8, false);
   if (![x, y, yaw].every(Number.isFinite)) return;
+  if (relocalizationSwitchingMap || relocalizationWaitingForMap || relocalizationMapUnconfirmed || relocalizationAwaitingPose && header.timestampNs <= relocalizationLayerBarrier) return;
+  lastPoseTimestamp = header.timestampNs;
   updateLivePose(
     {
       pose: {
@@ -2144,6 +3268,7 @@ function updateTelemetryCloud(data) {
     data.byteLength !== TELEMETRY_HEADER_BYTES + header.pointCount * 8
   )
     return;
+  if (relocalizationSwitchingMap || relocalizationWaitingForMap || relocalizationMapUnconfirmed || relocalizationAwaitingPose || header.timestampNs <= relocalizationLayerBarrier) return;
   const packedMapPoints = new Float32Array(header.pointCount * 2);
   for (let index = 0; index < header.pointCount; index += 1) {
     const offset = TELEMETRY_HEADER_BYTES + index * 8;
@@ -2170,6 +3295,7 @@ function updateTelemetryCostmap(data) {
       TELEMETRY_HEADER_BYTES + COSTMAP_META_BYTES + header.pointCount
   )
     return;
+  if (relocalizationSwitchingMap || relocalizationWaitingForMap || relocalizationMapUnconfirmed || relocalizationAwaitingPose || header.timestampNs <= relocalizationLayerBarrier) return;
   const offset = TELEMETRY_HEADER_BYTES;
   const originX = header.view.getFloat32(offset, false);
   const originY = header.view.getFloat32(offset + 4, false);
@@ -2389,20 +3515,52 @@ function rebuildCloudRaster() {
   }
   renderCloudPoints(packedPoints || packCloudPoints(mapPoints || []));
 }
-async function refreshActiveMap(observation) {
+async function refreshActiveMapFromServer() {
+  if (activeMapPollPending) return;
+  activeMapPollPending = true;
+  const actionEpoch = relocalizationActionEpoch;
+  try {
+    const snapshot = await request("/api/observation/active-map");
+    if (actionEpoch === relocalizationActionEpoch) await refreshActiveMap(snapshot);
+  } catch { /* the next lightweight poll retries */ }
+  finally { activeMapPollPending = false; }
+}
+async function refreshActiveMap(observation, fromRelocalization = false) {
   // active_map.json 由既有轨迹记录器写入；点云/位姿链路不触碰地图缓存。
   const mapId = observation.active_map_id;
+  if (relocalizationTargetMapId) {
+    if (mapId === relocalizationTargetMapId && !fromRelocalization)
+      relocalizationTargetMapAcknowledged = true;
+    if (mapId !== relocalizationTargetMapId) {
+      if (!relocalizationTargetMapAcknowledged) return;
+      relocalizationTargetMapId = undefined;
+    }
+  }
   if (!mapId || mapId === loadedMapId || mapId === requestedActiveMapId) return;
+  clearLiveWallCompensation();
+  closeMapMarkerMenu();
+  closeMapMarkerForm();
+  mapMarkers = [];
+  mapMarkerNavigationStatus = undefined;
+  renderNavigationRoute();
+  renderMapMarkers();
   requestedActiveMapId = mapId;
+  const requestEpoch = ++activeMapRequestEpoch;
   try {
     const layers = await request(
       `/api/observation/maps/${encodeURIComponent(mapId)}/layers`,
     );
-    virtualWalls = Array.isArray(layers.virtual_walls)
+    if (requestEpoch !== activeMapRequestEpoch || requestedActiveMapId !== mapId) return;
+    const incomingWalls = Array.isArray(layers.virtual_walls)
       ? layers.virtual_walls
       : [];
+    // 缓存快照可能比 map_server 的墙文件先到达。保留上一张已确认的墙，直到
+    // 当前地图已给出实际替代结果；一次短暂空响应不能让整张地图闪成无虚拟墙。
+    if (incomingWalls.length || !virtualWalls.length)
+      virtualWalls = incomingWalls;
     loadCachedMap(mapId, layers.map);
   } catch (_) {
+    if (requestEpoch !== activeMapRequestEpoch || requestedActiveMapId !== mapId) return;
     // 网络短暂失败不能把这次切图永久标为“已处理”；下一次轻量标记检查会重试。
     reportObservationOnce(
       `cached-map-${mapId}`,
@@ -2410,10 +3568,69 @@ async function refreshActiveMap(observation) {
       `地图缓存层读取失败：map_id=${mapId}。请检查 maps_cache 与轨迹记录器。`,
     );
     requestedActiveMapId = undefined;
-    virtualWalls = [];
+    clearLiveWallCompensation();
   }
   updateDiagnostics();
   scheduleMapDraw();
+}
+
+function liveWallSignature(mapId, metadata) {
+  if (!mapId || !metadata?.width || !metadata?.height || !(metadata.resolution > 0) || !Array.isArray(metadata.origin)) return undefined;
+  return `${mapId}|${metadata.width}|${metadata.height}|${Number(metadata.resolution).toFixed(8)}|${Number(metadata.origin[0]).toFixed(8)}|${Number(metadata.origin[1]).toFixed(8)}|${normalizeFrame(metadata.frame_id) || "map"}`;
+}
+function clearLiveWallCompensation() {
+  window.clearTimeout(liveWallCompensationTimer);
+  liveWallCompensationTimer = undefined;
+  activeLiveWallSignature = undefined;
+  resolvedLiveWallSignature = undefined;
+  liveWallCompensationAttempts = 0;
+}
+function scheduleLiveWallCompensation(mapId, metadata) {
+  const signature = liveWallSignature(mapId, metadata);
+  if (!signature || signature === resolvedLiveWallSignature) return;
+  if (activeLiveWallSignature !== signature) {
+    window.clearTimeout(liveWallCompensationTimer);
+    activeLiveWallSignature = signature;
+    liveWallCompensationAttempts = 0;
+  }
+  if (!liveWallCompensationTimer) requestLiveWallCompensation(mapId, metadata);
+}
+async function requestLiveWallCompensation(mapId, metadata) {
+  const signature = liveWallSignature(mapId, metadata);
+  if (!signature || signature !== activeLiveWallSignature) return;
+  liveWallCompensationTimer = undefined;
+  try {
+    const result = await request("/api/observation/live-layers", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        resolution: Number(metadata.resolution), width: Number(metadata.width), height: Number(metadata.height),
+        origin: [Number(metadata.origin[0]), Number(metadata.origin[1])], frame_id: normalizeFrame(metadata.frame_id) || "map",
+      }),
+    });
+    if (signature !== activeLiveWallSignature || mapId !== loadedMapId) return;
+    if (result.matched) {
+      resolvedLiveWallSignature = signature;
+      const incomingWalls = Array.isArray(result.virtual_walls)
+        ? result.virtual_walls
+        : [];
+      // 同一地图的短暂空响应不是“墙已被删除”。已有墙只在收到非空的新
+      // 结果时替换，防止实时元数据补偿把稳定地图刷成无虚拟墙。
+      if (incomingWalls.length || !virtualWalls.length)
+        virtualWalls = incomingWalls;
+      renderVirtualWalls();
+      // 该匹配同时为地图标记提供已验证的当前地图身份；按需刷新，不轮询标记。
+      refreshMapMarkers();
+      updateDiagnostics();
+      scheduleMapDraw();
+      return;
+    }
+  } catch (_) {
+    // map_server 切图和墙文件可见性存在短暂窗口；受限重试而非在页面报错。
+  }
+  if (signature !== activeLiveWallSignature || mapId !== loadedMapId) return;
+  const delay = liveWallCompensationAttempts < 5 ? 1000 : 5000;
+  liveWallCompensationAttempts += 1;
+  liveWallCompensationTimer = window.setTimeout(() => requestLiveWallCompensation(mapId, metadata), delay);
 }
 function loadCachedMap(mapId, metadata) {
   if (
@@ -2425,11 +3642,18 @@ function loadCachedMap(mapId, metadata) {
   )
     return;
   loadedMapId = mapId;
+  const requestEpoch = activeMapRequestEpoch;
   const image = new Image();
   image.decoding = "async";
   image.onload = () => {
-    if (loadedMapId !== mapId) return;
+    if (loadedMapId !== mapId || requestEpoch !== activeMapRequestEpoch) return;
     invalidateMapScopedCloud();
+    if (!relocalizationWaitingForMap && !relocalizationAwaitingPose) relocalizationLayerBarrier = 0n;
+    rawVehiclePose = undefined;
+    latestLiveMotion = renderedVehiclePose = tfVehiclePose = undefined;
+    const discardedPreview = Boolean(relocalizationPreview || relocalizationPlacing);
+    clearRelocalizationPreview();
+    if (discardedPreview) relocalizationActionNotice = "地图已切换，旧预览已作废，请在当前地图重新设置位姿";
     mapInfo = {
       width: Number(metadata.width),
       height: Number(metadata.height),
@@ -2442,6 +3666,10 @@ function loadCachedMap(mapId, metadata) {
     };
     mapTexture?.destroy(true);
     mapTexture = Texture.from(image);
+    displayedMapId = mapId;
+    relocalizationMapUnconfirmed = false;
+    updateRelocalizationMapTarget(relocalizationStatus || {});
+    renderRelocalizationControls();
     $("mapEmpty").hidden = true;
     // 进入观测页且车辆尚未提供定位时，优先展示完整地图；运行中切图则延续随车视角。
     if (!vehiclePoseInMap()?.position) {
@@ -2452,13 +3680,16 @@ function loadCachedMap(mapId, metadata) {
       mapView.followOffset = { x: 0, y: 0 };
     }
     renderStaticWorld();
+    scheduleLiveWallCompensation(mapId, metadata);
+    // 标记仅在 live_layers 严格确认当前地图后读取，避免短暂切图显示旧图标。
     scheduleCloudRasterBuild();
     updateDiagnostics();
     scheduleMapDraw();
   };
   image.onerror = () => {
-    if (loadedMapId === mapId) {
+    if (loadedMapId === mapId && requestEpoch === activeMapRequestEpoch) {
       loadedMapId = undefined;
+      requestedActiveMapId = undefined;
       setText(
         "mapDiagnostics",
         "当前地图缓存读取失败；请在测试任务中重新开启轨迹记录。",
@@ -2581,17 +3812,63 @@ function connectTelemetry(payload) {
   if (!mobileConsoleEnabled())
     openLane("costmap", "/costmap", scheduleLatestCostmapPacket, "局部代价地图");
 }
+function setupMapLayersPanel() {
+  const control = $("mapLayersControl");
+  const toggle = $("mapLayersToggle");
+  const panel = $("mapLayersPanel");
+  if (!control || !toggle || !panel) return;
+
+  const setExpanded = (expanded) => {
+    panel.hidden = !expanded;
+    toggle.setAttribute("aria-expanded", String(expanded));
+  };
+  toggle.addEventListener("click", () => {
+    const expanded = panel.hidden;
+    setExpanded(expanded);
+    if (expanded) announceMapOverlayOpen("layers");
+  });
+  document.addEventListener(MAP_OVERLAY_OPEN_EVENT, (event) => {
+    if (event.detail !== "layers" && !panel.hidden) setExpanded(false);
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!panel.hidden && !control.contains(event.target)) setExpanded(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !panel.hidden) {
+      setExpanded(false);
+      toggle.focus();
+    }
+  });
+}
 async function main() {
   initializeTheme();
   window.RYAletheiaShell?.install();
   setupMobileConsole();
   setupMapInteraction();
+  setupLocalizationStatusOverlay();
+  setupMapLayersPanel();
   const costmapToggle = $("costmapVisible");
   costmapVisible = costmapToggle?.checked !== false;
   costmapToggle?.addEventListener("change", () => {
     costmapVisible = costmapToggle.checked;
     renderCostmap();
     updateDiagnostics(true);
+    scheduleMapDraw(true);
+  });
+  const mapMarkersToggle = $("mapMarkersVisible");
+  mapMarkersVisible = mapMarkersToggle?.checked !== false;
+  mapMarkersToggle?.addEventListener("change", () => {
+    mapMarkersVisible = mapMarkersToggle.checked;
+    closeMapMarkerMenu();
+    renderMapMarkers();
+    if (mapMarkersVisible) refreshMapMarkers();
+    scheduleMapDraw(true);
+  });
+  const navigationRouteToggle = $("navigationRouteVisible");
+  navigationRouteVisible = navigationRouteToggle?.checked !== false;
+  navigationRouteToggle?.addEventListener("change", () => {
+    navigationRouteVisible = navigationRouteToggle.checked;
+    renderNavigationRoute();
     scheduleMapDraw(true);
   });
   $("webrtcVideoToggle")?.addEventListener("click", toggleWebRtcVideo);
@@ -2616,7 +3893,9 @@ async function main() {
       localizationStatusTimer = window.setInterval(
         refreshLocalizationStatus,
         LOCALIZATION_STATUS_REFRESH_MS,
-      );
+          );
+          setupRelocalizationControl();
+          setupMapMarkerLayer();
     }
     const models = Array.isArray(settings.live_observation?.vehicle_models)
       ? settings.live_observation.vehicle_models
@@ -2648,14 +3927,10 @@ async function main() {
     connectTelemetry(ready);
     window.setInterval(() => {
       reportClientMetrics();
-      request("/api/observation/heartbeat", { method: "POST" })
-        .then(refreshActiveMap)
-        .catch(() => {});
+      request("/api/observation/heartbeat", { method: "POST" }).catch(() => {});
     }, 5000);
     window.setInterval(() => {
-      request("/api/observation/active-map")
-        .then(refreshActiveMap)
-        .catch(() => {});
+      refreshActiveMapFromServer();
     }, ACTIVE_MAP_SYNC_MS);
   } catch (error) {
     setText("connectionState", "不可用");
@@ -2664,6 +3939,7 @@ async function main() {
   }
 }
 window.addEventListener("error", (event) => {
+  if (globalThis.RYAletheiaDiagnostics) return;
   const location = event.filename
     ? `${event.filename}:${event.lineno || 0}:${event.colno || 0}`
     : "未知位置";
@@ -2675,6 +3951,7 @@ window.addEventListener("error", (event) => {
   );
 });
 window.addEventListener("unhandledrejection", (event) => {
+  if (globalThis.RYAletheiaDiagnostics) return;
   const detail =
     event.reason?.message || String(event.reason || "未知 Promise 异常");
   reportObservationOnce(
@@ -2683,9 +3960,12 @@ window.addEventListener("unhandledrejection", (event) => {
     `实时观测页面未处理 Promise 异常：${detail}`,
   );
 });
-window.addEventListener("beforeunload", () => {
-  window.clearInterval(localizationStatusTimer);
-  window.clearInterval(webrtcStatusTimer);
+    window.addEventListener("beforeunload", () => {
+        window.clearInterval(localizationStatusTimer);
+        window.clearInterval(relocalizationStatusTimer);
+        window.clearInterval(mapMarkerNavigationTimer);
+      clearLiveWallCompensation();
+      window.clearInterval(webrtcStatusTimer);
   [...webrtcPlayers.keys()].forEach(destroyWebRtcPlayer);
   stopRenderScheduling();
   closeTelemetryConnections();

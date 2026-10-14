@@ -8,6 +8,7 @@ and never installs or edits a root system unit.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shlex
 import subprocess
@@ -20,6 +21,7 @@ class AutostartError(RuntimeError):
 
 
 DEFAULT_ROS_DOMAIN_ID = 66
+LOGGER = logging.getLogger("ry_aletheia.autostart")
 
 
 class AutostartManager:
@@ -80,6 +82,7 @@ class AutostartManager:
             self._disable_systemd_unit()
             self._remove(self.service_path)
             self._remove(self.desktop_path)
+            LOGGER.info("用户自启配置已关闭：mode=none")
             return self.status()
 
         self._remove(self.desktop_path)
@@ -87,12 +90,15 @@ class AutostartManager:
             self._write_service()
             self._systemctl("daemon-reload")
             self._systemctl("enable", self.SERVICE_NAME)
+            LOGGER.info("用户自启配置已启用：mode=systemd-user ros_domain_id=%s", self.ros_domain_id)
             return self.status()
-        except (OSError, subprocess.SubprocessError, AutostartError):
+        except (OSError, subprocess.SubprocessError, AutostartError) as exc:
             # A desktop session may not expose a user systemd bus.  The XDG
             # entry remains per-user and requires no elevated permission.
+            LOGGER.warning("用户 systemd 自启不可用，尝试桌面会话自启：error=%s", exc)
             self._remove(self.service_path)
             self._write_desktop_entry()
+            LOGGER.info("用户自启配置已启用：mode=desktop-autostart ros_domain_id=%s", self.ros_domain_id)
             return self.status()
 
     def _write_service(self) -> None:
@@ -181,9 +187,10 @@ class AutostartManager:
         try:
             self._systemctl("disable", self.SERVICE_NAME)
             self._systemctl("daemon-reload")
-        except (OSError, subprocess.SubprocessError, AutostartError):
+        except (OSError, subprocess.SubprocessError, AutostartError) as exc:
             # Removal below is the source of truth even if a desktop session
             # has already gone away and systemctl cannot reach its user bus.
+            LOGGER.warning("用户 systemd 自启禁用命令未完成，继续清理用户自启文件：error=%s", exc)
             return
 
     @staticmethod

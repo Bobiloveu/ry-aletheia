@@ -97,13 +97,30 @@
               </div>
               <div id="mapInteraction" class="map-interaction-layer" aria-label="地图缩放与拖动交互"></div>
               <div class="localization-status" id="localizationStatus" data-phase="unavailable" role="status" aria-live="polite" aria-atomic="true">
-                <span class="localization-status-dot" aria-hidden="true"></span>
-                <span class="localization-status-copy">
-                  <strong id="localizationStatusLabel">定位状态检查中</strong>
-                  <small id="localizationStatusDetail">正在读取定位状态</small>
-                </span>
+                <button id="localizationStatusToggle" class="localization-status-toggle" type="button" aria-expanded="false" aria-controls="localizationStatusPanel">
+                  <span class="localization-status-dot" aria-hidden="true"></span>
+                  <span class="localization-status-copy">
+                    <strong id="localizationStatusLabel">定位状态检查中</strong>
+                    <small id="localizationStatusDetail">正在读取定位状态</small>
+                  </span>
+                </button>
+                <section id="localizationStatusPanel" class="localization-status-panel" aria-label="定位状态详情" hidden>
+                  <dl>
+                    <div><dt>当前状态</dt><dd id="localizationStateSummary">—</dd></div>
+                    <div><dt>定位情况</dt><dd id="localizationIssueSummary">—</dd></div>
+                    <div><dt>最后更新</dt><dd id="localizationFreshness">等待数据</dd></div>
+                  </dl>
+                  <small>状态来自车端定位模块。</small>
+                </section>
               </div>
               <div class="local-map-empty" id="mapEmpty">正在获取当前地图…</div>
+              <div class="map-operation-status" id="mapOperationStatus" role="status" aria-live="polite" aria-atomic="true" hidden>
+                <span class="map-operation-indicator" aria-hidden="true"></span>
+                <div class="map-operation-copy">
+                  <strong id="mapOperationTitle"></strong>
+                  <p id="mapOperationDetail"></p>
+                </div>
+              </div>
               <div class="map-diagnostics" id="mapDiagnostics">
                 等待地图、定位与点云数据
               </div>
@@ -112,10 +129,111 @@
                 <i id="mapScaleBar" aria-hidden="true"></i>
                 <strong id="mapScaleLabel">— m</strong>
               </div>
-              <label class="map-layer-toggle" id="costmapToggle">
-                <input id="costmapVisible" type="checkbox" checked />
-                <span>局部代价地图</span>
-              </label>
+              <div class="map-layers-control" id="mapLayersControl">
+                <button
+                  class="map-layers-toggle"
+                  id="mapLayersToggle"
+                  type="button"
+                  aria-expanded="false"
+                  aria-controls="mapLayersPanel"
+                >
+                  <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                    <path d="m3 6 7-3 7 3-7 3-7-3Z" />
+                    <path d="m3 10 7 3 7-3M3 14l7 3 7-3" />
+                  </svg>
+                  <span>图层</span>
+                  <i aria-hidden="true"></i>
+                </button>
+                <section class="map-layers-panel" id="mapLayersPanel" aria-label="地图图层" hidden>
+                  <header>
+                    <strong>地图图层</strong>
+                    <span>实时显示</span>
+                  </header>
+                  <div class="map-layers-list">
+                    <label class="map-layer-toggle" id="costmapToggle">
+                      <input id="costmapVisible" type="checkbox" checked />
+                      <span>局部代价地图</span>
+                    </label>
+                    <label class="map-layer-toggle" id="mapMarkersToggle">
+                      <input id="mapMarkersVisible" type="checkbox" checked />
+                      <span>地图标记</span>
+                    </label>
+                    <label class="map-layer-toggle" id="navigationRouteToggle">
+                      <input id="navigationRouteVisible" type="checkbox" checked />
+                      <span>规划路线</span>
+                    </label>
+                  </div>
+                </section>
+              </div>
+              <div class="relocalization-control" id="relocalizationControl">
+                <button id="relocalizationToggle" class="relocalization-toggle" type="button" aria-expanded="false" aria-controls="relocalizationPanel">
+                  <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                    <circle cx="10" cy="10" r="4.2" />
+                    <path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2" />
+                  </svg>
+                  <span>手动重定位</span>
+                </button>
+                <section id="relocalizationPanel" class="relocalization-panel" aria-label="手动重定位" hidden>
+                  <header><strong id="relocalizationLabel">手动重定位</strong><small id="relocalizationDetail">拖动仅调整本地预览；确认后执行重定位。</small></header>
+                  <p class="relocalization-step" id="relocalizationStep">左键拖动移位 · 右键拖动调整朝向</p>
+                  <div class="relocalization-placement">
+                    <button id="relocalizationOverview" type="button">查看整张地图</button>
+                    <button id="relocalizationPlace" type="button" aria-pressed="false" hidden>一键找回车体</button>
+                  </div>
+                  <div class="relocalization-config">
+                    <label for="relocalizationConfigMode">定位配置</label>
+                    <select id="relocalizationConfigMode" disabled>
+                      <option value="auto">自动 · 沿用当前配置</option>
+                      <option value="manual">手动选择定位 YAML</option>
+                    </select>
+                    <div id="relocalizationConfigManual" hidden>
+                      <p id="relocalizationConfigSelected">尚未选择定位配置</p>
+                      <button id="relocalizationConfigBrowse" type="button" aria-expanded="false" aria-controls="relocalizationConfigBrowser">选择小车上的文件</button>
+                      <small>仅本次加载所选配置；下次默认自动。</small>
+                    </div>
+                    <section id="relocalizationConfigBrowser" class="relocalization-config-browser" aria-label="选择小车定位配置" hidden>
+                      <p id="relocalizationConfigDirectory">/opt/ry/config/localization</p>
+                      <div class="relocalization-config-navigation">
+                        <button id="relocalizationConfigUp" type="button">上一级</button>
+                        <button id="relocalizationConfigRoot" type="button">根目录</button>
+                        <button id="relocalizationConfigClose" type="button">收起</button>
+                      </div>
+                      <p id="relocalizationConfigMessage" role="status" aria-live="polite"></p>
+                      <div id="relocalizationConfigEntries" class="relocalization-config-entries"></div>
+                    </section>
+                  </div>
+                  <div class="relocalization-actions">
+                    <button id="relocalizationApply" type="button" disabled>确认重定位</button>
+                    <button id="relocalizationCancel" type="button" hidden>取消预览</button>
+                    <button id="relocalizationCheck" type="button" hidden>查询本次结果</button>
+                    <button id="relocalizationRecover" type="button" hidden>恢复自动驾驶</button>
+                  </div>
+                </section>
+              </div>
+              <div class="map-marker-control" id="mapMarkerControl">
+                <button id="mapMarkerCreateToggle" class="map-marker-toggle" type="button" aria-expanded="false" aria-controls="mapMarkerForm">
+                  <span aria-hidden="true">＋</span><span>添加标记</span>
+                </button>
+                <section id="mapMarkerForm" class="map-marker-form" aria-label="添加地图标记" hidden>
+                  <label>名称<input id="mapMarkerAlias" maxlength="48" autocomplete="off" /></label>
+                  <div class="map-marker-coordinate-grid">
+                    <label>X（米）<input id="mapMarkerX" inputmode="decimal" autocomplete="off" /></label>
+                    <label>Y（米）<input id="mapMarkerY" inputmode="decimal" autocomplete="off" /></label>
+                    <label>yaw（角度）<input id="mapMarkerYaw" inputmode="decimal" min="-180" max="180" step="any" autocomplete="off" /></label>
+                  </div>
+                  <small id="mapMarkerFormDetail">标记只保存到当前已确认地图。</small>
+                  <div class="map-marker-form-actions">
+                    <button id="mapMarkerSave" type="button">保存标记</button>
+                    <button id="mapMarkerCancel" type="button">取消</button>
+                  </div>
+                </section>
+              </div>
+              <section id="mapMarkerMenu" class="map-marker-menu" aria-label="地图标记操作" hidden>
+                <p id="mapMarkerMenuLabel">地图标记</p>
+                <button id="mapMarkerNavigate" type="button">前往此标记</button>
+                <button id="mapMarkerRemove" type="button">删除标记</button>
+                <small id="mapMarkerMenuDetail">将由后端再次核验地图和车辆状态</small>
+              </section>
             </div>
           </article>
         </section>

@@ -23,6 +23,7 @@ from autodrive_console.acceptance_orchestrator import (
     AcceptanceOrchestrator,
 )
 from autodrive_console.acceptance_report import AcceptanceReportWriter
+from autodrive_console.native_report_archive import NativeReportArchive
 from autodrive_console.models import MultiDestination, MultiTaskRequest, TaskParameters
 
 
@@ -1395,6 +1396,9 @@ def test_acceptance_report_inlines_trajectory_times_and_hides_random_seed(tmp_pa
     assert "trajectory-report-tooltip" in text
     assert "data-trajectory-points" in text
     assert "偏差" not in text
+    native = NativeReportArchive(report_dir).summary_for_filename(reference.html_filename)
+    assert native is not None
+    assert native["kind"] == "acceptance"
 
 
 def test_report_archive_classifies_and_deletes_acceptance_evidence_safely(tmp_path):

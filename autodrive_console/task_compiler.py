@@ -43,7 +43,7 @@ PROFILE = "indoor_elevator_v1"
 PROFILE_VERSION = 1
 DEFAULT_MAP_ROOT = Path("/opt/ry/data/maps")
 TEMPLATE_ROOT = Path(__file__).with_name("task_templates") / PROFILE
-SPEED_MODES = frozenset({"task_point", "single_point", "elevator_in", "backward", "narrow_point", "slow_point"})
+SPEED_MODES = frozenset({"normal", "task_point", "single_point", "elevator_in", "backward", "narrow_point", "slow_point"})
 TARGET_ARRIVAL_ACTIONS = frozenset({"place_water", "auto_cargo"})
 TARGET_ARRIVAL_ACTION_DEFAULT = "place_water"
 _ROUTE_STAGE_LABELS = {
@@ -1396,7 +1396,7 @@ def _pose(point: dict[str, float]) -> dict[str, dict[str, float]]:
 def _waypoint(identifier: str, point: dict[str, float], speed_mode: str, task_id: str = "", *, is_task_point: bool = True) -> dict[str, Any]:
     if speed_mode not in SPEED_MODES:
         raise CompilationError("速度模式不在批准列表中")
-    return {"waypoint_task_id": task_id, "is_task_point": is_task_point, "speed_mode": speed_mode, "is_backward": False, "is_single_point": True, "pose": _pose(point), "waypoint_id": identifier}
+    return {"waypoint_task_id": task_id, "is_task_point": is_task_point, "speed_mode": speed_mode, "is_backward": False, "is_single_point": speed_mode != "normal", "pose": _pose(point), "waypoint_id": identifier}
 
 
 def _task_json(
