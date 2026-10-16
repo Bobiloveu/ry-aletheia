@@ -536,7 +536,7 @@ def test_multi_task_mode_splits_shared_indoor_and_each_target_floor_pair(two_map
         },
     ]
     assert family_manifest["stages"] == [
-        {"type": "lobby", "label": "电梯大厅"},
+        {"type": "lobby", "label": "室内大厅"},
         {"type": "target_floor", "label": "用户楼层"},
     ]
     assert all("map_asset_id" not in stage for stage in family_manifest["stages"])

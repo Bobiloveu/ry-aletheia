@@ -49,7 +49,7 @@ TARGET_ARRIVAL_ACTION_DEFAULT = "place_water"
 _ROUTE_STAGE_LABELS = {
     "ferry": "摆渡层",
     "outdoor": "户外图",
-    "lobby": "电梯大厅",
+    "lobby": "室内大厅",
     "target_floor": "用户楼层",
 }
 _SAFE_SITE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
@@ -829,7 +829,7 @@ def compile_indoor_elevator(project: dict[str, Any], *, map_root: Path = DEFAULT
     status_config_sha = _sha(status_config_bytes)
     scene_model = project.get("scene_model")
     if scene_model not in {"indoor", "custom"}:
-        raise CompilationError("当前室内任务模板需要电梯大厅和用户楼层流程")
+        raise CompilationError("当前室内任务模板需要室内大厅和用户楼层流程")
     if scene_model == "custom":
         flow = project.get("deployment_flow")
         flow_types = [item.get("type") for item in flow] if isinstance(flow, list) else []

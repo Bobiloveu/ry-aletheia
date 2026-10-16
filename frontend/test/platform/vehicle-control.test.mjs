@@ -66,3 +66,33 @@ test("requestVehicleControl preserves the legacy HTTP-status fallback copy", asy
     (error) => error instanceof RequestError && error.message === "请求失败（503）",
   );
 });
+
+test('control request deadline aborts even a transport that never resolves', async () => {
+  let signal;
+  await assert.rejects(requestVehicleControl('/api/vehicle-control/vector', {session_id:'a'}, false, {
+    timeoutMs: 10, fetchImpl: async (_url, options) => {
+      signal=options.signal;
+      return new Promise(()=>{});
+    },
+  }), /超时/);
+  assert.equal(signal.aborted,true);
+});
+
+test('control deadline also covers a stalled JSON response body', async () => {
+  let signal;
+  await assert.rejects(requestVehicleControl('/api/vehicle-control', undefined, false, {
+    timeoutMs: 10, fetchImpl: async (_url, options) => {
+      signal=options.signal;
+      return {ok:true,status:200,json:()=>new Promise(()=>{})};
+    },
+  }), /超时/);
+  assert.equal(signal.aborted,true);
+});
+
+test('explicit session invalidation survives aggregate status with other active sessions', async () => {
+  await assert.rejects(requestVehicleControl('/api/vehicle-control/heartbeat', {session_id:'expired'}, false, {
+    fetchImpl: async () => response({ok:false,status:409,body:{
+      error:'会话已失效',code:'session_invalid',status:{session:{present:true,state:'active'}},
+    }}),
+  }), error => error.sessionInvalid===true && error.vehicleState.session.present===true);
+});

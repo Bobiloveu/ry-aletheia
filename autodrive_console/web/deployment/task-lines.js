@@ -123,7 +123,18 @@ export function createTaskLineSession({request,onChange=()=>{},onProject=()=>{}}
       else {project=next;if(!api.dirty&&!busy&&draft.id) reset(list(next?.task_lines).find(item=>item.id===draft.id) || list(next?.task_lines).find(item=>item.id===next?.active_task_line_id));}
       emit();
     },
-    newDraft(){if(busy||api.dirty)return;reset();emit();},
+    newDraft(){
+      if(busy||!project)return;
+      if(draft.id){
+        const {id,...intent}=copy(draft);
+        draft=intent;baseline=emptyLine();error='';
+        message='已保留当前流程。保存后创建新线路，原线路保持不变。';
+      }else{
+        error='';message=validateTaskLine(project,draft).length
+          ?'当前为新线路草稿，完成名称、起点和步骤后保存。':'当前已是新线路草稿，直接保存即可。';
+      }
+      emit();
+    },
     editSaved(id){if(busy||api.dirty)return;reset(list(project?.task_lines).find(item=>item.id===id));emit();},
     discard(){if(busy)return;reset(list(project?.task_lines).find(item=>item.id===draft.id));emit();},
     change(fields){if(busy)return;draft={...draft,...copy(fields)};error='';message='';emit();},
@@ -173,7 +184,12 @@ export function bindTaskLinesUI({container,request,onProject,onChange=()=>{}}) {
     const validationMessage=(session.dirty||session.draft.id)?validation.join(' '):'';
     if(status){status.textContent=session.error||(insertionIndex!==null?'请在新卡片中选择位置并确认添加，或取消本步。':session.message)||(session.busy?'正在保存并选择线路…':validationMessage)||(session.dirty?'尚未保存。保存后将用于本次导出。':session.draft.id?(session.project?.active_task_line_id===session.draft.id?'已保存 · 本次导出线路':'已保存 · 尚未选为本次导出线路'):'从既有标记中编排一条去程线路。');status.classList.toggle('is-error',Boolean(session.error||validationMessage));}
     const save=container.querySelector('[data-line-command="save"]');
-    if(save)save.disabled=session.busy||!session.project||validation.length>0||insertionIndex!==null;
+    if(save){
+      save.disabled=session.busy||!session.project||validation.length>0||insertionIndex!==null;
+      save.textContent=session.busy?'正在保存…':session.draft.id?'保存修改':'保存新线路';
+    }
+    const create=container.querySelector('[data-line-command="new"]');
+    if(create)create.disabled=session.busy||!session.project||insertionIndex!==null;
     for(const control of container.querySelectorAll('[data-dirty-lock]')) {
       const command=control.dataset.lineCommand;
       control.disabled=session.busy||session.dirty||insertionIndex!==null||(['activate','delete'].includes(command)&&!session.draft.id)||(command==='activate'&&validation.length>0);
@@ -239,7 +255,8 @@ export function bindTaskLinesUI({container,request,onProject,onChange=()=>{}}) {
     const mapLabel=item=>list(project?.map_assets).find(map=>map.id===item?.map_asset_id)?.label||item?.map_asset_id||'位置待选择';
     const name=(item,ref)=>!item?'位置已失效':ref?.kind==='transition'?transitionDisplayLabel(project,item):componentDisplayLabel(project,item);
     const disabled=session.busy||!project?'disabled':'';
-    container.innerHTML=`<div class="task-line-toolbar"><label>已保存线路（${saved.length} 条）<select data-line-select data-line-focus="saved" data-dirty-lock ${session.dirty||session.busy?'disabled':''}><option value="">新线路</option>${options(saved.map(line=>[line.id,`${line.name}${project.active_task_line_id===line.id?(multi?' · 新目标模板':' · 本次导出'):''}`]),draft.id)}</select></label><button type="button" class="compact-action" data-line-command="new" data-line-focus="new" data-dirty-lock ${session.dirty||session.busy?'disabled':''}>新建线路</button></div>
+    container.innerHTML=`<div class="task-line-toolbar"><label>已保存线路（${saved.length} 条）<select data-line-select data-line-focus="saved" data-dirty-lock ${session.dirty||session.busy?'disabled':''}><option value="">新线路草稿</option>${options(saved.map(line=>[line.id,`${line.name}${project.active_task_line_id===line.id?(multi?' · 新目标模板':' · 本次导出'):''}`]),draft.id)}</select></label><button type="button" class="compact-action" data-line-command="new" data-line-focus="new" title="保留当前名称、起点和流程，转为新线路草稿" ${session.busy||!project?'disabled':''}>新建线路</button></div>
+      <p class="page-muted">${draft.id?'编辑后可保存修改；点“新建线路”保留当前流程，另存一条线路。':'当前为新线路草稿，可直接编排并保存，无需先点“新建线路”。'}</p>
       ${multi?'<p class="page-muted">每个楼上目标独立一条线路，导出时包含全部已保存线路及各户去返任务。</p>':''}
       <fieldset ${disabled}><div class="task-line-fields"><label>线路名称<input id="taskLineName" data-line-name data-line-focus="name" maxlength="80" value="${esc(draft.name)}" placeholder="例如：超市取货配送" /></label></div>
       <div class="task-line-flow-heading"><h3>去程任务流程</h3><span>${draft.steps.length} 步 · 自动生成返程</span></div>

@@ -8,8 +8,8 @@
     <link rel="stylesheet" href="/styles.css" />
     <link rel="stylesheet" href="/refinement.css" />
     <link rel="stylesheet" href="/page_views.css" />
-    <link rel="stylesheet" href="/tool_logs.css" />
     <link rel="stylesheet" href="/app_shell.css" />
+    <link rel="stylesheet" href="/tool_logs.css" />
   </head>
   <body>
     <aside>
@@ -41,10 +41,10 @@
     <main class="page-main">
       <header class="page-header">
         <div>
-          <p class="eyebrow">SYSTEM DIAGNOSTICS / LOCAL ARCHIVE</p>
+
           <h1>工具日志</h1>
           <p class="sub">
-            所有可导出的诊断文件都列在下方。页面只显示结构化控制台事件；地图、点云和视频的原始运行时输出可单独下载或合并下载。
+            管理 Aletheia 自己的运行日志。自动保留近期记录，按需下载、清空或删除历史。
           </p>
         </div>
         <div class="log-header-actions">
@@ -65,63 +65,66 @@
           >
         </div>
       </header>
-      <section class="page-grid">
-        <article class="panel span-5">
-          <p class="eyebrow">EVENT LEDGER</p>
-          <b id="logCount" class="page-stat">读取中</b>
-          <p id="logDetail" class="page-muted">正在读取控制台事件。</p>
-        </article>
-        <article class="panel span-7">
-          <p class="eyebrow">SUPPORT BUNDLE</p>
-          <p class="page-muted">
-            完整诊断包是当前所有日志文件的 ZIP
-            快照。单独下载适合只交付特定故障链路，例如
-            <code>live_preprocessor_cloud.log</code> 或
-            <code>video-runtime.log</code>。
-          </p>
-        </article>
+      <p id="logManagementMessage" class="log-management-message" role="status" aria-live="polite"></p>
+      <section class="page-grid log-management-grid">
         <article class="panel log-files-panel">
           <div class="panel-title">
-            <div>
-              <p class="eyebrow">DIAGNOSTIC FILES</p>
-              <h2>可下载日志文件</h2>
-            </div>
+            <h2>日志文件</h2>
             <span id="logFileCount" class="log-file-count">读取中</span>
           </div>
-          <p class="page-muted log-files-intro">
-            仅显示由 Aletheia 生成的受控诊断文件；文件路径不会通过网页暴露。
-          </p>
+          <div class="log-file-toolbar">
+            <div class="log-tabs" aria-label="日志文件范围">
+              <button class="log-action file-tab active" data-file-scope="current" aria-pressed="true" type="button">当前日志</button>
+              <button class="log-action file-tab" data-file-scope="archive" aria-pressed="false" type="button">历史 <span id="logHistoryCount">0</span></button>
+            </div>
+            <button id="deleteLogHistory" class="log-action log-danger-action" type="button" disabled>删除全部历史</button>
+          </div>
+          <p class="page-muted log-files-intro">清空当前文件后会继续记录。历史文件可以单独删除。</p>
           <div id="diagnosticFileList" class="diagnostic-file-list">
             <div class="page-empty">正在读取日志文件清单…</div>
           </div>
         </article>
-        <article class="panel">
-          <div class="panel-title">
-            <div>
-              <p class="eyebrow">EVENT LEDGER</p>
-              <h2>本机事件记录</h2>
-            </div>
-            <div class="log-tabs">
-              <button
-                class="compact-action log-tab active"
-                data-scope="all"
-                type="button"
-              >
-                全部</button
-              ><button
-                class="compact-action log-tab"
-                data-scope="errors"
-                type="button"
-              >
-                仅错误
-              </button>
-            </div>
-          </div>
-          <div id="logList" class="log-list">
-            <div class="page-empty">正在读取日志…</div>
+        <article class="panel log-storage-panel">
+          <h2>存储与保留</h2>
+          <p id="storageSummary" class="log-storage-summary">读取中</p>
+          <p id="logRetentionSummary" class="page-muted">正在读取保留设置。</p>
+          <p id="logRetentionError" class="log-retention-error" role="alert"></p>
+          <form id="retentionPolicyForm" hidden>
+            <label for="retentionDays">历史保留天数</label>
+            <div class="log-policy-input"><input id="retentionDays" type="number" min="1" max="365" step="1" required /><span>天</span></div>
+            <label for="retentionTotalMib">日志总容量上限</label>
+            <div class="log-policy-input"><input id="retentionTotalMib" type="number" min="128" max="4096" step="1" required /><span>MiB</span></div>
+            <label for="retentionFileMib">原始日志单文件上限</label>
+            <div class="log-policy-input"><input id="retentionFileMib" type="number" min="2" max="32" step="1" required /><span>MiB</span></div>
+            <p class="page-muted log-policy-note">达到上限时保留最新内容，优先移除较早的历史。总容量至少为单文件上限的 6 倍。</p>
+            <button id="saveRetentionPolicy" class="log-action log-primary-action" type="submit">保存并整理</button>
+          </form>
+          <div class="log-maintenance-footer">
+            <button id="cleanupLogs" class="log-action" type="button" disabled>立即整理</button>
+            <p id="logLastCleanup" class="page-muted">后台会自动检查日志容量。</p>
+            <p class="page-muted">仅管理工具日志，不包含机器人日志、报告和录包。</p>
           </div>
         </article>
+        <article class="panel log-events-panel">
+          <div class="panel-title">
+            <div><h2>本机事件记录 <span id="logCount" class="log-file-count">读取中</span></h2><p id="logDetail" class="page-muted">正在读取控制台事件。</p></div>
+            <div class="log-tabs" aria-label="事件范围">
+              <button class="log-action log-tab active" data-scope="all" type="button" aria-pressed="true">全部</button>
+              <button class="log-action log-tab" data-scope="errors" type="button" aria-pressed="false">仅错误</button>
+            </div>
+          </div>
+          <div id="logList" class="log-list"><div class="page-empty">正在读取日志…</div></div>
+        </article>
       </section>
+      <dialog id="logActionDialog" class="log-action-dialog" aria-labelledby="logActionTitle" aria-describedby="logActionTarget logActionDescription">
+        <h2 id="logActionTitle">确认操作</h2>
+        <p id="logActionTarget" class="log-action-target"></p>
+        <p id="logActionDescription" class="page-muted"></p>
+        <div class="log-dialog-actions">
+          <button id="logCancelAction" class="log-action" type="button" autofocus>取消</button>
+          <button id="logConfirmAction" class="log-action log-destructive-action" type="button">确认</button>
+        </div>
+      </dialog>
     </main>
     <script type="module" src="/tool-logs.js"></script>
     <script src="/app_shell.js"></script>

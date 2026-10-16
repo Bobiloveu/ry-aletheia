@@ -6,6 +6,8 @@ import json
 import logging
 import threading
 import time
+import zipfile
+from pathlib import Path
 from http.server import ThreadingHTTPServer
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
@@ -162,3 +164,143 @@ def test_stdout_follower_failure_after_200_is_not_reported_as_success(http_conso
 def test_meaningful_read_actions_are_logged(path):
     from autodrive_console.tool_audit import HttpAudit
     assert HttpAudit("GET", path).read_action
+
+
+def file_info(address, name):
+    status, _, body = request(address, 'GET', '/api/tool-logs/files')
+    assert status == 200
+    return next(f for f in json.loads(body)['files'] if f['name'] == name)
+
+
+def test_log_management_policy_is_persisted_and_legacy_entries_still_work(http_console):
+    address, store = http_console
+    policy = {'retention_days': 14, 'max_total_mib': 512, 'max_file_mib': 8}
+    status, _, body = request(address, 'PUT', '/api/tool-logs/retention', {'policy': policy})
+    assert status == 200, body
+    assert json.loads(body)['storage']['policy'] == policy
+    status, _, body = request(address, 'GET', '/api/tool-logs/files')
+    assert json.loads(body)['storage']['limit_bytes'] == 512 * 1024 * 1024
+    assert request(address, 'GET', '/api/tool-logs?scope=all')[0] == 200
+    assert request(address, 'PUT', '/api/tool-logs/retention', {'policy': {**policy, 'retention_days': False}})[0] == 400
+    assert store.storage_status()['policy'] == policy
+
+
+def test_http_clear_keeps_open_writer_and_requires_confirmation(http_console):
+    address, store = http_console
+    path = store.directory / 'video-runtime.log'
+    with path.open('ab', buffering=0) as producer:
+        producer.write(b'before\n')
+        file = file_info(address, path.name)
+        url = f'/api/tool-logs/files/{path.name}/clear'
+        assert request(address, 'POST', url, {'file_id': file['file_id']})[0] == 400
+        assert path.read_bytes() == b'before\n'
+        status, _, body = request(address, 'POST', url, {'file_id': file['file_id'], 'confirm': True})
+        assert status == 200, body
+        producer.write(b'after\n')
+        assert path.read_bytes() == b'after\n'
+
+
+def test_http_delete_is_only_for_confirmed_current_identity_of_history(http_console):
+    address, store = http_console
+    path = store.directory / 'video-runtime.log.1'
+    path.write_text('old history')
+    file = file_info(address, path.name)
+    url = f'/api/tool-logs/files/{path.name}'
+    replacement = store.directory / 'replacement'
+    replacement.write_text('new history')
+    replacement.replace(path)
+    assert request(address, 'DELETE', url, {'file_id': file['file_id'], 'confirm': True})[0] == 409
+    assert path.read_text() == 'new history'
+    file = file_info(address, path.name)
+    assert request(address, 'DELETE', url, {'file_id': file['file_id'], 'confirm': True})[0] == 200
+    assert not path.exists()
+    current = store.directory / 'video-runtime.log'
+    current.write_text('current')
+    file = file_info(address, current.name)
+    assert request(address, 'DELETE', '/api/tool-logs/files/video-runtime.log', {'file_id': file['file_id'], 'confirm': True})[0] == 400
+
+
+def test_http_cleanup_history_does_not_clear_current_logs(http_console):
+    address, store = http_console
+    (store.directory / 'video-runtime.log').write_text('keep current')
+    (store.directory / 'video-runtime.log.1').write_text('remove history')
+    assert request(address, 'POST', '/api/tool-logs/cleanup', {'mode': 'history'})[0] == 400
+    status, _, body = request(address, 'POST', '/api/tool-logs/cleanup', {'mode': 'history', 'confirm': True})
+    assert status == 200, body
+    assert (store.directory / 'video-runtime.log').read_text() == 'keep current'
+    assert not (store.directory / 'video-runtime.log.1').exists()
+
+
+def test_http_download_lease_blocks_clear_and_releases_on_context_exit(http_console):
+    address, store = http_console
+    path = store.directory / 'video-runtime.log'
+    path.write_text('download snapshot')
+    file = file_info(address, path.name)
+    with store.open_diagnostic(path.name):
+        assert request(address, 'POST', f'/api/tool-logs/files/{path.name}/clear', {'file_id': file['file_id'], 'confirm': True})[0] == 409
+    assert request(address, 'POST', f'/api/tool-logs/files/{path.name}/clear', {'file_id': file['file_id'], 'confirm': True})[0] == 200
+
+
+def test_downloads_stream_owned_files_without_whole_file_reads(http_console, monkeypatch):
+    address, store = http_console
+    target = store.directory / 'video-runtime.log'
+    target.write_bytes(b'diagnostic\n' * 20000)
+    (store.directory / 'video-runtime.log.1').write_text('archived detail')
+    original = Path.read_bytes
+    def refuse_log_read(path):
+        if path.parent == store.directory:
+            pytest.fail('download allocated complete log')
+        return original(path)
+    monkeypatch.setattr(Path, 'read_bytes', refuse_log_read)
+    status, _, body = request(address, 'GET', '/api/tool-logs/files/video-runtime.log/download')
+    assert status == 200
+    assert body == b'diagnostic\n' * 20000
+    status, _, body = request(address, 'GET', '/api/tool-logs/download?scope=all')
+    assert status == 200
+    with zipfile.ZipFile(io.BytesIO(body)) as archive:
+        assert archive.read('video-runtime.log.1') == b'archived detail'
+        assert archive.read('video-runtime.log') == b'diagnostic\n' * 20000
+    assert not store._leases
+
+
+def test_slow_network_download_does_not_pin_or_truncate_the_live_log(http_console, monkeypatch):
+    address, store = http_console
+    path = store.directory / 'video-runtime.log'
+    path.write_text('stable download snapshot')
+    selected = file_info(address, path.name)['file_id']
+    original = web_console.ConsoleHandler._stream_tool_log
+    def clear_before_network_write(handler, source, size, filename, content_type='text/plain; charset=utf-8'):
+        assert not store._leases
+        store.clear_file(path.name, selected)
+        original(handler, source, size, filename, content_type)
+    monkeypatch.setattr(web_console.ConsoleHandler, '_stream_tool_log', clear_before_network_write)
+    status, _, body = request(address, 'GET', '/api/tool-logs/files/video-runtime.log/download')
+    assert status == 200
+    assert body == b'stable download snapshot'
+    assert path.read_text() == ''
+
+
+@pytest.mark.parametrize('path', [
+    '/api/tool-logs/files/..%2Fprivate.log/clear',
+    '/api/tool-logs/files/video-runtime.log.99/clear',
+])
+def test_http_management_rejects_paths_outside_owned_log_whitelist(http_console, path):
+    address, _ = http_console
+    assert request(address, 'POST', path, {'file_id': 'invalid', 'confirm': True})[0] == 400
+
+
+def test_clear_permission_failure_is_a_controlled_server_error(http_console):
+    address, store = http_console
+    path = store.directory / 'video-runtime.log'
+    path.write_text('keep when permissions fail')
+    file = file_info(address, path.name)
+    import os
+    open_file = os.open
+    def deny_target(target, *args, **kwargs):
+        if Path(target) == path:
+            raise PermissionError('not writable')
+        return open_file(target, *args, **kwargs)
+    with patch('autodrive_console.tool_logging.os.open', deny_target):
+        status, _, body = request(address, 'POST', f'/api/tool-logs/files/{path.name}/clear', {'file_id':file['file_id'],'confirm':True})
+    assert status == 500, body
+    assert path.read_text() == 'keep when permissions fail'

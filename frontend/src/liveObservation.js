@@ -50,6 +50,11 @@ const LOCALIZATION_STATUS_REFRESH_MS = 1000;
 const RELOCALIZATION_STATUS_REFRESH_MS = 700;
 const VIDEO_INPUT_READINESS_TIMEOUT_MS = 8000;
 const WEBRTC_CONNECT_TIMEOUT_MS = 5000;
+const WEBRTC_DISCONNECT_GRACE_MS = 5000;
+const WEBRTC_STATUS_TIMEOUT_MS = 5000;
+const WEBRTC_CONTROL_TIMEOUT_MS = 15000;
+const WEBRTC_SESSION_CLEANUP_TIMEOUT_MS = 1500;
+const WEBRTC_FRAME_STALE_MS = 1000;
 const WEBRTC_FRAME_TIMEOUT_MS = 8000;
 const WEBRTC_RETRY_DELAY_MS = 3000;
 const DEFAULT_VIEW_METERS = 16;
@@ -153,6 +158,7 @@ let costmapUpdatedAt = 0;
 let costmapVisible = true;
 let mapMarkersVisible = true;
 let navigationRouteVisible = true;
+let observedNavigationRoute;
 let mapMarkers = [];
 let selectedMapMarker;
 let mapMarkerNavigationTimer;
@@ -189,7 +195,11 @@ let liveWallCompensationAttempts = 0;
 // WHEP/WebRTC，再由 PixiJS Video Texture 合成。即便新增流失败，也不会影响
 // 现有地图、点云或诊断图像订阅。
 const webrtcPlayers = new Map();
+const webrtcSessionCleanups = new Map();
 let webrtcStatusTimer;
+let webrtcStatusRequest;
+let webrtcStatusStopped = false;
+let webrtcControlRequest;
 let webrtcVideoEnabled = false;
 let webrtcToggleInFlight = false;
 const webrtcStreamTogglesInFlight = new Set();
@@ -233,6 +243,7 @@ let localizationStatusTimer;
 let relocalizationStatusTimer;
 let relocalizationStatus;
 let relocalizationPreview;
+let relocalizationPanelOpen = false;
 let relocalizationEditing = false;
 let relocalizationDraftRevision = 0;
 let relocalizationSubmittedRevision = 0;
@@ -383,7 +394,7 @@ function relocalizationCandidateFromLivePose() {
   return hasFiniteRelocalizationCandidate(candidate) ? candidate : undefined;
 }
 function canEditRelocalization() {
-  return !mobileConsoleEnabled() && !relocalizationWaitingForMap;
+  return relocalizationPanelOpen && !mobileConsoleEnabled() && !relocalizationWaitingForMap;
 }
 function beginLocalRelocalizationPreview() {
   if (!canEditRelocalization() || !mapInfo) return;
@@ -824,9 +835,15 @@ function setupRelocalizationControl() {
     },
   });
   const setExpanded = (expanded) => {
-    if (!expanded) relocalizationConfigPicker.close();
+    relocalizationPanelOpen = expanded;
+    if (!expanded) {
+      relocalizationConfigPicker.close();
+      stopRelocalizationDrag();
+      if (relocalizationPlacing) setRelocalizationPlacement(false);
+    }
     panel.hidden = !expanded;
     toggle.setAttribute("aria-expanded", String(expanded));
+    renderRelocalizationControls();
   };
   toggle.addEventListener("click", () => {
     const expanded = panel.hidden;
@@ -857,7 +874,7 @@ function setupRelocalizationControl() {
       setRelocalizationPlacement(false);
       return;
     }
-    if (event.key === "Escape" && relocalizationEditing) {
+    if (event.key === "Escape" && relocalizationPanelOpen && relocalizationEditing) {
       discardRelocalizationPreview();
       return;
     }
@@ -1190,8 +1207,10 @@ function setMobileConsoleView(view, persist = true) {
   });
   if (persist) localStorage.setItem(MOBILE_VIEW_KEY, view);
   if (view === "map") {
-    for (const state of webrtcPlayers.values())
+    for (const state of webrtcPlayers.values()) {
       closeWebRtcPlayer(state, "相机页未显示，浏览器解码已暂停。");
+      releaseWebRtcRenderer(state);
+    }
     if (mapInfo) scheduleMapDraw(true);
   } else {
     stopRenderScheduling();
@@ -1451,9 +1470,15 @@ function renderWebRtcStreamControls(streams) {
 }
 function setWebRtcPlayerState(state, detail) {
   state.detail.textContent = detail;
-  state.label.textContent = state.hasDecodedFrame
-    ? "播放中"
-    : state.playbackStatus || state.streamStatus || "等待中";
+  state.label.textContent = state.disconnectTimer !== undefined
+    ? "连接波动"
+    : state.networkInterrupted
+      ? "等待画面恢复"
+      : state.frameStalled
+        ? "画面停顿"
+        : state.hasDecodedFrame
+          ? "播放中"
+          : state.playbackStatus || state.streamStatus || "等待中";
 }
 function layoutWebRtcSprite(state) {
   if (!state.sprite || !state.viewport) return;
@@ -1473,6 +1498,7 @@ function layoutWebRtcSprite(state) {
 async function initializeWebRtcRenderer(state) {
   if (state.destroyed) return;
   if (state.initialization) return state.initialization;
+  const generation = state.rendererGeneration || 0;
   state.initialization = (async () => {
     const rect = state.surface.getBoundingClientRect();
     const width = Math.max(1, Math.round(rect.width) || 320);
@@ -1486,7 +1512,7 @@ async function initializeWebRtcRenderer(state) {
       autoDensity: true,
       resolution: window.devicePixelRatio || 1,
     });
-    if (state.destroyed) {
+    if (state.destroyed || (state.rendererGeneration || 0) !== generation) {
       app.destroy(true, { children: true });
       return;
     }
@@ -1497,6 +1523,7 @@ async function initializeWebRtcRenderer(state) {
     state.app = app;
     state.viewport = { width, height };
     state.resizeObserver = new ResizeObserver(() => {
+      if (state.app !== app) return;
       const next = state.surface.getBoundingClientRect();
       const nextWidth = Math.max(1, Math.round(next.width));
       const nextHeight = Math.max(1, Math.round(next.height));
@@ -1512,15 +1539,28 @@ async function initializeWebRtcRenderer(state) {
     });
     state.resizeObserver.observe(state.surface);
   })().catch((error) => {
-    state.initialization = undefined;
-    if (!state.destroyed)
-      setWebRtcPlayerState(
-        state,
-        `PixiJS 初始化失败：${error?.message || "未知错误"}`,
-      );
+    if ((state.rendererGeneration || 0) === generation) {
+      state.initialization = undefined;
+      if (!state.destroyed)
+        setWebRtcPlayerState(
+          state,
+          `PixiJS 初始化失败：${error?.message || "未知错误"}`,
+        );
+    }
     throw error;
   });
   return state.initialization;
+}
+function releaseWebRtcRenderer(state) {
+  // Invalidate in-flight initialization before a returning view can start one.
+  state.rendererGeneration = (state.rendererGeneration || 0) + 1;
+  state.initialization = undefined;
+  state.resizeObserver?.disconnect();
+  state.resizeObserver = undefined;
+  const app = state.app;
+  state.app = undefined;
+  state.viewport = undefined;
+  app?.destroy(true, { children: true });
 }
 function stopWebRtcFramePump(state) {
   if (state.videoFrameRequest !== undefined) {
@@ -1547,15 +1587,23 @@ function startWebRtcFramePump(state) {
       state.texture?.source?.update?.();
       layoutWebRtcSprite(state);
       state.app?.render();
-      if (!state.hasDecodedFrame) {
-        state.hasDecodedFrame = true;
+      const firstFrame = !state.hasDecodedFrame;
+      state.hasDecodedFrame = true;
+      if (firstFrame) {
         window.clearTimeout(state.firstFrameTimer);
         state.firstFrameTimer = undefined;
+      }
+      if ((firstFrame || state.networkInterrupted || state.frameStalled) &&
+          (!state.networkInterrupted || peer.connectionState === "connected")) {
+        const recoveredConnection = state.networkInterrupted;
+        state.networkInterrupted = false;
+        state.frameStalled = false;
         setWebRtcPlayerState(state, `${state.stream.resolution} · H.264 · WebRTC`);
-        resolveObservationDiagnostic(
-          `webrtc-${state.stream.name}`,
-          `视频流已恢复播放：${state.stream.name}（${state.stream.source_label || state.stream.source_topic || "视频输入"}）。`,
-        );
+        if (firstFrame || recoveredConnection)
+          resolveObservationDiagnostic(
+            `webrtc-${state.stream.name}`,
+            `视频流已恢复播放：${state.stream.name}（${state.stream.source_label || state.stream.source_topic || "视频输入"}）。`,
+          );
       }
     }
     if (state.video.requestVideoFrameCallback)
@@ -1574,14 +1622,52 @@ function clearWebRtcTexture(state) {
   state.texture = undefined;
 }
 function deleteWebRtcSession(url) {
-  if (url)
-    fetch(url, { method: "DELETE", keepalive: true }).catch(() => {});
+  if (!url || webrtcSessionCleanups.has(url)) return;
+  // A lost DELETE plus a lost DTLS close can leave an old gateway reader
+  // sending alongside its replacement. Retain only its cleanup URL, never
+  // the old peer or frames, for a finite, single-flight cleanup sequence.
+  const cleanup = { attempts: 0 };
+  webrtcSessionCleanups.set(url, cleanup);
+  const remove = async () => {
+    if (cleanup.attempts && webrtcStatusStopped) {
+      webrtcSessionCleanups.delete(url);
+      return;
+    }
+    cleanup.attempts++;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), WEBRTC_SESSION_CLEANUP_TIMEOUT_MS);
+    let retry = false;
+    try {
+      // keepalive can retain an HTTP slot after abort in Chromium; use it
+      // only for page exit. Cleanup never blocks replacement playback.
+      const response = await fetch(url, {
+        method: "DELETE", keepalive: webrtcStatusStopped, signal: controller.signal,
+      });
+      response.body?.cancel()?.catch(() => {});
+      retry = !response.ok &&
+        (response.status === 408 || response.status === 429 || response.status >= 500);
+    } catch {
+      retry = true;
+    } finally {
+      window.clearTimeout(timer);
+    }
+    if (retry && cleanup.attempts < 3 && !webrtcStatusStopped)
+      window.setTimeout(remove, cleanup.attempts * 1000);
+    else webrtcSessionCleanups.delete(url);
+  };
+  void remove();
 }
 function closeWebRtcPlayer(state, message) {
   window.clearTimeout(state.connectTimer);
   window.clearTimeout(state.firstFrameTimer);
+  window.clearTimeout(state.disconnectTimer);
+  window.clearTimeout(state.retryTimer);
   state.connectTimer = undefined;
   state.firstFrameTimer = undefined;
+  state.disconnectTimer = undefined;
+  state.retryTimer = undefined;
+  state.networkInterrupted = false;
+  state.frameStalled = false;
   state.abortController?.abort();
   state.abortController = undefined;
   const hadTexture = !!state.texture;
@@ -1601,6 +1687,24 @@ function closeWebRtcPlayer(state, message) {
   state.video.srcObject = null;
   if (message) setWebRtcPlayerState(state, message);
 }
+function scheduleWebRtcRetry(state) {
+  // A periodic heartbeat can run just before retryAfter, otherwise adding a
+  // whole extra polling interval. One timer belongs only to this failed player.
+  const retry = () => {
+    if (state.retryTimer !== timer) return;
+    state.retryTimer = undefined;
+    if (state.destroyed || webrtcStatusStopped) return;
+    const remaining = state.retryAfter - performance.now();
+    if (remaining > 0) {
+      timer = window.setTimeout(retry, Math.ceil(remaining));
+      state.retryTimer = timer;
+      return;
+    }
+    maintainWebRtcPlayer(state);
+  };
+  let timer = window.setTimeout(retry, Math.max(0, Math.ceil(state.retryAfter - performance.now())));
+  state.retryTimer = timer;
+}
 function failWebRtcPlayer(state, peer, detail) {
   if (state.pc !== peer) return;
   state.retryAfter = performance.now() + WEBRTC_RETRY_DELAY_MS;
@@ -1612,16 +1716,14 @@ function failWebRtcPlayer(state, peer, detail) {
     "WARNING",
     `视频流播放失败：${state.stream.name}；${detail}`,
   );
+  scheduleWebRtcRetry(state);
 }
 function destroyWebRtcPlayer(name) {
   const state = webrtcPlayers.get(name);
   if (!state) return;
   state.destroyed = true;
   closeWebRtcPlayer(state);
-  state.resizeObserver?.disconnect();
-  state.app?.destroy(true, { children: true });
-  state.app = undefined;
-  state.resizeObserver = undefined;
+  releaseWebRtcRenderer(state);
   state.card.remove();
   webrtcPlayers.delete(name);
 }
@@ -1740,11 +1842,32 @@ async function connectWebRtcPlayer(state, stream) {
   };
   peer.onconnectionstatechange = () => {
     if (state.pc !== peer) return;
-    if (peer.connectionState === "connected" && !state.hasDecodedFrame) {
-      state.playbackStatus = "等待首帧";
-      setWebRtcPlayerState(state, "连接已建立，等待浏览器解码首帧…");
+    if (peer.connectionState === "connected") {
+      window.clearTimeout(state.disconnectTimer);
+      state.disconnectTimer = undefined;
+      if (state.networkInterrupted)
+        setWebRtcPlayerState(state, "连接已恢复，等待新画面…");
+      else if (!state.hasDecodedFrame) {
+        state.playbackStatus = "等待首帧";
+        setWebRtcPlayerState(state, "连接已建立，等待浏览器解码首帧…");
+      }
     }
-    if (["failed", "disconnected", "closed"].includes(peer.connectionState))
+    if (peer.connectionState === "disconnected") {
+      // ICE can recover without renegotiation. Keep the last frame clearly
+      // marked as interrupted; repeated notifications cannot reset the limit.
+      state.networkInterrupted = true;
+      if (state.disconnectTimer === undefined)
+        state.disconnectTimer = window.setTimeout(() => {
+          if (state.pc === peer && peer.connectionState !== "connected")
+            failWebRtcPlayer(state, peer, "WebRTC 连接波动超过 5 秒，等待自动重连。");
+        }, WEBRTC_DISCONNECT_GRACE_MS);
+      setWebRtcPlayerState(state, "连接波动，正在等待原连接恢复（最多 5 秒）…");
+      reportObservationOnce(
+        `webrtc-${stream.name}`, "WARNING",
+        `视频流连接波动：${stream.name}；等待原连接恢复。`,
+      );
+    }
+    if (["failed", "closed"].includes(peer.connectionState))
       failWebRtcPlayer(state, peer,
         `WebRTC 已断开（${peer.connectionState}），等待自动重连。`);
   };
@@ -1842,7 +1965,35 @@ function diagnoseWebRtcStatus(enabled, gateway, streams) {
     );
   }
 }
+function maintainWebRtcPlayer(state) {
+  if (!state.playbackAllowed || state.destroyed) return;
+  if (!mobileWebRtcPlaybackAllowed()) {
+    closeWebRtcPlayer(state, "相机页未显示，浏览器解码已暂停。");
+    releaseWebRtcRenderer(state);
+    return;
+  }
+  if (state.pc?.connectionState === "connected" && state.hasDecodedFrame) {
+    const frameAge = performance.now() - state.lastDecodedAt;
+    if (frameAge > WEBRTC_FRAME_TIMEOUT_MS)
+      failWebRtcPlayer(state, state.pc, "视频解码已停滞，等待自动重连。");
+    else if (frameAge > WEBRTC_FRAME_STALE_MS && !state.frameStalled) {
+      state.frameStalled = true;
+      setWebRtcPlayerState(state, "画面停顿，等待新的实时画面…");
+    }
+  }
+  if (state.url !== state.stream.url || !state.pc ||
+      ["failed", "closed"].includes(state.pc.connectionState))
+    connectWebRtcPlayer(state, state.stream);
+}
+function maintainWebRtcPlayers() {
+  for (const state of webrtcPlayers.values()) maintainWebRtcPlayer(state);
+}
 function applyWebRtcVideoStatus(payload) {
+  // The shared request helper maps a truncated JSON body to {}. Neither a
+  // query nor a control response may turn that into a shutdown of all streams.
+  if (typeof payload?.enabled !== "boolean" || !Array.isArray(payload.streams) ||
+      typeof payload.gateway?.online !== "boolean")
+    throw new Error("视频状态响应不完整");
   const enabled = payload?.enabled === true;
   const gateway = payload?.gateway || {};
   const runtime = payload?.runtime || {};
@@ -1910,21 +2061,9 @@ function applyWebRtcVideoStatus(payload) {
       : active
         ? "关闭"
         : "开启";
-    if (active && !runtimeError && stream.status === "online" && mobileWebRtcPlaybackAllowed()) {
-      // Reuse the existing three-second status cadence for stall checks. No
-      // stats polling or additional work is added to the per-frame path.
-      if (state.pc && state.hasDecodedFrame && !document.hidden &&
-          performance.now() - state.lastDecodedAt > WEBRTC_FRAME_TIMEOUT_MS)
-        failWebRtcPlayer(state, state.pc, "视频解码已停滞，等待自动重连。");
-      if (
-        state.url !== stream.url ||
-        !state.pc ||
-        ["failed", "closed"].includes(state.pc.connectionState)
-      )
-        connectWebRtcPlayer(state, stream);
-    } else if (active && !runtimeError && stream.status === "online")
-      closeWebRtcPlayer(state, "相机页未显示，浏览器解码已暂停。");
-    else
+    state.playbackAllowed = active && !runtimeError && stream.status === "online";
+    if (state.playbackAllowed) maintainWebRtcPlayer(state);
+    else {
       closeWebRtcPlayer(
         state,
         runtimeError || (active && stream.detail) || (active && stream.status === "waiting"
@@ -1933,33 +2072,78 @@ function applyWebRtcVideoStatus(payload) {
             ? "MediaMTX 未就绪。"
             : "该路视频处于待机状态。"),
       );
+      releaseWebRtcRenderer(state);
+    }
   }
   syncMobilePrimaryWebRtcStream(activeStreams.length ? activeStreams : streams);
 }
+function cancelWebRtcVideoStatus() {
+  const pending = webrtcStatusRequest;
+  webrtcStatusRequest = undefined;
+  if (!pending) return;
+  window.clearTimeout(pending.timer);
+  pending.controller.abort();
+}
 async function refreshWebRtcVideoStatus() {
+  if (webrtcStatusStopped || webrtcStatusRequest || webrtcToggleInFlight || webrtcStreamTogglesInFlight.size)
+    return;
+  const pending = { controller: new AbortController() };
+  webrtcStatusRequest = pending;
+  pending.timer = window.setTimeout(() => pending.controller.abort(), WEBRTC_STATUS_TIMEOUT_MS);
   try {
-    applyWebRtcVideoStatus(await request("/api/video/status"));
+    const payload = await request("/api/video/status", { signal: pending.controller.signal });
+    if (webrtcStatusRequest !== pending) return;
+    if (pending.controller.signal.aborted) throw new Error("视频状态查询超时");
+    applyWebRtcVideoStatus(payload);
+    resolveObservationDiagnostic("video-status-api", "视频状态查询已恢复。");
   } catch (error) {
-    setWebRtcGatewayState(false, `读取视频状态失败：${error.message}`);
+    if (webrtcStatusRequest !== pending) return;
+    const detail = pending.controller.signal.aborted ? "查询超时" : error.message;
+    setText("webrtcGatewayState", `读取视频状态失败：${detail}`);
+    $("webrtcGatewayBadge").textContent = "状态暂不可用";
+    $("webrtcGatewayBadge").className = "badge muted";
     reportObservationOnce(
       "video-status-api",
       "WARNING",
-      `读取视频状态失败：${error.message}`,
+      `读取视频状态失败：${detail}`,
     );
+  } finally {
+    window.clearTimeout(pending.timer);
+    if (webrtcStatusRequest === pending) webrtcStatusRequest = undefined;
+  }
+}
+async function requestWebRtcControl(payload) {
+  const controller = new AbortController();
+  webrtcControlRequest = controller;
+  const timer = window.setTimeout(() => controller.abort(), WEBRTC_CONTROL_TIMEOUT_MS);
+  try {
+    const result = await request("/api/video/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    if (controller.signal.aborted)
+      throw new Error("视频切换结果未确认，正在重新读取状态");
+    return result;
+  } catch (error) {
+    if (controller.signal.aborted)
+      throw new Error("视频切换结果未确认，正在重新读取状态");
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+    if (webrtcControlRequest === controller) webrtcControlRequest = undefined;
   }
 }
 async function toggleWebRtcVideo() {
   if (webrtcToggleInFlight || webrtcStreamTogglesInFlight.size) return;
+  cancelWebRtcVideoStatus();
   const enabled = !webrtcVideoEnabled;
   webrtcToggleInFlight = true;
   setWebRtcVideoToggle(enabled, true);
   try {
     applyWebRtcVideoStatus(
-      await request("/api/video/control", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled }),
-      }),
+      await requestWebRtcControl({ enabled }),
     );
   } catch (error) {
     setWebRtcGatewayState(false, `视频切换失败：${error.message}`);
@@ -1968,21 +2152,19 @@ async function toggleWebRtcVideo() {
     webrtcToggleInFlight = false;
     setWebRtcVideoToggle(webrtcVideoEnabled, false);
     renderWebRtcStreamControls(webrtcConfiguredStreams);
+    refreshWebRtcVideoStatus();
   }
 }
 async function toggleWebRtcStream(stream) {
   if (!stream?.name || webrtcToggleInFlight || webrtcStreamTogglesInFlight.size)
     return;
+  cancelWebRtcVideoStatus();
   webrtcStreamTogglesInFlight.add(stream.name);
   renderWebRtcStreamControls(webrtcConfiguredStreams);
   try {
-    const payload = await request("/api/video/control", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        stream: stream.name,
-        enabled: stream.enabled !== true,
-      }),
+    const payload = await requestWebRtcControl({
+      stream: stream.name,
+      enabled: stream.enabled !== true,
     });
     applyWebRtcVideoStatus(payload);
   } catch (error) {
@@ -1998,8 +2180,22 @@ async function toggleWebRtcStream(stream) {
   }
 }
 function startWebRtcVideoStatus() {
+  webrtcStatusStopped = false;
+  window.clearInterval(webrtcStatusTimer);
   refreshWebRtcVideoStatus();
-  webrtcStatusTimer = window.setInterval(refreshWebRtcVideoStatus, 3000);
+  webrtcStatusTimer = window.setInterval(() => {
+    // Local recovery must not wait for a slow HTTP response. Reuse the same
+    // cadence and Backend-confirmed streams; no media stats or extra polling.
+    maintainWebRtcPlayers();
+    refreshWebRtcVideoStatus();
+  }, 3000);
+}
+function stopWebRtcVideoStatus() {
+  webrtcStatusStopped = true;
+  window.clearInterval(webrtcStatusTimer);
+  webrtcStatusTimer = undefined;
+  cancelWebRtcVideoStatus();
+  webrtcControlRequest?.abort();
 }
 function setupMapInteraction() {
   const interaction = $("mapInteraction");
@@ -2910,16 +3106,22 @@ function renderMapMarkers() {
     pixiMapMarkerLayer.addChild(marker);
   }
 }
+function applyObservedNavigationRoute(snapshot) {
+  const route = snapshot?.navigation_route;
+  observedNavigationRoute = !relocalizationMapUnconfirmed && snapshot?.active_map_id === loadedMapId
+    && route?.map_id === loadedMapId ? route : undefined;
+  renderNavigationRoute();
+  scheduleMapDraw();
+}
 function navigationRoutePoints() {
-  const route = mapMarkerNavigationStatus?.phase === "navigating"
-    ? mapMarkerNavigationStatus.route
-    : undefined;
-  if (route?.frame_id !== "map" || !Array.isArray(route.points) || route.points.length < 2) return [];
+  const route = observedNavigationRoute;
+  if (relocalizationMapUnconfirmed || route?.map_id !== loadedMapId || route?.frame_id !== "map"
+    || !Array.isArray(route.points) || route.points.length < 2 || route.points.length > 512) return [];
   const points = [];
   for (const point of route.points) {
     const x = Number(point?.x);
     const y = Number(point?.y);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return [];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 100000 || Math.abs(y) > 100000) return [];
     points.push({ x, y });
   }
   return points;
@@ -3023,12 +3225,10 @@ function syncVehicleLayer(vehicle, layout) {
     vehicleModel,
     layout.pixelsPerMeter,
   );
-  // A recovered preview replaces the pointer even at whole-site zoom levels.
-  // Keep its icon legible; actual observation and submitted metres stay unchanged.
+  // Preview and live observation share the same metric footprint. Keep the
+  // larger invisible drag hit area separate from the visible vehicle size.
   const preview = hasFiniteRelocalizationCandidate(relocalizationPreview);
-  const iconScale = preview ? Math.max(1, 32 / footprint.length) : 1;
-  const length = footprint.length * iconScale;
-  const width = footprint.width * iconScale;
+  const { length, width } = footprint;
   element.setAttribute("aria-label", preview ? "重定位预览位置及车头方向，尚未下发" : "小车实时位置及车头方向");
   element.hidden = false;
   if (element.style.width !== `${width}px`) element.style.width = `${width}px`;
@@ -3463,6 +3663,8 @@ function invalidateMapScopedCloud() {
   // map 坐标系在切图时会重置。丢弃旧图的待解码/待绘制扫描，并给渲染器加
   // generation 栅栏，杜绝上一张图的异步点云在新图就绪后闪现一帧。
   mapGeneration += 1;
+  observedNavigationRoute = undefined;
+  renderNavigationRoute();
   cloud = undefined;
   pendingCloudPacket = undefined;
   pendingCloudFrame = undefined;
@@ -3519,11 +3721,23 @@ async function refreshActiveMapFromServer() {
   if (activeMapPollPending) return;
   activeMapPollPending = true;
   const actionEpoch = relocalizationActionEpoch;
+  const generation = mapGeneration;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 2000);
   try {
-    const snapshot = await request("/api/observation/active-map");
-    if (actionEpoch === relocalizationActionEpoch) await refreshActiveMap(snapshot);
-  } catch { /* the next lightweight poll retries */ }
-  finally { activeMapPollPending = false; }
+    const snapshot = await request("/api/observation/active-map?include_route=true", { signal: controller.signal });
+    if (actionEpoch === relocalizationActionEpoch && generation === mapGeneration) {
+      applyObservedNavigationRoute(snapshot);
+      // Layer loading has its own epoch fence. It must not hold the route
+      // poll gate: a stalled map-image request cannot freeze terminal cleanup.
+      void refreshActiveMap(snapshot);
+    }
+  } catch {
+    if (actionEpoch === relocalizationActionEpoch && generation === mapGeneration) applyObservedNavigationRoute();
+  } finally {
+    window.clearTimeout(timeout);
+    activeMapPollPending = false;
+  }
 }
 async function refreshActiveMap(observation, fromRelocalization = false) {
   // active_map.json 由既有轨迹记录器写入；点云/位姿链路不触碰地图缓存。
@@ -3542,6 +3756,7 @@ async function refreshActiveMap(observation, fromRelocalization = false) {
   closeMapMarkerForm();
   mapMarkers = [];
   mapMarkerNavigationStatus = undefined;
+  observedNavigationRoute = undefined;
   renderNavigationRoute();
   renderMapMarkers();
   requestedActiveMapId = mapId;
@@ -3965,12 +4180,13 @@ window.addEventListener("unhandledrejection", (event) => {
         window.clearInterval(relocalizationStatusTimer);
         window.clearInterval(mapMarkerNavigationTimer);
       clearLiveWallCompensation();
-      window.clearInterval(webrtcStatusTimer);
+      stopWebRtcVideoStatus();
   [...webrtcPlayers.keys()].forEach(destroyWebRtcPlayer);
   stopRenderScheduling();
   closeTelemetryConnections();
 });
 document.addEventListener("visibilitychange", () => {
+  maintainWebRtcPlayers();
   if (document.hidden) stopRenderScheduling();
   else if (mapInfo) scheduleMapDraw();
 });

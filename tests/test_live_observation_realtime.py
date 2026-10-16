@@ -184,7 +184,7 @@ def test_vehicle_marker_uses_the_metric_svg_vehicle_without_an_arrow():
 def test_industrial_video_uses_whep_html_video_and_pixi_texture_without_a_frame_relay():
     source = (ROOT / "frontend" / "src" / "liveObservation.js").read_text(encoding="utf-8")
     html = (ROOT / "frontend" / "live-observation.html").read_text(encoding="utf-8")
-    _assert_source_contains(source, "request('/api/video/status')")
+    _assert_source_contains(source, "request('/api/video/status', {signal:pending.controller.signal})")
     _assert_source_contains(source, "request('/api/video/control'")
     assert "function toggleWebRtcVideo()" in source
     assert "function toggleWebRtcStream(stream)" in source
@@ -284,7 +284,8 @@ def test_pose_stream_uses_a_separate_latest_wins_udp_sender_without_a_hidden_ros
     assert "if (superseded(frame.sequence)) return;" in source
     assert "MSG_DONTWAIT" in source
     assert "kUdpPayloadBytes = 1152" in source
-    assert "publishing latest pose for display" in source
+    assert "aletheia::select_display_pose(" in source
+    assert "aletheia::pose_stamp_ns(transform->header.stamp)" in source
     assert '"/_aletheia/live_points"' not in source
     assert '"/_aletheia/live_pose"' not in source
 

@@ -128,6 +128,8 @@ class _RclpyTopicCounter:
         try:
             executor.spin()
         except Exception:
+            with self._lock:
+                self._error = "计数器接收线程异常终止"
             LOGGER.exception("Bag counter executor failed topics=%d", len(self._topic_types))
             raise
 
@@ -246,7 +248,10 @@ class BagRecordingManager:
 
     @classmethod
     def _is_shared_memory_only_type(cls, message_type: str) -> bool:
-        """Never offer streams migrated to ShmSDK rather than DDS."""
+        """Apply the recorder's type exclusions, even for DDS-visible streams.
+
+        The historical name does not imply every excluded sensor uses ShmSDK.
+        """
         return message_type in cls._SHARED_MEMORY_ONLY_TYPES or message_type.endswith("/Image") or "PointCloud" in message_type
 
     def validate_request(self, request: object, count: int) -> RecordingRequest | None:
@@ -347,13 +352,15 @@ class BagRecordingManager:
         counter = None
         log_handle = None
         stage_dir = None
+        process = None
+        cleanup_failed = False
         try:
             LOGGER.info("Bag recording starting run=%s attempt=%s source=%s topics=%d",
                         run_id, attempt_index, source, len(request.topics))
             topic_types = self._current_topic_types(request.topics)
             environment = self._environment_verifier()
             archive_id = uuid.uuid4().hex
-            display_name = self._display_name(case_name, attempt_index, archive_id, source=source)
+            display_name = self._display_name(label if source == "manual" else case_name, attempt_index, source=source)
             stage_dir = (self.root / ".staging" / archive_id).resolve()
             if stage_dir.parent != (self.root / ".staging").resolve():
                 raise BagRecordingError("诊断录包暂存目录无效")
@@ -412,6 +419,12 @@ class BagRecordingManager:
                        "Bag recording start failed run=%s attempt=%s source=%s reason=%s",
                        run_id, attempt_index, source, type(exc).__name__,
                        exc_info=not isinstance(exc, BagRecordingError))
+            if process is not None:
+                try:
+                    self._stop_process(process)
+                except Exception:
+                    cleanup_failed = True
+                    LOGGER.exception("Bag recording startup cleanup failed; retaining staging and blocking new recordings")
             if log_handle is not None:
                 log_handle.close()
             if counter is not None:
@@ -419,14 +432,16 @@ class BagRecordingManager:
                     counter.stop()
                 except Exception:
                     pass
-            if stage_dir is not None:
+            if stage_dir is not None and not cleanup_failed:
                 shutil.rmtree(stage_dir, ignore_errors=True)
+            if cleanup_failed:
+                raise BagRecordingError("录包启动失败且进程清理未完成，已保留暂存数据；请检查日志并重启控制台后再录制") from exc
             if isinstance(exc, BagRecordingError):
                 raise
             raise BagRecordingError(f"无法启动诊断录包：{exc}") from exc
         finally:
             with self._lock:
-                self._starting = False
+                self._starting = cleanup_failed
 
     def stop(self, active: ActiveRecording) -> dict[str, object]:
         """Stop an owned recorder, audit its output, and atomically archive it."""
@@ -487,6 +502,15 @@ class BagRecordingManager:
     def archive_path(self, archive_id: str) -> Path:
         """Return a verified archive directory for the HTTP download boundary."""
         return self._archive_by_id(archive_id)[0]
+
+    def archive_download_name(self, archive_id: str) -> str:
+        """Return a compact ASCII filename, independent of labels and storage paths."""
+        _, manifest = self._archive_by_id(archive_id)
+        try:
+            timestamp = datetime.fromisoformat(str(manifest.get("started_at") or "")).strftime("%Y%m%d_%H%M%S")
+        except ValueError:
+            timestamp = "undated"
+        return f"bag_{timestamp}_{archive_id[:8]}.tar"
 
     def delete_archive(self, archive_id: str) -> None:
         directory, manifest = self._archive_by_id(archive_id)
@@ -649,7 +673,7 @@ class BagRecordingManager:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, final_manifest)
-        final_dir = (self.root / str(manifest["display_name"])).resolve()
+        final_dir = (self.root / f"bag_{active.archive_id}").resolve()
         if final_dir.parent != self.root or final_dir.exists():
             raise BagRecordingError("诊断数据包最终目录无效或冲突")
         active.stage_dir.replace(final_dir)
@@ -675,12 +699,13 @@ class BagRecordingManager:
         return files
 
     @staticmethod
-    def _display_name(case_name: str, attempt_index: int | None, archive_id: str, *, source: str = "test_attempt") -> str:
-        safe_case = re.sub(r"[^\w-]+", "_", case_name, flags=re.UNICODE).strip("_")[:32] or "case"
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    def _display_name(case_name: str, attempt_index: int | None, *, source: str = "test_attempt") -> str:
         if source == "manual":
-            return f"bag_{timestamp}_manual_{safe_case}_{archive_id}"
-        return f"bag_{timestamp}_{safe_case}_T-{attempt_index:03d}_{archive_id}"
+            return str(case_name or "手动录制")
+        title = str(case_name or "测试录制")
+        if isinstance(attempt_index, int) and not isinstance(attempt_index, bool) and attempt_index > 0:
+            return f"{title} · 第 {attempt_index} 轮"
+        return title
 
     def _archive_manifests(self) -> list[tuple[Path, dict[str, object]]]:
         found: list[tuple[Path, dict[str, object]]] = []
@@ -714,7 +739,10 @@ class BagRecordingManager:
         audit = manifest.get("audit") if isinstance(manifest.get("audit"), dict) else {}
         return {
             "archive_id": manifest.get("archive_id"),
-            "display_name": manifest.get("display_name"),
+            "display_name": BagRecordingManager._display_name(
+                manifest.get("label", "") if manifest.get("source") == "manual" else manifest.get("case_name", ""),
+                manifest.get("attempt_index"), source=str(manifest.get("source", "test_attempt")),
+            ),
             "case_name": manifest.get("case_name"),
             "attempt_index": manifest.get("attempt_index"),
             "source": manifest.get("source", "test_attempt"),
@@ -739,7 +767,7 @@ class BagRecordingManager:
             archive_id = candidate.name
             manifest = {
                 "schema_version": 1, "archive_id": archive_id,
-                "display_name": f"bag_incomplete_{archive_id}", "case_name": "未完成录制",
+                "display_name": "未完成录制", "case_name": "未完成录制",
                 "attempt_index": None, "started_at": None,
                 "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                 "topics": {}, "recording_profile": {}, "environment": {},
@@ -749,7 +777,7 @@ class BagRecordingManager:
             temporary = candidate / "manifest.json.tmp"
             temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(temporary, candidate / "manifest.json")
-            candidate.replace(self.root / str(manifest["display_name"]))
+            candidate.replace(self.root / f"bag_{archive_id}")
             LOGGER.warning("Bag incomplete archive recovered archive=%s audit=failed", archive_id)
 
     @staticmethod

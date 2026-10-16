@@ -1,6 +1,7 @@
 import io
 import json
 import tempfile
+import threading
 from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from autodrive_console.vehicle_control import (
     VehicleControlConflict,
     VehicleControlController,
     VehicleControlError,
+    VehicleControlSessionInvalid,
 )
 
 
@@ -630,6 +632,20 @@ class VehicleControlTests(unittest.TestCase):
         controller.release_manual_session.assert_called_once_with("mobile-session")
         self.assertEqual(handler._json.call_args.args[1], HTTPStatus.OK)
 
+    def test_http_invalid_session_keeps_other_sessions_status_and_adds_code(self):
+        handler = _vehicle_control_handler("/api/vehicle-control/heartbeat", {"session_id": "expired"})
+        controller = Mock()
+        controller.heartbeat.side_effect = VehicleControlSessionInvalid("会话已失效")
+        controller.status.return_value = {"session": {"present": True, "state": "active"}}
+        with patch.object(web_console, "VEHICLE_CONTROL", controller):
+            handler._vehicle_control_action(handler.path)
+
+        payload, status = handler._json.call_args.args
+        self.assertEqual(status, HTTPStatus.CONFLICT)
+        self.assertEqual(payload["code"], "session_invalid")
+        self.assertTrue(payload["status"]["session"]["present"])
+        self.assertNotIn("session_id", payload)
+
     def test_input_watchdog_latches_stop_without_browser_input(self):
         self._confirm_emergency_normal()
         self.control._on_source_state(SimpleNamespace(data="navigation"))
@@ -802,6 +818,139 @@ class VehicleControlTests(unittest.TestCase):
         self.control._on_source_state(SimpleNamespace(data="navigation"))
         self.control.begin_manual_session()
         self.assertTrue(self.control.has_control_session())
+
+
+
+    def test_zero_vector_fences_late_motion_while_emergency_confirmation_is_unknown(self):
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        sid = self.control.begin_manual_session()["session"]["id"]
+        self.control.set_vector(sid, 1.0, 0.0, input_sequence=1)
+        self.control._on_emergency_stop(SimpleNamespace(data=None))
+        self.control.set_vector(sid, 0.0, 0.0, input_sequence=2)
+        self._confirm_emergency_normal()
+        self.control.set_vector(sid, 1.0, 0.0, input_sequence=1)
+        self.control._on_publish_tick()
+        self.assertEqual(self.control._target_linear, 0.0)
+        self.assertTrue(all(m.linear.x == 0.0 for m in self.control._velocity_publisher.messages))
+
+    def test_superseded_zero_tick_cannot_brake_newer_explicit_motion(self):
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        sid = self.control.begin_manual_session()["session"]["id"]
+        self.control.set_vector(sid, 1.0, 0.0, input_sequence=1)
+        ready, resume = threading.Event(), threading.Event()
+        original = self.control._publish_stop_now
+        def paused_stop():
+            ready.set()
+            if not resume.wait(2): raise AssertionError("STOP fixture not resumed")
+            original()
+        with patch.object(self.control, "_publish_stop_now", side_effect=paused_stop):
+            worker=threading.Thread(target=lambda:self.control.set_vector(sid,0.0,0.0,input_sequence=2))
+            worker.start()
+            try:
+                self.assertTrue(ready.wait(2))
+                self.control.set_vector(sid,1.0,0.0,input_sequence=3)
+                self.control._velocity_publisher.messages.clear()
+                self.control._on_publish_tick()
+            finally:
+                resume.set();worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual([m.linear.x for m in self.control._velocity_publisher.messages],[0.2])
+
+
+    def test_invalid_session_has_a_machine_readable_code_even_with_other_sessions(self):
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        self.control.begin_manual_session()
+        with self.assertRaises(VehicleControlConflict) as caught:
+            self.control.heartbeat("expired-client")
+        self.assertEqual(getattr(caught.exception, "code", None), "session_invalid")
+        self.assertTrue(self.control.status()["session"]["present"])
+
+
+    def test_retired_emergency_future_cannot_double_count_its_timeout(self):
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        sid = self.control.begin_manual_session()["session"]["id"]
+        client = _EmergencyClient()
+        self.control._emergency_state_client = client
+        self.control._GetEmergencyStop = _EmergencyService
+        self.control.set_vector(sid, 1.0, 0.0, input_sequence=1)
+        self.control._request_emergency_state_if_needed()
+        old = client.future
+        self.clock.now += 0.21
+        self.control._request_emergency_state_if_needed()
+        self.assertEqual(self.control._emergency_query_failures, 1)
+        old.resolve(SimpleNamespace(is_emergency_stop=False))
+        self.assertEqual(self.control._emergency_query_failures, 1)
+        self.assertEqual(self.control.status()["emergency_stop"]["state"], "normal")
+        self.assertEqual(self.control._target_linear, 0.2)
+
+
+    def test_scheduler_failure_cannot_count_against_newer_topic_confirmation(self):
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        self.control.begin_manual_session()
+        self.control._GetEmergencyStop = _EmergencyService
+        client = Mock()
+        def renewed_during_service_check():
+            self._confirm_emergency_normal()
+            return False
+        client.service_is_ready.side_effect = renewed_during_service_check
+        self.control._emergency_state_client = client
+
+        self.control._request_emergency_state_if_needed()
+
+        self.assertEqual(self.control._emergency_query_failures, 0)
+
+    def test_expired_query_already_superseded_by_topic_is_retired_without_failure(self):
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        self.control.begin_manual_session()
+        client = _EmergencyClient()
+        self.control._emergency_state_client = client
+        self.control._GetEmergencyStop = _EmergencyService
+        self.control._request_emergency_state_if_needed()
+        old = client.future
+        self.clock.now += 0.1
+        self._confirm_emergency_normal()
+        generation = self.control._emergency_state_generation
+        self.clock.now += 0.11
+
+        self.control._request_emergency_state_if_needed()
+        old.resolve(SimpleNamespace(is_emergency_stop=False))
+
+        self.assertEqual(self.control._emergency_query_failures, 0)
+        self.assertEqual(self.control._emergency_state_generation, generation)
+        self.assertIsNone(self.control._emergency_query_future)
+
+    def test_retired_publish_tick_cannot_send_motion_after_newer_stop(self):
+        self._confirm_emergency_normal()
+        self.control._on_source_state(SimpleNamespace(data="miniapp"))
+        sid = self.control.begin_manual_session()["session"]["id"]
+        self.control.set_vector(sid, 1.0, 0.0, input_sequence=1)
+        self.control._velocity_publisher.messages.clear()
+        selected, resume = threading.Event(), threading.Event()
+        publish = self.control._publish_twist
+        def pause_before_publish(linear, angular):
+            if linear or angular:
+                selected.set()
+                if not resume.wait(2):
+                    raise AssertionError("test publisher was not released")
+            publish(linear, angular)
+        with patch.object(self.control, "_publish_twist", side_effect=pause_before_publish):
+            worker = threading.Thread(target=self.control._on_publish_tick)
+            worker.start()
+            try:
+                self.assertTrue(selected.wait(2))
+                self.control.set_vector(sid, 0.0, 0.0, input_sequence=2)
+                self.assertEqual(self.control._velocity_publisher.messages[-1].linear.x, 0.0)
+            finally:
+                resume.set()
+                worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual([message.linear.x for message in self.control._velocity_publisher.messages], [0.0])
 
 
 if __name__ == "__main__":

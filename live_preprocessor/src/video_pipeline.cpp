@@ -11,6 +11,8 @@ bool valid_target_budget(int width, int height, int fps) {
 
 std::vector<std::string> pipeline_arguments(const PipelineConfig &config, const FrameLayout &source) {
   if (config.encoder != "vaapih264enc" && config.encoder != "nvh264enc") throw std::invalid_argument("不支持的视频硬件编码器");
+  if (config.nvenc_rate_control != "cbr" && config.nvenc_rate_control != "vbr")
+    throw std::invalid_argument("不支持的 NVENC 码率策略");
   std::vector<std::string> arguments = {
       config.executable,
       "-q",
@@ -59,8 +61,11 @@ std::vector<std::string> pipeline_arguments(const PipelineConfig &config, const 
   if (config.encoder == "vaapih264enc") {
     arguments.push_back("keyframe-period=" + std::to_string(config.fps));
   } else {
-    arguments.insert(arguments.end(), {"preset=low-latency-hq", "rc-mode=cbr", "bframes=0", "zerolatency=true",
-                                       "gop-size=" + std::to_string(config.fps), "!", "video/x-h264,profile=constrained-baseline"});
+    arguments.insert(arguments.end(), {"preset=low-latency-hq", "rc-mode=" + config.nvenc_rate_control,
+                                       "bframes=0", "zerolatency=true", "gop-size=" + std::to_string(config.fps)});
+    if (config.nvenc_rate_control == "vbr")
+      arguments.insert(arguments.end(), {"max-bitrate=" + std::to_string(config.bitrate_kbps), "const-quality=23"});
+    arguments.insert(arguments.end(), {"!", "video/x-h264,profile=constrained-baseline"});
   }
   arguments.insert(arguments.end(),
                    {"!", "h264parse", "config-interval=-1", "!", "rtspclientsink", "location=" + config.rtsp_url, "protocols=tcp"});

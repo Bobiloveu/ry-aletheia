@@ -118,7 +118,7 @@ if [[ -n "${AMENT_PREFIX_PATH:-}" ]]; then
   IFS=: read -r -a SOURCED_PREFIXES <<< "$AMENT_PREFIX_PATH"
   AMENT_PREFIXES+=("${SOURCED_PREFIXES[@]}")
 fi
-for package in tf2_msgs nav2_msgs sensor_msgs; do
+for package in tf2_msgs nav2_msgs sensor_msgs nav_msgs action_msgs; do
   found=false
   for prefix in "${AMENT_PREFIXES[@]}"; do
     # 工作空间的 isolated install 常用 <prefix>/<package>/lib；系统 ROS2

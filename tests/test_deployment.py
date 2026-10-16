@@ -1702,15 +1702,13 @@ def test_deployment_flow_allows_source_map_with_integrated_lobby(
     assert [item["stage"] for item in store.stage_plan(project["id"])["stages"]] == [source_type, "target_floor"]
 
 
-def test_deployment_flow_requires_terminal_target_floor(
+def test_deployment_flow_keeps_a_configured_target_floor_terminal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     store, project, _ = _project_with_distinct_maps(tmp_path, monkeypatch, 0)
 
-    with pytest.raises(DeploymentError, match="用户楼层"):
-        store.set_deployment_flow(project["id"], [
-            {"id": "outdoor", "type": "outdoor"},
-        ])
+    saved = store.set_deployment_flow(project["id"], [{"id": "outdoor", "type": "outdoor"}])
+    assert [item["type"] for item in saved["deployment_flow"]] == ["outdoor"]
     with pytest.raises(DeploymentError, match="末节点"):
         store.set_deployment_flow(project["id"], [
             {"id": "lobby", "type": "lobby"},

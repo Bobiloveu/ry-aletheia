@@ -122,7 +122,7 @@ def _unit_stage_sequences(
             outdoors[identity] = map_id
         elif role == "lobby":
             if identity in lobbies:
-                raise AutomaticRouteError(f"{building} 栋 {unit} 单元必须且只能有一张电梯大厅地图")
+                raise AutomaticRouteError(f"{building} 栋 {unit} 单元必须且只能有一张室内大厅地图")
             lobbies[identity] = map_id
         else:
             floors.setdefault(identity, []).append(map_id)
@@ -141,7 +141,7 @@ def _unit_stage_sequences(
         outdoor = outdoors.get(identity)
         target_maps = sorted(set(floors.get(identity, [])))
         if not lobby or not target_maps:
-            raise AutomaticRouteError(f"{building} 栋 {unit} 单元缺少电梯大厅或用户楼层地图实例")
+            raise AutomaticRouteError(f"{building} 栋 {unit} 单元缺少室内大厅或用户楼层地图实例")
         if "outdoor" in types and not outdoor:
             raise AutomaticRouteError(f"{building} 栋 {unit} 单元缺少户外地图实例")
         for target_map in target_maps:
@@ -199,7 +199,7 @@ def _binding_for_identity_map(
         )
     ]
     if len(matches) != 1:
-        label = {"ferry": "摆渡层", "outdoor": "户外", "lobby": "电梯大厅", "target_floor": "用户楼层"}[stage]
+        label = {"ferry": "摆渡层", "outdoor": "户外", "lobby": "室内大厅", "target_floor": "用户楼层"}[stage]
         raise AutomaticRouteError(
             f"{identity[0]} 栋 {identity[1]} 单元的{label}地图缺少唯一定位绑定；请回到地图阶段修正"
         )
@@ -321,7 +321,7 @@ def _derive_route(
     elevator_chain = [
         _unique_component(components, str(binding["map_asset_id"]), "elevator", "地图切图电梯")
         for binding in bindings
-        if binding.get("type") == "floor"
+        if len(bindings) > 1 and binding.get("type") == "floor"
     ]
     _validate_elevator_chain([*elevators, *elevator_chain])
     handoff_transition_ids = {

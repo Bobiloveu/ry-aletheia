@@ -131,7 +131,7 @@
           </div>
           <div id="deploymentFlowEditor" class="deployment-flow-editor deployment-hidden">
             <div class="deployment-flow-editor-head">
-              <div><strong>地图阶段顺序</strong><span>拖动顺序前请先确认现场路线；用户楼层必须是最后一段。</span></div>
+              <div><strong>地图阶段顺序</strong><span>可单独配置任意地图阶段；组合多图时按现场路线排序，用户楼层如有则放在最后。</span></div>
               <button id="saveDeploymentFlow" class="compact-action" type="button" disabled>保存流程</button>
             </div>
             <div id="deploymentFlowCanvas" class="deployment-flow-canvas" aria-live="polite"></div>
@@ -139,7 +139,7 @@
               <span>添加阶段</span>
               <button type="button" class="compact-action" data-flow-add="outdoor">＋ 户外图</button>
               <button type="button" class="compact-action" data-flow-add="ferry">＋ 摆渡层</button>
-              <button type="button" class="compact-action" data-flow-add="lobby">＋ 电梯大厅</button>
+              <button type="button" class="compact-action" data-flow-add="lobby">＋ 室内大厅</button>
               <button type="button" class="compact-action" data-flow-add="target_floor">＋ 用户楼层</button>
             </div>
           </div>
@@ -183,7 +183,7 @@
               ><span id="mapLabelText">显示名称</span><input
                 id="mapLabel"
                 maxlength="80"
-                placeholder="室外地图 / 电梯大厅" /></label
+                placeholder="室外地图 / 室内大厅" /></label
             ><button id="importMap" class="page-top-action" type="button" disabled>
               导入地图快照
             </button>
@@ -236,7 +236,7 @@
                 </figure>
               </div>
               <ul id="pcdWarnings" class="pcd-warnings" hidden></ul>
-              <div id="pcdConfirmControls" class="pcd-confirm-controls" hidden><label for="pcdMapLabel">地图显示名称<input id="pcdMapLabel" maxlength="80" placeholder="例如：电梯大厅" /></label><p class="page-muted">这是离线高度投影。请检查门洞、通道和小障碍物，再确认保存到当前项目。</p><button id="pcdConfirm" class="page-top-action" type="button" disabled>确认导入并继续</button></div>
+              <div id="pcdConfirmControls" class="pcd-confirm-controls" hidden><label for="pcdMapLabel">地图显示名称<input id="pcdMapLabel" maxlength="80" placeholder="例如：室内大厅" /></label><p class="page-muted">这是离线高度投影。请检查门洞、通道和小障碍物，再确认保存到当前项目。</p><button id="pcdConfirm" class="page-top-action" type="button" disabled>确认导入并继续</button></div>
             </div>
           </div>
           <p id="importMessage" class="inline-message">
@@ -249,7 +249,7 @@
           <div id="mappingControls" class="settings-form deployment-hidden">
             <label class="map-folder-picker">建图模板 YAML<input id="mappingTemplateFile" type="file" accept=".yaml,.yml,application/x-yaml,text/yaml" aria-describedby="mappingTemplateMessage" /></label>
             <p id="mappingTemplateMessage" class="inline-message map-folder-message">请选择操作者电脑上的 YAML 模板。</p>
-            <label>地图名称<input id="mappingLabel" maxlength="80" placeholder="例如：电梯大厅" /></label>
+            <label>地图名称<input id="mappingLabel" maxlength="80" placeholder="例如：室内大厅" /></label>
             <p class="page-muted mapping-role-note">地图角色将在“部署拓扑位置”中设置。</p>
             <div class="mapping-actions"><button id="prepareMapping" class="compact-action" type="button">准备建图会话</button><button id="openMappingWorkbench" class="page-top-action" type="button" disabled>进入建图工作台</button><button id="discardMapping" class="compact-action danger-action" type="button" disabled>放弃当前会话</button></div>
           </div>

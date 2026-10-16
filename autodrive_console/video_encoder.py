@@ -30,11 +30,12 @@ class EncoderProbeCancelled(RuntimeError):
 class EncoderSelection:
     encoder: str
     device: str | None
+    nvenc_rate_control: str = 'cbr'
 
 
 class HardwareEncoderSelector:
     def __init__(self) -> None:
-        self._cache: dict[tuple[str, str, str], EncoderSelection | str] = {}
+        self._cache: dict[tuple[str, str, str, str], EncoderSelection | str] = {}
 
     @staticmethod
     def _render_devices() -> list[str]:
@@ -42,8 +43,10 @@ class HardwareEncoderSelector:
         return sorted(str(path) for path in Path('/dev/dri').glob('renderD[0-9]*'))[:2]
 
     def select(self, gst_launch: Path, requested: str, vaapi_device: str,
-               cancelled: Callable[[], bool] | None = None) -> EncoderSelection:
-        key = (str(gst_launch), requested, vaapi_device)
+               cancelled: Callable[[], bool] | None = None, *, nvenc_rate_control: str = 'cbr') -> EncoderSelection:
+        if nvenc_rate_control not in ('cbr', 'vbr'):
+            raise ValueError('nvenc_rate_control 必须为 cbr 或 vbr')
+        key = (str(gst_launch), requested, vaapi_device, nvenc_rate_control)
         cached = self._cache.get(key)
         if isinstance(cached, EncoderSelection):
             return cached
@@ -57,17 +60,19 @@ class HardwareEncoderSelector:
             if not devices:
                 errors.append('Intel VAAPI：没有可用的 DRM render 节点')
         if requested in {'auto', 'nvh264enc'}:
-            candidates.append(EncoderSelection('nvh264enc', None))
+            candidates.append(EncoderSelection('nvh264enc', None, nvenc_rate_control))
         for candidate in candidates:
             if cancelled and cancelled():
                 raise EncoderProbeCancelled('硬件编码预检已取消')
             LOGGER.info('视频硬件编码预检：encoder=%s device=%s synthetic_frames=3 timeout_s=%s', candidate.encoder, candidate.device,10 if candidate.encoder=='nvh264enc' else 4)
-            error = self._probe(gst_launch, candidate.encoder, candidate.device, cancelled)
+            error = self._probe(gst_launch, candidate.encoder, candidate.device, cancelled,
+                                nvenc_rate_control=candidate.nvenc_rate_control)
             if cancelled and cancelled():
                 raise EncoderProbeCancelled('硬件编码预检已取消')
             if error is None:
                 self._cache[key] = candidate
-                LOGGER.info('视频硬件编码选择完成：encoder=%s device=%s', candidate.encoder, candidate.device)
+                LOGGER.info('视频硬件编码选择完成：encoder=%s device=%s rate_control=%s', candidate.encoder,
+                            candidate.device, candidate.nvenc_rate_control if candidate.encoder == 'nvh264enc' else 'cqp')
                 return candidate
             LOGGER.warning('视频硬件编码预检失败：encoder=%s device=%s detail=%s', candidate.encoder, candidate.device, error[-2048:])
             errors.append(f'{candidate.encoder} {candidate.device or "NVIDIA"}：{error}')
@@ -77,13 +82,17 @@ class HardwareEncoderSelector:
 
     @staticmethod
     def _probe(gst_launch: Path, encoder: str, device: str | None,
-               cancelled: Callable[[], bool] | None = None) -> str | None:
+               cancelled: Callable[[], bool] | None = None, *, nvenc_rate_control: str = 'cbr') -> str | None:
+        if nvenc_rate_control not in ('cbr', 'vbr'):
+            raise ValueError('nvenc_rate_control 必须为 cbr 或 vbr')
         command = [str(gst_launch), '-q', 'videotestsrc', 'num-buffers=3', '!',
                    'video/x-raw,width=640,height=480,framerate=15/1', '!', 'videoconvert', '!',
                    'video/x-raw,format=NV12', '!', encoder, 'bitrate=1200']
         if encoder == 'nvh264enc':
             # Properties verified against the locked GStreamer 1.20.3 source.
-            command += ['preset=low-latency-hq', 'rc-mode=cbr', 'zerolatency=true', 'bframes=0', 'gop-size=15']
+            command += ['preset=low-latency-hq', f'rc-mode={nvenc_rate_control}', 'zerolatency=true', 'bframes=0', 'gop-size=15']
+            if nvenc_rate_control == 'vbr':
+                command += ['max-bitrate=1200', 'const-quality=23']
             command += ['!', 'video/x-h264,profile=constrained-baseline']
         else:
             command += ['keyframe-period=15']

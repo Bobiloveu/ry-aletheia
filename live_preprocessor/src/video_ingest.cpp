@@ -46,6 +46,7 @@ struct Options {
   std::string gst_launch;
   std::string vaapi_device;
   std::string encoder{"vaapih264enc"};
+  std::string nvenc_rate_control{"cbr"};
   std::string rtsp_url;
   int width{};
   int height{};
@@ -116,6 +117,8 @@ Options parse_options(int argc, char **argv) {
       options.vaapi_device = value;
     else if (key == "--encoder")
       options.encoder = value;
+    else if (key == "--nvenc-rate-control")
+      options.nvenc_rate_control = value;
     else if (key == "--rtsp-url")
       options.rtsp_url = value;
     else if (key == "--width")
@@ -134,7 +137,8 @@ Options parse_options(int argc, char **argv) {
   if (!is_ros_name(options.node_name) || !has_valid_source || (options.encoding != "rgb8" && options.encoding != "bgr8") ||
       options.gst_launch.empty() || options.vaapi_device.empty() || options.rtsp_url.empty() || !options.bitrate_kbps ||
       !aletheia::video::valid_target_budget(options.width, options.height, options.fps) ||
-      (options.encoder != "vaapih264enc" && options.encoder != "nvh264enc")) {
+      (options.encoder != "vaapih264enc" && options.encoder != "nvh264enc") ||
+      (options.nvenc_rate_control != "cbr" && options.nvenc_rate_control != "vbr")) {
     throw std::runtime_error(
         "必须提供安全的 node-name、输入源、encoding(rgb8/bgr8)、gst-launch、vaapi-device、rtsp-url、width、height、fps 和 bitrate-kbps；"
         "shmsdk 输入仅允许 CamFront/CamBack/CamLeft/CamRight");
@@ -284,9 +288,14 @@ class VideoIngest final : public rclcpp::Node {
   }
 
   void start_pipeline(const aletheia::video::FrameLayout &layout) {
+    RCLCPP_INFO(get_logger(), "启动硬件编码：encoder=%s rate_control=%s target=%dx%d fps=%d bitrate_kbps=%d const_quality=%s",
+                options_.encoder.c_str(), options_.encoder == "nvh264enc" ? options_.nvenc_rate_control.c_str() : "cqp",
+                options_.width, options_.height, options_.fps, options_.bitrate_kbps,
+                options_.encoder == "nvh264enc" && options_.nvenc_rate_control == "vbr" ? "23" : "preset");
     stop_pipeline();
     auto arguments = aletheia::video::pipeline_arguments(
-        {options_.gst_launch, options_.encoder, options_.rtsp_url, options_.width, options_.height, options_.fps, options_.bitrate_kbps},
+        {options_.gst_launch, options_.encoder, options_.rtsp_url, options_.width, options_.height, options_.fps,
+         options_.bitrate_kbps, options_.nvenc_rate_control},
         layout);
     std::vector<char *> argv;
     argv.reserve(arguments.size() + 1);

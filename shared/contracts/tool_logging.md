@@ -37,3 +37,27 @@ Status: Existing
 Backend：上下文/脱敏、HTTP 成功与错误/恢复、后台生命周期、上报输入和限流。
 Web：早期安装、异常/资源/请求捕获、被捕获的本地失败、重复抑制、无递归与现有功能回归。
 Mobile：核对 `ToolLogEntry.fromJson` 原字段及未知字段兼容；原接口和必填字段未变。
+
+## 2026-10-15 日志管理增量（Existing）
+
+影响 Backend、Desktop Web 和移动 Web 日志页；Flutter 仍只消费原条目与下载接口，原必填字段、路径和响应类型不变，不增加 Flutter 工具链要求。机器人业务日志、报告、录包不在管理范围内。
+
+- `GET /api/tool-logs/files` 保留 `files`，增加 `storage={total_size_bytes,limit_bytes,policy,last_cleanup_at,last_error}`；策略为 `{retention_days:7,max_total_mib:256,max_file_mib:16}`。
+- 每文件保留原字段，增量 `kind:current|archive`、`file_id`、`can_clear`、`can_delete`。身份不包含路径，只用于避免清单过时后误删已经轮转的文件。
+- `PUT /api/tool-logs/retention` 接收 `{policy:{retention_days,max_total_mib,max_file_mib}}`；天数 1～365、总量 128～4096 MiB、单文件 2～32 MiB，均为整数且总量至少六个单文件容量；保存后立即整理并返回新 storage。
+- `POST /api/tool-logs/cleanup` 接收 `{mode:expired|history,confirm:true}`。expired 按既定策略整理，history 删除全部白名单历史。必须明确确认，不清空当前文件。
+- `POST /api/tool-logs/files/{name}/clear` 和 `DELETE /api/tool-logs/files/{name}` 接收 `{file_id,confirm:true}`，分别只允许清空当前文件和删除历史文件。
+- 格式/范围无效为 400，文件不存在为 404，身份已变或正在生成下载快照为 409，I/O 故障为受控 500；不自动重试破坏性请求。
+- 策略持久化到 `config/tool_logging.json`。已有文件不可读、无效、为符号链接或超过 4096 字节时暂停自动整理并返回 last_error；重新保存有效策略后恢复，不静默覆盖异常文件。
+- 默认结构化日志仍 2 MiB/三份历史；原始追加日志在后台按容量保留最新窗口后原 inode 截断，历史最多三份，再按七天和总量预算清理。当前文件不按历史过期规则删除；每五秒检查，写入或下载期间允许短时超出预算。
+- 下载按打开时的长度分块读取，单文件与完整 ZIP 均用磁盘临时快照，禁止将整个大日志读进 Python 内存。快照生成期间以跨进程共享租约暂缓该家族轮转；网络传输不持有活跃日志租约，避免慢客户端阻止清理。日志写者使用短时跨进程互斥，另一进程轮转后重新打开当前 inode。
+
+原始子进程日志采用 copytruncate 尽力快照：复制与截断之间的少量并发输出可能丢失；结构化业务与错误日志独立加锁轮转。首次整理旧的超大原始文件也只保留最新单文件容量窗口，旧内容不会整份归档。Linux 生产环境使用 POSIX flock 提供跨进程保护。
+
+## 2026-10-15 视频带宽记录（Existing）
+
+Backend 视频运行器同时向受控 `video-runtime.log` stdout 与 JSONL 工具日志的 `video` 模块
+记录网关统计带宽：总 Mbps / MB/s、逐路 Mbps、连接数和采样时间窗。稳定观看每三十秒
+记录一次；无观看连接不重复打印，连接/计数变化和统计失败/恢复时记录状态。
+沿用原 `time/level/source/message` 字段，不增加 Web/Mobile 必填字段或调用接口。
+统计口径、回环请求总期限与媒体隔离边界见 `video.md` 的“视频带宽日志”节。

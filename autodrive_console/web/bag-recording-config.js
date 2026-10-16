@@ -53,7 +53,7 @@ async function refreshTopics() {
     const data = await requestJson("/api/bag-recordings/topics");
     topics = Array.isArray(data.topics) ? data.topics : [];
     selected = new Set([...selected].filter((name) => topics.some((topic) => topic.name === name)));
-    $("topicHint").textContent = topics.length ? `已发现 ${topics.length} 个可录 Topic；开始目标轮前仍会再次验证。` : "未发现可录 DDS Topic；请确认发布者和 ROS 域后刷新。";
+    $("topicHint").textContent = topics.length ? `已发现 ${topics.length} 个可录 Topic；开始录制前会再次验证。` : "未发现可录 DDS Topic；请确认发布者和 ROS 域后刷新。";
   } catch (error) {
     $("topicHint").textContent = `读取 ROS 图失败：${error.message}`;
   } finally {

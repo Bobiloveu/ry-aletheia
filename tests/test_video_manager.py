@@ -573,7 +573,7 @@ class VideoManagerTests(unittest.TestCase):
         """冻结控制台的动态订阅必须能加载 sensor_msgs 的 C 类型支持。"""
         binary_script = (ROOT / "build_binary.sh").read_text(encoding="utf-8")
 
-        self.assertIn("for package in tf2_msgs nav2_msgs sensor_msgs; do", binary_script)
+        self.assertIn("for package in tf2_msgs nav2_msgs sensor_msgs nav_msgs action_msgs; do", binary_script)
         self.assertIn("--collect-all sensor_msgs", binary_script)
 
 

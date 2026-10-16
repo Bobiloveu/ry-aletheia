@@ -26,7 +26,7 @@
           <label>录制时长<select id="durationMinutes"><option value="5">5 分钟</option><option value="10">10 分钟</option><option value="15" selected>15 分钟</option><option value="20">20 分钟</option></select></label>
           <p class="bag-config-note">开始后可切换页面或手动遥控；录制会持续到手动停止或达到时长。</p>
         </div>
-        <p class="bag-config-note">图像、点云和 LaserScan 已走共享内存，不能通过 DDS 录入 rosbag。</p>
+        <p class="bag-config-note">当前录包范围不包含图像、相机信息、点云和 LaserScan；仅列出可录制的 DDS Topic。</p>
         <div class="bag-config-selection-state"><strong id="selectedCount">尚未选择 Topic</strong><span id="selectionHint">最多选择 32 个 Topic。</span></div>
         <button id="save" type="button">保存配置并返回测试计划</button>
         <a id="cancelLink" class="text-button bag-config-cancel" href="/">取消</a>

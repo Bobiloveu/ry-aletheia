@@ -5,6 +5,38 @@
 **消费者：** `robot_backend` 是项目快照、路线校验和实验导出的权威执行方；PC `web_console` 是部署地图与路线编辑器。Mobile 不是本定位路线/清单契约的消费者，且不得调用其路由。
 **兼容性：** 优先增量变更；破坏性变更必须同时更新所有消费者和本文档。
 
+2026-10-16 文档对齐：本文将当前固定线路与历史兼容入口分别说明。仅纠正文档，不改变
+Backend、PC Web 或机器人任务格式；Mobile 不是消费者。速度模式参考来源、已实现枚举与
+未接入项以 [速度模式模板基线](../../docs/development/SPEED_MODE_TEMPLATES.md) 为准；
+参考 XML 不由部署包自动安装，不能据此宣称车端导航兼容性已验证。
+
+2026-10-16 固定线路导出的运行标识影响 Backend 编译、PC Web 预览及机器人任务文件读取，
+Mobile 不消费。新生成的 `waypoint_task_id`、`waypoint_id` 与对应 XML 文件名只使用
+ASCII 字母、数字、下划线和连字符。行为树保留执行序号与英文用途；线路名的 ASCII 部分
+可作为后缀，全中文名使用项目内可读编号 `line_01` 等，清理后同名时分配可读序号。
+项目/线路中文显示名、trace 中的标签、任务 JSON 显示名称及地图路径不因此重命名。
+JSON、XML 引用、分段文件和清单哈希同步生成，旧导出文件不改写；预览缓存随编译器源码失效。
+PC Web 无已保存线路时默认就是可编辑的新草稿，配置后直接保存即可。“新建线路”保留当前
+名称、起点、步骤和动作，解除原线路 ID，仅转为新草稿；保存走原有创建端点，不覆盖原线路。
+当前已经是新草稿时重复点击不清空。只有“放弃修改”显式丢弃草稿；操作期间的 busy 与项目
+切换保护仍保留。此交互不自动保存，不改变 Backend/API 或 Mobile 的所有权。
+
+2026-10-16 单图部署影响 Backend 项目流程、固定线路编译与 PC Web 选择/预览/下载；
+Mobile 不消费。流程至少一个阶段，用户楼层可选；若配置用户楼层，仍放在最后。
+户外图、摆渡层、室内大厅（原“电梯大厅”，内部 `lobby/indoor` 标识不变）、用户楼层
+均可独立成图。单图固定线路沿用同图导航、动作、原路返程及安全校验，不创建跨图动作。
+`single` 仍输出 tasks 包；`multi` 仍输出既有直接子任务结构，仅生成实际阶段的去返文件：
+摆渡层 `sub_outdoor_eguard[ _r ].json`，户外图 `outdoor/<building>_<unit>[ _r ].json`，
+室内大厅 `indoor/<building>_<unit>[ _r ].json`，用户楼层 `floor/<目标文件名>[ _r ].json`。
+独立楼层仍按已保存的送货目标分线路，保留门牌校验，不为同图行驶要求电梯；没有物理电梯
+依据时，预览 physical_floor 为 null，不能从门牌猜测物理楼层索引。跨图模板规则保持原状。
+全局独立摆渡定位清单保持空楼栋/单元，包内使用 `runtime/maps/<community>/ferry/` 与
+`runtime/localization/<community>/ferry.yaml`，不推测楼栋归属；这些仍只是项目实验产物。
+多线路合并按实际文件/地图数量映射，继续拒绝同一路径但语义冲突的产物。旧两图文件布局、
+机器人子任务字段及运行目录所有权不变，不自动部署或执行。
+没有 `task_lines` 的历史单图项目增量启用空线路列表，保留地图、标记、绑定和旧路线；
+需由人员明确保存线路后使用固定线路编译器，不从旧路线猜测取送货动作。历史多图兼容入口不变。
+
 2026-10-13 多条固定线路汇总影响 Backend 编译/下载与 PC Web 编辑/预览；Mobile 不消费，机器人既有 multi_tasks 文件格式不变。
 `single` 仍以 `active_task_line_id` 选择一条线路；`multi` 校验并汇总全部已保存线路，每条用户楼层线路以一个送货目标结束，各户输出独立的 `floor/*[ _r ].json`。公共段语义一致才复用；同名文件的动作、几何、速度、地图或定位内容冲突时阻断，不能覆盖。未保存草稿不参与导出。
 多线路预览清单新增 `compiled_task_lines`，每项保留线路 `id/name/start_component_id/steps` 及其在预览 `task_json.subtasks` 中的 `subtask_start/subtask_count`。`waypoint_trace` 增量记录 `task_line_id`，相应 `subtask_task_line_ids` 与子任务数组逐项对应。Web 可显示全部或一条线路，不在两条独立线路之间生成连接；实际动作与节点仍来自 Backend 编译。`active_task_line` 保留当前选中线路兼容字段，不能再作为 multi 包唯一成员。
@@ -56,7 +88,8 @@ Backend 编译与目录发现、PC Web 预览及机器人任务文件读取；Mo
 
 2026-10-13 固定线路导出命名影响 Backend 产物与 PC Web 下载，Mobile 不消费。
 任务 JSON 和 ZIP 以“小区名_线路名”命名，不再暴露线路 ID 哈希前缀。
-固定线路行为树使用“动作执行序号_英文用途_线路名.xml”，序号按任务 JSON 中首次执行的顺序
+固定线路行为树使用“动作执行序号_英文用途_线路运行后缀.xml”，后缀按上文 2026-10-16
+ASCII 规则生成（取代此处原先允许中文线路名的规则）；序号按任务 JSON 中首次执行的顺序
 统一补零；取送货包含 `pickup/delivery`、`upper/lower` 和 `open/close/unload`，乘梯动作区分
 `outbound/return`。同项目同名或清理后重名的线路增加可读编号，非法路径字符被替换，
 文件名按 UTF-8 字节限长；原线路全名仍在清单中保留。所有 `waypoint_task_id` 同步引用新文件名
@@ -82,7 +115,7 @@ Web 新建时按当前地图分配未使用的“过渡点 N”；旧项目中�
 业务意图，后端负责可达性、真实切图连接与返程派生。单条线路为 1–512 步，不接受客户端返程。
 保存、选择、删除线路使实验预览失效。引用删除后须报告失效，不能自动替换或跳过业务节点。
 新项目始终带有空的 `task_lines` 与 `active_task_line_id:null`，必须保存并选择线路才能编译。
-只有快照中完全没有 `task_lines` 字段的历史项目保留既有 single/multi 编译行为；字段存在但
+只有快照中完全没有 `task_lines` 字段且未按上文单图规则迁移的历史多图项目保留既有 single/multi 编译行为；字段存在但
 为空、选择失效或引用被删除时阻止编译，不静默回退。固定线路编译不改写项目的 `task_mode`，固定线路
 预览的 `manifest.task_mode` 遵循项目的 `single/multi`。
 
@@ -120,7 +153,7 @@ Mobile 不消费部署预览，不增加工具链。固定线路新增 `manifest
 展开顺序每个实际 waypoint 一项，字段固定为 `waypoint_id/map_asset_id/leg/label/role/source_id`。
 `leg` 仅为 `outbound` 或 `return`；`source_id` 保留项目原 ID；`role` 表达 entry/exit、
 transition、pickup/delivery/visit、start/return_start 或电梯用途。JSON `waypoint_id` 使用统一
-补零序号、方向、英文用途及可选安全用户标签，不再包含内部 fl_ 哈希；引用、四段 multi JSON
+补零序号、方向、英文用途及可选 ASCII 用户标签，不再包含内部 fl_ 哈希；引用、实际分段 multi JSON
 和 trace 同步发布。`subtask_map_asset_ids` 继续与 subtasks 对齐，跨图不能连线。
 编译器以导出后的栅格（含擦除/补墙及 YAML 占据语义）与虚拟墙查找实际可通行路径，自动
 展开路径穿过的已放置窄通道及通行设施；不要求它们被选为任务步骤。未经过的不自动加入。
@@ -152,9 +185,9 @@ return 是此块的局部反向投影，不能拼成固定线路整单返程。�
 项目模式。
 
 `SiteProject.deployment_flow` 是有序地图阶段节点数组，每个节点包含 `id`、`type` 和 `label`。PC 工作台以卡片拖拽维护该数组，插入位置由前/后卡片的吸附指示确定；保存前后均由 Backend 重新归一化和校验，浏览器拖拽状态不是权威数据。
-`type` 只能是 `outdoor`（户外图）、`ferry`（摆渡层）、`lobby`（电梯大厅）或
-`target_floor`（用户楼层）。流程必须包含且仅包含一个 `target_floor`，且
-`target_floor` 必须是末节点；电梯大厅为可选阶段，最多一个；户外图最多一个，摆渡层可重复。旧项目读取时会从
+`type` 只能是 `outdoor`（户外图）、`ferry`（摆渡层）、`lobby`（室内大厅）或
+`target_floor`（用户楼层）。流程至少包含一个阶段；四类均可独立使用。用户楼层可选，最多
+一个且如有必须是末节点；室内大厅、户外图各最多一个，摆渡层可重复。旧项目读取时会从
 `scene_model` 自动迁移为默认流程，`scene_model` 仅保留兼容和编译配置识别用途。
 
 地图实例的 `scope` 由 Backend 从角色派生，不能由浏览器选择：`ferry` 是全小区复用的
@@ -165,7 +198,8 @@ return 是此块的局部反向投影，不能拼成固定线路整单返程。�
 地图实例不保存人工填写的楼层：地图标记发生在电梯落点配置之前，手填值既不能代表实际面板按钮层，
 也不能代表运行时物理楼层。地图实例只收集用途、楼栋和单元；目标层的任务物理楼层由关联电梯组件的
 `button_floor` 与项目物理电梯按钮序列自动推导。旧项目已存的 `floor` 仅只读兼容，不能成为新任务的
-推导来源或新项目的填写项。
+推导来源或新项目的填写项。独立单图用户楼层没有物理电梯时不要求电梯组件；multi 文件名
+使用有效门牌的按钮层前缀与两位户号，physical_floor 保持 null，不推测物理索引。
 
 | Method | Route | Request | Response |
 | --- | --- | --- |
@@ -377,6 +411,8 @@ Mobile 不消费项目地图编辑记录，不增加其依赖。来源地图与�
 **Status: Existing（自动派生，实验任务编译输入）**
 **消费者：** `robot_backend` 校验、派生并生成清单；PC `web_console` 只展示自动推导结果。Mobile 不是消费者，不调用以下路由或读取这些实验产物。
 
+本节自动路线规则用于历史非固定线路入口；当前固定线路按人员保存的 `task_lines` 派生执行与定位清单，独立单图不要求用户楼层或电梯。
+
 `localization_routes` 是每个楼栋/单元唯一的一条有序路线，也是 Backend 从项目事实生成的审计快照。地图成员与顺序来自创建项目时的 `deployment_flow`、`map_stage_assignments` 与定位绑定；起点、目标、电梯和中间设施来自地图标记。每个手动任务过渡点和每个非固定组件都是服务端自动路径的**必经锚点**：服务端从当前锚点按可达地图路径距离及稳定 ID 选择下一个节点，随后继续到目标。组件不需要预先落在“电梯到目标”的最短线或最短栅格路径上；标记组件会使路线经过它。浏览器不提交路线对象、端点、锚点或节点顺序，也不得用创建时间或坐标近邻猜测顺序。
 
 自动派生要求每段有唯一的核心标记和可验证的物理电梯关系。任务过渡点或组件不可达、方向性组件与前后路径矛盾、区域尺寸无效，或相邻必经锚点/终点之间地图不连通时，后端拒绝派生并返回具体地图、标记和恢复操作；不会开放人工排序作为绕过方式。
@@ -420,7 +456,7 @@ Mobile 不消费项目地图编辑记录，不增加其依赖。来源地图与�
 
 执行链是 Backend 和 PC Web 的 Existing 共享数据模型：Backend 是唯一写入者，PC 只读展示节点 ID 与顺序。Mobile 不是消费者，不读写此字段。修改地图组件几何、属性、手动过渡点坐标/朝向/速度或场景地图阶段，都会使现有实验预览失效，并要求重新自动派生。
 
-`floor` 不能出现在路线中间；保存时后端按 `binding_ids` 顺序归一化链接。PC 编辑器可明确
+历史自动定位路线的 `floor` 不能出现在路线中间；保存时后端按 `binding_ids` 顺序归一化链接。PC 编辑器可明确
 包含/排除同身份绑定、清空未保存草稿或确认删除路线。新绑定不会自动加入已保存路线；所有
 成员、顺序和锚点变更只在显式保存/删除后生效。
 
@@ -431,7 +467,7 @@ Mobile 不消费项目地图编辑记录，不增加其依赖。来源地图与�
 **Status: Existing（已实现）**
 **消费者：** `robot_backend` 验证并编译；PC `web_console` 负责标记、展示和保存速度、去程朝向。Mobile 不读取或写入该字段。
 
-画布的手动 `Waypoint` 中，`kind: "transition"` 通常是**任务过渡点**。当它是 `ferry` 或 `outdoor` 来源图上的唯一过渡点时，Backend 自动将其作为地图转场锚点，并从该地图的执行节点中排除；这不是浏览器可选的第二种模式。其余过渡点在历史非固定线路中是自动路径必经点，后端按当前可达距离和稳定 ID 自动形成 `execution_nodes` 顺序；历史去程按该顺序、返程严格反序，浏览器不提供人工排列。固定线路使用保存的去程步骤，返程按去程已展开节点逆序经过这些过渡点，不重复业务动作。以下是历史模式的节点规则：
+画布的手动 `Waypoint` 中，`kind: "transition"` 通常是**任务过渡点**。在历史自动定位路线中，当它是 `ferry` 或 `outdoor` 来源图上的唯一过渡点时，Backend 自动将其作为地图转场锚点，并从该地图的执行节点中排除；这不是浏览器可选的第二种模式。其余过渡点在历史非固定线路中是自动路径必经点，后端按当前可达距离和稳定 ID 自动形成 `execution_nodes` 顺序；历史去程按该顺序、返程严格反序，浏览器不提供人工排列。固定线路使用保存的去程步骤，返程按去程已展开节点逆序经过这些过渡点，不重复业务动作。以下是历史模式的节点规则：
 
 - 大厅去程：`lobby_start → lobby_1… → lobby_wait → lobby_elevator_center`；大厅返程：`lobby_return_wait → lobby_r_1… → lobby_return_start`。
 - 用户层去程：`target_wait → 1509_1… → target`；用户层返程：`1509_r_1… → target_return_wait → target_return_elevator_center`。因此只要存在用户层过渡点，返程的首个导航点就是最后一个去程过渡点，不能直接跳到候梯点。
@@ -440,7 +476,7 @@ Mobile 不消费项目地图编辑记录，不增加其依赖。来源地图与�
 
 手动过渡点生成的条目固定为 `waypoint_task_id: ""`、`is_task_point: false`，因此不生成或引用行为树。过渡点保存的 `yaw` 是去程朝向；历史非固定线路返程采用同一点的相反顺序并自动转向 180°，使姿态与返程行驶方向一致。区域和受控设备组件按 `execution_nodes` 的同一位置展开为多个节点；受控设备动作才会引用项目内受控行为树。
 
-闸机与自动门的显示编号（`gate_id` / `door_id`）只供人员识别；`controller_device_id` 是 `DoorControl doorid` 的唯一来源。两类组件均保存 `pre_open_distance_m`（开门前距离）与 `post_open_distance_m`（开门后停靠距离），默认均为 `1.5m`，范围为 `0.5–5m`。执行链把去程动作点自动投射到设备门体两侧：门前距离处开门、门后距离处关门；历史非固定线路返程复用同一物理点并反转动作；固定线路返程复用去程两侧物理动作点并逆序执行，开门后关门。地图标记和几何调整阶段允许设备号暂为空，以便先落图再在现有组件属性中补填；一旦填写则必须是正整数纯数字。实验预览、行为树生成和下载仍要求其非空且为正整数，缺失时必须阻断，绝不生成猜测的设备号。每个动作路点的 `waypoint_task_id` 必须与 ZIP 中同名 XML（不含 `.xml`）完全一致；闸机遵循 `e_guard_open_go`，自动门遵循 `{building}_{unit}_open_door_go` 等既有任务命名。
+闸机与自动门的显示编号（`gate_id` / `door_id`）只供人员识别；`controller_device_id` 是 `DoorControl doorid` 的唯一来源。两类组件均保存 `pre_open_distance_m`（开门前距离）与 `post_open_distance_m`（开门后停靠距离），默认均为 `1.5m`，范围为 `0.5–5m`。执行链把去程动作点自动投射到设备门体两侧：门前距离处开门、门后距离处关门；历史非固定线路返程复用同一物理点并反转动作；固定线路返程复用去程两侧物理动作点并逆序执行，开门后关门。地图标记和几何调整阶段允许设备号暂为空，以便先落图再在现有组件属性中补填；一旦填写则必须是正整数纯数字。实验预览、行为树生成和下载仍要求其非空且为正整数，缺失时必须阻断，绝不生成猜测的设备号。每个动作路点的 `waypoint_task_id` 必须与 ZIP 中同名 XML（不含 `.xml`）完全一致。历史非固定线路的闸机遵循 `e_guard_open_go`，自动门遵循 `{building}_{unit}_open_door_go` 等既有命名；固定线路使用上文执行序号、英文用途与 ASCII 线路后缀规则。
 
 受控设备的默认速度模式只定义在 `autodrive_console/task_templates/indoor_elevator_v1/components/component-defaults.json`。其中 `auto_door` 固定为 `task_point`，`gate` 固定为 `narrow_point`；浏览器只读展示，不提供人工选择。Backend 在创建、更新、读取旧项目和编译任务时均加载该文件，锁定项会覆盖历史项目属性，因此修改该 JSON 是后续调整默认策略的唯一入口。`GET /api/deployment-component-defaults` 只读返回当前已验证配置，供 PC Web 展示；Mobile 不是消费者。
 
@@ -448,7 +484,7 @@ Mobile 不消费项目地图编辑记录，不增加其依赖。来源地图与�
 
 任务 JSON 和 `runtime/loc_yaml_path.json` 必须消费同一条地图段执行链，不能分别推导返程。定位清单最终 `floor` 条目的 `init_return` 始终等于该图**返程子任务的首个实际节点**。固定线路的首节点来自去程导航段的逆序节点（过渡点、区域边界、设备动作点或电梯候梯点），与实际导出的返程 JSON 一致。历史非固定线路继续取最后一个去程非固定节点的返程姿态，没有该节点时回退到目标层电梯门前呼梯点。大厅执行链同样写入大厅的去/返任务段，但不替代进入大厅时由电梯行为树控制的定位切换锚点。
 
-任务过渡点持久化 `speed_mode`，只允许 `normal`、`task_point`、`single_point`、`slow_point` 和 `narrow_point`。PC Web 新建手动过渡点显式保存 `normal`（常规通过）；旧项目或 API 请求缺失速度时仍按 `single_point`（单点停靠）兼容读取。`normal` 导出的 `is_single_point` 为 `false`，继续保持 `is_task_point: false` 和 `waypoint_task_id: ""`，以选择既有 `speed_modes/normal.xml` 连续导航且不执行动作；其余速度保持既有单点标志。`elevator_in` 与 `backward` 属于受控电梯行为，不能被手动过渡点使用。旧 `kind: "return"` 兼容迁移为不参与任务导出的过渡记录，避免把历史返程选择误插到去程。修改任何任务过渡点都会使现有实验预览失效，必须重新由 Backend 编译。本次枚举与 Web 新建默认值影响 Existing Backend 和 PC Web，验证其过渡点保存/读取、任务编译和 Web 控件；Mobile 不是消费者，不增加移动端依赖。
+任务过渡点持久化 `speed_mode`，只允许 `normal`、`task_point`、`single_point`、`slow_point` 和 `narrow_point`。PC Web 新建手动过渡点显式保存 `normal`（常规通过）；旧项目或 API 请求缺失速度时仍按 `single_point`（单点停靠）兼容读取。`normal` 导出的 `is_single_point` 为 `false`，继续保持 `is_task_point: false` 和 `waypoint_task_id: ""`，为车端连续导航提供模式与标志且不执行动作；参考树为 `speed_modes/normal.xml`，实际路径映射须由车端执行器确认；其余速度保持既有单点标志。`elevator_in` 与 `backward` 属于受控电梯行为，不能被手动过渡点使用。旧 `kind: "return"` 兼容迁移为不参与任务导出的过渡记录，避免把历史返程选择误插到去程。修改任何任务过渡点都会使现有实验预览失效，必须重新由 Backend 编译。本次枚举与 Web 新建默认值影响 Existing Backend 和 PC Web，验证其过渡点保存/读取、任务编译和 Web 控件；Mobile 不是消费者，不增加移动端依赖。
 
 | Method | Route | Request | Response |
 | --- | --- | --- | --- |
@@ -513,26 +549,28 @@ Waypoint 与地图组件均可直接删除，即使当前自动路线引用它�
 
 ## Experimental task compiler
 
-**Status: Experimental（已实现预览，不可部署）**
+**Status: Experimental（已实现预览，不自动安装或执行）**
 **权威实现：** `DeploymentStore` 的项目内实验导出与 `web_console.py` HTTP 路由
 **消费者：** 当前仅 Web Console；Mobile 保持不变，在明确实现前不得调用以下路由。
 
-编译器以一个 `ry-aletheia.site-project` 为唯一输入所有者。`task_mode=single` 为每个
+编译器以一个 `ry-aletheia.site-project` 为唯一输入所有者。当前固定线路的 single 使用已选线路，multi 汇总已保存线路，独立单图布局见本文顶部。下述按目标派生与多栋单元目录规则描述历史非固定线路兼容入口。
+
+该兼容入口的 `task_mode=single` 为每个
 已标记目标生成一条完整的去返任务；`task_mode=multi` 按每个栋/单元的地图实例与自动定位路线生成可复用的
 `multi_tasks/<community>/sub_outdoor_eguard[ _r ].json`（仅有摆渡层时，整个小区只一对）、
 `multi_tasks/<community>/outdoor/<building>_<unit>[ _r ].json`（仅有户外阶段时，每栋单元一对）、
 `multi_tasks/<community>/indoor/<building>_<unit>[ _r ].json`，以及每户的
 `multi_tasks/<community>/floor/<building>_<unit>_n_n<door>[ _r ].json`。一个项目可包含多个栋、
 单元和目标地图；旧的单张 `map_stage_assignments` 仅用于导入向导，不能覆盖或决定其他栋单元的
-编译路线。标准层门牌按物理楼层和两位户号派生（例如 `1501 → n_n01`）；非标准层使用
-`<building>_<unit>_<physical_floor>_<full_room_number>`。没有摆渡层或户外阶段时不会创建对应目录。
+编译路线。标准层使用按钮层匹配后的两位户号（例如 `1501 → n_n01`）；非标准层使用
+`<building>_<unit>_<button_floor>_<full_room_number>`，按钮层不等于物理楼层索引。没有摆渡层或户外阶段时不会创建对应目录。
 路线、目录、文件名和目标顺序都由后端从已保存的地图、流程和组件事实派生，浏览器不传递它们。
 
 `multi_tasks/<community>/` 中的每个任务文件是一个直接的子任务对象，精确字段为
 `change_loc`、`map_url`、`pcd_url`、`subtask_name` 和 `waypoints`；它不是带 `subtasks` 数组的
 完整任务组 JSON。该格式与现有多任务运行时读取方式一致。
 
-任何包含户外或摆渡阶段的多任务预览必须验证对应的自动入口、唯一转场、地图执行链及设施动作；缺少任一事实时以 `422` 阻断预览，不能输出不完整的 ZIP。它只能在该项目自己的 `deployments/<project_id>/exports/`
+历史非固定线路中，任何包含户外或摆渡阶段的多任务预览必须验证对应的自动入口、唯一转场、地图执行链及设施动作；缺少任一事实时以 `422` 阻断预览，不能输出不完整的 ZIP。它只能在该项目自己的 `deployments/<project_id>/exports/`
 下持久化预览产物；不会写入 `/opt/ry/data/tasks/origin_tasks`、行为树运行目录或
 定位运行配置，也不会写入 `/opt/ry/data/tasks/multi_tasks`，更不会启动 ROS、Supervisor 或下发任务。
 

@@ -106,8 +106,20 @@ class _Transport:
         self.cancelled.append(goal)
 
 
+_CREATED_CONTROLLERS = []
+
+
+@pytest.fixture(autouse=True)
+def close_created_controllers():
+    try:
+        yield
+    finally:
+        while _CREATED_CONTROLLERS:
+            _CREATED_CONTROLLERS.pop().close()
+
+
 def _controller(*, observation=None, vehicle=None, localization=None, transport=None, active_run=lambda: False):
-    return MapMarkerNavigationController(
+    controller = MapMarkerNavigationController(
         _MarkerStore(),
         observation or _Observation(),
         vehicle or _Vehicle(),
@@ -115,6 +127,8 @@ def _controller(*, observation=None, vehicle=None, localization=None, transport=
         active_run_guard=active_run,
         transport=transport or _Transport(),
     )
+    _CREATED_CONTROLLERS.append(controller)
+    return controller
 
 
 def test_active_manual_map_id_uses_verified_static_identity_for_a_runtime_snapshot() -> None:
@@ -436,10 +450,16 @@ def test_nav2_transport_allows_ten_seconds_for_dds_action_discovery(monkeypatch)
     monkeypatch.setitem(sys.modules, "nav_msgs.msg", nav_msgs)
     monkeypatch.setitem(sys.modules, "rclpy.qos", qos)
 
-    with pytest.raises(MapMarkerNavigationUnavailable, match="Nav2 导航服务不可用"):
-        _RosNavigateToPoseTransport().send_goal("map", 0.0, 0.0, 0.0, lambda _result: None)
+    transport = _RosNavigateToPoseTransport()
+    try:
+        with pytest.raises(MapMarkerNavigationUnavailable, match="Nav2 导航服务不可用"):
+            transport.send_goal("map", 0.0, 0.0, 0.0, lambda _result: None)
+    finally:
+        transport.close()
 
     assert observed["timeout"] == 10.0
+    assert transport._worker._stopped.is_set()
+    assert not transport._worker._thread.is_alive()
 
 
 def test_nav2_worker_forwards_plan_only_after_its_goal_is_accepted(monkeypatch) -> None:

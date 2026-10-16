@@ -52,6 +52,51 @@ test('save submits only outbound intent then explicitly activates returned saved
   assert.equal(session.project.active_task_line_id,'line-a'); assert.equal(session.dirty,false);
 });
 
+test('a configured first draft saves without clicking new line first',async()=>{
+  const calls=[];
+  const saved={...project,task_lines:[line],active_task_line_id:line.id};
+  const session=taskLines.createTaskLineSession({request:async(url,options)=>{
+    calls.push([url,JSON.parse(options.body)]);return {task_line:line,project:saved};
+  }});
+  session.load(project);
+  session.change({name:line.name,start_component_id:line.start_component_id,steps:line.steps});
+  session.newDraft();
+  assert.deepEqual(session.draft.steps,line.steps);
+  await session.save();
+  assert.equal(calls.length,1);assert.equal(calls[0][0],'/api/deployments/project-a/task-lines');
+  assert.equal(calls[0][1].name,line.name);
+});
+
+test('new line preserves configured edits and creates instead of overwriting the saved line',async()=>{
+  const saved=structuredClone({...project,task_lines:[line],active_task_line_id:line.id});
+  const calls=[];
+  const session=taskLines.createTaskLineSession({request:async(url,options)=>{
+    const payload=JSON.parse(options.body);calls.push(url);
+    const created={...payload,id:'line-b'};
+    return {task_line:created,project:{...saved,task_lines:[...saved.task_lines,created],active_task_line_id:created.id}};
+  }});
+  session.load(saved);session.change({name:'第二条线路'});session.move(3,0);
+  const configured=structuredClone(session.draft);
+  session.newDraft();
+  assert.equal(session.draft.id,undefined);
+  assert.equal(session.dirty,true);
+  assert.equal(session.draft.name,configured.name);
+  assert.deepEqual(session.draft.steps,configured.steps);
+  await session.save();
+  assert.deepEqual(calls,['/api/deployments/project-a/task-lines']);
+  assert.deepEqual(saved.task_lines,[line]);
+});
+
+test('starting from a saved line retains its flow and discard can clear the new copy',()=>{
+  const session=taskLines.createTaskLineSession();
+  session.load({...project,task_lines:[line],active_task_line_id:line.id});
+  session.newDraft();
+  assert.deepEqual(session.draft.steps,line.steps);
+  assert.equal(session.draft.start_component_id,line.start_component_id);
+  assert.equal(session.draft.id,undefined);
+  session.discard();assert.deepEqual(session.draft.steps,[]);
+});
+
 test('project switch clears drafts and ignores completion of an older save',async()=>{
   assert.equal(typeof taskLines.createTaskLineSession,'function');
   let resolve;const session=taskLines.createTaskLineSession({request:()=>new Promise(r=>{resolve=r;})});

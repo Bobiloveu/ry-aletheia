@@ -82,7 +82,7 @@ from autodrive_console.scenario_activation import ScenarioActivationTracker
 from autodrive_console.settings import SettingsStore
 from autodrive_console.software_inventory import SoftwareInventory, SoftwareInventoryError, SoftwareInventoryUnavailable
 from autodrive_console.supervisor import SupervisorClient
-from autodrive_console.tool_logging import ToolLogStore
+from autodrive_console.tool_logging import ToolLogConflict, ToolLogMissing, ToolLogStore
 from autodrive_console.tool_audit import BrowserEventRecorder, audit_request, inject_client_diagnostics
 from autodrive_console.upgrade_manager import UpgradeError, UpgradeManager
 from autodrive_console.video import ConsoleVideoRuntime, VideoConfigurationError, VideoManager, VideoRuntime
@@ -139,7 +139,7 @@ ACCEPTANCE_REPORT_FILENAME = re.compile(r"acceptance_[0-9a-f]{12}_\d{8}_\d{6}\.h
 REPORT_FILENAME = re.compile(
     r"(?:run_[0-9a-f]{12}_[^/]+|报告_\d{8}_\d{6}_[^/]+_[0-9a-f]{12}|acceptance_[0-9a-f]{12}_\d{8}_\d{6})\.html"
 )
-LOGS = ToolLogStore(WORKSPACE / "logs")
+LOGS = ToolLogStore(WORKSPACE / "logs", policy_path=CONFIG_DIR / "tool_logging.json")
 LOGGER = LOGS.configure()
 CLIENT_DIAGNOSTICS = BrowserEventRecorder()
 # Configure before constructors recover persisted jobs/runs and emit diagnostics.
@@ -359,6 +359,7 @@ def _close_console_resources(
             LOGGER.exception("关闭控制台资源失败：%s", label)
 
     close_one("原生报告回填", native_backfill_stop.set)
+    close_one("工具日志维护", LOGS.stop_maintenance)
     # Keep the console-owned video lifecycle explicit: this is the only
     # process family whose shutdown may briefly wait for encoder children.
     # Failure is isolated so an already replaced binary is still restarted.
@@ -755,7 +756,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         elif path == "/api/observation/active-map":
             # 地图切换标记只有一个短 ID，供实时页快速发现 map_server 生命周期
             # 切换；绝不通过此接口传输或轮询 OccupancyGrid 栅格数据。
-            self._json({"active_map_id": OBSERVATION.active_map_id()})
+            map_id = OBSERVATION.active_map_id()
+            payload = {"active_map_id": map_id}
+            if parse_qs(request.query).get("include_route") == ["true"]:
+                payload["navigation_route"] = OBSERVATION.navigation_route(map_id)
+            self._json(payload)
         elif path == "/api/observation/localization-status":
             self._json(LOCALIZATION_STATUS.status())
         elif path == "/api/observation/relocalization":
@@ -803,7 +808,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             else:
                 self._json({"entries": LOGS.entries(errors_only), "scope": "errors" if errors_only else "all"})
         elif path == "/api/tool-logs/files":
-            self._json({"files": LOGS.diagnostic_records()})
+            self._json({"files": LOGS.diagnostic_records(), "storage": LOGS.storage_status()})
         elif path == "/api/tool-logs/download":
             self._download_tool_log(request.query == "scope=errors")
         elif path.startswith("/api/tool-logs/files/") and path.endswith("/download"):
@@ -858,6 +863,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     @audit_request
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if path == "/api/tool-logs/cleanup" or (path.startswith("/api/tool-logs/files/") and path.endswith("/clear")):
+            self._manage_tool_log("POST", path)
+            return
         if path == "/api/tool-logs/client-events":
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
@@ -1608,6 +1616,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     @audit_request
     def do_PUT(self) -> None:
         path = urlparse(self.path).path
+        if path == "/api/tool-logs/retention":
+            self._manage_tool_log("PUT", path)
+            return
         if path == "/api/robot-logs/sources":
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
@@ -1754,7 +1765,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         except VehicleControlUnavailable as exc:
             self._json({"error": str(exc), "status": VEHICLE_CONTROL.status()}, HTTPStatus.SERVICE_UNAVAILABLE)
         except VehicleControlConflict as exc:
-            self._json({"error": str(exc), "status": VEHICLE_CONTROL.status()}, HTTPStatus.CONFLICT)
+            payload = {"error": str(exc), "status": VEHICLE_CONTROL.status()}
+            if getattr(exc, "code", None):
+                payload["code"] = exc.code
+            self._json(payload, HTTPStatus.CONFLICT)
         except (VehicleControlError, TypeError, ValueError, json.JSONDecodeError) as exc:
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
@@ -2217,6 +2231,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     @audit_request
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
+        if path.startswith("/api/tool-logs/files/"):
+            self._manage_tool_log("DELETE", path)
+            return
         if path.startswith("/api/deployments/") and "/map-projections" in path:
             self._map_projection_request("DELETE", path)
             return
@@ -2496,6 +2513,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         """Stream one manifest-backed bag directory without accepting a path."""
         try:
             directory = BAG_RECORDINGS.archive_path(archive_id)
+            filename = BAG_RECORDINGS.archive_download_name(archive_id)
         except BagRecordingError as exc:
             self.send_error(HTTPStatus.NOT_FOUND, str(exc))
             return
@@ -2504,7 +2522,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/x-tar")
-        self.send_header("Content-Disposition", f"attachment; filename=diagnostic-bag-{archive_id}.tar")
+        self.send_header("Content-Disposition", f"attachment; filename={filename}")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         try:
@@ -2515,7 +2533,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     resolved = target.resolve()
                     if not resolved.is_relative_to(directory):
                         continue
-                    bundle.add(str(target), arcname=str(Path(directory.name) / target.relative_to(directory)), recursive=False)
+                    bundle.add(str(target), arcname=str(Path(filename).stem / target.relative_to(directory)), recursive=False)
         except (OSError, tarfile.TarError, BrokenPipeError):
             LOGGER.warning("诊断录包下载中断：archive=%s", archive_id)
 
@@ -2545,41 +2563,109 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _download_tool_log(self, errors_only: bool) -> None:
-        if not errors_only:
-            # 现场诊断不能只给出 Python 主日志：点云、位姿和视频的真实故障通常在
-            # 预处理节点或原生编码器的 stderr 中。所有条目来自
-            # ToolLogStore 的固定白名单，不打包 logs/ 下的任意用户文件。
-            archive = io.BytesIO()
-            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
-                files = LOGS.diagnostic_files()
-                if files:
-                    for target in files:
-                        bundle.writestr(target.name, target.read_bytes())
+    def _manage_tool_log(self, method: str, path: str) -> None:
+        try:
+            length = int(self.headers.get('Content-Length', '0'))
+            if not 2 <= length <= 4096:
+                self.close_connection = True
+                raise ValueError('日志管理请求大小无效')
+            payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict):
+                raise ValueError('日志管理请求格式无效')
+            if method == 'PUT':
+                if set(payload) != {'policy'}:
+                    raise ValueError('日志保留设置格式无效')
+                LOGS.save_policy(payload['policy'])
+                result = LOGS.cleanup()
+            else:
+                if payload.get('confirm') is not True:
+                    raise ValueError('请先确认日志清理操作')
+                if path == '/api/tool-logs/cleanup':
+                    if set(payload) != {'mode', 'confirm'} or payload['mode'] not in {'expired', 'history'}:
+                        raise ValueError('日志整理范围无效')
+                    result = LOGS.cleanup(history=payload['mode'] == 'history')
                 else:
-                    bundle.writestr("README.txt", "尚无 Aletheia 诊断日志。\n")
-            body = archive.getvalue()
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/zip")
-            self.send_header("Content-Disposition", "attachment; filename=ry-aletheia-diagnostics.zip")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        target = LOGS.file(errors_only)
-        if not target.is_file():
-            body = b""
-        else:
-            body = target.read_bytes()
-        filename = "ry-aletheia-error.log"
+                    if set(payload) != {'file_id', 'confirm'}:
+                        raise ValueError('日志文件确认信息无效')
+                    name = unquote(path.removeprefix('/api/tool-logs/files/'))
+                    if method == 'POST':
+                        name = name.removesuffix('/clear')
+                        result = LOGS.clear_file(name, payload['file_id'])
+                    else:
+                        result = LOGS.delete_file(name, payload['file_id'])
+            LOGGER.info('工具日志管理完成：method=%s freed_bytes=%s', method, result.get('freed_bytes', 0))
+            self._json({**result, 'storage': LOGS.storage_status()})
+        except ToolLogConflict as exc:
+            self._json({'error': str(exc)}, HTTPStatus.CONFLICT)
+        except ToolLogMissing as exc:
+            self._json({'error': str(exc)}, HTTPStatus.NOT_FOUND)
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            self._json({'error': str(exc)}, HTTPStatus.BAD_REQUEST)
+        except OSError:
+            LOGGER.exception('工具日志管理失败')
+            self._json({'error': '日志管理失败，请检查目录权限或剩余空间。'}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    @staticmethod
+    def _copy_log_snapshot(source, output, size: int) -> None:
+        remaining = size
+        while remaining:
+            chunk = source.read(min(64 * 1024, remaining))
+            if not chunk:
+                raise OSError('日志快照已改变')
+            output.write(chunk)
+            remaining -= len(chunk)
+
+    def _stream_tool_log(self, source, size: int, filename: str, content_type='text/plain; charset=utf-8') -> None:
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Disposition", f"attachment; filename={filename}")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Disposition', f'attachment; filename={filename}')
+        self.send_header('Content-Length', str(size))
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Cache-Control', 'no-store')
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self._copy_log_snapshot(source, self.wfile, size)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+            audit = getattr(self, '_tool_audit', None)
+            if audit is not None:
+                audit.interrupted = True
+        except OSError:
+            self.close_connection = True
+            audit = getattr(self, '_tool_audit', None)
+            if audit is not None:
+                audit.response(HTTPStatus.OK, {'error': '工具日志快照传输未完成'})
+            LOGGER.warning('工具日志下载未完成：file=%s', filename)
+
+    def _download_tool_log(self, errors_only: bool) -> None:
+        if errors_only:
+            target = LOGS.diagnostic_file(LOGS.ERROR_NAME)
+            if target is None:
+                self._stream_tool_log(io.BytesIO(), 0, 'ry-aletheia-error.log')
+            else:
+                self._download_diagnostic_file(target)
+            return
+        try:
+            # Disk-backed staging bounds RAM even for a legacy gigabyte log.
+            # Each file has a read lease and an opening-length snapshot.
+            with tempfile.TemporaryFile(mode='w+b') as temporary:
+                with zipfile.ZipFile(temporary, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
+                    files = LOGS.diagnostic_files()
+                    if not files:
+                        bundle.writestr('README.txt', '尚无 Aletheia 诊断日志。\n')
+                    for target in files:
+                        try:
+                            with LOGS.open_diagnostic(target.name) as (source, size):
+                                with bundle.open(target.name, 'w', force_zip64=True) as output:
+                                    self._copy_log_snapshot(source, output, size)
+                        except ToolLogMissing:
+                            continue  # A history file may expire between list/open.
+                size = temporary.tell()
+                temporary.seek(0)
+                self._stream_tool_log(temporary, size, 'ry-aletheia-diagnostics.zip', 'application/zip')
+        except (OSError, ValueError):
+            LOGGER.exception('工具诊断包生成失败')
+            self._json({'error': '诊断包生成失败，请检查日志权限或临时空间。'}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _download_diagnostic_file(self, target: Path | None) -> None:
         """Download exactly one whitelisted diagnostic file, never a raw path."""
@@ -2590,17 +2676,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._json({"error": "诊断日志不存在"}, HTTPStatus.NOT_FOUND)
             return
         try:
-            body = target.read_bytes()
-        except OSError:
+            # Release the live-file lease before a slow Wi-Fi client receives
+            # bytes. Network stalls must not pin an ever-growing active log.
+            with tempfile.TemporaryFile(mode='w+b') as snapshot:
+                with LOGS.open_diagnostic(target.name) as (source, size):
+                    self._copy_log_snapshot(source, snapshot, size)
+                snapshot.seek(0)
+                self._stream_tool_log(snapshot, size, target.name)
+        except (OSError, ValueError):
             self._json({"error": "诊断日志不可读"}, HTTPStatus.NOT_FOUND)
-            return
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Disposition", f"attachment; filename={target.name}")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        self.wfile.write(body)
 
     def _download_tracked_robot_log_file(self, download_id: str) -> None:
         """Serve one short-lived browser download while exposing metadata-only progress."""
@@ -3109,6 +3193,7 @@ def run_console() -> None:
     # The HTTP handler may start/stop only this parent-owned controller; no
     # Supervisor or system service participates in the optional video path.
     server.video_runtime = video_runtime
+    LOGS.start_maintenance()
     video_runtime.start_if_enabled()
     print("RY Aletheia 自动测试平台：http://0.0.0.0:8087")
     print("局域网访问：http://<小车IP>:8087")

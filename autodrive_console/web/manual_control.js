@@ -19,6 +19,11 @@ import {
   let inputTimer = null;
   let statusTimer = null;
   let heartbeatTimer = null;
+  let statusRequestPending = false;
+  let heartbeatRequestPending = false;
+  let motionRequest = null;
+  let stopRequest = null;
+  let pendingVector = null;
   let lastStatus = null;
   let adoptingExistingMiniapp = false;
   let speedTimer = null;
@@ -41,7 +46,29 @@ import {
     { range: "stopAccRange", number: "stopAcc", output: "stopAccValue", minimum: 20, maximum: 2000 },
   ];
 
-  const request = (path, payload, keepalive = false) => requestVehicleControl(path, payload, keepalive);
+  let requestRevision = 0;
+  let renderedRevision = 0;
+  const responseRevisions = new WeakMap();
+  const request = async (path, payload, keepalive = false, options = {}) => {
+    const revision = ++requestRevision;
+    try {
+      const state = await requestVehicleControl(path, payload, keepalive, options);
+      if (state && typeof state === "object") responseRevisions.set(state, revision);
+      return state;
+    } catch (error) {
+      responseRevisions.set(error, revision);
+      if (error.vehicleState && typeof error.vehicleState === "object") responseRevisions.set(error.vehicleState, revision);
+      if (payload?.session_id === sessionId &&
+          (error.sessionInvalid || error.status === 409 && error.vehicleState?.session?.present === false)) {
+        clearHeld();
+        sessionId = null;
+        nextInputSequence();
+        render(lastStatus);
+      }
+      throw error;
+    }
+  };
+  const responseIsCurrent = value => (responseRevisions.get(value) ?? renderedRevision) >= renderedRevision;
 
   function loadKeyboardBindings() {
     try {
@@ -309,13 +336,16 @@ import {
     }
     releaseButton.disabled = state !== "triggered" || release === "waiting_confirmation";
     releaseButton.textContent = release === "waiting_confirmation" ? "正在确认解除" : "解除急停";
-    if (state !== "normal") clearHeld();
+    if (state !== "normal" || pending) cancelHeldMotion();
     if (release === "confirmed" && previousEmergencyRelease !== "confirmed") message("已由车端急停状态确认解除。", "success");
     previousEmergencyRelease = release;
   }
 
   function render(state) {
-    if (!state) return;
+    if (!state) return false;
+    const revision = responseRevisions.get(state);
+    if (revision !== undefined && revision < renderedRevision) return false;
+    if (revision !== undefined) renderedRevision = revision;
     lastStatus = state;
     const switching = Boolean(state.transition);
     const isManual = state.actual_source === "miniapp";
@@ -336,6 +366,7 @@ import {
     const requestNavigation = $("requestNavigation");
     const exit = $("exitManual");
     const ready = Boolean(state.manual_ready && sessionId && !keyBindingDialogPending);
+    if (!ready) cancelHeldMotion();
     renderSpeed(state.speed, ready);
     enter.disabled = !state.can_begin_manual || switching;
     enter.textContent = isManual ? "开始手动控制" : "进入手动控制";
@@ -389,24 +420,31 @@ import {
       }
     }
     if (state.transition_error) message(state.transition_error, "error");
+    return true;
   }
 
   async function refresh() {
+    if (statusRequestPending) return;
+    statusRequestPending = true;
     try {
       const state = await request("/api/vehicle-control");
-      render(state);
+      if (!render(state)) return;
       // 若现场已先把控制源切到了 miniapp，页面打开时直接建立 Aletheia
       // 的短生命期会话。该动作只发送 STOP，不发送任何非零速度。
       if (state.actual_source === "miniapp" && state.can_begin_manual && !sessionId && !adoptingExistingMiniapp) {
         adoptExistingMiniapp();
       }
     } catch (error) {
+      if (!responseIsCurrent(error)) return;
       if (error.vehicleState) render(error.vehicleState);
       message(error.message, "error");
+    } finally {
+      statusRequestPending = false;
     }
   }
 
   function clearHeld() {
+    pendingVector = null;
     heldInputs.clear();
     heldVector = { linearRatio: 0, angularRatio: 0 };
     if (inputTimer) window.clearInterval(inputTimer);
@@ -414,13 +452,22 @@ import {
     driveButtons.forEach((button) => button.classList.remove("is-held"));
   }
 
-  async function stop() {
-    const wasMoving = heldVector.linearRatio !== 0 || heldVector.angularRatio !== 0;
+  function cancelHeldMotion() {
+    const needsFence = heldVector.linearRatio || heldVector.angularRatio || pendingVector ||
+      (motionRequest && motionRequest.sequence === inputSequence);
     clearHeld();
+    // Clearing local input alone cannot cancel an HTTP motion already sent.
+    // Fence it once, even while emergency/source confirmation is unavailable.
+    if (needsFence && sessionId) return sendVector({ linearRatio: 0, angularRatio: 0 }, nextInputSequence());
+    return null;
+  }
+
+  async function stop() {
+    const fenced = cancelHeldMotion();
     if (!sessionId) return true;
     // Use a newer zero vector rather than an unordered legacy STOP request:
     // any in-flight earlier movement request is then ignored by the Backend.
-    if (wasMoving) return sendVector({ linearRatio: 0, angularRatio: 0 }, nextInputSequence());
+    if (fenced) return fenced;
     else {
       try {
         render(await request("/api/vehicle-control/stop", { session_id: sessionId }));
@@ -521,22 +568,48 @@ import {
     driveButtons.forEach((button) => button.classList.toggle("is-held", activeCommands.has(button.dataset.command)));
   }
 
-  async function sendVector(vector, sequence) {
+  function sendVector(vector, sequence) {
+    const stopping = vector.linearRatio === 0 && vector.angularRatio === 0;
+    if (stopping) {
+      pendingVector = null;
+      if (stopRequest) return stopRequest.promise;
+    } else if (motionRequest || stopRequest) {
+      pendingVector = { vector, sequence };
+      return Promise.resolve(false);
+    }
+    const flight = { sequence };
+    if (stopping) stopRequest = flight;
+    else motionRequest = flight;
+    flight.promise = performVectorRequest(vector, sequence).finally(() => {
+      if (stopping) { if (stopRequest === flight) stopRequest = null; }
+      else if (motionRequest === flight) motionRequest = null;
+      if (!motionRequest && !stopRequest && pendingVector) {
+        const queued = pendingVector;
+        pendingVector = null;
+        if (queued.sequence === inputSequence && sessionId && lastStatus?.manual_ready &&
+            (heldVector.linearRatio || heldVector.angularRatio)) sendVector(queued.vector, queued.sequence);
+      }
+    });
+    return flight.promise;
+  }
+
+  async function performVectorRequest(vector, sequence) {
     if (!sessionId) return false;
+    const requestSession = sessionId;
     try {
       const state = await request("/api/vehicle-control/vector", {
         session_id: sessionId,
         linear_ratio: vector.linearRatio,
         angular_ratio: vector.angularRatio,
         input_sequence: sequence,
-      });
+      }, false, { timeoutMs: Math.min(1000, Math.max(100, Number(lastStatus?.safety?.input_timeout_ms) || 350)) });
       // A response to an older overlapping request must not overwrite the UI
       // state already confirmed for a newer input.
       if (sequence === inputSequence) render(state);
       return true;
     } catch (error) {
-      if (sequence !== inputSequence) return false;
-      clearHeld();
+      if (sequence !== inputSequence || requestSession !== sessionId) return false;
+      cancelHeldMotion();
       if (error.vehicleState) render(error.vehicleState);
       message(error.message, "error");
       return false;
@@ -621,16 +694,20 @@ import {
   }
 
   async function heartbeat() {
-    if (!sessionId) return;
+    if (!sessionId || heartbeatRequestPending || motionRequest || stopRequest) return;
+    heartbeatRequestPending = true;
     try { render(await request("/api/vehicle-control/heartbeat", { session_id: sessionId })); }
-    catch (error) { clearHeld(); if (error.vehicleState) render(error.vehicleState); message(error.message, "error"); }
+    catch (error) { if (!responseIsCurrent(error)) return; cancelHeldMotion(); if (error.vehicleState) render(error.vehicleState); message(error.message, "error"); }
+    finally { heartbeatRequestPending = false; }
   }
 
   function leavePageSafely() {
     clearHeld();
     if (!sessionId) return;
     const payload = new Blob([JSON.stringify({ session_id: sessionId })], { type: "application/json" });
-    navigator.sendBeacon?.("/api/vehicle-control/exit", payload);
+    sessionId = null;
+    nextInputSequence();
+    navigator.sendBeacon?.("/api/vehicle-control/release", payload);
   }
 
   $("enterManual").addEventListener("click", enterManual);

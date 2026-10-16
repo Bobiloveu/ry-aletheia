@@ -8,7 +8,7 @@ function harness(request = async () => ({})) {
   const c = vm.createContext({ request, $:()=>undefined, relocalizationHandoffTimer:undefined, performance: {now: () => now},
     LIVE_POSE_FALLBACK_MS: 450, window: {confirm:()=>true,clearTimeout(){}, setTimeout(fn,ms){if(ms===150)fn();return 1;}},
     relocalizationStatus: {phase:'idle', can_begin:true}, relocalizationPreview:undefined,
-    relocalizationEditing:false,relocalizationDraftRevision:0,relocalizationSubmittedRevision:0,
+    relocalizationPanelOpen:true,relocalizationEditing:false,relocalizationDraftRevision:0,relocalizationSubmittedRevision:0,
     relocalizationPreviewMapId:undefined,relocalizationWorkflowPending:false,
     relocalizationSubmissionUncertain:false,relocalizationOutcomePending:false,relocalizationRequestId:undefined,
     relocalizationMapUnconfirmed:false,tfVehiclePose:undefined,renderedVehiclePose:undefined,latestLiveMotion:undefined,
@@ -126,6 +126,89 @@ function gestures(c, rotation, pixelsPerMeter) {
   return (name,point,button=0,extra={})=>listeners[name]({pointerId:1,pointerType:'mouse',button,
     clientX:point.x+80,clientY:point.y+120,deltaY:100,preventDefault(){},stopPropagation(){},...extra});
 }
+function panelControls(c) {
+  const nodes = {};
+  const documentListeners = {};
+  for (const id of ['relocalizationControl', 'relocalizationToggle', 'relocalizationPanel']) {
+    nodes[id] = { hidden: id === 'relocalizationPanel', listeners: {},
+      addEventListener(name, fn) { this.listeners[name] = fn; }, setAttribute() {}, focus() {} };
+  }
+  const lookup = c.$;
+  c.$ = id => nodes[id] || lookup(id);
+  c.relocalizationPanelOpen = false;
+  c.document = { addEventListener(name, fn) { documentListeners[name] = fn; } };
+  c.MAP_OVERLAY_OPEN_EVENT = 'map-overlay-open';
+  c.announceMapOverlayOpen = () => {};
+  c.createRelocalizationConfigPicker = () => c.relocalizationConfigPicker;
+  c.relocalizationConfigPicker.close = () => {};
+  c.window.setInterval = () => 1;
+  c.RELOCALIZATION_STATUS_REFRESH_MS = 1000;
+  const a = source.indexOf('function setupRelocalizationControl()');
+  const b = source.indexOf('function closeMapMarkerMenu()', a);
+  vm.runInContext(source.slice(a, b), c);
+  c.setupRelocalizationControl();
+  return { toggle: () => nodes.relocalizationToggle.listeners.click(), nodes, documentListeners };
+}
+test('vehicle move and rotation require opening the manual relocalization panel', () => {
+  const c = harness(); const event = gestures(c, 0, 15); const panel = panelControls(c);
+  const point = { x: 400, y: 300 };
+  assert.equal(c.canEditRelocalization(), false);
+  for (const button of [0, 2]) {
+    event('pointerdown', point, button);
+    assert.equal(c.relocalizationDrag, undefined);
+    assert.equal(c.relocalizationPreview, undefined);
+    event('pointerup', point, button);
+  }
+  panel.toggle();
+  assert.equal(panel.nodes.relocalizationPanel.hidden, false);
+  assert.equal(c.canEditRelocalization(), true);
+  for (const phase of ['idle', 'calibrating', 'failed', 'unavailable', 'calling_service', 'switching_to_miniapp', 'switching_to_navigation']) {
+    c.applyRelocalizationStatus({ phase });
+    event('pointerdown', point);
+    assert.equal(c.relocalizationDrag?.mode, 'move', phase);
+    event('pointerup', point);
+    event('pointerdown', point, 2);
+    assert.equal(c.relocalizationDrag?.mode, 'rotate', phase);
+    event('pointerup', point, 2);
+  }
+});
+test('closing the manual panel ends a drag and blocks editing until reopened', () => {
+  const c = harness(); const event = gestures(c, 0, 15); const panel = panelControls(c);
+  panel.toggle(); event('pointerdown', { x: 400, y: 300 });
+  assert.ok(c.relocalizationDrag);
+  const original = { ...c.relocalizationPreview };
+  panel.toggle();
+  assert.equal(c.relocalizationDrag, undefined);
+  assert.equal(c.canEditRelocalization(), false);
+  event('pointermove', { x: 450, y: 320 });
+  assert.deepEqual({ ...c.relocalizationPreview }, original);
+  panel.toggle(); event('pointerdown', { x: 400, y: 300 });
+  assert.equal(c.relocalizationDrag?.mode, 'move');
+});
+test('opening another map overlay cancels vehicle placement and locks the closed manual panel', () => {
+  const c = harness(); const event = gestures(c, 0, 15); const panel = panelControls(c);
+  panel.toggle();
+  const original = { ...c.relocalizationPreview };
+  c.setRelocalizationPlacement(true);
+  event('pointermove', { x: 500, y: 400 });
+  panel.documentListeners['map-overlay-open']({ detail: 'markers' });
+  assert.equal(panel.nodes.relocalizationPanel.hidden, true);
+  assert.equal(c.relocalizationPlacing, false);
+  assert.equal(c.canEditRelocalization(), false);
+  assert.deepEqual({ ...c.relocalizationPreview }, original);
+});
+test('Escape in another overlay cannot discard the closed manual panel preview or configuration', () => {
+  const c = harness(); gestures(c, 0, 15); const panel = panelControls(c);
+  panel.toggle(); c.editRelocalizationPreview({ x: 7, y: 8, yaw: 1 });
+  let resets = 0; c.relocalizationConfigPicker.reset = () => { resets++; };
+  panel.documentListeners['map-overlay-open']({ detail: 'markers' });
+  panel.documentListeners.keydown({ key: 'Escape' });
+  assert.deepEqual({ ...c.relocalizationPreview }, { x: 7, y: 8, yaw: 1 });
+  assert.equal(resets, 0);
+  panel.toggle(); panel.documentListeners.keydown({ key: 'Escape' });
+  assert.equal(c.relocalizationPreview, undefined);
+  assert.equal(resets, 1);
+});
 test('scrolling the localization configuration panel must not zoom the map or consume its wheel',()=>{
   const c=harness();const event=gestures(c,0,15);c.mapView.pixelsPerMeter=15;
   event('wheel',{x:450,y:350},0,{target:{closest:()=>({})},
@@ -211,18 +294,35 @@ test('a touch grab of the vehicle drags the local preview rather than panning th
   event('pointerup',{x:430,y:300},0,{pointerType:'touch'});
   assert.equal(c.relocalizationDrag,undefined);
 });
-test('recovery preview stays visible on a very large map without resizing actual vehicle observation',()=>{
-  const c=harness();gestures(c,0,.5);
-  const element={style:{},hidden:true,setAttribute(){}};
-  c.$=()=>element;
-  const a=source.indexOf('function syncVehicleLayer('),b=source.indexOf('function vehiclePoseInMap(',a);
-  vm.runInContext(source.slice(a,b),c);
-  c.relocalizationPreview={x:7,y:8,yaw:0};
-  c.syncVehicleLayer(c.previewVehiclePose(undefined),c.currentMapLayout());
-  assert.ok(parseFloat(element.style.height)>=32);
-  c.relocalizationPreview=undefined;
-  c.syncVehicleLayer({position:{x:7,y:8},yaw:0},c.currentMapLayout());
-  assert.equal(parseFloat(element.style.height),.5);
+for (const scale of [.5, 8, 40, 80]) {
+  test(`dragging and rotating a relocation preview preserves the real metric footprint at ${scale}px/m`,()=>{
+    const c=harness();gestures(c,.7,scale);
+    c.vehicleModel={length_m:1.2,width_m:.75};
+    const element={style:{},hidden:true,setAttribute(){}};
+    c.$=()=>element;
+    const a=source.indexOf('function syncVehicleLayer('),b=source.indexOf('function vehiclePoseInMap(',a);
+    vm.runInContext(source.slice(a,b),c);
+    c.syncVehicleLayer({position:{x:10,y:20},yaw:0},c.currentMapLayout());
+    const initial={width:element.style.width,height:element.style.height};
+    for (const pose of [{x:7,y:8,yaw:0},{x:-4,y:12,yaw:1.7},{x:18,y:-3,yaw:-2.1}]) {
+      c.editRelocalizationPreview(pose);
+      c.syncVehicleLayer(c.previewVehiclePose(undefined),c.currentMapLayout());
+      assert.equal(element.style.width,initial.width);
+      assert.equal(element.style.height,initial.height);
+      assert.ok(Math.abs(parseFloat(element.style.height)-1.2*scale)<1e-10);
+      assert.ok(Math.abs(parseFloat(element.style.width)-.75*scale)<1e-10);
+      assert.equal(element.hidden,false);
+    }
+  });
+}
+test('a metric-sized preview remains draggable from its larger invisible hit area on an overview',()=>{
+  const c=harness();const event=gestures(c,0,.5);
+  c.setRelocalizationPreview({x:10,y:20,yaw:0});
+  // The visible footprint is under one pixel; a grab 20px away still works.
+  event('pointerdown',{x:420,y:300});
+  assert.equal(c.relocalizationDrag?.mode,'move');
+  event('pointermove',{x:430,y:300});event('pointerup',{x:430,y:300});
+  assert.ok(Math.abs(c.relocalizationPreview.x-30)<1e-8);
 });
 for (const [rotation,scale] of [[0,15],[.7,45],[-1.3,8]]) {
   test(`grab offset survives nonzero origin, rotation ${rotation} and zoom ${scale}`,()=>{

@@ -167,6 +167,33 @@ void pipeline_preserves_source_stride_and_target_budget() {
   REQUIRE(threw);
 }
 
+void nvenc_vbr_candidate_keeps_budget_and_low_latency() {
+  PipelineConfig config{"/private/gst-launch", "nvh264enc", "rtsp://127.0.0.1:8554/front", 640, 480, 15, 1200};
+  const FrameLayout layout{640, 480, 1920, "rgb"};
+  REQUIRE(contains(pipeline_arguments(config, layout), "rc-mode=cbr"));
+  config.nvenc_rate_control = "vbr";
+  auto args = pipeline_arguments(config, layout);
+  REQUIRE(contains(args, "rc-mode=vbr") && !contains(args, "rc-mode=cbr"));
+  REQUIRE(contains(args, "bitrate=1200") && contains(args, "max-bitrate=1200"));
+  REQUIRE(contains(args, "const-quality=23"));
+  REQUIRE(contains(args, "framerate=15/1") && contains(args, "gop-size=15"));
+  REQUIRE(contains(args, "bframes=0") && contains(args, "zerolatency=true"));
+  REQUIRE(contains(args, "video/x-h264,profile=constrained-baseline"));
+  REQUIRE(contains(args, "drop-buffer-flags=discont") && contains(args, "sync=true"));
+  REQUIRE(std::count(args.begin(), args.end(), "queue") == 1);
+  config.fps = 10; config.bitrate_kbps = 800;
+  args = pipeline_arguments(config, layout);
+  REQUIRE(contains(args, "max-bitrate=800") && contains(args, "framerate=10/1"));
+  config.encoder = "vaapih264enc";
+  args = pipeline_arguments(config, layout);
+  REQUIRE(contains(args, "keyframe-period=10"));
+  REQUIRE(!contains(args, "const-quality=23") && !contains(args, "rc-mode=vbr"));
+  config.encoder = "nvh264enc"; config.nvenc_rate_control = "invalid";
+  bool threw = false;
+  try { pipeline_arguments(config, layout); } catch (const std::invalid_argument &) { threw = true; }
+  REQUIRE(threw);
+}
+
 void latest_slot_decodes_only_at_output_budget() {
   LatestFrameSlot<std::shared_ptr<std::vector<uint8_t>>> slot;
   FrameBudget budget(15);
@@ -225,6 +252,7 @@ int main() {
     pipeline_preserves_source_stride_and_target_budget();
     nvenc_waits_for_live_clock_before_dropping_preroll_frame();
     latest_slot_decodes_only_at_output_budget();
+    nvenc_vbr_candidate_keeps_budget_and_low_latency();
     std::cout << "video frame/pipeline tests passed\n";
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';

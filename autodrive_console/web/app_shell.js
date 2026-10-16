@@ -2,45 +2,62 @@
   const themeKey = 'ry-aletheia-theme';
   // Desktop navigation has one source of truth so future entries are added to
   // their information group instead of being injected into every page shell.
+  // Original sidebar glyphs share the approved 24px grid and optical weight.
+  // Inline geometry inherits currentColor and needs no network or icon font.
+  const NAVIGATION_ICONS = Object.freeze({
+    "dashboard": "<rect x=\"3.5\" y=\"3.5\" width=\"7\" height=\"7\" rx=\"1.8\"/><rect x=\"3.5\" y=\"13.5\" width=\"7\" height=\"7\" rx=\"1.8\"/><rect x=\"13.5\" y=\"13.5\" width=\"7\" height=\"7\" rx=\"1.8\"/><path d=\"m15 3.9 5.2 3.1-5.2 3.1Z\" fill=\"currentColor\" stroke=\"none\"/>",
+    "manual-control": "<rect x=\"4\" y=\"15.5\" width=\"16\" height=\"5\" rx=\"2.5\"/><path d=\"M12 9v6.5\"/><circle cx=\"12\" cy=\"6\" r=\"3\"/><path d=\"M17 18h.01\"/>",
+    "deployment": "<path d=\"m9 3.8-5.5 3v13.4L9 17.3l6 3 5.5-3V3.8L15 6.7Zm0 0v13.5m6-10.6v13.6\"/>",
+    "acceptance": "<path d=\"M8 5.5H6.5A2 2 0 0 0 4.5 7.5v12a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-12a2 2 0 0 0-2-2H16\"/><rect x=\"8\" y=\"2.5\" width=\"8\" height=\"5\" rx=\"1.6\"/><path d=\"m8 14 2.5 2.5 5.5-6\"/>",
+    "observation": "<path d=\"M8 3.5H6a2.5 2.5 0 0 0-2.5 2.5v2m13-4.5H18A2.5 2.5 0 0 1 20.5 6v2M3.5 16v2A2.5 2.5 0 0 0 6 20.5h2m8 0h2a2.5 2.5 0 0 0 2.5-2.5v-2\"/><circle cx=\"12\" cy=\"12\" r=\"4\"/><circle cx=\"12\" cy=\"12\" r=\"1.1\" fill=\"currentColor\" stroke=\"none\"/>",
+    "test-cases": "<path d=\"M16.5 3.5h-11a2 2 0 0 0-2 2v11\"/><rect x=\"7\" y=\"7\" width=\"13.5\" height=\"13.5\" rx=\"2\"/><path d=\"m10 12 1 1 2-2m2.5 1h2M10 16.5h7.5\"/>",
+    "reports": "<rect x=\"4\" y=\"3\" width=\"16\" height=\"18\" rx=\"2.5\"/><path d=\"M8 16v-4m4 4V8m4 8v-6\"/>",
+    "bag-recording": "<rect x=\"3.5\" y=\"5\" width=\"17\" height=\"14\" rx=\"2.5\"/><path d=\"M6.5 12H8l1.5-3.5 3 7 1.5-3.5h3.5\"/><circle cx=\"17.5\" cy=\"8\" r=\"1\" stroke=\"none\" fill=\"currentColor\"/>",
+    "robot-logs": "<path d=\"M13.5 3.5H6a1.5 1.5 0 0 0-1.5 1.5v14A1.5 1.5 0 0 0 6 20.5h12a1.5 1.5 0 0 0 1.5-1.5V9.5Zm0 0V8A1.5 1.5 0 0 0 15 9.5h4.5M8 13h8m-8 4h5\"/>",
+    "settings": "<path d=\"M4 6.5h3m4 0h9M4 12h9m4 0h3M4 17.5h3m4 0h9\"/><circle cx=\"9\" cy=\"6.5\" r=\"2\"/><circle cx=\"15\" cy=\"12\" r=\"2\"/><circle cx=\"9\" cy=\"17.5\" r=\"2\"/>",
+    "software": "<path d=\"m12 3 8.5 4.8v8.4L12 21l-8.5-4.8V7.8Zm-8.5 4.8L12 12.6l8.5-4.8M12 12.6V21m-4.25-15.6 8.5 4.8\"/>",
+  });
+  const navigationIcon = (name) =>
+    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" focusable="false">${NAVIGATION_ICONS[name]}</svg>`;
   const NAVIGATION_GROUPS = [
     {
       label: "作业",
       items: [
-        { href: "/", label: "任务指挥台", icon: "⌘" },
-        { href: "/manual-control.html", label: "手动控制", icon: "⌁" },
+        { href: "/", label: "任务指挥台", icon: "dashboard" },
+        { href: "/manual-control.html", label: "手动控制", icon: "manual-control" },
       ],
     },
     {
       label: "部署与验收",
       items: [
-        { href: "/deployment.html", label: "部署建图", icon: "◇" },
-        { href: "/acceptance-test.html", label: "部署验收", icon: "✓" },
+        { href: "/deployment.html", label: "部署建图", icon: "deployment" },
+        { href: "/acceptance-test.html", label: "部署验收", icon: "acceptance" },
       ],
     },
     {
       label: "测试与诊断",
       items: [
-        { href: "/live-observation.html", label: "实时运行观测", icon: "◉" },
-        { href: "/case-library.html", label: "测试用例管理", icon: "▤" },
+        { href: "/live-observation.html", label: "实时运行观测", icon: "observation" },
+        { href: "/case-library.html", label: "测试用例管理", icon: "test-cases" },
       ],
     },
     {
       label: "记录与分析",
       items: [
-        { href: "/reports.html", label: "报告中心", icon: "◫" },
-        { href: "/bag-recordings.html", label: "诊断录包", icon: "◌" },
+        { href: "/reports.html", label: "报告中心", icon: "reports" },
+        { href: "/bag-recordings.html", label: "诊断录包", icon: "bag-recording" },
         {
           href: "/robot-logs.html",
           label: "机器人日志",
-          icon: '<svg viewBox="0 0 16 16" focusable="false"><path d="M3 1.5h7l3 3v10H3zM10 1.5v3h3M5.5 8h5M5.5 10.5h5"/></svg>',
+          icon: "robot-logs",
         },
       ],
     },
     {
       label: "系统",
       items: [
-        { href: "/runtime-settings.html", label: "运行配置", icon: "⚙" },
-        { href: "/software-inventory.html", label: "软件资产", icon: "▦" },
+        { href: "/runtime-settings.html", label: "运行配置", icon: "settings" },
+        { href: "/software-inventory.html", label: "软件资产", icon: "software" },
       ],
     },
   ];
@@ -81,7 +98,7 @@
       group.items.forEach((item) => {
         const link = document.createElement('a');
         link.href = item.href;
-        link.innerHTML = `<span aria-hidden="true">${item.icon}</span>${item.label}`;
+        link.innerHTML = `<span class="nav-icon" aria-hidden="true">${navigationIcon(item.icon)}</span>${item.label}`;
         entries.append(link);
       });
       section.append(entries);

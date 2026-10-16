@@ -12,14 +12,16 @@ const size = (bytes) => {
   return `${(value / 1024 ** 3).toFixed(2)} GiB`;
 };
 function statusLabel(status) { return status === 'passed' ? '审查通过' : status === 'warning' ? '审查警告' : '审查失败 / 未完成'; }
+function formatStartedAt(value) {
+  const match = typeof value === 'string' && value.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:[+-]\d{2}:\d{2}|Z)?$/);
+  return match ? `${match[1]} ${match[2]}` : '开始时间未知';
+}
 function createCard(archive) {
   const card = document.createElement('article'); card.className = 'archive-card';
   const info = document.createElement('div');
   const title = document.createElement('h3'); title.textContent = text(archive.display_name); info.append(title);
   const detail = document.createElement('p');
-  detail.textContent = archive.source === 'manual'
-    ? `手动场景${archive.label ? ` · ${archive.label}` : ''} · ${text(archive.started_at)}`
-    : `${text(archive.case_name)} · T-${String(archive.attempt_index ?? '—').padStart(3, '0')} · ${text(archive.started_at)}`;
+  detail.textContent = `${archive.source === 'manual' ? '手动录制' : archive.attempt_index == null ? '录制未完成' : '测试录制'} · ${formatStartedAt(archive.started_at)}`;
   info.append(detail);
   const meta = document.createElement('div'); meta.className = 'archive-meta';
   [size(archive.total_size_bytes), text(archive.compression)].forEach(value => { const item = document.createElement('span'); item.textContent = value; meta.append(item); });
@@ -53,10 +55,19 @@ async function load() {
   loadInFlight = true;
   $('pageState').textContent = '读取中';
   try {
-    const [data, manualData] = await Promise.all([requestJson('/api/bag-recordings'), requestJson('/api/bag-recordings/manual')]); const archives = Array.isArray(data.archives) ? data.archives : [];
-    $('archiveList').replaceChildren(...(archives.length ? archives.map(createCard) : [Object.assign(document.createElement('p'), { textContent: '尚无诊断录包归档。' })]));
-    $('archiveCount').textContent = archives.length; $('archiveBytes').textContent = size(archives.reduce((sum, item) => sum + (Number(item.total_size_bytes) || 0), 0)); $('archiveAttention').textContent = archives.filter(item => item.audit_status !== 'passed').length; $('pageState').textContent = '已更新';
-    renderManualRecording(manualData.manual);
+    const [archiveResult, manualResult] = await Promise.allSettled([requestJson('/api/bag-recordings'), requestJson('/api/bag-recordings/manual')]);
+    if (archiveResult.status === 'fulfilled') {
+      const archives = Array.isArray(archiveResult.value.archives) ? archiveResult.value.archives : [];
+      $('archiveList').replaceChildren(...(archives.length ? archives.map(createCard) : [Object.assign(document.createElement('p'), { textContent: '尚无诊断录包归档。' })]));
+      $('archiveCount').textContent = archives.length; $('archiveBytes').textContent = size(archives.reduce((sum, item) => sum + (Number(item.total_size_bytes) || 0), 0)); $('archiveAttention').textContent = archives.filter(item => item.audit_status !== 'passed').length;
+    } else {
+      $('archiveList').textContent = `无法读取归档：${archiveResult.reason.message}`;
+      ['archiveCount', 'archiveBytes', 'archiveAttention'].forEach(id => { $(id).textContent = '—'; });
+    }
+    if (manualResult.status === 'fulfilled') renderManualRecording(manualResult.value.manual);
+    else $('manualRecordingSummary').textContent = '暂时无法读取手动录制状态，请刷新重试。';
+    const failures = [archiveResult, manualResult].filter(result => result.status === 'rejected').length;
+    $('pageState').textContent = failures === 0 ? '已更新' : failures === 1 ? '部分更新' : '读取失败';
   } catch (error) { $('archiveList').textContent = `无法读取归档：${error.message}`; $('manualRecordingSummary').textContent = '暂时无法读取手动录制状态。'; $('pageState').textContent = '读取失败'; }
   finally { loadInFlight = false; }
 }

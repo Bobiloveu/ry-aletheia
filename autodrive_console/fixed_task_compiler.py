@@ -26,15 +26,17 @@ from .task_path import TASK_TRANSITION_SPEED_MODES, return_yaw
 from .fixed_multi_export import multi_layout, multi_fragments, merge_multi_line_previews
 
 
-def _filename_token(value: str, *, byte_limit: int = 72, fallback: str = 'task_line') -> str:
-    token = ''.join(c if c.isalnum() or c in '_-' else '_' for c in value)
+def _filename_token(value: str, *, byte_limit: int = 72, fallback: str = 'task_line', ascii_only: bool = False) -> str:
+    token = ''.join(c if (c.isalnum() and (not ascii_only or c.isascii())) or c in '_-' else '_' for c in value)
     token = re.sub('_+', '_', token).strip('_-')
     return token.encode('utf-8')[:byte_limit].decode('utf-8', errors='ignore').rstrip('_-') or fallback
 
 
-def _export_line_name(project: dict, line: dict) -> str:
+def _export_line_name(project: dict, line: dict, *, ascii_only: bool = False) -> str:
     """Readable project-local namespace, including sanitized-name collisions."""
-    entries = [(item['id'], _filename_token(item['name'])) for item in project.get('task_lines', [])]
+    entries = [(item['id'], _filename_token(item['name'], ascii_only=ascii_only,
+                fallback=f'line_{index:02d}' if ascii_only else 'task_line'))
+               for index, item in enumerate(project.get('task_lines', []), 1)]
     reserved = {name.casefold() for _, name in entries}
     used = set()
     for identifier, base in entries:
@@ -103,6 +105,9 @@ def _scope_shared_ferry(project: dict, line: dict) -> dict:
         if map_id not in used or binding.get('type') != 'ferry' or binding.get('building') or binding.get('unit'):
             scoped.append(binding)
             continue
+        if len(used) == 1:
+            scoped.append(binding)
+            continue
         identities = {(other['building'], other['unit']) for other in bindings
                       if other.get('map_asset_id') in used and other.get('type') in {'floor', 'indoor'}
                       and other.get('building') and other.get('unit')
@@ -154,6 +159,7 @@ class _Compiler:
         self.site = tc._site_id(self.assets[self.start['map_asset_id']], root)
         self.prefix = 'fl_' + sha256(line['id'].encode()).hexdigest()[:12]
         self.export_line_name = _export_line_name(project, line)
+        self.runtime_line_name = _export_line_name(project, line, ascii_only=True)
         self.export_task_name = f"{_filename_token(self.community, byte_limit=120, fallback='community')}_{self.export_line_name}"
         self.action_labels: dict[str, str] = {}
         self.bindings: dict[str, dict] = {}
@@ -177,7 +183,8 @@ class _Compiler:
             if len(matches) != 1:
                 raise tc.CompilationError('线路地图必须有唯一有效的自动定位绑定')
             b = matches[0]
-            if not b.get('building') or not b.get('unit'):
+            global_ferry = b.get('type') == 'ferry' and not b.get('building') and not b.get('unit')
+            if (not b.get('building') or not b.get('unit')) and not global_ferry:
                 raise tc.CompilationError('固定线路尚不支持未明确楼栋单元的地图连接')
             tc._source_path(self.assets[map_id], self.root)
             self.bindings[map_id] = b
@@ -293,7 +300,7 @@ class _Compiler:
             label = self.action_labels.get(identifier)
             if not label:
                 raise tc.CompilationError('行为树缺少导出名称')
-            name = f'{ordinal:0{width}d}_{label}_{self.export_line_name}'
+            name = f'{ordinal:0{width}d}_{label}_{self.runtime_line_name}'
             old = self.artifacts.pop(f'waypoint_tasks/{self.site}/{identifier}.xml')
             tc._merge_artifact(self.artifacts, tc._artifact(f'waypoint_tasks/{self.site}/{name}.xml', old.content))
             names[identifier] = name
@@ -338,7 +345,9 @@ class _Compiler:
                 purpose = meta['purpose'].removeprefix(meta['leg']+'_')
                 name = f"{ordinal:0{width}d}_{meta['leg']}_{purpose}"
                 if meta['label'] != meta['purpose']:
-                    name += '_' + _filename_token(meta['label'],byte_limit=72,fallback='point')
+                    label = _filename_token(meta['label'],byte_limit=72,fallback='',ascii_only=True)
+                    if label:
+                        name += '_' + label
                 node['waypoint_id'] = name
                 self.waypoint_trace.append({'waypoint_id':name,'map_asset_id':map_id,
                     **{k:meta[k] for k in ('leg','label','role','source_id')}})

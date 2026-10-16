@@ -158,7 +158,6 @@ def localization_files(tmp_path, monkeypatch):
     monkeypatch.setattr(ManualRelocalizationController, "_confirm_loaded_map", confirm)
     # External ROS boundaries only; YAML and filesystem operations remain real.
     monkeypatch.setattr(ManualRelocalizationController, "_read_current_map", staticmethod(lambda: active[0]), raising=False)
-    monkeypatch.setattr(manual_relocalization_module, "verify_current_config_runtime", lambda: (2813, "12345"), raising=False)
     monkeypatch.setattr(manual_relocalization_module, "localizer_runtime_identity", lambda: (2813, "12345"), raising=False)
     return template, current
 
@@ -515,29 +514,95 @@ def test_current_config_reuse_ignores_a_startup_yaml_for_another_map(localizatio
     assert template.read_text() == text
 
 
-def test_unknown_current_config_protocol_keeps_vehicle_stopped(monkeypatch):
-    from autodrive_console.relocalization_config import RelocalizationConfigError
-    def unsupported():
-        raise RelocalizationConfigError('当前定位版本尚未核验沿用配置能力')
-    monkeypatch.setattr(manual_relocalization_module, 'verify_current_config_runtime', unsupported)
+def test_automatic_mode_uses_empty_path_without_a_package_version_gate(monkeypatch):
+    import subprocess
+    def no_package_query(*args, **kwargs):
+        pytest.fail('automatic relocalization must not depend on a package version gate')
+    monkeypatch.setattr(subprocess, 'run', no_package_query)
     vehicle = _Vehicle()
     calls = []
-    controller = ManualRelocalizationController(vehicle, _Scenario(), invoke=lambda *args: calls.append(args))
+    controller = ManualRelocalizationController(vehicle, _Scenario(),
+        invoke=lambda request, timeout: calls.append(request) or _Response(),
+        localization_status=_LocalizationStatus(['initializing', 'normal']))
     assert controller.begin(_settings())['can_apply'] is True
     assert vehicle.hold == 'active'
     assert calls == []
     result = controller.apply(_settings(), {'x': 1, 'y': 2, 'yaw': 0})
-    assert result['phase'] == 'failed'
-    assert '手动选择定位 YAML' in result['detail']
-    assert vehicle.hold == 'failed'
-    assert calls == []
+    assert result['phase'] == 'switching_to_navigation'
+    assert len(calls) == 2
+    assert [request['use_wheel_odom'] for request in calls] == [True, False]
+    assert all(request['map_path'] == '' for request in calls)
 
 
-def test_explicit_yaml_remains_usable_when_empty_path_capability_is_unknown(localization_files, monkeypatch):
-    from autodrive_console.relocalization_config import RelocalizationConfigError
-    def unsupported():
-        raise RelocalizationConfigError('当前定位版本尚未核验沿用配置能力')
-    monkeypatch.setattr(manual_relocalization_module, 'verify_current_config_runtime', unsupported)
+@pytest.mark.parametrize('failure,expected_flags', [
+    (None, [True, False]),
+    ('restart_before_prepare', []),
+    ('restart_after_prepare', [True]),
+    ('domain_changed_after_prepare', [True]),
+    ('map_changed_after_prepare', [True]),
+    ('parking_lost_after_prepare', [True]),
+    ('restart_during_initialization', [True, False]),
+    ('prepare_rejected', [True]),
+    ('initialization_rejected', [True, False]),
+    ('initialization_timeout', [True, False]),
+    ('no_fresh_localization', [True, False]),
+])
+def test_automatic_mode_with_real_process_reader_preserves_failure_boundaries(tmp_path, monkeypatch, failure, expected_flags):
+    import subprocess
+    from unittest.mock import Mock
+    import autodrive_console.relocalization_config as runtime
+
+    # No installed package, executable or localization YAML is needed. Exercise
+    # the real identity reader rather than the normal controller fixture's mock.
+    process = tmp_path / 'proc' / '2813'
+    process.mkdir(parents=True)
+    (process / 'cmdline').write_bytes(b'/opt/ry/install/lightning/lib/lightning/run_loc_online\0')
+    (process / 'environ').write_bytes(b'ROS_DOMAIN_ID=66\0')
+    def start_time(value):
+        (process / 'stat').write_text('2813 (run_loc_online) ' + ' '.join(['S'] + ['0'] * 18 + [value]))
+    start_time('12345')
+    monkeypatch.setenv('ROS_DOMAIN_ID', '66')
+    monkeypatch.setattr(runtime, 'PROC_ROOT', process.parent)
+    monkeypatch.setattr(manual_relocalization_module, 'localizer_runtime_identity', runtime.localizer_runtime_identity)
+    monkeypatch.setattr(subprocess, 'run', lambda *args, **kwargs: pytest.fail('unexpected package or shell query'))
+    scenario = _Scenario()
+    scenario.active_lightning_config = lambda: pytest.fail('automatic mode must never fall back to startup YAML')
+    vehicle = _Vehicle()
+    vehicle.recover_navigation_after_relocalization = Mock(wraps=vehicle.recover_navigation_after_relocalization)
+    calls = []
+    def invoke(request, timeout):
+        calls.append(dict(request))
+        if request['use_wheel_odom']:
+            if failure == 'restart_after_prepare': start_time('12346')
+            elif failure == 'domain_changed_after_prepare': (process / 'environ').write_bytes(b'ROS_DOMAIN_ID=67\0')
+            elif failure == 'map_changed_after_prepare': monkeypatch.setattr(controller, '_read_current_map', lambda: Path('/different/map.yaml'))
+            elif failure == 'parking_lost_after_prepare': vehicle.source = 'navigation'
+            return SimpleNamespace(success=failure != 'prepare_rejected')
+        if failure == 'restart_during_initialization': start_time('12346')
+        if failure == 'initialization_timeout': raise manual_relocalization_module.ManualRelocalizationUnavailable('重定位响应超时')
+        return SimpleNamespace(success=failure != 'initialization_rejected')
+    clock = _Clock()
+    controller = ManualRelocalizationController(vehicle, scenario, invoke=invoke,
+        localization_status=_LocalizationStatus(['normal'] if failure == 'no_fresh_localization' else ['initializing', 'normal']),
+        clock=clock, sleep=clock.sleep)
+    controller.RESULT_CONFIRM_TIMEOUT_S = .25
+    assert controller.begin(_settings())['can_apply']
+    if failure == 'restart_before_prepare': start_time('12346')
+    result = controller.apply(_settings(), {'x': 1.25, 'y': -2.5, 'yaw': .75, 'request_id': 'auto-runtime-matrix'})
+    assert [request['use_wheel_odom'] for request in calls] == expected_flags
+    assert all(request['map_path'] == '' and request['x'] == 1.25 and request['y'] == -2.5 and request['yaw'] == .75 for request in calls)
+    assert result['operation_outcome'] == ('succeeded' if failure is None else 'failed')
+    if failure is None:
+        vehicle.recover_navigation_after_relocalization.assert_called_once()
+        assert result['phase'] == 'switching_to_navigation'
+    else:
+        vehicle.recover_navigation_after_relocalization.assert_not_called()
+        assert result['phase'] == 'failed' and vehicle.hold == 'failed'
+
+
+def test_explicit_yaml_uses_the_same_runtime_binding_without_package_queries(localization_files, monkeypatch):
+    import subprocess
+    monkeypatch.setattr(subprocess, 'run', lambda *args, **kwargs: pytest.fail('unexpected package query'))
     template, _ = localization_files
     calls = []
     controller = ManualRelocalizationController(_Vehicle(), _Scenario(),
@@ -708,7 +773,7 @@ def test_inflight_action_never_blocks_another_action_or_status_reader(action):
 
 def test_restarted_localizer_cannot_accept_a_preview_from_before_restart(monkeypatch):
     identity = [(2813, '12345')]
-    monkeypatch.setattr(manual_relocalization_module, 'verify_current_config_runtime', lambda: identity[0])
+    monkeypatch.setattr(manual_relocalization_module, 'localizer_runtime_identity', lambda: identity[0])
     vehicle = _Vehicle()
     calls = []
     controller = ManualRelocalizationController(vehicle, _Scenario(), invoke=lambda *args: calls.append(args))
@@ -785,11 +850,11 @@ def test_reset_during_runtime_check_before_send_cannot_confirm_request(monkeypat
     checks = []
     def verify():
         checks.append(True)
-        if len(checks) == 2:
+        if len(checks) == 3:
             monitor.observe(SimpleNamespace(state=0, error_code=0, fault_id=0))
             monitor.observe(SimpleNamespace(state=1, error_code=0, fault_id=0))
         return (2813, '12345')
-    monkeypatch.setattr(manual_relocalization_module, 'verify_current_config_runtime', verify)
+    monkeypatch.setattr(manual_relocalization_module, 'localizer_runtime_identity', verify)
     vehicle = _Vehicle()
     controller = ManualRelocalizationController(vehicle, _Scenario(), invoke=lambda *args: _Response(),
         localization_status=monitor, clock=clock, sleep=clock.sleep)

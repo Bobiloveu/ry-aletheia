@@ -7,7 +7,7 @@ header .text-button { width: auto; height: max-content; }
 .manual-recording-actions .delete, .archive-actions .delete { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); background: var(--danger-soft); }
 .archive-list { display: grid; gap: 10px; }
 .archive-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; padding: 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-sunken); }
-.archive-card h3 { margin: 0; color: var(--ink); font: 650 13px ui-monospace, monospace; overflow-wrap: anywhere; }
+.archive-card h3 { margin: 0; color: var(--ink); font-size: 14px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
 .archive-card p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .archive-meta { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 11px; }
 .archive-meta span { padding: 4px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: color-mix(in srgb, var(--surface-raised) 72%, transparent); font: 10px ui-monospace, monospace; }

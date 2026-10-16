@@ -23,9 +23,12 @@ def pytest_configure(config):
     from autodrive_console.tool_logging import ToolLogStore
     original = ToolLogStore.__init__
     default_logs = Path(__file__).resolve().parents[1] / "logs"
-    def initialize(store, directory):
-        target = Path(temporary.name) / "logs" if Path(directory).resolve() == default_logs.resolve() else directory
-        original(store, target)
+    def initialize(store, directory, **options):
+        is_default = Path(directory).resolve() == default_logs.resolve()
+        target = Path(temporary.name) / "logs" if is_default else directory
+        if is_default and "policy_path" in options:
+            options["policy_path"] = Path(temporary.name) / "config" / "tool_logging.json"
+        original(store, target, **options)
     logs_guard = patch.object(ToolLogStore, "__init__", initialize)
     logs_guard.start()
     config.add_cleanup(logs_guard.stop)

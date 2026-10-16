@@ -20,7 +20,8 @@ export function automaticExecutionNodes(route, bindingId) {
 export function automaticRouteStatus(route, bindings) {
   const orderedBindings = automaticRouteBindings(route, bindings);
   if (!route || !orderedBindings.length) return { ready: false, reason: "尚未生成自动路线" };
-  if (orderedBindings.at(-1).type !== "floor") return { ready: false, reason: "场景流程必须以用户楼层结束" };
+  if (orderedBindings.length !== route.binding_ids.length) return { ready: false, reason: "自动路线引用的定位绑定不完整" };
+  if (orderedBindings.length > 1 && orderedBindings.at(-1).type !== "floor") return { ready: false, reason: "场景流程必须以用户楼层结束" };
   return {
     ready: true,
     mapCount: orderedBindings.length,

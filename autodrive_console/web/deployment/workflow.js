@@ -87,7 +87,7 @@ export function deriveMapImportGuidance(topology, targetStageId = null) {
       detail: "所有已配置阶段均已绑定地图，不需要继续导入。",
       fileLabel: "选择地图文件",
       nameLabel: "显示名称",
-      namePlaceholder: "室外地图 / 电梯大厅",
+      namePlaceholder: "室外地图 / 室内大厅",
     };
   }
   const completedLabels = stages

@@ -27,6 +27,7 @@ from urllib.parse import quote, urlparse, urlsplit
 from urllib.request import Request, urlopen
 
 from .video_encoder import EncoderProbeCancelled, EncoderSelection, EncoderUnavailable, HardwareEncoderSelector
+from .video_bandwidth import VideoBandwidthMonitor
 
 
 def _choose_private_rtsp_port(gateway: dict[str, Any]) -> int:
@@ -270,6 +271,10 @@ class VideoManager:
             raise VideoConfigurationError("runtime 必须是对象")
         if runtime.get("encoder") not in {'auto', 'vaapih264enc', 'nvh264enc'}:
             raise VideoConfigurationError("runtime.encoder 必须为 auto、vaapih264enc 或 nvh264enc")
+        nvenc_rate_control = runtime.get('nvenc_rate_control', 'cbr')
+        if nvenc_rate_control not in ('cbr', 'vbr'):
+            raise VideoConfigurationError('runtime.nvenc_rate_control 必须为 cbr 或 vbr')
+        runtime = {**runtime, 'nvenc_rate_control': nvenc_rate_control}
         device = runtime.get('vaapi_device')
         if device != 'auto' and (not isinstance(device, str) or not re.fullmatch(r'/dev/dri/renderD[0-9]{1,4}', device)):
             raise VideoConfigurationError("runtime.vaapi_device 必须为 auto 或受控 DRM render 节点")
@@ -656,6 +661,7 @@ class VideoRuntime:
         self._startup_pending: tuple[str, float] | None = None
         self._next_startup_probe_at = 0.0
         self._rtsp_port: int | None = None
+        self.bandwidth_monitor: VideoBandwidthMonitor | None = None
 
     def _publish_status(self, **changes: Any) -> None:
         self._runtime_diagnostic.update(changes)
@@ -697,7 +703,9 @@ class VideoRuntime:
             # Declare every configured path once.  A per-stream switch then
             # only changes its native publisher; MediaMTX and other paths stay
             # live and existing WebRTC sessions are never needlessly reset.
-            self.encoder_selection = self.encoder_selector.select(gst_launch, config['runtime']['encoder'], config['runtime']['vaapi_device'], lambda: self.stopping)
+            self.encoder_selection = self.encoder_selector.select(
+                gst_launch, config['runtime']['encoder'], config['runtime']['vaapi_device'], lambda: self.stopping,
+                nvenc_rate_control=config['runtime']['nvenc_rate_control'])
             config = self.manager.load_config()
             if self.stopping or not config['enabled']:
                 self._publish_status(state='disabled', error_code=None, detail='视频已关闭')
@@ -753,6 +761,8 @@ class VideoRuntime:
                 f"(ROS_DOMAIN_ID={config['ros_domain_id']})",
                 flush=True,
             )
+            self.bandwidth_monitor = VideoBandwidthMonitor(config['gateway']['api_url'], config['streams'])
+            self.bandwidth_monitor.start()
             return self._monitor_children(ingest_binary, gst_launch)
         except OSError as exc:
             self._publish_status(state='error', error_code='process_start_failed', detail=str(exc))
@@ -760,7 +770,13 @@ class VideoRuntime:
             print(f"RY Aletheia 视频子进程启动失败：{exc}", flush=True)
             return 1
         finally:
-            self._stop_children()
+            try:
+                if self.bandwidth_monitor is not None:
+                    self.bandwidth_monitor.stop()
+            except (RuntimeError, OSError):
+                LOGGER.warning('视频带宽统计停止失败；继续回收原生视频子进程')
+            finally:
+                self._stop_children()
 
     def _runtime_root(self) -> Path:
         runtime = (self.workspace / "runtime" / "video").resolve()
@@ -894,6 +910,8 @@ class VideoRuntime:
             "--input-kind", stream["input"]["kind"],
             "--encoder", self.encoder_selection.encoder if self.encoder_selection else
                 ('vaapih264enc' if config['runtime']['encoder'] == 'auto' else config['runtime']['encoder']),
+            "--nvenc-rate-control", self.encoder_selection.nvenc_rate_control if self.encoder_selection else
+                config['runtime']['nvenc_rate_control'],
             "--encoding", stream["encoding"],
             "--gst-launch", str(gst_launch),
             "--vaapi-device", (self.encoder_selection.device if self.encoder_selection else None) or

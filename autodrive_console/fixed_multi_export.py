@@ -41,6 +41,8 @@ def multi_layout(project, line):
     source = components[line['start_component_id']]['map_asset_id']
     visits = [(step, (waypoints if step['kind']=='transition' else components)[step['id']]) for step in line['steps']]
     destinations = {location['map_asset_id'] for _,location in visits} - {source}
+    if not destinations and len(project.get('deployment_flow', [])) == 1:
+        return _single_map_layout(project, source, visits, components)
     if len(destinations) != 1:
         raise tc.CompilationError('多任务点结构需要一个公共地图和一个连续用户楼层段；不能把该线路导出为单任务结构')
     destination = destinations.pop()
@@ -58,7 +60,7 @@ def multi_layout(project, line):
     bindings = {b['map_asset_id']:b for b in project.get('localization_bindings', [])}
     source_binding, target_binding = bindings.get(source, {}), bindings.get(destination, {})
     if source_binding.get('type') not in {'indoor','ferry'} or target_binding.get('type')!='floor':
-        raise tc.CompilationError('多任务点固定线路需要电梯大厅（可包含在摆渡层中）和用户楼层定位绑定')
+        raise tc.CompilationError('多任务点跨图固定线路需要室内大厅（可包含在摆渡层中）和用户楼层定位绑定')
     source_stage,source_type = _saved_stage(project,source,source_binding)
     target_stage,target_type = _saved_stage(project,destination,target_binding)
     flow = project.get('deployment_flow')
@@ -97,6 +99,55 @@ def multi_layout(project, line):
             'floor_stem':branch.floor_stem,'common_stem':common_stem,'family':family}
 
 
+def _single_map_layout(project, map_id, visits, components):
+    bindings = [b for b in project.get('localization_bindings', []) if b.get('map_asset_id') == map_id]
+    if len(bindings) != 1:
+        raise tc.CompilationError('单图线路需要唯一有效的定位绑定')
+    binding = bindings[0]
+    stage_id, stage_type = _saved_stage(project, map_id, binding)
+    if project['deployment_flow'][0].get('id') != stage_id:
+        raise tc.CompilationError('单图线路与保存的部署阶段不一致')
+    instance = next(i for i in project['map_instances'] if i.get('map_asset_id') == map_id)
+    building, unit = binding.get('building', ''), binding.get('unit', '')
+    ownership = instance.get('building', ''), instance.get('unit', '')
+    global_ferry = stage_type == 'ferry' and (building, unit) == ('', '')
+    if ownership != (building, unit) or (not global_ferry and not all(
+        isinstance(value, str) and re.fullmatch(r'[1-9][0-9]*', value) for value in (building, unit)
+    )):
+        raise tc.CompilationError('单图地图实例与定位绑定的楼栋单元不一致')
+    targets = []
+    if stage_type == 'target_floor':
+        deliveries = [(step, location) for step, location in visits if step.get('action', {}).get('purpose') == 'delivery']
+        if len(deliveries) != 1 or visits[-1] != deliveries[0]:
+            raise tc.CompilationError('多任务点单图楼层线路应以唯一送货目标结束；请为各目标保存独立线路')
+        target = deliveries[0][1]
+        landings = [c for c in components.values() if c.get('map_asset_id') == map_id and c.get('kind') == 'elevator']
+        if landings:
+            try:
+                branch = _target_branch(target, instance, building, unit, list(components.values()),
+                                        {e['id']: e for e in project.get('physical_elevators', [])})
+            except TaskRouteFamilyError as exc:
+                raise tc.CompilationError(f'多任务点目标配置无效：{exc}') from exc
+            stem = branch.floor_stem
+            targets.append({'full_room_number': branch.full_room_number, 'physical_floor': branch.physical_floor,
+                            'button_floor': branch.button_floor, 'door': branch.door, 'floor_stem': stem})
+        else:
+            room = str(target.get('attributes', {}).get('door') or '').strip()
+            if not re.fullmatch(r'[1-9][0-9]{2,15}', room):
+                raise tc.CompilationError('多任务点单图楼层目标需填写有效门牌（楼层与两位户号）')
+            button, door = int(room[:-2]), room[-2:]
+            stem = f'{building}_{unit}_n_n{door}' if instance['role'] == 'typical_floor' else f'{building}_{unit}_{button}_{room}'
+            targets.append({'full_room_number': room, 'physical_floor': None, 'button_floor': button,
+                            'door': door, 'floor_stem': stem})
+        stem = f'floor/{stem}'
+    else:
+        stem = 'sub_outdoor_eguard' if stage_type == 'ferry' else f'{binding["type"]}/{building}_{unit}'
+    asset = next(a for a in project['map_assets'] if a['id'] == map_id)
+    family = {'building': building, 'unit': unit, 'required_outputs': [binding['type']],
+              'stages': [{'type': stage_type, 'label': asset.get('label') or stage_type}], 'targets': targets}
+    return {'source': map_id, 'destination': map_id, 'single_map_stem': stem, 'family': family}
+
+
 def multi_fragments(layout, community, subtasks, map_ids):
     groups = []
     for subtask,map_id in zip(subtasks,map_ids):
@@ -104,12 +155,17 @@ def multi_fragments(layout, community, subtasks, map_ids):
         if not groups or groups[-1][0]!=key:
             groups.append((key,[]))
         groups[-1][1].append(subtask)
-    expected = [(layout['source'],False),(layout['destination'],False),
-                (layout['destination'],True),(layout['source'],True)]
+    standalone = layout.get('single_map_stem')
+    expected = ([(layout['source'],False),(layout['source'],True)] if standalone else
+                [(layout['source'],False),(layout['destination'],False),
+                 (layout['destination'],True),(layout['source'],True)])
     if len(subtasks)!=len(map_ids) or [key for key,_ in groups]!=expected:
         raise tc.CompilationError('多任务点执行顺序不能无损拆分为公共与楼层正返段')
-    common = layout['common_stem']
-    names = [common,f"floor/{layout['floor_stem']}",f"floor/{layout['floor_stem']}_r",f'{common}_r']
+    if standalone:
+        names = [standalone, f'{standalone}_r']
+    else:
+        common = layout['common_stem']
+        names = [common,f"floor/{layout['floor_stem']}",f"floor/{layout['floor_stem']}_r",f'{common}_r']
     artifacts = []
     for name,(_,members) in zip(names,groups):
         first = members[0]
@@ -152,7 +208,8 @@ def merge_multi_line_previews(project, previews):
             tc._merge_artifact(artifacts,tc._artifact(canonical,member.content))
         lookup = {item['waypoint_id']:item for item in preview.manifest['waypoint_trace']}
         ordered_maps = list(dict.fromkeys(preview.manifest['subtask_map_asset_ids']))
-        direction_maps = [ordered_maps[0],ordered_maps[1],ordered_maps[1],ordered_maps[0]]
+        direction_maps = ([ordered_maps[0]] * 2 if len(ordered_maps) == 1 else
+                          [ordered_maps[0],ordered_maps[1],ordered_maps[1],ordered_maps[0]])
         start = len(subtasks)
         for index,path in enumerate(preview.manifest['multi_task_files']):
             document = json.loads(members[path].content)

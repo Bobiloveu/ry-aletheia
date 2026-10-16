@@ -24,8 +24,8 @@
 | `/control_source_cmd` | Aletheia → 机器人 | `std_msgs/String`：`navigation` 或 `miniapp` | 请求允许的控制源切换。 |
 | `/control_source_state` | 机器人 → Aletheia | `std_msgs/String`：实际控制源状态 | 唯一确认来源。客户端不得根据一次按钮点击或成功 HTTP 请求推断控制权。 |
 | `/cmd_vel_miniapp` | Aletheia → 机器人 | `geometry_msgs/Twist` | 仅在受控会话有效时由 Backend 输出速度。`linear.x` 和 `angular.z` 承载命令；协议专用辅助字段只能由 `MiniappTwistFactory` 构造。 |
-| `/is_emergency_stop` | 机器人 → Aletheia | `std_msgs/Bool`，`RELIABLE + TRANSIENT_LOCAL` | 真实急停唯一依据：`false` 为未触发，`true` 为已触发。该状态由底盘锁存，Aletheia 必须以相同 QoS 订阅，以便后启动时立即取得当前状态。未收到或 ROS2 不可用时为 `unknown`，必须禁止手动运动。Aletheia 只订阅，绝不发布。 |
-| `/get_emergency_stop` | Aletheia → 机器人 | `master_interfaces/srv/GetEmergencyStop` | 仅在启动期 `unknown` 时异步读取底盘当前急停状态，响应字段 `is_emergency_stop`。这是 Topic 锁存在部分车端未送达时的受控补齐；不可用、超时或异常不得推断为 `false`。 |
+| `/is_emergency_stop` | 机器人 → Aletheia | `std_msgs/Bool`，`RELIABLE + TRANSIENT_LOCAL` | 车端急停的 Topic 依据（服务补齐见下一行）：`false` 为未触发，`true` 为已触发。该状态由底盘锁存，Aletheia 必须以相同 QoS 订阅，以便后启动时立即取得当前状态。未收到或 ROS2 不可用时为 `unknown`，必须禁止手动运动。Aletheia 只订阅，绝不发布。 |
+| `/get_emergency_stop` | Aletheia → 机器人 | `master_interfaces/srv/GetEmergencyStop` | 启动状态未知时补齐，并在手动会话、重定位占用、miniapp 切源或地图标记导航期间限频异步确认底盘当前急停状态，响应字段 `is_emergency_stop`。服务响应受查询世代与新鲜度保护；不可用、超时或异常不得推断为 `false`。 |
 | `/command` | Aletheia → 机器人 | `std_msgs/String` | 仅用于经确认的软件解除急停，固定内容为 `{"speed":0.0,"angle":0.0,"acc":2000,"press":1400,"place":-1,"ulock":0}`；不得读取手动驾驶参数，不得用于 `place` 控制。 |
 
 只有机器人 Backend 可以发布或订阅这些 Topic。Web 和 Mobile 不得直接使用 ROS、发布 Twist 或自行选择控制源 Topic。
@@ -38,9 +38,31 @@ Backend 的 `MapMarkerNavigationController` 是唯一可以使用 `/navigate_to_
 
 `/is_emergency_stop=false` 只在新鲜确认窗口内可作为运动或地图标记导航许可。手动会话、重定位占用、切至 `miniapp` 或地图标记导航进行时，Backend 必须受限地异步复查 `/get_emergency_stop`；Topic/服务确认超时或连续服务失败会清空目标、发送 STOP 并将急停状态变为 `unknown`。地图标记刚进入 `checking` 而急停仍为 `pending` 时，Backend 最多等待一个固定且短暂的确认窗口；期间持续互锁且绝不发送 Nav2 Goal，窗口结束仍未确认则拒绝。不能持续确认急停的车辆不得保留既有 `false` 的运动权限。
 
-地图标记导航的路线数据只能由上述 Backend Action worker 在已接受的自有 Goal 期间只读订阅 `/plan`；它不是新的控制入口。worker 只公开经过 `map` frame、有限坐标、当前 Goal 终点匹配和点数上限校验的二维快照，并在取消、终态、失效安全条件、切图和新 Goal 时清空。Web 只消费该受控快照，Mobile 不消费或展示路线数据。
+地图标记导航控制器的路线数据仍由上述 Backend Action worker 在已接受的自有 Goal 期间只读订阅 `/plan`；它不是新的控制入口。worker 只公开经过 `map` frame、有限坐标、当前 Goal 终点匹配和点数上限校验的二维快照，并在取消、终态、失效安全条件、切图和新 Goal 时清空。PC 通用“规划路线”图层另由观测缓存器只读接收 `/plan`，仅以只读导航状态管理显示生命周期，不修改上述所有权/互锁；具体有界、过期与兼容规则见实时观测契约。Mobile 不消费或展示路线数据。
 
 ## 控制源状态机
+
+2026-10-16 修复约束：Backend 在实际提交非零 Twist 的串行出口重新核验当前目标、
+控制源、会话、急停与既有看门狗；核验和 publish 之间不得接受更新的 STOP 状态。
+已被 STOP 或新目标取代的定时器快照不能随后提交。Web/Mobile HTTP 格式、20 Hz、
+350 ms 输入超时与 1.2 s 心跳边界保持不变；两个消费者均受益，无新增必需客户端字段。
+PC Web 对控制操作、heartbeat 与 GET 状态响应统一按本页请求代际应用；已被更新确认
+替代的旧响应不得清除当前按键。此展示层保护不替代 Backend 的真实急停与看门狗。
+PC Web 连续输入只保留一个在途运动请求及一个最新待发送向量，STOP 使用独立优先请求，
+不能等待旧运动响应。控制 HTTP 有总期限（一般请求 2 秒，运动请求不超过车端输入窗口），
+运动请求超时清空输入并单次提交更高序号零向量；不无限重试或自动恢复运动。
+新鲜安全锁定或当前心跳连接失败清空输入时，若仍有运动意图或未被停止序号覆盖的
+在途运动，同样单次提交更高序号零向量，避免恢复许可后迟到旧运动复活。
+合法会话的零向量仍校验序号，但不受未知急停或控制源未确认的非零运动许可限制；
+真正运动许可不变。当前运动失败与明确会话失效不能被展示层代际保护吞掉。
+急停服务的退休 future 和旧代回调必须无副作用，同一次失败不能重复计数；真实当前
+失败、确认过期与急停继续按原规则锁定。上述无 HTTP/ROS 格式变化，Mobile 保持兼容。
+失效会话的 409 响应增量附带 `code: "session_invalid"`，只表示本次提交的会话失效，
+不表示所有端都退出。PC Web 仅对仍持有的同一会话应用该结果；兼容旧端的明确
+409 + `status.session.present=false`。普通聚合 GET 没有会话 ID 不能据此清理会话。
+Mobile 旧错误处理保持兼容，可忽略新增错误码；无新增必需请求字段。
+PC Web 普通离页使用已有 `/release` 且每次会话只提交一次，不全局切回 navigation；
+显式退出按钮继续使用全局 `/exit`。自己的运动目标随 release STOP，其他端保留会话。
 
 允许 Aletheia 请求的控制源值为 `navigation` 和 `miniapp`。车端状态 Topic 还可能报告如 `remote` 的外部控制源；任何非空回传均为已确认的实际状态。`remote` 只表示当前来源，不是浏览器禁用切换请求的理由。
 
@@ -49,8 +71,8 @@ Backend 的 `MapMarkerNavigationController` 是唯一可以使用 `/navigate_to_
 3. 只有收到实际状态确认后，会话才成为 `active`；任一 active 会话均可接受非零命令或速度变更，**最后一条有效输入**更新 Backend 唯一的运动目标。
 4. `stop` 立即产生 Backend 生成的三帧有界零 Twist（首帧立即、后两帧按 20 Hz），以容忍单帧丢失；完成后不再占用速度 Topic。`release` 只删除调用方会话；若它拥有当前运动目标则立即 STOP，但绝不请求切源。`exit` 是全局动作，执行 **STOP → 清空全部会话 → 请求 `navigation` → 等待实际状态确认**。切换失败时不能猜测控制已切换。
 5. 若其他控制源接管、控制源确认超时或 ROS2 控制器不可用，Backend 必须清除运动并拒绝后续移动。
-6. 只有 `/is_emergency_stop=false` 且控制源已实际确认 `miniapp` 时，手动会话才允许输出非零 Twist。`true` 或 `unknown` 会立即停止并拒绝后续运动。
-7. 软件解除急停只发布固定 `/command` 报文，随后最多等待 4.0 s；仅在收到 `/is_emergency_stop=false` 后才可显示成功。该动作不请求也不改变控制源。
+6. 只有车端 Topic 或有效服务响应确认急停为 `false`，且控制源已实际确认 `miniapp` 时，手动会话才允许输出非零 Twist。`true` 或 `unknown` 会立即停止并拒绝后续运动。
+7. 软件解除急停只发布固定 `/command` 报文，随后最多等待 4.0 s；仅在车端 Topic 或有效服务响应确认急停为 `false` 后才可显示成功。该动作不请求也不改变控制源。
 
 ### 手动重定位占用
 
@@ -76,7 +98,7 @@ PC 手动重定位是 Backend 内部的不可驾驶 `miniapp` 占用，不是 `/
 | `POST /api/vehicle-control/stop` | `{ "session_id": "…" }` | 保留会话的同时立即发送 STOP。 |
 | `POST /api/vehicle-control/release` | `{ "session_id": "…" }` | 仅释放调用方会话；若其拥有当前运动目标则 STOP，但保留其他端会话和已确认的 `miniapp` 控制源。供 App 后台、离页或断开连接使用。 |
 | `POST /api/vehicle-control/exit` | `{ "session_id": "…" }` | 停止、请求返回 `navigation`，并等待实际确认。 |
-| `POST /api/vehicle-control/release-emergency-stop` | `{}` | 仅当真实急停为 `true` 时发布固定解除报文，并等待 `/is_emergency_stop=false` 确认；等待中返回 `202`。 |
+| `POST /api/vehicle-control/release-emergency-stop` | `{}` | 仅当真实急停为 `true` 时发布固定解除报文，并等待车端 Topic 或有效服务响应确认急停为 `false`；等待中返回 `202`。 |
 | `POST /api/vehicle-control/chassis-parameters` | `{ "press": integer, "movement_acc": integer, "stop_acc": integer }` | 持久化并更新手动驾驶参数。`press` 为 20-2000，`movement_acc` 为 10-1000，`stop_acc` 为 20-2000。 |
 
 成功时返回当前状态对象。`200 OK` 表示没有控制源切换等待中；`202 Accepted` 表示切换仍在等待。`400 Bad Request` 表示输入格式错误或不支持的命令。`409 Conflict` 表示不安全控制状态、活动运行、重复会话或缺少控制源确认。`503 Service Unavailable` 表示 Backend ROS2 控制器无法运行。客户端在返回 `status` 时必须展示，且不得实现无界重试循环。
@@ -129,7 +151,7 @@ Backend 以 **20 Hz** 发布。保持输入必须在 **350 ms** 前刷新；会�
 
 Desktop Web 的车辆执行状态页通过 Backend 内部 `VehicleExecutionStatusMonitor` 只读消费本控制器快照：`emergency_stop.state=triggered` 显示“急停已触发”，已确认的 `actual_source=miniapp` 显示“手动控制中”。这不创建新的浏览器控制接口、不改变多端会话或底盘安全门控，也不得由浏览器会话、点击结果或 `pending` 状态推断。
 
-`can_begin_manual` 表示当前客户端可以加入或发起 `miniapp` 会话，不表示可运动；`can_request_navigation` 表示可以发起全局 `navigation` 切换请求。两者在 `remote`、急停或急停未知时仍可为真。`manual_ready` 才是唯一的非零速度许可，仍要求至少一个有效会话、`miniapp` 实际确认及 `/is_emergency_stop=false`。`shared_sessions.active_count` 与 `switching_count` 只用于展示当前参与数，绝不泄露其他客户端的会话 ID。
+`can_begin_manual` 表示当前客户端可以加入或发起 `miniapp` 会话，不表示可运动；`can_request_navigation` 表示可以发起全局 `navigation` 切换请求。两者在 `remote`、急停或急停未知时仍可为真。`manual_ready` 才是唯一的非零速度许可，仍要求至少一个有效会话、`miniapp` 实际确认及车端 Topic 或有效服务响应确认急停为 `false`。`shared_sessions.active_count` 与 `switching_count` 只用于展示当前参与数，绝不泄露其他客户端的会话 ID。
 
 `/vector` 不是直接 ROS 速度接口：`target_linear = linear_ratio × linear_mps`，`target_angular = angular_ratio × angular_radps`。移动端和 PC Web 都以车头向上为视觉坐标：上/下分别为正/负 `linear_ratio`，左/右分别为正/负 `angular_ratio`；因此右上为正线速度与负角速度，即前进并右转的弧线。它不是横向右前平移。新的向量目标与旧的 `/command` 目标互斥；多个客户端中最后一条有效 `/command` 或 `/vector` 更新该唯一目标。任一后续 `/speed` 更新必须按保存的比例重新换算。急停、未知急停、外部切源、拥有当前目标的会话输入/心跳超时、任一 `stop`、`release`、`exit` 和 `(0,0)` 均清除两类目标并使用 `stop_acc`。每次实际清除运动都发布固定三帧零 Twist，之后停止发布；这不是持续制动流。
 

@@ -356,7 +356,7 @@ def test_disabled_or_failed_starting_stream_does_not_hold_up_other_nvenc_streams
 def test_cancel_during_hardware_preflight_does_not_start_any_media_process(tmp_path):
     m = manager(tmp_path)
     rt = video.VideoRuntime(m, tmp_path, tmp_path / 'ingest')
-    def finish_probe(*args):
+    def finish_probe(*args, **kwargs):
         rt.stopping = True
         return video.EncoderSelection('nvh264enc', None)
     with patch.object(rt, '_runtime_root', return_value=tmp_path), patch.object(rt, '_require_executable', side_effect=lambda path, label: path), patch.object(rt, '_write_media_config'), patch.object(rt, '_install_signal_handlers'), patch.object(rt.encoder_selector, 'select', side_effect=finish_probe), patch('autodrive_console.video.subprocess.Popen') as popen:
@@ -368,7 +368,7 @@ def test_cancel_during_hardware_preflight_does_not_start_any_media_process(tmp_p
 def test_cancel_after_failed_intel_does_not_start_detached_nvenc_probe(tmp_path):
     selector = video.HardwareEncoderSelector()
     stopped = False
-    def failure(*args):
+    def failure(*args, **kwargs):
         nonlocal stopped
         stopped = True
         return 'driver unavailable'
@@ -412,3 +412,107 @@ def test_console_stop_signals_only_owned_descendant_groups_and_rejects_reused_pi
         process(22222, 777, 22222, 999)  # PID reused after the snapshot.
         video._signal_owned_subgroups(groups, signal.SIGKILL)
         assert killpg.call_count == 1
+
+
+def test_runner_owns_bandwidth_worker_and_stops_it_even_when_monitor_fails(tmp_path):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+    m = manager(tmp_path)
+    raw = json.loads(m.config_path.read_text())
+    request_started, release = threading.Event(), threading.Event()
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            request_started.set()
+            release.wait(2)
+            body = b'{"items":[],"pageCount":1}'
+            self.send_response(200); self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            try: self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError): pass
+        def log_message(self, *args): pass
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval':.01}, daemon=True)
+    thread.start()
+    raw['gateway']['api_url'] = f'http://127.0.0.1:{server.server_port}/v3/paths/list'
+    m.config_path.write_text(json.dumps(raw))
+    rt = video.VideoRuntime(m, tmp_path, tmp_path/'ingest')
+    (tmp_path/'mediamtx').mkdir()
+    def fail_after_start(*args):
+        assert request_started.wait(1)
+        assert not release.is_set()  # Media lifecycle progressed while statistics HTTP was blocked.
+        assert rt.bandwidth_monitor.thread.is_alive()
+        raise RuntimeError('test monitor failure')
+    try:
+        with patch.object(rt, '_runtime_root', return_value=tmp_path), \
+             patch.object(rt, '_require_executable', side_effect=lambda path,label:path), \
+             patch.object(rt, '_install_signal_handlers'), patch.object(rt, '_stop_children'), \
+             patch.object(rt.encoder_selector, 'select', return_value=video.EncoderSelection('nvh264enc',None)), \
+             patch.object(rt, '_wait_for_gateway', return_value=True), \
+             patch.object(rt, '_reconcile_streams'), \
+             patch.object(rt, '_monitor_children', side_effect=fail_after_start), \
+             patch('autodrive_console.video.subprocess.Popen'):
+            with pytest.raises(RuntimeError, match='test monitor failure'):
+                rt.run()
+        assert not rt.bandwidth_monitor.thread.is_alive()
+    finally:
+        release.set()
+        server.shutdown(); thread.join(2); server.server_close()
+
+
+def test_statistics_start_failure_does_not_stop_video_or_skip_children_cleanup(tmp_path):
+    m=manager(tmp_path);rt=video.VideoRuntime(m,tmp_path,tmp_path/'ingest')
+    (tmp_path/'mediamtx').mkdir()
+    with patch.object(rt,'_runtime_root',return_value=tmp_path), \
+         patch.object(rt,'_require_executable',side_effect=lambda path,label:path), \
+         patch.object(rt,'_install_signal_handlers'), patch.object(rt,'_stop_children') as cleanup, \
+         patch.object(rt.encoder_selector,'select',return_value=video.EncoderSelection('nvh264enc',None)), \
+         patch.object(rt,'_wait_for_gateway',return_value=True), \
+         patch.object(rt,'_reconcile_streams'), \
+         patch.object(rt,'_monitor_children',return_value=0) as playback, \
+         patch('autodrive_console.video.subprocess.Popen'), \
+         patch('autodrive_console.video_bandwidth.threading.Thread.start',side_effect=RuntimeError('cannot start thread')):
+        assert rt.run()==0
+    assert playback.call_count==1
+    assert cleanup.call_count==1
+
+
+def test_nvenc_candidate_is_explicit_and_does_not_change_default_or_vaapi(tmp_path):
+    m=manager(tmp_path)
+    assert m.load_config()['runtime']['nvenc_rate_control']=='cbr'
+    m=manager(tmp_path,nvenc_rate_control='vbr')
+    assert m.load_config()['runtime']['nvenc_rate_control']=='vbr'
+    for value in ('auto','vbr;id',True,[],None):
+        with pytest.raises(video.VideoConfigurationError,match='nvenc_rate_control'):
+            manager(tmp_path,nvenc_rate_control=value).load_config()
+
+
+def test_nvenc_candidate_selection_cache_and_probe_use_same_mode(tmp_path):
+    selector=video.HardwareEncoderSelector()
+    with patch.object(selector,'_probe',return_value=None) as probe:
+        cbr=selector.select(tmp_path/'gst','nvh264enc','auto')
+        vbr=selector.select(tmp_path/'gst','nvh264enc','auto',nvenc_rate_control='vbr')
+        assert selector.select(tmp_path/'gst','nvh264enc','auto',nvenc_rate_control='vbr')==vbr
+    assert probe.call_count==2
+    assert cbr.nvenc_rate_control=='cbr' and vbr.nvenc_rate_control=='vbr'
+    assert probe.call_args_list[-1].kwargs['nvenc_rate_control']=='vbr'
+    proc=Mock();proc.wait.return_value=0
+    with patch('autodrive_console.video_encoder.subprocess.Popen',return_value=proc) as popen:
+        assert selector._probe(tmp_path/'gst','nvh264enc',None,nvenc_rate_control='vbr') is None
+    args=popen.call_args.args[0]
+    assert 'rc-mode=vbr' in args and 'max-bitrate=1200' in args and 'const-quality=23' in args
+    assert 'rc-mode=cbr' not in args
+    assert 'bframes=0' in args and 'zerolatency=true' in args and 'gop-size=15' in args
+
+
+def test_selected_nvenc_policy_reaches_ingest_even_if_file_changes_mid_run(tmp_path):
+    m=manager(tmp_path,nvenc_rate_control='vbr')
+    rt=video.VideoRuntime(m,tmp_path,tmp_path/'ingest')
+    rt.encoder_selection=video.EncoderSelection('nvh264enc',None,'vbr')
+    config=m.load_config()
+    config['runtime']['nvenc_rate_control']='cbr'
+    with patch('autodrive_console.video.subprocess.Popen') as popen:
+        rt._start_ingest(config['streams'][0],config,tmp_path/'ingest',tmp_path/'gst')
+    args=popen.call_args.args[0]
+    assert args[args.index('--nvenc-rate-control')+1]=='vbr'
+    assert args[args.index('--fps')+1]=='15'
+    assert args[args.index('--bitrate-kbps')+1]=='1200'

@@ -78,8 +78,8 @@ class DeploymentStore:
     }
     FLOW_NODE_TYPES = {
         "outdoor": {"label": "户外图", "description": "从园区或室外起点进入"},
-        "ferry": {"label": "摆渡层", "description": "摆渡或换乘地图，可包含电梯大厅"},
-        "lobby": {"label": "电梯大厅", "description": "独立候梯地图，按需添加"},
+        "ferry": {"label": "摆渡层", "description": "摆渡或换乘地图，可包含室内大厅"},
+        "lobby": {"label": "室内大厅", "description": "独立候梯地图，按需添加"},
         "target_floor": {"label": "用户楼层", "description": "最终配送目标地图"},
     }
     LEGACY_STAGE_ORDERS = {
@@ -606,14 +606,25 @@ class DeploymentStore:
                 raise DeploymentError("部署流程节点标识无效或重复")
             seen_ids.add(node_id)
             label = " ".join(str(entry.get("label") or cls.FLOW_NODE_TYPES[node_type]["label"]).split())[:80]
+            if node_type == "lobby" and label == "电梯大厅":
+                label = cls.FLOW_NODE_TYPES[node_type]["label"]
             nodes.append({"id": node_id, "type": node_type, "label": label or cls.FLOW_NODE_TYPES[node_type]["label"]})
         if not nodes:
             raise DeploymentError("部署流程不能为空")
-        if counts.get("target_floor", 0) != 1:
-            raise DeploymentError("部署流程必须包含一个用户楼层")
-        if nodes[-1]["type"] != "target_floor":
+        if counts.get("target_floor", 0) and nodes[-1]["type"] != "target_floor":
             raise DeploymentError("用户楼层必须是流程末节点")
         return nodes
+
+    @staticmethod
+    def _enable_single_map_task_lines(document: dict[str, Any]) -> bool:
+        if "task_lines" not in document and len(document.get("deployment_flow", [])) == 1:
+            # The legacy compiler assumes an elevator trip across two maps.
+            # Preserve its facts, but require explicit business intent rather
+            # than inventing a fixed line from old navigation anchors.
+            document["task_lines"] = []
+            document["active_task_line_id"] = None
+            return True
+        return False
 
     @classmethod
     def _flow_stage_ids(cls, document: dict[str, Any]) -> list[str]:
@@ -672,6 +683,8 @@ class DeploymentStore:
             if document.get("deployment_flow") != deployment_flow:
                 document["deployment_flow"] = deployment_flow
                 migrated = True
+        if self._enable_single_map_task_lines(document):
+            migrated = True
         for instance in document["map_instances"]:
             if not isinstance(instance, dict):
                 continue
@@ -1670,6 +1683,7 @@ class DeploymentStore:
             raise DeploymentError("新流程不能移除已有地图阶段；请先调整地图绑定")
         document["deployment_flow"] = deployment_flow
         document["scene_model"] = self._legacy_scene_for_flow(deployment_flow)
+        self._enable_single_map_task_lines(document)
         self._invalidate_task_compiler_preview(document)
         document["updated_at"] = self._now()
         self._write_json(self._document_path(project_id), document)

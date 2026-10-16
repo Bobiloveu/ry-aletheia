@@ -1,3 +1,5 @@
+#include "pose_selection.hpp"
+
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cerrno>
@@ -234,6 +236,7 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
             "preserve_primary_density", input_topic_ == "/collision_voxel_layer/points")),
         map_frame_(declare_parameter<std::string>("map_frame", "map")),
         base_frame_(declare_parameter<std::string>("base_frame", "base_footprint")),
+        odom_frame_(declare_parameter<std::string>("odom_frame", "odom")),
         udp_host_(declare_parameter<std::string>("telemetry_udp_host", "127.0.0.1")),
         udp_port_(static_cast<int>(std::clamp<int64_t>(declare_parameter<int>("telemetry_udp_port", 8769), 1, 65535))),
         // 网关与浏览器协议的硬上限同为 3000。主输入在此范围内仍原样保留；
@@ -573,25 +576,17 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
 
   void publish_pose() {
     if (!pose_sender_ || !pose_sender_->available()) return;
-    std::optional<geometry_msgs::msg::TransformStamped> transform;
-    for (const auto& frame : base_frames_) {
-      try {
-        // 仅用于显示：使用最新可用变换，避免等待历史时间戳导致车体落后真实运动。
-        transform = tf_buffer_.lookupTransform(map_frame_, frame, tf2::TimePointZero);
-        break;
-      } catch (const tf2::TransformException&) { }
-    }
+    const auto now_ns = get_clock()->now().nanoseconds();
+    const auto transform = aletheia::select_display_pose(
+        [this](const std::string& target, const std::string& source)
+            -> std::optional<geometry_msgs::msg::TransformStamped> {
+          try { return tf_buffer_.lookupTransform(target, source, tf2::TimePointZero); }
+          catch (const tf2::TransformException&) { return std::nullopt; }
+        }, base_frames_, map_frame_, odom_frame_, now_ns, static_cast<int64_t>(max_pose_age_ms_) * 1000000LL);
     if (!transform) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                           "Waiting for latest %s <- base_footprint/base_link TF; pose telemetry has no frame to send",
-                           map_frame_.c_str());
+          "Waiting for fresh %s <- base TF; no current pose measurement to send", map_frame_.c_str());
       return;
-    }
-    // map->odom 往往低频，而 base->odom 高频；合成 lookup 的 header stamp 可能
-    // 继承低频边而看似“过期”。这里已经请求 TimePointZero 的最新可用位姿，不能
-    // 因该合成时间戳再次丢弃整条车体流，否则浏览器只能退回批量 /tf。
-    if (is_stale(transform->header.stamp, max_pose_age_ms_)) {
-      RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 2000, "Latest %s <- base transform stamp exceeds %d ms; publishing latest pose for display", map_frame_.c_str(), max_pose_age_ms_);
     }
     // 浏览器仅需要 map 平面位姿。四元数不再经 ROS CDR 转发，改为三个
     // network-order float32：x、y、yaw；实际网络发送由 UdpLatestSender 线程完成。
@@ -603,8 +598,8 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
     append_network_float(payload, static_cast<float>(transform->transform.translation.x));
     append_network_float(payload, static_cast<float>(transform->transform.translation.y));
     append_network_float(payload, static_cast<float>(yaw));
-    const auto now_ns = static_cast<uint64_t>(std::max<int64_t>(0, get_clock()->now().nanoseconds()));
-    pose_sender_->publish({now_ns, 1, std::move(payload)});
+    const auto measured_ns = static_cast<uint64_t>(std::max<int64_t>(0, aletheia::pose_stamp_ns(transform->header.stamp)));
+    pose_sender_->publish({measured_ns, 1, std::move(payload)});
   }
 
   void maybe_publish_latest() {
@@ -741,7 +736,7 @@ class LiveCloudPreprocessor final : public rclcpp::Node {
     published_sequence_ = sequence;
   }
 
-  std::string input_topic_, livox_input_topic_, costmap_input_topic_, map_frame_, base_frame_, udp_host_;
+  std::string input_topic_, livox_input_topic_, costmap_input_topic_, map_frame_, base_frame_, odom_frame_, udp_host_;
   bool cloud_enabled_, pose_enabled_, costmap_enabled_, preserve_primary_density_;
   int max_points_;
   int udp_port_;

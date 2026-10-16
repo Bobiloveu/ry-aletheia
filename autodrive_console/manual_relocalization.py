@@ -19,7 +19,7 @@ from typing import Any
 from .current_map_reader import CurrentMapReader, CurrentMapUnavailable
 from .map_assets import MapAssetCache
 from .scenario_setup import ScenarioSetupStore
-from .relocalization_config import RelocalizationConfigError, localizer_runtime_identity, verify_current_config_runtime
+from .relocalization_config import RelocalizationConfigError, localizer_runtime_identity
 from .relocalization_files import LocalizationConfigFiles, LocalizationConfigFileError
 from .vehicle_control import VehicleControlConflict, VehicleControlController, VehicleControlUnavailable
 
@@ -72,9 +72,7 @@ class ManualRelocalizationController:
     ) -> None:
         self._vehicle_control = vehicle_control
         # Keep existing callers compatible; startup YAML is not a source here.
-        self._verify_runtime = verify_current_config_runtime
         self._runtime_identity = localizer_runtime_identity
-        self._requires_current_config = False
         self._bound_runtime: tuple[int, str] | None = None
         self._invoke = invoke
         self._switch_map = switch_map
@@ -137,7 +135,6 @@ class ManualRelocalizationController:
                 self._target_map_id = None
                 self._bound_map = self._start_current_map_watch()
                 self._source_map_id = self._map_reader.source_map_id
-                self._requires_current_config = False
                 self._bound_runtime = self._runtime_identity()
             except RelocalizationConfigError as exc:
                 LOGGER.warning("手动重定位开始失败：%s", exc)
@@ -184,7 +181,6 @@ class ManualRelocalizationController:
                 self._operation_id, self._operation_outcome = request_id, 'running'
                 self._phase, self._detail = "calling_service", "正在下发重定位"
                 self._remember_operation(self._operation_result(request_id, 'running'))
-            self._requires_current_config = selection is None
             self._snapshot('active')
             try:
                 config = self._configuration(settings)
@@ -510,13 +506,9 @@ class ManualRelocalizationController:
 
     @staticmethod
     def _public_detail(detail: str) -> str:
-        if detail == "当前定位版本尚未核验沿用配置能力":
-            return f"{detail}；车辆保持停车，请手动选择定位 YAML 后再次确认"
         if detail in {
             "当前地图查询响应超时", "当前地图服务未就绪", "当前地图参数无效", "当前地图无法确认",
-            "当前地图路径不受支持", "当前定位版本尚未核验沿用配置能力", "当前定位进程无法唯一确认",
-            "当前定位配置沿用能力无法确认", "运行中的定位程序与已核验版本不一致",
-            "运行中的定位库未通过沿用配置能力核验", "核验期间定位运行版本发生变化",
+            "当前地图路径不受支持", "当前定位进程无法唯一确认",
             "定位进程的 ROS 域无法确认，不能证明运行实例唯一", "等待定位状态确认超时",
             "手动重定位期间地图发生变化，请恢复后重新对齐",
             "手动重定位期间定位进程发生变化，请恢复后重新对齐",
@@ -541,8 +533,6 @@ class ManualRelocalizationController:
 
     def _check_current_runtime(self) -> None:
         if self._bound_runtime is None or self._runtime_identity() != self._bound_runtime:
-            raise ManualRelocalizationUnavailable("手动重定位期间定位进程发生变化，请恢复后重新对齐")
-        if self._requires_current_config and self._verify_runtime() != self._bound_runtime:
             raise ManualRelocalizationUnavailable("手动重定位期间定位进程发生变化，请恢复后重新对齐")
 
     def _start_current_map_watch(self) -> Path:

@@ -107,6 +107,10 @@ def test_bag_download_stream_contains_only_the_verified_archive(tmp_path):
     handler.send_response = Mock(); handler.send_header = Mock(); handler.end_headers = Mock(); handler.wfile = io.BytesIO()
 
     class Recorder(_RecorderApi):
+        def archive_download_name(self, archive_id):
+            assert archive_id == "a" * 32
+            return "bag_20261015_092825_aaaaaaaa.tar"
+
         def archive_path(self, archive_id):
             assert archive_id == "a" * 32
             return archive
@@ -115,8 +119,9 @@ def test_bag_download_stream_contains_only_the_verified_archive(tmp_path):
         handler._download_bag_archive("a" * 32)
 
     handler.wfile.seek(0)
+    handler.send_header.assert_any_call("Content-Disposition", "attachment; filename=bag_20261015_092825_aaaaaaaa.tar")
     with tarfile.open(fileobj=handler.wfile, mode="r:") as bundle:
-        assert sorted(bundle.getnames()) == ["bag_demo/bag.db3.zstd", "bag_demo/manifest.json"]
+        assert sorted(bundle.getnames()) == ["bag_20261015_092825_aaaaaaaa/bag.db3.zstd", "bag_20261015_092825_aaaaaaaa/manifest.json"]
 
 
 def test_scenario_apply_returns_immediately_with_a_trackable_activation():

@@ -143,11 +143,17 @@ class RuntimeLayout:
         validate_path_component(self.community, "小区")
 
     def localization_yaml(self, building: str, unit: str, key: str) -> RuntimePath:
+        if building == unit == "" and key == "ferry":
+            relative = PurePosixPath("runtime", "localization", self.community, "ferry.yaml")
+            return RuntimePath(relative.as_posix(), (self.LOCALIZATION_ROOT / relative.relative_to("runtime", "localization")).as_posix())
         building, unit, key = self._location_parts(building, unit, key)
         relative = PurePosixPath("runtime", "localization", self.community, f"{building}_{unit}", f"{key}.yaml")
         return RuntimePath(relative.as_posix(), (self.LOCALIZATION_ROOT / relative.relative_to("runtime", "localization")).as_posix())
 
     def map_yaml(self, building: str, unit: str, key: str) -> RuntimePath:
+        if building == unit == "" and key == "ferry":
+            relative = PurePosixPath("runtime", "maps", self.community, "ferry", "map.yaml")
+            return RuntimePath(relative.as_posix(), (self.MAP_ROOT / relative.relative_to("runtime", "maps")).as_posix())
         building, unit, key = self._location_parts(building, unit, key)
         relative = PurePosixPath("runtime", "maps", self.community, f"{building}_{unit}", key, "map.yaml")
         return RuntimePath(relative.as_posix(), (self.MAP_ROOT / relative.relative_to("runtime", "maps")).as_posix())
@@ -345,8 +351,11 @@ def _resolve_execution_entries(
             raise LocationManifestError("执行定位绑定不存在或重复")
         selected.add(identifier)
         binding = bindings_by_id[identifier]
-        building = validate_path_component(binding["building"], "楼栋")
-        unit = validate_path_component(binding["unit"], "单元")
+        if binding["type"] == "ferry" and binding["building"] == binding["unit"] == "":
+            building = unit = ""
+        else:
+            building = validate_path_component(binding["building"], "楼栋")
+            unit = validate_path_component(binding["unit"], "单元")
         asset = assets[binding["map_asset_id"]]
         poses: dict[str, dict[str, float]] = {}
         for field in ("init_go", "init_return"):

@@ -3514,7 +3514,7 @@ function openWaypointPopover(waypoint, event) {
  $("waypointPopoverPurpose").textContent = appearsInTask && Array.isArray(selectedProject?.task_lines)
     ? "可在任务线路中添加此过渡点，指定去程经过顺序；返程按实际可通行路径直接回起点。速度与去程朝向在此设置，normal 为常规通过，不执行动作。拖动蓝色方向手柄可调整朝向。"
     : appearsInTask
-    ? `${transitionRole === "lobby" ? "电梯大厅" : "用户楼层"}任务过渡点会自动纳入去程；系统会按当前地图标记自动派生它在去程中的位置，返程严格按该链反向经过。实线箭头表示去程，虚线箭头表示自动反向的返程。拖动蓝色圆形方向手柄即可调整去程朝向；它不生成行为树。`
+    ? `${transitionRole === "lobby" ? "室内大厅" : "用户楼层"}任务过渡点会自动纳入去程；系统会按当前地图标记自动派生它在去程中的位置，返程严格按该链反向经过。实线箭头表示去程，虚线箭头表示自动反向的返程。拖动蓝色圆形方向手柄即可调整去程朝向；它不生成行为树。`
     : isTaskTransition
       ? "可设置此过渡点的朝向与速度。取送货任务中要经过它，请在任务线路中添加此位置并安排访问顺序。"
     : "删除后系统会根据剩余地图标记重新派生路线；缺少起点、目标或电梯等核心标记时会明确提示补齐。";
@@ -4427,7 +4427,7 @@ canvas.addEventListener("pointerdown", async (event) => {
         note("mapToolHint", Array.isArray(selectedProject?.task_lines)
           ? "过渡点已保存，可加入任务线路；点选它可配置速度和去程朝向。"
           : transitionRole
-          ? `已标记${transitionRole === "lobby" ? "电梯大厅" : "用户楼层"}任务过渡点；点选它可配置速度和去程朝向。系统会按当前地图标记自动派生它在去程中的位置，生成预览将写入去程和返程。`
+          ? `已标记${transitionRole === "lobby" ? "室内大厅" : "用户楼层"}任务过渡点；点选它可配置速度和去程朝向。系统会按当前地图标记自动派生它在去程中的位置，生成预览将写入去程和返程。`
           : "已标记定位过渡锚点。只有大厅或用户楼层地图上的任务过渡点会写入配送任务 JSON。");
         keepMapAnnotationOpen("过渡点已保存；请继续检查当前地图，完成后再确认进入定位路线。") ||
           completeDeploymentEdit("过渡点已保存，可继续修改，完成后点击“结束修改并返回”。");

@@ -45,6 +45,8 @@ class ObservationManager:
         self._lifecycle_lock = threading.RLock()
         self._lock = threading.RLock()
         self._preprocessor_processes: dict[str, subprocess.Popen] = {}
+        self._preprocessor_retries: dict[str, dict[str, float]] = {}
+        self._active = False
         self._preprocessor_path = preprocessor_path
         self._telemetry = TelemetryGateway(log_dir)
         self._map_snapshot = ObservationMapSnapshot(maps_dir)
@@ -98,6 +100,7 @@ class ObservationManager:
             options = self._options(settings)
             if not options["enabled"]:
                 raise ObservationError("实时观测尚未在运行配置中启用")
+            self._active = True
             self._reap()
             self._last_heartbeat = time.monotonic()
             self._schedule_idle_stop(settings)
@@ -126,8 +129,20 @@ class ObservationManager:
     def heartbeat(self, settings: RobotSettings) -> dict[str, Any]:
         with self._lifecycle_lock:
             self._last_heartbeat = time.monotonic()
+            self._reap()
             if self._telemetry.status()["online"]:
                 self._schedule_idle_stop(settings)
+                if self._active and self._options(settings)["enabled"]:
+                    if self._map_snapshot.status().get("state") in {"stopping", "stopped"}:
+                        self._map_snapshot.start()
+                    for kind in ("cloud", "pose", "costmap"):
+                        retry = self._preprocessor_retries.get(kind, {})
+                        if not self._preprocessor_running(kind) and self._last_heartbeat >= retry.get("next_at", 0):
+                            try:
+                                self._start_preprocessor(only_kind=kind)
+                            except (OSError, ObservationError) as exc:
+                                self._defer_preprocessor(kind)
+                                LOGGER.warning("实时%s流恢复失败，保持其他流运行：%s", kind, exc)
             return self.status(settings)
 
     def record_client_event(self, level: str, message: str) -> None:
@@ -191,6 +206,8 @@ class ObservationManager:
 
     def stop(self) -> None:
         with self._lifecycle_lock:
+            self._active = False
+            self._preprocessor_retries.clear()
             with self._lock:
                 preprocessors = list(self._preprocessor_processes.values())
                 self._preprocessor_processes = {}
@@ -220,7 +237,7 @@ class ObservationManager:
             process = self._preprocessor_processes.get(kind)
             return process is not None and process.poll() is None
 
-    def _start_preprocessor(self) -> None:
+    def _start_preprocessor(self, *, only_kind: str | None = None) -> None:
         """以独立进程启动点云、位姿与 costmap 流，避免大帧互相阻塞。"""
         target = self._preprocessor_path
         if target is None or not target.is_file():
@@ -234,6 +251,8 @@ class ObservationManager:
             "costmap": ["-r", "__node:=ry_aletheia_live_costmap", "-p", "enable_cloud:=false", "-p", "enable_pose:=false", "-p", "enable_costmap:=true", "-p", "max_costmap_age_ms:=5000", "-p", f"telemetry_udp_port:={TelemetryGateway.COSTMAP_UDP_PORT}"],
         }
         for kind, arguments in definitions.items():
+            if only_kind is not None and kind != only_kind:
+                continue
             if self._preprocessor_running(kind):
                 continue
             try:
@@ -242,6 +261,7 @@ class ObservationManager:
                 log.close()
                 with self._lock:
                     self._preprocessor_processes[kind] = process
+                    self._preprocessor_retries.setdefault(kind, {})["started_at"] = time.monotonic()
                 label = {"cloud": "点云", "pose": "位姿", "costmap": "局部代价地图"}[kind]
                 LOGGER.info("已启动 Aletheia 轻量%s流：pid=%s", label, process.pid)
             except OSError as exc:
@@ -279,6 +299,10 @@ class ObservationManager:
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             pass
         return None
+
+    def navigation_route(self, map_id: str | None) -> dict[str, object] | None:
+        """Read the latest bounded plan; never create a ROS client from HTTP."""
+        return self._map_snapshot.navigation_route(map_id)
 
     def active_task_map_path(self) -> Path | None:
         """Return the already verified active YAML identity without ROS I/O.
@@ -680,6 +704,16 @@ class ObservationManager:
                     self._sidecar_log_tail(f"live_preprocessor_{kind}.log"),
                 )
                 del self._preprocessor_processes[kind]
+                self._defer_preprocessor(kind)
+
+    def _defer_preprocessor(self, kind: str) -> None:
+        with self._lock:
+            now = time.monotonic()
+            retry = self._preprocessor_retries.setdefault(kind, {})
+            failures = 0 if now - retry.get("started_at", now) >= 10 else int(retry.get("failures", 0))
+            retry["failures"] = failures + 1
+            retry["next_at"] = now + min(30.0, .5 * 2 ** min(failures, 6))
+            retry.pop("started_at", None)
 
     def _sidecar_log_tail(self, name: str) -> str:
         """Read a bounded tail from one fixed child-process diagnostic file."""

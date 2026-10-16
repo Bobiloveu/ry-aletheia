@@ -1,7 +1,7 @@
 export const FLOW_NODE_TYPES = {
   outdoor: { label: "户外图", description: "从园区或室外起点进入", icon: "↗" },
-  ferry: { label: "摆渡层", description: "摆渡或换乘地图，可包含电梯大厅", icon: "⇄" },
-  lobby: { label: "电梯大厅", description: "独立候梯地图，按需添加", icon: "▥" },
+  ferry: { label: "摆渡层", description: "摆渡或换乘地图，可包含室内大厅", icon: "⇄" },
+  lobby: { label: "室内大厅", description: "独立候梯地图，按需添加", icon: "▥" },
   target_floor: { label: "用户楼层", description: "最终配送目标地图", icon: "⌂" },
 };
 
@@ -27,9 +27,10 @@ export function validateFlow(nodes) {
     return counts;
   }, {});
   if (!flow.length) return { valid: false, message: "至少添加一个地图阶段。" };
-  if (typeCounts.lobby > 1) return { valid: false, message: "电梯大厅最多配置一个。" };
-  if (typeCounts.target_floor !== 1) return { valid: false, message: "流程需要一个用户楼层。" };
-  if (flow.at(-1)?.type !== "target_floor") return { valid: false, message: "用户楼层必须放在最后。" };
+  if (flow.some(node => !Object.hasOwn(FLOW_NODE_TYPES, node?.type))) return { valid: false, message: "地图阶段类型无效。" };
+  if (typeCounts.lobby > 1) return { valid: false, message: "室内大厅最多配置一个。" };
+  if (typeCounts.target_floor > 1) return { valid: false, message: "用户楼层最多配置一个。" };
+  if (typeCounts.target_floor && flow.at(-1)?.type !== "target_floor") return { valid: false, message: "用户楼层必须放在最后。" };
   if (typeCounts.outdoor > 1) return { valid: false, message: "户外图最多配置一个。" };
   return { valid: true, message: "流程顺序已就绪。" };
 }

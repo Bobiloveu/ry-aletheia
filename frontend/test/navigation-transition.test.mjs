@@ -76,7 +76,7 @@ test("legacy menu pages apply the saved theme before loading the shared shell", 
   assert.match(read("frontend/vite.config.js"), /"\/theme_bootstrap\.js"/);
   assert.match(read("autodrive_console/web/app_shell.css"), /html\[data-theme="light"\] body/);
   assert.match(read("autodrive_console/web/scenario_setup.css"), /html\[data-theme="light"\]\s+\.scenario-help/);
-  assert.match(read("autodrive_console/web/tool_logs.css"), /html\[data-theme="light"\]\s+\.diagnostic-file-row/);
+  assert.match(read("autodrive_console/web/tool_logs.css"), /\.diagnostic-file-row\s*\{[^}]*background:\s*var\(--surface-sunken\)/s, "tool log rows inherit the theme selected before paint");
   assert.doesNotMatch(read("autodrive_console/web/vehicle-execution-status.html"), /theme_bootstrap\.js/);
 });
 

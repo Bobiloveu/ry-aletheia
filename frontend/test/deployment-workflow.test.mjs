@@ -891,6 +891,15 @@ test("an integrated ferry lobby does not require a separate lobby stage", () => 
   ]).valid, false);
 });
 
+test("each deployment stage can form a standalone scene", () => {
+  for (const type of ["ferry", "outdoor", "lobby", "target_floor"]) {
+    assert.equal(validateFlow([{ id: type, type }]).valid, true, type);
+  }
+  assert.equal(validateFlow([]).valid, false);
+  assert.equal(validateFlow([{ id: "bad", type: "unknown" }]).valid, false);
+  assert.equal(validateFlow([{id:'a',type:'target_floor'},{id:'b',type:'target_floor'}]).valid,false);
+});
+
 test("deployment flow cards reorder by drag semantics and keep the target floor last", () => {
   const flow = [
     { id: "outdoor", type: "outdoor" },

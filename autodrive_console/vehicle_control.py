@@ -31,6 +31,10 @@ class VehicleControlConflict(VehicleControlError):
     """当前真实控制状态不允许接管手动控制。"""
 
 
+class VehicleControlSessionInvalid(VehicleControlConflict):
+    code = "session_invalid"
+
+
 @dataclass(frozen=True)
 class MiniappTwistProfile:
     """保留 miniapp Twist 的辅助协议字段。
@@ -160,6 +164,7 @@ class VehicleControlController:
         self._emergency_stop: bool | None = None
         self._emergency_state_generation = 0
         self._emergency_query_future = None
+        self._emergency_query_generation: int | None = None
         self._emergency_query_next_at = 0.0
         self._emergency_query_started_at: float | None = None
         self._emergency_last_confirmed_at: float | None = None
@@ -413,12 +418,13 @@ class VehicleControlController:
         publish_stop = False
         with self._lock:
             self._advance_safety_locked(now)
-            session = self._require_session_locked(session_id, allow_inactive=False)
-            if self._emergency_stop is not False:
+            stopping = linear == 0.0 and angular == 0.0
+            session = self._require_session_locked(session_id, allow_inactive=stopping)
+            if not stopping and self._emergency_stop is not False:
                 raise VehicleControlConflict(self._emergency_motion_block_reason_locked())
-            if self._pending_source is not None or self._actual_source != self.SOURCE_MINIAPP:
+            if not stopping and (self._pending_source is not None or self._actual_source != self.SOURCE_MINIAPP):
                 raise VehicleControlConflict("尚未收到 /control_source_state=miniapp 的实际确认，禁止发送运动指令")
-            if session["state"] != "active":
+            if not stopping and session["state"] != "active":
                 raise VehicleControlConflict("手动控制会话无效，禁止发送运动指令")
             # Browser requests can race on the network.  A delayed movement
             # packet must not be able to revive a newer STOP from the same
@@ -430,7 +436,7 @@ class VehicleControlController:
                 was_moving = bool(self._target_linear or self._target_angular)
                 self._clear_motion_locked()
                 self._manual_stop_latched = True
-                publish_stop = was_moving
+                publish_stop = True
             else:
                 was_moving = bool(self._target_linear or self._target_angular)
                 self._target_command = None
@@ -878,6 +884,7 @@ class VehicleControlController:
         """在 ROS executor 内发起单个、非阻塞且限频的底盘状态查询。"""
         now = self._clock()
         timed_out_future = None
+        timed_out_generation = None
         with self._lock:
             client = self._emergency_state_client
             service_type = self._GetEmergencyStop
@@ -890,14 +897,19 @@ class VehicleControlController:
                     return
                 # A rclpy service future can remain incomplete permanently when
                 # the chassis service disappears.  Retire it before retrying;
-                # advancing the generation also makes a late reply inert.
+                # only its original generation may count the timeout. A newer
+                # Topic confirmation has already superseded this request.
                 timed_out_future = self._emergency_query_future
                 self._emergency_query_future = None
                 self._emergency_query_started_at = None
-                self._emergency_state_generation += 1
+                if self._emergency_query_generation == self._emergency_state_generation:
+                    self._emergency_state_generation += 1
+                    timed_out_generation = self._emergency_state_generation
+                self._emergency_query_generation = None
         if timed_out_future is not None:
-            self._diagnostic_failure("emergency_query", "%s 急停状态查询超时，将在限频后重试", self.EMERGENCY_STATE_SERVICE, level=logging.WARNING)
-            self._record_emergency_query_failure()
+            if timed_out_generation is not None:
+                self._diagnostic_failure("emergency_query", "%s 急停状态查询超时，将在限频后重试", self.EMERGENCY_STATE_SERVICE, level=logging.WARNING)
+                self._record_emergency_query_failure(generation=timed_out_generation)
             return
         with self._lock:
             if (
@@ -909,18 +921,19 @@ class VehicleControlController:
             self._emergency_query_next_at = now + self.config.emergency_query_interval_s
             generation = self._emergency_state_generation
         if client is None or service_type is None or not client.service_is_ready():
-            self._record_emergency_query_failure()
+            self._record_emergency_query_failure(generation=generation)
             return
         try:
             future = client.call_async(service_type.Request())
         except Exception:
             self._diagnostic_failure("emergency_query", "无法发起 %s 急停状态查询", self.EMERGENCY_STATE_SERVICE, level=logging.WARNING, exc_info=True)
-            self._record_emergency_query_failure()
+            self._record_emergency_query_failure(generation=generation)
             return
         with self._lock:
             if self._closed or generation != self._emergency_state_generation:
                 return
             self._emergency_query_future = future
+            self._emergency_query_generation = generation
             self._emergency_query_started_at = now
         future.add_done_callback(
             lambda completed: self._on_emergency_query_future(completed, generation=generation)
@@ -928,30 +941,30 @@ class VehicleControlController:
 
     def _on_emergency_query_future(self, future, *, generation: int) -> None:
         with self._lock:
-            if self._emergency_query_future is future:
-                self._emergency_query_future = None
-                started_at = self._emergency_query_started_at
-                self._emergency_query_started_at = None
-            else:
-                started_at = None
-            if self._closed:
+            if self._emergency_query_future is not future:
+                return
+            self._emergency_query_future = None
+            self._emergency_query_generation = None
+            started_at = self._emergency_query_started_at
+            self._emergency_query_started_at = None
+            if self._closed or generation != self._emergency_state_generation:
                 return
             timed_out = started_at is None or self._clock() - started_at > self.config.emergency_query_timeout_s
         if timed_out:
-            self._record_emergency_query_failure()
+            self._record_emergency_query_failure(generation=generation)
             return
         try:
             response = future.result()
         except Exception:
             self._diagnostic_failure("emergency_query", "%s 急停状态查询失败", self.EMERGENCY_STATE_SERVICE, level=logging.WARNING, exc_info=True)
-            self._record_emergency_query_failure()
+            self._record_emergency_query_failure(generation=generation)
             return
         self._on_emergency_query_response(response, generation=generation)
 
-    def _record_emergency_query_failure(self) -> None:
+    def _record_emergency_query_failure(self, *, generation: int | None = None) -> None:
         publish_stop = False
         with self._lock:
-            if self._closed or not self._emergency_confirmation_required_locked():
+            if self._closed or (generation is not None and generation != self._emergency_state_generation) or not self._emergency_confirmation_required_locked():
                 return
             self._emergency_query_failures += 1
             if self._emergency_query_failures < self.config.emergency_query_failure_limit:
@@ -1166,10 +1179,10 @@ class VehicleControlController:
 
     def _require_session_locked(self, session_id: str, *, allow_inactive: bool) -> dict[str, Any]:
         if not isinstance(session_id, str) or not session_id or session_id not in self._sessions:
-            raise VehicleControlConflict("手动控制会话无效或已结束")
+            raise VehicleControlSessionInvalid("手动控制会话无效或已结束")
         session = self._sessions[session_id]
         if not allow_inactive and session.get("state") not in {"switching", "active"}:
-            raise VehicleControlConflict("手动控制会话已失效，禁止发送运动指令")
+            raise VehicleControlSessionInvalid("手动控制会话已失效，禁止发送运动指令")
         return session
 
     def _fail_locked(self, message: str) -> None:
@@ -1228,8 +1241,17 @@ class VehicleControlController:
             if publisher is None or twist_type is None:
                 raise VehicleControlUnavailable("ROS2 miniapp velocity publisher 尚未就绪")
             with self._lock:
+                if linear or angular:
+                    self._advance_safety_locked(self._clock())
+                    if not self._manual_ready_locked() or (linear, angular) != (self._target_linear, self._target_angular):
+                        return
+                elif self._manual_ready_locked() and (self._target_linear or self._target_angular) and not (self._stop_pending or self._stop_frames_remaining):
+                    return
                 profile = self._twist_profile
-            publisher.publish(self._twist_factory.build(twist_type, linear, angular, profile=profile))
+                # STOP/permission changes and this final submission share the
+                # state lock. A tick selected before STOP cannot publish after
+                # it, even if it was waiting for the publisher lock.
+                publisher.publish(self._twist_factory.build(twist_type, linear, angular, profile=profile))
 
     def _snapshot_locked(self, *, session_id: str | None = None) -> dict[str, Any]:
         # 会话操作的响应只能描述请求者自己的 session；常规 GET 则只返回

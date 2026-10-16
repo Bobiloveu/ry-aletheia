@@ -45,7 +45,7 @@ test('fixed execution blocks preserve numeric trip order and repeated map member
   const sections=executionChainSections({block_10:{map_asset_id:'map-a',outbound:[node],return:[node]},block_2:{map_asset_id:'map-b',outbound:[],return:[]},block_1:{binding_id:'bind-a',outbound:[node],return:[]}},project);
   assert.deepEqual(sections.map(section=>[section.key,section.mapAssetId,section.label]),[['block_1','map-a','第 1 段 · 大厅'],['block_2','map-b','第 2 段 · 楼层'],['block_10','map-a','第 3 段 · 大厅']]);
   assert.equal(sections[0].outbound[0].source_id,'p');
-  assert.deepEqual(executionChainSections({lobby:{binding_id:'bind-a',outbound:[],return:[]},target:{outbound:[],return:[]}},project).map(section=>section.label),['电梯大厅','用户楼层']);
+  assert.deepEqual(executionChainSections({lobby:{binding_id:'bind-a',outbound:[],return:[]},target:{outbound:[],return:[]}},project).map(section=>section.label),['室内大厅','用户楼层']);
 });
 
 test('preview segments use subtask map metadata without joining across other maps',async()=>{

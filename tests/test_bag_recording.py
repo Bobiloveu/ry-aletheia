@@ -127,6 +127,25 @@ def _recording_environment():
     return RecordingEnvironment("humble", "/opt/ros/humble/bin/ros2", "/opt/ros/humble", "rmw_fastrtps_cpp", "0")
 
 
+def test_counter_executor_failure_is_retained_for_archive_audit():
+    from autodrive_console.bag_recording import _RclpyTopicCounter
+
+    counter = _RclpyTopicCounter({"/odom": "nav_msgs/msg/Odometry"})
+    counter._counts["/odom"] = 42
+
+    class BrokenExecutor:
+        def spin(self):
+            raise RuntimeError("simulated DDS counter failure")
+
+    with pytest.raises(RuntimeError, match="simulated DDS counter failure"):
+        counter._spin(BrokenExecutor())
+
+    counts, error = counter.snapshot()
+    assert counts == {"/odom": 42}
+    assert error, "A dead audit counter must not silently look healthy"
+    assert "simulated DDS counter failure" not in error
+
+
 def _metadata(bag_dir):
     return {
         "storage_identifier": "sqlite3",
@@ -217,6 +236,45 @@ def test_manual_archive_keeps_its_scene_label_limit_and_actual_duration(tmp_path
     assert manifest["duration_limit_seconds"] == 900
     assert isinstance(manifest["actual_duration_seconds"], int)
     assert manifest["actual_duration_seconds"] >= 0
+    assert summary["display_name"] == "窄通道避障"
+    assert manager.archive_path(active.archive_id).name == f"bag_{active.archive_id}"
+
+
+@pytest.mark.parametrize("source,label,case,attempt,expected", [
+    ("manual", "窄通道避障", "窄通道避障", None, "窄通道避障"),
+    ("manual", "", "手动场景", None, "手动录制"),
+    ("test_attempt", "", "夜间巡检", 2, "夜间巡检 · 第 2 轮"),
+    ("test_attempt", "", "未完成录制", None, "未完成录制"),
+])
+def test_legacy_archive_titles_are_readable_without_rewriting_files(tmp_path, source, label, case, attempt, expected):
+    import json
+
+    archive_id = "a" * 32
+    directory = tmp_path / f"bag_20261015_092825_manual_QA_{archive_id}"
+    directory.mkdir()
+    original = json.dumps({"archive_id": archive_id, "display_name": directory.name,
+        "source": source, "label": label, "case_name": case, "attempt_index": attempt,
+        "started_at": "2026-10-15T09:28:25+08:00"}, ensure_ascii=False)
+    (directory / "manifest.json").write_text(original)
+    manager = BagRecordingManager(tmp_path, topic_probe=_topics)
+
+    assert manager.list_archives()[0]["display_name"] == expected
+    assert manager.archive_detail(archive_id)["archive"]["display_name"] == expected
+    assert manager.archive_path(archive_id) == directory
+    assert manager.archive_download_name(archive_id) == "bag_20261015_092825_aaaaaaaa.tar"
+    assert (directory / "manifest.json").read_text() == original
+
+
+@pytest.mark.parametrize("started_at", [None, "bad\r\nInjected: header"])
+def test_bag_download_name_has_safe_fallback_for_missing_or_invalid_time(tmp_path, started_at):
+    import json
+
+    archive_id = "a" * 32
+    directory = tmp_path / "legacy"
+    directory.mkdir()
+    (directory / "manifest.json").write_text(json.dumps({"archive_id": archive_id, "started_at": started_at}))
+    manager = BagRecordingManager(tmp_path, topic_probe=_topics)
+    assert manager.archive_download_name(archive_id) == "bag_undated_aaaaaaaa.tar"
 
 
 def test_manual_and_test_attempt_recorders_cannot_overlap_at_the_process_boundary(tmp_path):
@@ -234,6 +292,68 @@ def test_manual_and_test_attempt_recorders_cannot_overlap_at_the_process_boundar
 
     with pytest.raises(BagRecordingError, match="录包"):
         manager.start("run123", "case", 1, RecordingRequest(1, ("/odom",)))
+
+
+def test_same_scene_archives_keep_separate_data_and_ids(tmp_path):
+    from autodrive_console.manual_bag_recording import ManualRecordingRequest
+
+    manager = BagRecordingManager(tmp_path, topic_probe=_topics,
+        environment_verifier=_recording_environment, popen=lambda *_args, **_kwargs: _FakeProcess(),
+        counter_factory=lambda _types: _FakeCounter(), metadata_reader=_metadata, sleeper=lambda _seconds: None)
+    ids = []
+    for _ in range(2):
+        active = manager.start_manual(ManualRecordingRequest(("/odom",), 5, "../窄通道"))
+        _rosbag_output(active)
+        summary = manager.stop(active)
+        assert summary["display_name"] == "../窄通道"
+        assert manager.archive_path(active.archive_id).parent == tmp_path
+        ids.append(active.archive_id)
+    assert ids[0] != ids[1]
+    assert len(manager.list_archives()) == 2
+    manager.delete_archive(ids[0])
+    assert manager.archive_path(ids[1]).is_dir()
+
+
+def test_start_failure_after_spawn_stops_the_owned_recorder_before_cleanup(tmp_path):
+    from unittest.mock import Mock
+
+    class BrokenCounter(_FakeCounter):
+        def reset(self):
+            raise RuntimeError("counter reset failed")
+
+    process = _FakeProcess()
+    counter = BrokenCounter()
+    manager = BagRecordingManager(tmp_path, topic_probe=_topics,
+        environment_verifier=_recording_environment, popen=lambda *_args, **_kwargs: process,
+        counter_factory=lambda _types: counter, sleeper=lambda _seconds: None)
+    manager._stop_process = Mock(return_value=0)
+    with pytest.raises(BagRecordingError, match="counter reset failed"):
+        manager.start("run", "case", 1, RecordingRequest(1, ("/odom",)))
+    manager._stop_process.assert_called_once_with(process)
+    assert counter.stopped
+    assert not manager._active
+    assert not manager._starting
+    assert not list((tmp_path / ".staging").iterdir())
+
+
+def test_failed_startup_process_cleanup_preserves_data_and_blocks_another_recorder(tmp_path):
+    from unittest.mock import Mock
+
+    class BrokenCounter(_FakeCounter):
+        def reset(self):
+            raise RuntimeError("counter reset failed")
+
+    popen = Mock(return_value=_FakeProcess())
+    manager = BagRecordingManager(tmp_path, topic_probe=_topics,
+        environment_verifier=_recording_environment, popen=popen,
+        counter_factory=lambda _types: BrokenCounter(), sleeper=lambda _seconds: None)
+    manager._stop_process = Mock(side_effect=OSError("stop failed"))
+    with pytest.raises(BagRecordingError, match="进程清理未完成"):
+        manager.start("run", "case", 1, RecordingRequest(1, ("/odom",)))
+    assert len(list((tmp_path / ".staging").iterdir())) == 1
+    with pytest.raises(BagRecordingError, match="已有诊断录包"):
+        manager.start("run", "case", 1, RecordingRequest(1, ("/odom",)))
+    assert popen.call_count == 1
 
 
 def test_stop_writes_manifest_with_hashes_metadata_and_audit(tmp_path):

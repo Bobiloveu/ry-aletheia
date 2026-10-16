@@ -31,6 +31,14 @@ find_package(sensor_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 
+if(BUILD_TESTING)
+  add_executable(aletheia_pose_selection_test test/pose_selection_test.cpp)
+  target_compile_features(aletheia_pose_selection_test PRIVATE cxx_std_17)
+  target_include_directories(aletheia_pose_selection_test PRIVATE src)
+  ament_target_dependencies(aletheia_pose_selection_test geometry_msgs tf2)
+  add_test(NAME pose_selection COMMAND aletheia_pose_selection_test)
+endif()
+
 add_executable(aletheia_live_cloud src/live_cloud_preprocessor.cpp)
 target_compile_features(aletheia_live_cloud PUBLIC cxx_std_17)
 ament_target_dependencies(aletheia_live_cloud

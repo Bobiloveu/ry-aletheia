@@ -65,7 +65,7 @@ export function executionChainSections(chain, project = {}) {
     return {
       key, mapAssetId,
       leg: ['outbound','return'].includes(value.leg) ? value.leg : null,
-      label: key === 'lobby' ? '电梯大厅' : key === 'target' ? '用户楼层' : `第 ${index + 1} 段 · ${map?.label || '地图通行段'}`,
+      label: key === 'lobby' ? '室内大厅' : key === 'target' ? '用户楼层' : `第 ${index + 1} 段 · ${map?.label || '地图通行段'}`,
       outbound: Array.isArray(value.outbound) ? value.outbound : [],
       return: Array.isArray(value.return) ? value.return : [],
       startAnchor: value.start_anchor || null, endAnchor: value.end_anchor || null,

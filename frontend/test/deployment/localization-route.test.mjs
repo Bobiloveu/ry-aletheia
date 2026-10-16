@@ -58,3 +58,11 @@ test("automatic route status requires a user-floor endpoint", () => {
     { ready: false, reason: "场景流程必须以用户楼层结束" },
   );
 });
+
+test("a standalone route accepts each Backend-derived map role", () => {
+  for (const id of ["outside", "ferry", "floor-a"]) {
+    assert.equal(automaticRouteStatus({ binding_ids: [id] }, bindings).ready, true);
+  }
+  assert.equal(automaticRouteStatus({binding_ids:['hall']},[{id:'hall',type:'indoor'}]).ready,true);
+  assert.equal(automaticRouteStatus({binding_ids:['hall','missing']},[{id:'hall',type:'indoor'}]).ready,false);
+});

@@ -345,11 +345,20 @@ body.theme-light .shutdown-control.is-armed {
 body.theme-light .shutdown-control-state { color: inherit; }
 body.theme-light .shutdown-control-hint { color: rgba(125, 48, 48, 0.72); }
 body.theme-light .pinball-track {
-  border-color: #c7c7cc;
-  background: linear-gradient(180deg, #e2e2e7 0%, #f3f3f5 100%);
-  box-shadow: inset 0 3px 6px rgba(0, 0, 0, 0.12), 0 1px 0 rgba(255, 255, 255, 0.8);
+  border-color: #b5bdc9;
+  background: linear-gradient(180deg, #e2e6ed 0%, #eef1f5 100%);
+  box-shadow: inset 0 1px 3px rgba(38, 48, 64, 0.1), 0 1px 0 rgba(255, 255, 255, 0.9);
 }
-body.theme-light .pinball-rail { background: #bfc1c8; box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8); }
+body.theme-light .pinball-rail {
+  background: #a1aab8;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+body.theme-light .forge-spring {
+  background: repeating-linear-gradient(90deg, #8994a4 0, #8994a4 2px, #dce1e9 3px, #dce1e9 5px);
+}
+body.theme-light .shutdown-toggle-input:focus-visible ~ .pinball-track {
+  outline-color: #a85f0a;
+}
 @media (prefers-reduced-motion: reduce) {
   .shutdown-control, .pinball-core, .forge-spring { transition: none; animation: none !important; }
   .shutdown-toggle-input:checked ~ .pinball-track .pinball-core { transform: translateX(55px); }

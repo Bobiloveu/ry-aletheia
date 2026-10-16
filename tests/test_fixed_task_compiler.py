@@ -79,7 +79,7 @@ def test_export_names_explain_actions_in_execution_order_and_match_json_referenc
         'delivery_upper_unload', 'delivery_lower_open',
         'return_elevator_call', 'return_elevator_ride', 'return_elevator_close_door', 'task_complete',
     ]
-    assert refs == [f'{index:02d}_{action}_{line}' for index, action in enumerate(expected, 1)]
+    assert refs == [f'{index:02d}_{action}_line_01' for index, action in enumerate(expected, 1)]
     trees = {Path(a.relative_path).stem for a in preview.artifacts if a.relative_path.startswith('waypoint_tasks/')}
     assert trees == set(refs)
     assert sorted(trees) == refs
